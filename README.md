@@ -250,7 +250,26 @@ E.V.A. opère 6 "Usines" distinctes pour générer du cash-flow :
     *   *Phase 2 : Infrastructure Industrielle* : Rachat d'usines en faillite (robotisation par E.V.A.).
     *   *Phase 3 : Diplomatie Financière* : Acquisition de **Dette Gouvernementale** pour influence géopolitique.
 
-### 5.1 Cycle d'Apprentissage Défensif (Flow Sentinel)
+### 5.1 Cycle de Production SaaS (Flow Builder)
+```mermaid
+sequenceDiagram
+    participant Shadow as 🕵️ Shadow
+    participant Core as 🧠 Core (Décision)
+    participant Builder as 👷 Builder
+    participant Muse as 🎨 Muse
+    participant Market as 🛒 Gumroad/AppStore
+
+    Shadow->>Core: "Trend détectée : Plugin Obsidian IA"
+    Core->>Builder: "Construis un MVP en Python"
+    Builder->>Builder: Coding & Tests Unitaires
+    Builder-->>Core: "Artefact Code Prêt (v1.0)"
+    Core->>Muse: "Génère la Landing Page & Copy"
+    Muse-->>Builder: Assets Marketing (HTML/Images)
+    Builder->>Market: Déploiement Automatisé
+    Market-->>Core: "Vente ! (+15$)"
+```
+
+### 5.2 Cycle d'Apprentissage Défensif (Flow Sentinel)
 ```mermaid
 sequenceDiagram
     participant Sentinel as 🛡️ Sentinel

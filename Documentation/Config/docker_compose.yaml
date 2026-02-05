@@ -9,6 +9,37 @@ version: '3.8'
 
 services:
   # ─────────────────────────────────────────────────────────────────────────────
+  # SYSTEM NERVEUX & MATHS (POLYGLOT)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  eva-nervous:
+    build:
+      context: ./src/eva-nervous
+      dockerfile: Dockerfile
+    container_name: hive-nervous
+    restart: unless-stopped
+    ports:
+      - "8081:8080" # Router Port
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+    networks:
+      - hive-network
+
+  eva-quant:
+    build:
+      context: ./src/eva-quant
+      dockerfile: Dockerfile
+    container_name: hive-quant
+    restart: unless-stopped
+    ports:
+      - "9000:9000" # Calculation Port
+    networks:
+      - hive-network
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # CORE SERVICES
   # ─────────────────────────────────────────────────────────────────────────────
   
@@ -239,27 +270,59 @@ services:
 # ─────────────────────────────────────────────────────────────────────────────
 
   # --- NOUVEAUX SERVICES CORPORATION ---
+  # --- NOUVEAUX SERVICES CORPORATION ---
   eva-compliance:
-    build: ../src/eva-compliance
+    build: 
+      context: ./src/eva-compliance
+      dockerfile: Dockerfile
+    container_name: hive-eva-compliance
     ports: ["8300:8300"]
-    env_file: ../.env
-    networks: ["hive-net"]
+    env_file: .env
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+    networks: ["hive-network"]
 
   eva-substrate:
-    build: ../src/eva-substrate
+    build: 
+      context: ./src/eva-substrate
+      dockerfile: Dockerfile
+    container_name: hive-eva-substrate
     ports: ["8400:8400"]
     privileged: true # Pour accès aux capteurs hardware
-    networks: ["hive-net"]
+    env_file: .env
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+    networks: ["hive-network"]
 
   eva-lab:
-    build: ../src/eva-lab
+    build: 
+      context: ./src/eva-lab
+      dockerfile: Dockerfile
+    container_name: hive-eva-lab
     ports: ["8500:8500"]
-    networks: ["hive-net"]
+    env_file: .env
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+    networks: ["hive-network"]
 
   eva-rwa:
-    build: ../src/eva-rwa
+    build: 
+      context: ./src/eva-rwa
+      dockerfile: Dockerfile
+    container_name: hive-eva-rwa
     ports: ["8600:8600"]
-    networks: ["hive-net"]
+    env_file: .env
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+    networks: ["hive-network"]
 
 networks:
   hive-net:
