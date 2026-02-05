@@ -1,0 +1,867 @@
+openapi: 3.0.3
+info:
+  title: The Banker API (Expert B - Trading)
+  description: |
+    API de l'Expert B "The Banker" - Gestion du Trading, Risque et Exécution.
+    
+    ## Règles de Sécurité (Constitution)
+    - **Loi 2**: Max Daily Drawdown = 4%, Max Total = 8%, Single Trade Risk Max = 1%
+    - **ROE Trading**: SL obligatoire, No Martingale, Anti-News Filter, Anti-Tilt (2 pertes = pause 24h)
+    
+    ## Architecture
+    - Endpoint interne uniquement (vmbr1 - pas exposé WAN)
+    - Communication avec MT5 via MetaTrader5 Python package
+    - Données temps réel stockées dans TimescaleDB
+  version: 1.0.0
+  
+servers:
+  - url: http://10.0.1.200:8100/api/v1
+    description: VM Trading Floor (Réseau interne uniquement)
+
+tags:
+  - name: Orders
+    description: Gestion des ordres de trading
+  - name: Risk
+    description: Calcul et vérification du risque
+  - name: Account
+    description: État du compte et positions
+  - name: Market
+    description: Données de marché
+  - name: Hydra
+    description: Multi-compte Prop Firm
+
+paths:
+  # ═══════════════════════════════════════════════════════════════
+  # ORDERS ENDPOINTS
+  # ═══════════════════════════════════════════════════════════════
+  /orders/execute:
+    post:
+      tags: [Orders]
+      summary: Exécuter un ordre de trading
+      description: |
+        Exécute un ordre après vérification du risque par le Kernel.
+        **Requiert validation Kernel** si montant > 0.5% du capital.
+      operationId: executeOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TradeOrderRequest'
+      responses:
+        '200':
+          description: Ordre exécuté avec succès
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradeOrderResponse'
+        '400':
+          description: Paramètres invalides
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: |
+            Ordre rejeté par le Kernel (violation Constitution)
+            - Risk > 1% par trade
+            - News High Impact imminente
+            - Anti-Tilt actif (2 pertes consécutives)
+            - Biométrie Admin défavorable (fatigue)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskRejection'
+        '503':
+          description: MT5 non disponible
+
+  /orders/close:
+    post:
+      tags: [Orders]
+      summary: Fermer une position
+      operationId: closePosition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClosePositionRequest'
+      responses:
+        '200':
+          description: Position fermée
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClosePositionResponse'
+
+  /orders/modify:
+    patch:
+      tags: [Orders]
+      summary: Modifier SL/TP d'une position
+      operationId: modifyPosition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModifyPositionRequest'
+      responses:
+        '200':
+          description: Position modifiée
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PositionDetails'
+
+  /orders/history:
+    get:
+      tags: [Orders]
+      summary: Historique des ordres
+      operationId: getOrderHistory
+      parameters:
+        - name: from_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: symbol
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+      responses:
+        '200':
+          description: Historique des ordres
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OrderHistoryItem'
+
+  # ═══════════════════════════════════════════════════════════════
+  # RISK ENDPOINTS
+  # ═══════════════════════════════════════════════════════════════
+  /risk/calculate:
+    post:
+      tags: [Risk]
+      summary: Calculer la taille de lot optimale
+      description: |
+        Formule: `LotSize = (AccountEquity * Risk%) / (StopLossDistance * TickValue)`
+        Applique les contraintes de la Loi 2 automatiquement.
+      operationId: calculateRisk
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RiskCalculationRequest'
+      responses:
+        '200':
+          description: Calcul de risque
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskCalculationResponse'
+
+  /risk/status:
+    get:
+      tags: [Risk]
+      summary: État actuel du risque
+      description: Drawdown journalier, anti-tilt status, etc.
+      operationId: getRiskStatus
+      responses:
+        '200':
+          description: Statut du risque
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskStatus'
+
+  /risk/news-filter:
+    get:
+      tags: [Risk]
+      summary: Vérifier les news à impact élevé
+      description: Retourne les news dans les 30 minutes avant/après
+      operationId: checkNewsFilter
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+            example: XAUUSD
+      responses:
+        '200':
+          description: État du filtre news
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NewsFilterStatus'
+
+  # ═══════════════════════════════════════════════════════════════
+  # ACCOUNT ENDPOINTS
+  # ═══════════════════════════════════════════════════════════════
+  /account/balance:
+    get:
+      tags: [Account]
+      summary: Solde et équité du compte
+      operationId: getAccountBalance
+      responses:
+        '200':
+          description: État du compte
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountBalance'
+
+  /account/positions:
+    get:
+      tags: [Account]
+      summary: Positions ouvertes
+      operationId: getOpenPositions
+      responses:
+        '200':
+          description: Liste des positions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PositionDetails'
+
+  /account/exposure:
+    get:
+      tags: [Account]
+      summary: Exposition totale du compte
+      operationId: getExposure
+      responses:
+        '200':
+          description: Analyse d'exposition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExposureAnalysis'
+
+  # ═══════════════════════════════════════════════════════════════
+  # MARKET ENDPOINTS
+  # ═══════════════════════════════════════════════════════════════
+  /market/quote:
+    get:
+      tags: [Market]
+      summary: Prix actuel d'un symbole
+      operationId: getQuote
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+            example: XAUUSD
+      responses:
+        '200':
+          description: Quote
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarketQuote'
+
+  /market/ohlc:
+    get:
+      tags: [Market]
+      summary: Données OHLC historiques
+      operationId: getOHLC
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: timeframe
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [M1, M5, M15, M30, H1, H4, D1, W1]
+        - name: count
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+      responses:
+        '200':
+          description: Données OHLC
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OHLCBar'
+
+  # ═══════════════════════════════════════════════════════════════
+  # HYDRA (Multi-Account) ENDPOINTS
+  # ═══════════════════════════════════════════════════════════════
+  /hydra/accounts:
+    get:
+      tags: [Hydra]
+      summary: Liste des comptes Prop Firm connectés
+      operationId: getHydraAccounts
+      responses:
+        '200':
+          description: Comptes connectés
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PropFirmAccount'
+
+  /hydra/copy:
+    post:
+      tags: [Hydra]
+      summary: Répliquer un ordre sur tous les comptes
+      description: Trade Copier Engine - Latence < 50ms
+      operationId: copyTrade
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CopyTradeRequest'
+      responses:
+        '200':
+          description: Résultat de la réplication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CopyTradeResponse'
+
+  /hydra/aggregate:
+    get:
+      tags: [Hydra]
+      summary: Statistiques agrégées de tous les comptes
+      operationId: getAggregateStats
+      responses:
+        '200':
+          description: Stats agrégées
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AggregateStats'
+
+# ═══════════════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════════════
+components:
+  schemas:
+    # ─────────────────────────────────────────────────────────────────
+    # ORDER SCHEMAS
+    # ─────────────────────────────────────────────────────────────────
+    TradeOrderRequest:
+      type: object
+      required:
+        - symbol
+        - action
+        - volume
+        - stop_loss_price
+      properties:
+        symbol:
+          type: string
+          description: Symbole MT5
+          example: XAUUSD
+        action:
+          type: string
+          enum: [BUY, SELL]
+        volume:
+          type: number
+          format: double
+          minimum: 0.01
+          maximum: 10.0
+          description: Taille du lot
+          example: 0.5
+        stop_loss_price:
+          type: number
+          format: double
+          description: "Prix du Stop Loss (OBLIGATOIRE - ROE Trading)"
+        take_profit_price:
+          type: number
+          format: double
+          description: Prix du Take Profit (optionnel)
+        entry_price:
+          type: number
+          format: double
+          description: Prix limite (si ordre limit, sinon market)
+        order_type:
+          type: string
+          enum: [MARKET, LIMIT, STOP]
+          default: MARKET
+        magic_number:
+          type: integer
+          description: Identifiant de stratégie
+          default: 12345
+        comment:
+          type: string
+          maxLength: 100
+          description: Commentaire pour le journal
+        source:
+          type: string
+          enum: [manual, algo, copier]
+          default: manual
+
+    TradeOrderResponse:
+      type: object
+      properties:
+        ticket:
+          type: integer
+          description: Numéro de ticket MT5
+          example: 1234567890
+        symbol:
+          type: string
+        action:
+          type: string
+        volume:
+          type: number
+        entry_price:
+          type: number
+        stop_loss:
+          type: number
+        take_profit:
+          type: number
+        execution_time_ms:
+          type: integer
+        slippage_points:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [filled, partial, rejected]
+
+    ClosePositionRequest:
+      type: object
+      required:
+        - ticket
+      properties:
+        ticket:
+          type: integer
+        partial_volume:
+          type: number
+          description: Volume à fermer (si partiel)
+
+    ClosePositionResponse:
+      type: object
+      properties:
+        ticket:
+          type: integer
+        profit:
+          type: number
+          format: double
+        close_price:
+          type: number
+        timestamp:
+          type: string
+          format: date-time
+
+    ModifyPositionRequest:
+      type: object
+      required:
+        - ticket
+      properties:
+        ticket:
+          type: integer
+        new_stop_loss:
+          type: number
+        new_take_profit:
+          type: number
+
+    PositionDetails:
+      type: object
+      properties:
+        ticket:
+          type: integer
+        symbol:
+          type: string
+        type:
+          type: string
+          enum: [BUY, SELL]
+        volume:
+          type: number
+        open_price:
+          type: number
+        current_price:
+          type: number
+        stop_loss:
+          type: number
+        take_profit:
+          type: number
+        profit:
+          type: number
+        profit_pips:
+          type: number
+        swap:
+          type: number
+        open_time:
+          type: string
+          format: date-time
+        magic:
+          type: integer
+        comment:
+          type: string
+
+    OrderHistoryItem:
+      type: object
+      properties:
+        ticket:
+          type: integer
+        symbol:
+          type: string
+        type:
+          type: string
+        volume:
+          type: number
+        open_price:
+          type: number
+        close_price:
+          type: number
+        profit:
+          type: number
+        open_time:
+          type: string
+          format: date-time
+        close_time:
+          type: string
+          format: date-time
+        close_reason:
+          type: string
+          enum: [manual, sl_hit, tp_hit, margin_call, algo]
+
+    # ─────────────────────────────────────────────────────────────────
+    # RISK SCHEMAS
+    # ─────────────────────────────────────────────────────────────────
+    RiskCalculationRequest:
+      type: object
+      required:
+        - symbol
+        - stop_loss_distance_pips
+      properties:
+        symbol:
+          type: string
+        stop_loss_distance_pips:
+          type: number
+          description: Distance SL en pips
+        risk_percent:
+          type: number
+          minimum: 0.1
+          maximum: 1.0
+          default: 1.0
+          description: "Risque en % (max 1.0 selon Loi 2)"
+        account_override:
+          type: string
+          description: ID compte Hydra spécifique
+
+    RiskCalculationResponse:
+      type: object
+      properties:
+        recommended_lot_size:
+          type: number
+          format: double
+          example: 0.25
+        max_allowed_lot_size:
+          type: number
+          format: double
+        risk_amount:
+          type: number
+          description: Montant risqué en devise du compte
+        account_equity:
+          type: number
+        stop_loss_pips:
+          type: number
+        tick_value:
+          type: number
+        warnings:
+          type: array
+          items:
+            type: string
+
+    RiskStatus:
+      type: object
+      properties:
+        daily_drawdown_percent:
+          type: number
+          description: "Drawdown journalier actuel (max 4%)"
+        daily_drawdown_limit_percent:
+          type: number
+          default: 4.0
+        total_drawdown_percent:
+          type: number
+          description: "Drawdown total (max 8%)"
+        anti_tilt_active:
+          type: boolean
+          description: True si 2 pertes consécutives
+        anti_tilt_expires_at:
+          type: string
+          format: date-time
+        trading_allowed:
+          type: boolean
+        restrictions:
+          type: array
+          items:
+            type: string
+            description: Raisons de restriction
+
+    RiskRejection:
+      type: object
+      properties:
+        rejected:
+          type: boolean
+          default: true
+        reason:
+          type: string
+          enum:
+            - RISK_TOO_HIGH
+            - NEWS_FILTER_ACTIVE
+            - ANTI_TILT_ACTIVE
+            - MAX_EXPOSURE_REACHED
+            - BIOMETRIC_ALERT
+            - DAILY_LOSS_LIMIT
+        details:
+          type: string
+        constitution_reference:
+          type: string
+          example: "Loi 2 - Protection du Capital"
+
+    NewsFilterStatus:
+      type: object
+      properties:
+        filter_active:
+          type: boolean
+        upcoming_events:
+          type: array
+          items:
+            type: object
+            properties:
+              event_name:
+                type: string
+              currency:
+                type: string
+              impact:
+                type: string
+                enum: [low, medium, high]
+              datetime:
+                type: string
+                format: date-time
+        trading_window_opens_at:
+          type: string
+          format: date-time
+
+    # ─────────────────────────────────────────────────────────────────
+    # ACCOUNT SCHEMAS
+    # ─────────────────────────────────────────────────────────────────
+    AccountBalance:
+      type: object
+      properties:
+        balance:
+          type: number
+          format: double
+        equity:
+          type: number
+          format: double
+        margin:
+          type: number
+        free_margin:
+          type: number
+        margin_level_percent:
+          type: number
+        currency:
+          type: string
+          example: USD
+        profit:
+          type: number
+          description: P&L des positions ouvertes
+        server:
+          type: string
+          example: "FTMO-Demo"
+        login:
+          type: integer
+
+    ExposureAnalysis:
+      type: object
+      properties:
+        total_positions:
+          type: integer
+        total_volume:
+          type: number
+        exposure_by_symbol:
+          type: object
+          additionalProperties:
+            type: number
+        max_positions_allowed:
+          type: integer
+          default: 3
+        can_open_new:
+          type: boolean
+
+    # ─────────────────────────────────────────────────────────────────
+    # MARKET SCHEMAS
+    # ─────────────────────────────────────────────────────────────────
+    MarketQuote:
+      type: object
+      properties:
+        symbol:
+          type: string
+        bid:
+          type: number
+          format: double
+        ask:
+          type: number
+          format: double
+        spread_points:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+
+    OHLCBar:
+      type: object
+      properties:
+        time:
+          type: string
+          format: date-time
+        open:
+          type: number
+        high:
+          type: number
+        low:
+          type: number
+        close:
+          type: number
+        tick_volume:
+          type: integer
+        real_volume:
+          type: integer
+
+    # ─────────────────────────────────────────────────────────────────
+    # HYDRA SCHEMAS
+    # ─────────────────────────────────────────────────────────────────
+    PropFirmAccount:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: "FTMO Challenge 10K"
+        broker:
+          type: string
+          enum: [FTMO, FundedNext, The5ers, TrueForex, Other]
+        login:
+          type: integer
+        server:
+          type: string
+        status:
+          type: string
+          enum: [connected, disconnected, challenge, funded]
+        balance:
+          type: number
+        equity:
+          type: number
+        phase:
+          type: string
+          enum: [challenge, verification, funded]
+        copy_enabled:
+          type: boolean
+
+    CopyTradeRequest:
+      type: object
+      required:
+        - order
+      properties:
+        order:
+          $ref: '#/components/schemas/TradeOrderRequest'
+        target_accounts:
+          type: array
+          items:
+            type: string
+          description: IDs des comptes cibles (tous si vide)
+        scaling_mode:
+          type: string
+          enum: [fixed, proportional]
+          default: proportional
+          description: Mode de scaling du volume
+
+    CopyTradeResponse:
+      type: object
+      properties:
+        source_ticket:
+          type: integer
+        copies:
+          type: array
+          items:
+            type: object
+            properties:
+              account_id:
+                type: string
+              ticket:
+                type: integer
+              status:
+                type: string
+                enum: [success, failed, skipped]
+              error:
+                type: string
+              latency_ms:
+                type: integer
+        total_latency_ms:
+          type: integer
+
+    AggregateStats:
+      type: object
+      properties:
+        total_accounts:
+          type: integer
+        total_balance:
+          type: number
+        total_equity:
+          type: number
+        total_profit_today:
+          type: number
+        accounts_at_risk:
+          type: integer
+          description: Comptes proches du max drawdown
+
+    # ─────────────────────────────────────────────────────────────────
+    # ERROR SCHEMAS
+    # ─────────────────────────────────────────────────────────────────
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+        details:
+          type: object
+        timestamp:
+          type: string
+          format: date-time
+
+  securitySchemes:
+    InternalToken:
+      type: http
+      scheme: bearer
+      description: Token interne signé par le Kernel
+
+security:
+  - InternalToken: []

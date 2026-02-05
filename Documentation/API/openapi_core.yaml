@@ -1,0 +1,547 @@
+openapi: 3.0.3
+info:
+  title: E.V.A. Core API
+  description: |
+    API principale d'E.V.A. - L'Orchestrateur Central (Expert A).
+    Gère le routage des requêtes, la mémoire conversationnelle et la synthèse des réponses.
+  version: 1.0.0
+  contact:
+    name: The Hive Admin
+    
+servers:
+  - url: http://the-hive.local:8000/api/v1
+    description: Serveur local (via Tailscale)
+
+tags:
+  - name: Chat
+    description: Interface conversationnelle principale
+  - name: Memory
+    description: Gestion de la mémoire long-terme (RAG)
+  - name: Agents
+    description: Communication inter-agents
+  - name: System
+    description: État du système et santé
+
+paths:
+  # ═══════════════════════════════════════════════════════════════
+  # CHAT ENDPOINTS
+  # ═══════════════════════════════════════════════════════════════
+  /chat/message:
+    post:
+      tags: [Chat]
+      summary: Envoyer un message à E.V.A.
+      description: |
+        Point d'entrée principal pour l'interaction humaine.
+        Le Core analyse l'intent, route vers l'expert approprié, et synthétise la réponse.
+      operationId: sendMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatMessageRequest'
+      responses:
+        '200':
+          description: Réponse d'E.V.A.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatMessageResponse'
+        '429':
+          description: Rate limit atteint
+        '503':
+          description: Expert non disponible (VRAM insuffisante)
+
+  /chat/stream:
+    post:
+      tags: [Chat]
+      summary: Envoyer un message avec réponse streamée
+      description: SSE (Server-Sent Events) pour afficher les tokens en temps réel.
+      operationId: sendMessageStream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatMessageRequest'
+      responses:
+        '200':
+          description: Stream de tokens
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /chat/history:
+    get:
+      tags: [Chat]
+      summary: Récupérer l'historique de conversation
+      operationId: getChatHistory
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        '200':
+          description: Historique des messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ChatMessage'
+
+  # ═══════════════════════════════════════════════════════════════
+  # MEMORY (RAG) ENDPOINTS
+  # ═══════════════════════════════════════════════════════════════
+  /memory/search:
+    post:
+      tags: [Memory]
+      summary: Recherche sémantique dans la mémoire
+      operationId: searchMemory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemorySearchRequest'
+      responses:
+        '200':
+          description: Résultats de recherche
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemorySearchResponse'
+
+  /memory/store:
+    post:
+      tags: [Memory]
+      summary: Stocker une information en mémoire long-terme
+      operationId: storeMemory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryStoreRequest'
+      responses:
+        '201':
+          description: Information stockée
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryStoreResponse'
+
+  # ═══════════════════════════════════════════════════════════════
+  # AGENT COMMUNICATION ENDPOINTS
+  # ═══════════════════════════════════════════════════════════════
+  /agents/route:
+    post:
+      tags: [Agents]
+      summary: Router une tâche vers un expert spécifique
+      description: Utilisé en interne par le Core pour déléguer aux experts.
+      operationId: routeToAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentRouteRequest'
+      responses:
+        '200':
+          description: Réponse de l'expert
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentRouteResponse'
+        '503':
+          description: Expert non disponible
+
+  /agents/status:
+    get:
+      tags: [Agents]
+      summary: État de tous les experts
+      operationId: getAgentsStatus
+      responses:
+        '200':
+          description: Statut des agents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AgentStatus'
+
+  # ═══════════════════════════════════════════════════════════════
+  # SYSTEM ENDPOINTS
+  # ═══════════════════════════════════════════════════════════════
+  /system/health:
+    get:
+      tags: [System]
+      summary: Vérification de santé du système
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Système opérationnel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /system/metrics:
+    get:
+      tags: [System]
+      summary: Métriques Prometheus
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Métriques au format Prometheus
+          content:
+            text/plain:
+              schema:
+                type: string
+
+# ═══════════════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════════════
+components:
+  schemas:
+    # ─────────────────────────────────────────────────────────────────
+    # CHAT SCHEMAS
+    # ─────────────────────────────────────────────────────────────────
+    ChatMessageRequest:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          description: Message de l'utilisateur
+          minLength: 1
+          maxLength: 10000
+          example: "Achète 0.5 lot de Gold maintenant"
+        session_id:
+          type: string
+          format: uuid
+          description: ID de session (généré si absent)
+        context:
+          $ref: '#/components/schemas/UserContext'
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attachment'
+          maxItems: 5
+
+    ChatMessageResponse:
+      type: object
+      properties:
+        message_id:
+          type: string
+          format: uuid
+        content:
+          type: string
+          description: Réponse d'E.V.A.
+        session_id:
+          type: string
+          format: uuid
+        intent:
+          $ref: '#/components/schemas/Intent'
+        routed_to:
+          type: string
+          enum: [core, banker, shadow, builder, sentinel, muse, sage, wraith]
+        processing_time_ms:
+          type: integer
+        tokens_used:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+
+    ChatMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          additionalProperties: true
+
+    # ─────────────────────────────────────────────────────────────────
+    # CONTEXT & INTENT
+    # ─────────────────────────────────────────────────────────────────
+    UserContext:
+      type: object
+      description: Contexte utilisateur pour personnalisation
+      properties:
+        location:
+          $ref: '#/components/schemas/GeoLocation'
+        device:
+          type: string
+          enum: [mobile, desktop, halo]
+        mood:
+          type: string
+          enum: [focused, relaxed, stressed, unknown]
+        biometrics:
+          $ref: '#/components/schemas/Biometrics'
+
+    GeoLocation:
+      type: object
+      properties:
+        latitude:
+          type: number
+          format: double
+        longitude:
+          type: number
+          format: double
+        accuracy_meters:
+          type: number
+
+    Biometrics:
+      type: object
+      description: Données de santé (Loi 1 - Épanouissement)
+      properties:
+        sleep_hours:
+          type: number
+          minimum: 0
+          maximum: 24
+        stress_level:
+          type: string
+          enum: [low, medium, high, critical]
+        heart_rate_bpm:
+          type: integer
+
+    Intent:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - TRADING_ORDER
+            - TRADING_QUERY
+            - OSINT_SEARCH
+            - SYSTEM_COMMAND
+            - CREATIVE_REQUEST
+            - HEALTH_QUERY
+            - SECURITY_ALERT
+            - GENERAL_CHAT
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        entities:
+          type: object
+          additionalProperties: true
+
+    Attachment:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [image, audio, document]
+        data_base64:
+          type: string
+          format: byte
+        filename:
+          type: string
+
+    # ─────────────────────────────────────────────────────────────────
+    # MEMORY (RAG) SCHEMAS
+    # ─────────────────────────────────────────────────────────────────
+    MemorySearchRequest:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: string
+          description: Requête de recherche sémantique
+        collection:
+          type: string
+          enum: [conversations, osint, trading, general]
+          default: general
+        limit:
+          type: integer
+          default: 5
+          maximum: 20
+        min_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.7
+
+    MemorySearchResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryItem'
+        query_time_ms:
+          type: integer
+
+    MemoryItem:
+      type: object
+      properties:
+        id:
+          type: string
+        content:
+          type: string
+        score:
+          type: number
+        metadata:
+          type: object
+          properties:
+            source:
+              type: string
+            timestamp:
+              type: string
+              format: date-time
+            tags:
+              type: array
+              items:
+                type: string
+
+    MemoryStoreRequest:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+        collection:
+          type: string
+          default: general
+        metadata:
+          type: object
+          additionalProperties: true
+
+    MemoryStoreResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        stored_at:
+          type: string
+          format: date-time
+
+    # ─────────────────────────────────────────────────────────────────
+    # AGENT SCHEMAS
+    # ─────────────────────────────────────────────────────────────────
+    AgentRouteRequest:
+      type: object
+      required:
+        - target_agent
+        - task
+      properties:
+        target_agent:
+          type: string
+          enum: [banker, shadow, builder, sentinel, muse, sage, wraith, researcher, advocate]
+        task:
+          type: string
+          description: Description de la tâche à effectuer
+        payload:
+          type: object
+          additionalProperties: true
+        priority:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 3
+        timeout_seconds:
+          type: integer
+          default: 30
+          maximum: 300
+
+    AgentRouteResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        result:
+          type: object
+          additionalProperties: true
+        error:
+          type: string
+        processing_time_ms:
+          type: integer
+        agent_used:
+          type: string
+
+    AgentStatus:
+      type: object
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, idle, busy, offline, error]
+        last_active:
+          type: string
+          format: date-time
+        vram_usage_mb:
+          type: integer
+        queue_depth:
+          type: integer
+
+    # ─────────────────────────────────────────────────────────────────
+    # SYSTEM SCHEMAS
+    # ─────────────────────────────────────────────────────────────────
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, critical]
+        timestamp:
+          type: string
+          format: date-time
+        components:
+          type: object
+          properties:
+            llm_server:
+              $ref: '#/components/schemas/ComponentHealth'
+            database:
+              $ref: '#/components/schemas/ComponentHealth'
+            redis:
+              $ref: '#/components/schemas/ComponentHealth'
+            gpu:
+              $ref: '#/components/schemas/ComponentHealth'
+
+    ComponentHealth:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [up, down, degraded]
+        latency_ms:
+          type: integer
+        details:
+          type: string
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token JWT obtenu via authentification Tailscale + Voix
+
+security:
+  - BearerAuth: []

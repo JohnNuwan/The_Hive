@@ -1,0 +1,33 @@
+[package]
+name = "eva-kernel"
+version = "0.1.0"
+edition = "2021"
+description = "EVA Kernel - Composant de sécurité Rust THE HIVE"
+license = "Proprietary"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+thiserror = "1.0"
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Pour bindings Python (optionnel)
+# pyo3 = { version = "0.20", features = ["extension-module"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[lib]
+name = "eva_kernel"
+path = "src/lib.rs"
+# Pour PyO3: crate-type = ["cdylib"]
+
+[[bin]]
+name = "eva-kernel"
+path = "src/main.rs"

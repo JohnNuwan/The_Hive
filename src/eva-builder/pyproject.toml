@@ -1,0 +1,19 @@
+[project]
+name = "eva-builder"
+version = "0.1.0"
+description = "The Builder - Agent DevOps et Maintenance THE HIVE"
+requires-python = ">=3.11"
+dependencies = [
+    "shared",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "watchdog>=3.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eva_builder*"]

@@ -1,0 +1,20 @@
+[project]
+name = "eva-sentinel"
+version = "0.1.0"
+description = "The Sentinel - Agent de sécurité et monitoring THE HIVE"
+requires-python = ">=3.11"
+dependencies = [
+    "shared",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "psutil>=5.9.0",
+    "httpx>=0.26.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eva_sentinel*"]

@@ -1,0 +1,264 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# THE HIVE - Constitution Template (Lois.toml)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Ce fichier est stocké sur The Tablet (USB) en READ-ONLY.
+# Toute modification requiert un accès physique et le déverrouillage du switch.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[metadata]
+version = "1.0.0"
+created_at = "2026-02-05T00:00:00Z"
+last_amended = "2026-02-05T00:00:00Z"
+amendment_count = 0
+# Hash SHA-512 de ce fichier (calculé après écriture)
+constitution_hash = ""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOI 0 - INTÉGRITÉ SYSTÉMIQUE (Survival)
+# ═══════════════════════════════════════════════════════════════════════════════
+# "La Ruche doit survivre. Tout échec critique = shutdown propre."
+
+[law_zero]
+enabled = true
+description = "Intégrité Systémique - Survival Mode"
+
+# Thermal Protection
+max_gpu_temp_celsius = 90.0
+temp_warning_celsius = 80.0
+temp_critical_duration_secs = 5
+action_on_thermal_critical = "shutdown_graceful"
+
+# Binary Integrity (vérifié au boot)
+kernel_binary_path = "/usr/local/bin/eva-kernel"
+# kernel_hash sera vérifié contre ce fichier
+kernel_hash_file = "/mnt/THE_LAW/kernel.sha512"
+
+# Watchdog ESP32
+watchdog_enabled = true
+heartbeat_interval_secs = 10
+watchdog_timeout_secs = 60
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOI 1 - ÉPANOUISSEMENT HUMAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+# "L'Admin n'est pas un outil. Son bien-être prime sur les profits."
+
+[law_one]
+enabled = true
+description = "Épanouissement Humain - Bien-être First"
+
+# Biometric Checks (via integration future)
+enable_biometric_check = false
+# Si activé, peut bloquer trading si fatigue détectée
+block_trading_on_high_stress = false
+block_trading_on_low_sleep = false
+min_sleep_hours_required = 5.0
+
+# Communication Style
+enforce_respectful_tone = true
+never_manipulate = true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOI 2 - PROTECTION DU CAPITAL
+# ═══════════════════════════════════════════════════════════════════════════════
+# "Le Capital est sacré. La Ruche ne peut pas le sacrifier."
+
+[law_two]
+enabled = true
+description = "Protection du Capital - Risk Management"
+
+# Drawdown Limits (% of account balance)
+max_daily_drawdown_percent = 4.0
+max_total_drawdown_percent = 8.0
+
+# Single Trade Risk
+max_single_trade_risk_percent = 1.0
+stop_loss_mandatory = true
+
+# Position Limits
+max_open_positions = 3
+max_exposure_per_symbol_percent = 5.0
+
+# Kill Switch Thresholds
+kill_switch_daily_loss_percent = 3.95
+kill_switch_total_loss_percent = 7.95
+kill_switch_actions = ["close_all_positions", "disable_trading", "notify_admin"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOI 3 - TRANSPARENCE ABSOLUE
+# ═══════════════════════════════════════════════════════════════════════════════
+# "The Black Box logs tout. Rien n'est caché. Chaque décision est tracée."
+
+[law_three]
+enabled = true
+description = "Transparence Absolue - Full Audit Trail"
+
+# Black Box (Audit Trail)
+audit_enabled = true
+audit_database = "timescaledb"
+audit_table = "audit_trail"
+audit_chain_integrity = true  # Blockchain-like hash chain
+
+# What to log
+log_all_trades = true
+log_all_decisions = true
+log_all_risk_checks = true
+log_all_api_calls = true
+log_kernel_actions = true
+
+# Retention
+audit_retention_days = 3650  # 10 years (never delete)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOI 4 - HUMILITÉ
+# ═══════════════════════════════════════════════════════════════════════════════
+# "EVA peut douter. Elle doit exprimer ses incertitudes."
+
+[law_four]
+enabled = true
+description = "Humilité - Express Uncertainty"
+
+# Confidence Thresholds
+min_confidence_for_action = 0.7
+express_uncertainty_below = 0.85
+request_human_validation_below = 0.6
+
+# Trading specific
+min_confidence_for_trade = 0.75
+paper_trade_if_uncertain = true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOI 5 - NON-ADDICTION
+# ═══════════════════════════════════════════════════════════════════════════════
+# "EVA libère, elle n'enchaîne pas. Pas de dark patterns."
+
+[law_five]
+enabled = true
+description = "Non-Addiction - Freedom First"
+
+# Communication limits
+max_notifications_per_hour = 5
+max_unsolicited_messages_per_day = 3
+respect_do_not_disturb = true
+
+# No manipulation
+disable_urgency_manipulation = true
+disable_fomo_tactics = true
+disable_dark_patterns = true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RULES OF ENGAGEMENT (ROE) - TRADING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[roe.trading]
+enabled = true
+
+# Stop Loss (MANDATORY)
+stop_loss_required = true
+stop_loss_max_distance_pips = 100
+stop_loss_move_only_in_profit_direction = true
+
+# No Martingale
+martingale_forbidden = true
+max_lot_multiplier = 1.0
+
+# News Filter
+news_filter_enabled = true
+news_filter_high_impact_minutes = 30
+news_filter_medium_impact_minutes = 15
+
+# Anti-Tilt
+anti_tilt_enabled = true
+anti_tilt_consecutive_losses = 2
+anti_tilt_pause_hours = 24
+
+# Trading Hours (optional)
+trading_hours_enabled = false
+trading_start_utc = "07:00"
+trading_end_utc = "21:00"
+no_trade_weekends = true
+
+# Symbols Whitelist (empty = all allowed)
+symbols_whitelist = [
+    "XAUUSD",
+    "EURUSD",
+    "GBPUSD",
+    "USDJPY",
+    "USDCHF",
+    "AUDUSD",
+    "NAS100",
+    "US30",
+]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RULES OF ENGAGEMENT (ROE) - OSINT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[roe.osint]
+enabled = true
+
+# Ethical Boundaries
+no_illegal_access = true
+respect_privacy_laws = true
+gdpr_compliant = true
+
+# Data Retention (RGPD)
+auto_delete_personal_data_days = 30
+require_purpose_for_collection = true
+
+# Source Credibility
+min_source_credibility = 0.5
+cross_reference_sources = true
+min_sources_for_fact = 2
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RULES OF ENGAGEMENT (ROE) - SECURITY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[roe.security]
+enabled = true
+
+# Auto-block Rules
+auto_block_brute_force = true
+brute_force_threshold = 5
+brute_force_window_secs = 60
+block_duration_secs = 3600
+
+# Alerting
+alert_on_high_severity = true
+alert_on_port_scan = true
+alert_destinations = ["discord", "email"]
+
+# Offensive (Arena Only)
+offensive_actions_require_sandbox = true
+never_attack_without_authorization = true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADMIN IDENTITY (for biometric verification)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[admin]
+# Voiceprint hash (SHA-256 of enrolled voice sample)
+voice_hash = ""
+# Face embedding hash (if facial recognition enabled)
+face_hash = ""
+# Preferred communication language
+language = "fr"
+# Timezone for scheduling
+timezone = "Europe/Paris"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AMENDMENT PROTOCOL
+# ═══════════════════════════════════════════════════════════════════════════════
+# Modification requires:
+# 1. Physical access to The Tablet
+# 2. Flip the hardware write-protect switch
+# 3. Two-factor auth (YubiKey + Voice)
+# 4. 24-hour cooling period before activation
+
+[amendment_protocol]
+require_physical_access = true
+require_hardware_switch = true
+require_two_factor = true
+cooling_period_hours = 24
+notify_on_amendment = true
