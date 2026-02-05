@@ -9,7 +9,7 @@ license = "Proprietary"
 tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = { version = "0.8", features = ["serde"] }
 thiserror = "1.0"
 sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
