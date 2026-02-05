@@ -1,0 +1,22 @@
+name: Rust Check
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Rust
+      uses: dsherret/rust-toolchain-file@v1
+      
+    - name: Cargo Check
+      run: cd src/eva-kernel && cargo check
+      
+    - name: Cargo Test
+      run: cd src/eva-kernel && cargo test
