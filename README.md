@@ -1,10 +1,14 @@
 # 🐝 THE HIVE & E.V.A. : SPÉCIFICATIONS FONCTIONNELLES ET TECHNIQUES DÉTAILLÉES
 
-![Status](https://img.shields.io/badge/Statut-Alpha_Genesis-gold?style=for-the-badge)
 ![Nervous](https://img.shields.io/badge/Messenger-Go_|_Redis-00ADD8?style=for-the-badge&logo=go)
 ![Maths](https://img.shields.io/badge/Quant-Julia_|_JAX-9558B2?style=for-the-badge&logo=julia)
 ![Security](https://img.shields.io/badge/S%C3%A9curit%C3%A9-Rust_|_ZFS-red?style=for-the-badge&logo=rust)
 ![Finance](https://img.shields.io/badge/Financials-FTMO_|_Hydra-green?style=for-the-badge)
+![Eco](https://img.shields.io/badge/Eco--Friendly-Circadian_Mode-2ca02c?style=for-the-badge&logo=leaf)
+![Resilience](https://img.shields.io/badge/Resilience-Phoenix_|_Dynasty-orange?style=for-the-badge&logo=fire)
+![OpenSource](https://img.shields.io/badge/Open_Source-MIT-blue?style=for-the-badge&logo=opensourceinitative)
+![France](https://img.shields.io/badge/Made_in-France-blue?style=for-the-badge)
+
 
 > **"Un organisme numérique conçu pour une souveraineté financière, personnelle et architecturale absolue."**
 
