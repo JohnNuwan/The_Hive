@@ -232,13 +232,37 @@ services:
   #     - wazuh_data:/var/ossec/data
   #   networks:
   #     - hive-network
+  #     - hive-net
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NETWORKS
 # ─────────────────────────────────────────────────────────────────────────────
 
+  # --- NOUVEAUX SERVICES CORPORATION ---
+  eva-compliance:
+    build: ../src/eva-compliance
+    ports: ["8300:8300"]
+    env_file: ../.env
+    networks: ["hive-net"]
+
+  eva-substrate:
+    build: ../src/eva-substrate
+    ports: ["8400:8400"]
+    privileged: true # Pour accès aux capteurs hardware
+    networks: ["hive-net"]
+
+  eva-lab:
+    build: ../src/eva-lab
+    ports: ["8500:8500"]
+    networks: ["hive-net"]
+
+  eva-rwa:
+    build: ../src/eva-rwa
+    ports: ["8600:8600"]
+    networks: ["hive-net"]
+
 networks:
-  hive-network:
+  hive-net:
     driver: bridge
     ipam:
       config:

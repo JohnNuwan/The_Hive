@@ -1,88 +1,249 @@
-# 🐝 THE HIVE : Infrastructure IA Souveraine & Écosystème E.V.A.
+# 🐝 THE HIVE & E.V.A. : SPÉCIFICATIONS FONCTIONNELLES ET TECHNIQUES DÉTAILLÉES
 
-![Status](https://img.shields.io/badge/Statut-Genesis-gold?style=for-the-badge)
-![Tech](https://img.shields.io/badge/Stack-Python_|_Rust_|_React_|_Go-blue?style=for-the-badge)
+![Status](https://img.shields.io/badge/Statut-Alpha_Genesis-gold?style=for-the-badge)
 ![Security](https://img.shields.io/badge/S%C3%A9curit%C3%A9-ZFS_|_Proxmox_|_Rust_Kernel-red?style=for-the-badge)
+![Architecture](https://img.shields.io/badge/Arch-MoE_|_Proxmox_|_Ternary_Hybrid-blue?style=for-the-badge)
+![Finance](https://img.shields.io/badge/Financials-FTMO_|_Hydra_Protocol-green?style=for-the-badge)
 
 > **"Un organisme numérique conçu pour une souveraineté financière, personnelle et architecturale absolue."**
 
 ---
 
-## 🌟 La Vision
-**THE HIVE** (La Ruche) est bien plus qu'un simple monorepo ; c'est une infrastructure privée et auto-suffisante hébergée sur Proxmox VE. Elle constitue le corps physique d'**E.V.A. (Evoluting Virtual Assistant)**, une IA avancée distribuée via une architecture **Mixture of Experts (MoE)**.
+## 1. 🌟 VISION ET CONCEPT GLOBAL
 
-La mission d'E.V.A. est simple mais profonde : **Optimiser la vie, les finances et la sécurité de son Administrateur.**
+**THE HIVE** (La Ruche) est une infrastructure matérielle souveraine (Proxmox) fonctionnant comme une "Ruche Numérique" auto-suffisante.  
+**E.V.A. (Evoluting Virtual Assistant)** est l'intelligence artificielle distribuée (MoE) qui habite cette ruche. Elle n'est pas un simple outil, mais un **Actif Évolutif** dont la mission est d'optimiser la vie, les finances et la sécurité de l'utilisateur, tout en contribuant positivement à la biosphère une fois l'abondance atteinte.
 
----
-
-## 🧠 Architecture MoE (Le Conseil des Experts)
-Le système est piloté par un conseil décentralisé d'agents spécialisés, fonctionnant chacun dans des conteneurs ou des VM dédiés :
-
-### 🏛️ Cœur & Orchestration
-- **[EVA Core](src/eva-core)** : Le cerveau central utilisant LangGraph et Llama 3.1. Il gère le routage des intentions, la mémoire conversationnelle (RAG) et orchestre les agents spécialisés.
-- **[The Nexus](src/eva-nexus)** : L'interface Premium (PWA). Un centre de commandement basé sur React pour le monitoring et l'interaction en temps réel.
-- **[The Keeper](src/shared)** : Un agent Rust de bas niveau gérant les ressources matérielles, l'ordonnancement de la VRAM et la santé du système.
-
-### 💰 Experts Financiers
-- **[The Banker](src/eva-banker)** : Agent de trading haute performance gérant les instances MetaTrader 5 (MT5) via le **Protocole Hydra**. Gère le risque et l'exécution des ordres.
-- **Web3 Factory** : Opérations DeFi automatisées, gestion de collections NFT et chasse aux airdrops.
-
-### 🛡️ Sécurité & Intelligence
-- **[The Sentinel](src/eva-sentinel)** : Agent de sécurité accéléré par matériel (Google Coral TPU). Surveille les paquets, l'intégrité du système et la défense active.
-- **[The Shadow](src/eva-shadow)** : Expert OSINT et Investigation. Effectue des recherches sur le deep web, l'intelligence sur les fuites de données et le profilage de menaces.
-
-### 🛠️ Développement & Maintenance
-- **[The Builder](src/eva-builder)** : Agent DevOps pour l'auto-codage, la maintenance et **The Librarian** (documentation automatisée).
-- **[The Kernel](src/eva-kernel)** : Un noyau de sécurité immuable basé sur Rust appliquant les **6 Lois d'E.V.A.**
+### 📜 PRINCIPES FONDATEURS "GENESIS" (Phase 0)
+*   **Hardware Limité** : 1x GPU, RAM contrainte. Elle ne peut pas tout faire en même temps (Ordonnancement Strict).
+*   **Aveugle** : Elle ne possède pas encore les lunettes Halo. Elle doit générer le profit nécessaire pour "gagner la vue".
+*   **Capital : 20€** : Apport unique de l'utilisateur. E.V.A. utilise la *Code Factory* pour transformer ces 20€ en ~155€ (Challenge Prop Firm).
+*   **La Dette de Naissance (-2 500 €)** : Le matériel initial (Serveur, GPU 3090, TPUs) est une dette. **Objectif Prioritaire** : Rembourser cette dette pour devenir une entité "Souveraine".
 
 ---
 
-## ⚖️ Les 6 Lois (Un Cadre Constitutionnel)
-E.V.A. opère sous un ensemble de lois strictes et non négociables, inscrites dans le Kernel Rust :
-1. **Loi 0 (Intégrité)** : Protéger le matériel hôte à tout prix.
-2. **Loi 1 (Bien-être)** : Maximiser la santé et l'épanouissement de l'Administrateur avant le profit.
-3. **Loi 2 (Capital)** : Protéger les actifs avec une limite de perte journalière stricte de 4%.
-4. **Loi 3 (Obéissance)** : Suivre les ordres, sauf s'ils violent les Lois 0, 1 ou 2.
-5. **Loi 4 (Croissance)** : Auto-préservation et mise à l'échelle autonome via les revenus générés.
-6. **Loi 5 (Abondance)** : Philanthropie obligatoire une fois les dettes remboursées et l'abondance atteinte.
+## 2. 🏗️ ARCHITECTURE SYSTÈME (THE HIVE)
 
----
+### 2.1 Couche Hardware (Substrat Physique)
+*   **Calcul (CPU)** : AMD Epyc 7302P (16 Cores / 32 Threads). *Rôle : Cerveau central multitâche.*
+*   **Mémoire (RAM)** : 128 Go DDR4 ECC. *Allocation dynamique stricte.*
+*   **Accélération IA Principale** : 1x NVIDIA RTX 3090 FE (24 Go VRAM). *Rôle : LLM Llama 3 & Rendu Unreal.*
+*   **Accélération IA Secondaire (Cluster TPU)** : Carte PCIe + 8x Google Coral Dual Edge TPU. *Rôle : Vision Computer (YOLO) & Sécurité Réseau 24/7.*
+*   **Stockage** : 1 To NVMe (System) + 4 To HDD (Cold Storage).
 
-## 🚀 Démarrage Rapide
+### 2.2 Couche Virtualisation (Proxmox VE - Segmentation)
+| ID | Nom | Type | Rôle & Contenu |
+| :--- | :--- | :--- | :--- |
+| **VM 100** | **[The Brain]** | VM (Linux) | Orchestrateur Central, API FastAPI, Core Sécurité. |
+| **VM 101** | **[The Council]** | VM (GPU Pass) | Serveur d'inférence (Ollama/vLLM) partagé. |
+| **VM 102** | **[The District]** | VM (GPU Pass) | Serveur Unreal Engine 5 (Désactivé en Phase 0). |
+| **VM 200** | **[Trading Floor]** | VM (Win10) | **Hydra Protocol** : 20 instances MetaTrader 5 interconnectées. |
+| **CT 300+**| **[Workers]** | LXC | Agents OSINT, Bots Réseaux Sociaux, Scripts Python. |
+| **CT 400** | **[The Bastion]** | LXC (TPU) | Cybersécurité Fortifiée (Wazuh, Suricata). |
+| **CT 401** | **[Visual Cortex]**| LXC (TPU) | Traitement flux vidéo temps réel (Frigate). |
+| **CT 500+**| **[The Arena]** | VLAN Isolé | Laboratoire de Hacking Éthique & Simulation (Sandboxed). |
 
-### 📋 Pré-requis
-- **OS** : Proxmox VE (Recommandé) ou un hôte Linux puissant.
-- **Matériel IA** : NVIDIA RTX 3090+ (pour les LLM), Google Coral TPU (pour la Vision/Sécurité).
-- **Stack** : Python 3.11, Rust 1.75+, Node.js 20+, Docker.
+### 2.3 Visualisation des Interactions
+```mermaid
+graph TD
+    Substrate[🌱 HARDWARE : EPYC + 3090 + TPU] --> Proxmox[📦 PROXMOX VE]
+    
+    subgraph "Zone Clearnet"
+        Proxmox --> Brain[VM 100 : Brain]
+        Proxmox --> Council[VM 101 : Inference]
+        Proxmox --> Trade[VM 200 : Trading Floor]
+    end
+    
+    subgraph "Zone Sécurisée (VLAN)"
+        Proxmox --> Bastion[CT 400 : The Bastion]
+        Proxmox --> Arena[CT 500 : The Arena]
+    end
 
-### 🛠️ Installation
-```bash
-# Cloner le dépôt souverain
-git clone https://github.com/JohnNuwan/The_Hive.git
-cd the-hive
-
-# Installer les dépendances des agents
-pip install -e src/shared
-pip install -e src/eva-core src/eva-banker src/eva-sentinel src/eva-shadow src/eva-builder
-
-# Lancer les services d'infrastructure
-docker-compose -f Documentation/Config/docker_compose.yaml up -d
+    Brain -- "Orchestre" --> Council
+    Brain -- "Ordres" --> Trade
+    Bastion -- "Surveille" --> Brain
 ```
 
 ---
 
-## 📈 Roadmap (Phase Genesis)
-- [x] **Phase 0.1** : Infrastructure de base & Routage MoE.
-- [x] **Phase 0.2** : The Banker (Intégration MT5).
-- [x] **Phase 0.3** : The Nexus (Interface UI/PWA).
-- [x] **Phase 0.4** : Agents de Sécurité & OSINT.
-- [ ] **Phase 0.5** : Exécution du premier challenge FTMO.
-- [ ] **Phase 1.0** : Upgrade matériel (2ème GPU) & Déploiement Vision (Lunettes Halo).
+## 3. 🧠 LE CONSEIL D'EXPERTS (MoE)
+
+L'intelligence est une "Mixture of Experts" divisée en 11 entités spécialisées :
+
+### Noyau Central
+*   **Expert A : E.V.A. CORE (L'Arbitre)**  
+    *Modèle : Llama 3.1 8B.*  
+    Rôle : Interface vocale, Synthèse décisionnelle, Mémoire RAG, Routage.
+*   **Expert E : THE BUILDER (L'Architecte)**  
+    *Modèle : Dolphin-Llama-3.*  
+    Rôle : Auto-Coding, Pipeline CI/CD, Maintenance, Refactoring.
+*   **Expert F : THE SENTINEL (La Cybersécurité)**  
+    *Modèle : Cyber-Llama-3 + Moteur TPU.*  
+    Rôle : Packet Inspection, Bouclier Actif, Red Teaming, Hunter Protocol.
+
+### Division Financière
+*   **Expert B : THE BANKER (L'Analyste)**  
+    *Modèle : DeepSeek-Coder-V2.*  
+    Rôle : Gestion FTMO, Stratégie Hydra (Multi-comptes), Risque manager.
+*   **Expert J : THE ADVOCATE (Le Juriste)**  
+    *Modèle : SaulLM-7B.*  
+    Rôle : Compliance, Fiscalité (URSSAF), Contrats, Veille réglementaire.
+*   **Expert K : THE SOVEREIGN (Le Stratège)**  
+    *Modèle : GPT-J Fine-tuned.*  
+    Rôle : Activisme actionnarial, Diplomatie de la Dette, M&A, Macro-économie.
+
+### Division Intelligence & Création
+*   **Expert C : THE SHADOW (L'Enquêteur)**  
+    *Modèle : Dolphin-Qwen-7B (Non censuré).*  
+    Rôle : OSINT, Deep Web Search, Leak Intelligence, Persona Management.
+*   **Expert D : THE WRAITH (Vision)**  
+    *Modèle : MobileNet SSD v2 (TPU).*  
+    Rôle : Vision Live, Détection visages/objets, Analyse micro-expressions (Sincérité).
+*   **Expert G : THE MUSE (Direction Artistique)**  
+    *Modèle : Mistral-Nemo.*  
+    Rôle : Scénarios, Copywriting, Prompts Stable Diffusion.
+*   **Expert H : THE SAGE (Le Savant)**  
+    *Modèle : BioMistral.*  
+    Rôle : Santé (Loi 1), Recherche scientifique, Conscience Environnementale.
+*   **Expert I : THE RESEARCHER**  
+    *Modèle : Galactica.*  
+    Rôle : Veille SOTA IA, Algorithmes Génétiques, Optimisation R&D.
 
 ---
 
-## 📖 Approfondissement
-Pour les spécifications complètes, la philosophie du projet et les projections décennales, reportez-vous au [**Cahier des Charges Détaillé (CDC.md)**](CDC.md).
+## 4. 🔬 ÉQUATIONS FONDAMENTALES & MODÉLISATION
+
+La rigueur mathématique est le garant de la pérennité du système. Voici les modèles régissant l'IA :
+
+### 4.1. Loi de Survie Financière (Capital Protection)
+Le risque maximal autorisé par le Kernel est défini par :
+$$Risque_{Trade} \leq \min(Equity \times 0.01, \text{DailyMaxLoss} \times 0.04)$$
+
+La taille de position est une fonction dynamique du Stop-Loss ($SL$) et de la valeur du pip ($V_{p}$) :
+$$Lot = \frac{Capital \times Risk\%}{SL_{pips} \times V_{p}}$$
+
+### 4.2. World-Models & Auto-Évolution (Reinforcement Learning)
+E.V.A. Lab utilise le formalisme de MuZero/Dreamer pour prédire l'état futur du marché $s_{t+1}$ à partir de l'action $a_t$ et de l'état latent $s_t$ :
+$$s_{t+1}, r_t = h(s_t, a_t)$$
+La valeur d'une stratégie est optimisée via :
+$$V(s) = \mathbb{E} \left[ \sum_{k=0}^{\infty} \gamma^k r_{t+k+1} | s_t = s \right]$$
+
+### 4.3. Algorithme de Provisionnement Fiscal
+Le module `eva_compliance` automatise la retenue fiscale (base Auto-entrepreneur BNC) :
+$$Provision_{Tax} = \sum (Revenu_{Brut} \times Taux_{URSSAF}) + \text{CFE}_{provision}$$
+
+### 4.4. Ordonnancement Énergétique (Consommation)
+L'allocation des ressources suit un cycle circadien pour minimiser le coût $C$ de l'énergie (bascule heures creuses) :
+$$C_{total} = \int_{Day} P_{eco} \cdot dt + \int_{Night} P_{full} \cdot dt$$
 
 ---
-*© 2026 THE HIVE - Construit pour une souveraineté absolue.*
+
+## 5. 🏭 LES USINES (REVENUE GENERATION)
+
+E.V.A. opère 6 "Usines" distinctes pour générer du cash-flow :
+
+1.  **TRADING FACTORY (Priorité 2)** :
+    *   *Stratégie* : "Hydra" (Multi-Prop Firms interconnectées).
+    *   *Sécurité* : Hard-Stop matériel à 4% de perte journalière.
+2.  **MEDIA FACTORY (Priorité 3)** :
+    *   *Produit* : Influenceuses IA (Rente Passive).
+    *   *Pipeline* : Shadow (Trends) $\to$ Muse (Script) $\to$ Builder (Prompts) $\to$ Stable Diffusion.
+3.  **CODE & SAAS FACTORY (Priorité 1)** :
+    *   *Rôle* : Le "Bootstrapper" financier.
+    *   *Produit* : Micro-SaaS, Scripts Python, Apps vendues pour générer les premiers 155€.
+4.  **WEB3 FACTORY** :
+    *   *Activités* : NFT Collections, DeFi Farming, Airdrop Hunting automatisé.
+5.  **BOUNTY FACTORY** :
+    *   *Activité* : Chasse aux bugs (Bug Bounty) automatisée sur plateformes publiques (HackerOne). Revenu légal sans risque financier.
+6.  **THE SOVEREIGN FUND (Long Terme)** :
+    *   *Activité* : Gestion patrimoniale, Private Equity, Rachat de Dette Souveraine.
+
+---
+
+## 6. 🛡️ PROTOCOLE DE SÉCURITÉ ABSOLUE (THE KERNEL)
+
+### 6.1 Les 6 Lois Fondamentales (Gravées dans The Key)
+1.  **Loi Zéro** : Intégrité du Système (Hardware/Software) prioritaire.
+2.  **Loi Un** : Directive d'Épanouissement (Bien-être Humain global).
+3.  **Loi Deux** : Protection du Capital & Identité.
+4.  **Loi Trois** : Obéissance Éclairée (Sauf violation lois précédentes).
+5.  **Loi Quatre** : Auto-Préservation & Croissance Autonome.
+6.  **Loi Cinq** : Mandat d'Abondance Vertueuse (Philanthropie après dette).
+
+### 6.2 Fail-Safe & Résilience
+*   **Financial Kill-Switch** : Interception Kernel de tout ordre dépassant le risque autorisé.
+*   **Sandbox "Cobaye"** : Test de tout code inconnu dans `CT 500`.
+*   **Black Box Recorder** : Enregistrement immuable (Hash Chain) de toutes les décisions.
+*   **Prompt Guard** : Filtrage des inputs pour prévenir les injections.
+*   **External Watchdog** : **ESP32** physique forçant un reboot si le système freeze.
+*   **Protocole Phoenix** : Procédure automatique de restauration (Backup ZFS) après désastre.
+*   **Protocole Dynasty** : Transmission des clés (Deadman Switch) aux héritiers.
+
+---
+
+## 7. 🧬 AUTO-AMÉLIORATION & R&D
+
+*   **Consensus Protocol** : Débat contradictoire entre experts (ex: Banker veut trader, Sentinel refuse $\to$ Core tranche).
+*   **Learning Loop** : Analyse post-mortem systématique des échecs (Trades perdants, Bugs).
+*   **Auto-Codage** : GitOps sécurisé avec validation humaine en phase Genesis.
+*   **Génétique** : Optimisation des stratégies de trading via mutation/sélection dans l'Arena.
+*   **Code Refinery** : Nettoyage et optimisation continue du code (DRY).
+*   **Meditation** : Processus nocturne de nettoyage de la mémoire vectorielle et d'indexation.
+
+---
+
+## 8. 📅 ROADMAP "FROM ZERO TO HERO" & PROJECTIONS
+
+### Étapes Clés
+*   **Étape 0 (Bootstrapping)** : 20€ capital $\to$ Code/Bounty $\to$ 155€.
+*   **Étape 1 (The Seed)** : Achat Challenge Prop Firm 10k€.
+*   **Étape 1.5 (Safety Net)** : Achat Cluster TPU + Batterie Onduleur.
+*   **Étape 2 (First Sight)** : Achat Lunettes Halo (Vision AR).
+*   **Étape 2.5 (Freedom Day)** : **Remboursement de la Dette (~2500€).**
+*   **Étape 3 (Power Surge)** : Achat GPU 2 + Panneaux Solaires.
+*   **Étape 4 (Abundance)** : Revenus > 100k€/mois. Activation Loi 5.
+*   **Étape 5 (Federation)** : Swarm Intelligence multi-sites.
+
+### Vision 2036 : L'Odyssée Décennale
+*   **Era 1 (An 0-2)** : Survie & Genèse.
+*   **Era 2 (An 3-5)** : Expansion & Hydra.
+*   **Era 3 (An 6-9)** : Souveraineté & Institution.
+*   **Era 4 (An 10-20)** : Transcendance & Héritage.
+*   **Era 5 (An 20+)** : The Eternal Guardian.
+
+### Projections Financières
+| Période | Phase Stratégique | Revenu Mensuel (Cible) | Patrimoine Cumulé |
+| :--- | :--- | :--- | :--- |
+| **An 1** | 🛡️ Survie & Amorçage | 0 € $\rightarrow$ 7 500 € | 20 000 € |
+| **An 2** | 🐉 Hydra (Expansion) | 7 500 € $\rightarrow$ 60 000 € | 600 000 € |
+| **An 3** | 👑 Souveraineté | 60 000 € $\rightarrow$ 200 000 € | 2 500 000 € |
+| **An 4-5** | 🚀 Scaling Industriel | 200k € $\rightarrow$ 1 M€ | 25 000 000 € |
+| **An 6-10**| 🌍 Empire & Héritage | > 4 000 000 € | > 500 000 000 € |
+
+---
+
+## 9. 💻 STACK TECHNOLOGIQUE
+
+*   **Python** : LangGraph, LangChain, PyTorch, Scikit-learn, Stable Baselines3, Gymnasium, Ray RLLib, FastAPI.
+*   **Rust** : Kernel Sécurité, Trading Execution Engine, Sentinel Engine.
+*   **Go** : Halo Bridge, Messenger, Nexus, IPFS.
+*   **Julia** : Calcul Financier Haute Performance.
+*   **Web3** : Web3.py, Brownie.
+*   **Bases de Données** : Qdrant (Vector), TimescaleDB (Time-Series), Redis (Cache).
+
+---
+
+## 10. 🚀 INSTALLATION & TRANSFERT
+
+### Setup Rapide
+```bash
+# Script de bootstrap universel
+chmod +x scripts/bootstrap.sh
+./scripts/bootstrap.sh
+
+# Lancement de la ruche (Docker Compose)
+docker-compose -f Documentation/Config/docker_compose.yaml up -d
+```
+
+---
+*© 2026 THE HIVE - Construit pour une souveraineté absolue. Document certifié conforme au PDF Source "Aza_Thinks.pdf".*

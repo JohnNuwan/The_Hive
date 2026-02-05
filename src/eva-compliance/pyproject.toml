@@ -1,0 +1,15 @@
+[project]
+name = "eva-compliance"
+version = "0.1.0"
+description = "Module de conformité juridique et fiscale pour E.V.A."
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "python-dotenv",
+    "cryptography"
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

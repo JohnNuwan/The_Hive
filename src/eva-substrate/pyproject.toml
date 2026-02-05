@@ -1,0 +1,14 @@
+[project]
+name = "eva-substrate"
+version = "0.1.0"
+description = "Module de gestion matérielle (Substrat biologique) pour E.V.A."
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "psutil",
+    "python-dotenv"
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

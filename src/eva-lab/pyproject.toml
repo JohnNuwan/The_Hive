@@ -1,0 +1,15 @@
+[project]
+name = "eva-lab"
+version = "0.1.0"
+description = "Laboratoire de R&D et d'auto-évolution pour E.V.A."
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "numpy",
+    "pandas",
+    "python-dotenv"
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
