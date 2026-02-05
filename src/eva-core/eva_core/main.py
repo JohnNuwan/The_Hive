@@ -117,8 +117,12 @@ async def lifespan(app: FastAPI):
     app.state.intent_router = IntentRouter()
     app.state.llm_service = get_llm_service()
     app.state.memory_service = get_memory_service()
+    
+    # Intégration Biblio_IA / PromptMaster
+    from eva_core.services.prompt_master import PromptMaster
+    app.state.prompt_master = PromptMaster()
 
-    logger.info("✅ EVA Core prêt")
+    logger.info("✅ EVA Core prêt avec moteur de prompts Biblio_IA")
 
     yield
 
@@ -235,9 +239,22 @@ async def chat(request: ChatRequest) -> ChatResponse:
         
         if intent.target_expert == "core":
             # Le Core répond directement
+            # Application de la méthode BMAD / CO-STAR par défaut
+            prompt_master: PromptMaster = app.state.prompt_master
+            
+            # Si l'intent est complexe, on utilise ReAct
+            method = "react" if intent.confidence < 0.8 else "costar"
+            
+            wrapped_message = prompt_master.wrap_with_method(request.message, method=method)
+            expert_injector = prompt_master.get_expert_injector("core")
+            
             response_text = await llm_service.generate_response(
-                messages=[user_message],
-                system_prompt="Tu es EVA, une IA assistante personnelle intelligente et bienveillante.",
+                messages=[ChatMessage(
+                    session_id=session_id,
+                    role=MessageRole.USER,
+                    content=wrapped_message
+                )],
+                system_prompt=f"{expert_injector}\nTu es EVA, une IA assistante personnelle intelligente et bienveillante.",
             )
         else:
             # Router vers un autre expert via Redis
