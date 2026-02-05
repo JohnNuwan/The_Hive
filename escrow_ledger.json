@@ -1,0 +1,101 @@
+{
+    "total_tax_blocked": 1000.0,
+    "transactions": [
+        {
+            "timestamp": "2026-02-05T15:51:06.903012",
+            "ticket_id": "MOCK_1770303066",
+            "gross_profit": 100.0,
+            "tax_blocked": 25.0
+        },
+        {
+            "timestamp": "2026-02-05T15:51:06.905821",
+            "ticket_id": "MOCK_1770303066",
+            "gross_profit": 500.0,
+            "tax_blocked": 125.0
+        },
+        {
+            "timestamp": "2026-02-05T15:51:06.907049",
+            "ticket_id": "MOCK_1770303066",
+            "gross_profit": 250.0,
+            "tax_blocked": 62.5
+        },
+        {
+            "timestamp": "2026-02-05T15:51:06.908744",
+            "ticket_id": "MOCK_1770303066",
+            "gross_profit": 150.0,
+            "tax_blocked": 37.5
+        },
+        {
+            "timestamp": "2026-02-05T15:51:29.317892",
+            "ticket_id": "MOCK_1770303089",
+            "gross_profit": 100.0,
+            "tax_blocked": 25.0
+        },
+        {
+            "timestamp": "2026-02-05T15:51:29.319475",
+            "ticket_id": "MOCK_1770303089",
+            "gross_profit": 500.0,
+            "tax_blocked": 125.0
+        },
+        {
+            "timestamp": "2026-02-05T15:51:29.320403",
+            "ticket_id": "MOCK_1770303089",
+            "gross_profit": 250.0,
+            "tax_blocked": 62.5
+        },
+        {
+            "timestamp": "2026-02-05T15:51:29.321288",
+            "ticket_id": "MOCK_1770303089",
+            "gross_profit": 150.0,
+            "tax_blocked": 37.5
+        },
+        {
+            "timestamp": "2026-02-05T15:51:53.484842",
+            "ticket_id": "MOCK_1770303113",
+            "gross_profit": 100.0,
+            "tax_blocked": 25.0
+        },
+        {
+            "timestamp": "2026-02-05T15:51:53.486646",
+            "ticket_id": "MOCK_1770303113",
+            "gross_profit": 500.0,
+            "tax_blocked": 125.0
+        },
+        {
+            "timestamp": "2026-02-05T15:51:53.487865",
+            "ticket_id": "MOCK_1770303113",
+            "gross_profit": 250.0,
+            "tax_blocked": 62.5
+        },
+        {
+            "timestamp": "2026-02-05T15:51:53.489153",
+            "ticket_id": "MOCK_1770303113",
+            "gross_profit": 150.0,
+            "tax_blocked": 37.5
+        },
+        {
+            "timestamp": "2026-02-05T15:52:06.912613",
+            "ticket_id": "MOCK_1770303126",
+            "gross_profit": 100.0,
+            "tax_blocked": 25.0
+        },
+        {
+            "timestamp": "2026-02-05T15:52:06.914072",
+            "ticket_id": "MOCK_1770303126",
+            "gross_profit": 500.0,
+            "tax_blocked": 125.0
+        },
+        {
+            "timestamp": "2026-02-05T15:52:06.915241",
+            "ticket_id": "MOCK_1770303126",
+            "gross_profit": 250.0,
+            "tax_blocked": 62.5
+        },
+        {
+            "timestamp": "2026-02-05T15:52:06.916283",
+            "ticket_id": "MOCK_1770303126",
+            "gross_profit": 150.0,
+            "tax_blocked": 37.5
+        }
+    ]
+}

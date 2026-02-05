@@ -13,17 +13,19 @@ from qdrant_client.models import Distance, PointStruct, VectorParams
 
 from shared import ChatMessage, get_settings
 
+from eva_core.memory_layer import MemoryLayer
+
 logger = logging.getLogger(__name__)
 
 
 class MemoryService:
     """
-    Service de mémoire vectorielle avec Qdrant.
+    Service de mémoire vectorielle avec Qdrant et Mem0.
     
     Permet:
-    - Stockage des messages de conversation
+    - Stockage des messages de conversation (Qdrant)
     - Recherche sémantique (RAG)
-    - Gestion des sessions
+    - Mémoire adaptative long terme (Mem0)
     """
 
     def __init__(
@@ -37,7 +39,8 @@ class MemoryService:
         self.collection_name = collection_name
         self._client: AsyncQdrantClient | None = None
         self._embedding_dim = 384  # all-MiniLM-L6-v2
-        logger.info(f"MemoryService initialisé: {host}:{port}/{collection_name}")
+        self.adaptive_memory = MemoryLayer()
+        logger.info(f"MemoryService initialisé: {host}:{port}/{collection_name} + Mem0 Adaptive")
 
     async def _get_client(self) -> AsyncQdrantClient:
         """Retourne ou crée le client Qdrant"""
@@ -122,12 +125,20 @@ class MemoryService:
                 points=[point],
             )
 
+            # Enrichissement de la mémoire adaptative (Mem0)
+            # Mem0 analyse le texte pour extraire des faits/préférences
+            self.adaptive_memory.store_event(message.content)
+
             logger.debug(f"Message stocké: {point_id}")
             return point_id
 
         except Exception as e:
             logger.warning(f"Erreur stockage mémoire: {e}")
             return ""
+
+    def get_user_profile(self) -> list:
+        """Récupère les préférences apprises par Mem0"""
+        return self.adaptive_memory.get_user_profile()
 
     async def search(
         self,

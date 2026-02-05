@@ -29,7 +29,7 @@ class Scheduler:
         
         # 3. Appliquer les changements si nécessaire
         if target_profile != self.current_state:
-            print(f"🔄 SWITCHING MODE: {self.current_state} -> {target_profile}")
+            print(f"SWITCHING MODE: {self.current_state} -> {target_profile}")
             
             # Allocation TPU (Vision vs Sécurité)
             # La nuit, on réduit la vision (il fait noir) et on maximise le calcul

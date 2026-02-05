@@ -54,6 +54,18 @@ class TaxManager:
             "message": "Security Warning: 25% of gains locked in Escrow."
         }
 
+    def get_escrow_status(self) -> Dict[str, Any]:
+        """Retourne l'état actuel du compte escrow"""
+        try:
+            with open(self.ESCROW_FILE, 'r') as f:
+                data = json.load(f)
+                return {
+                    "total_blocked": data.get("total_tax_blocked", 0.0),
+                    "transaction_count": len(data.get("transactions", []))
+                }
+        except Exception:
+            return {"total_blocked": 0.0, "transaction_count": 0}
+
     def _record_transaction(self, ticket_id: str, gross: Decimal, tax: Decimal):
         """Écrit la transaction dans le fichier JSON sécurisé"""
         try:

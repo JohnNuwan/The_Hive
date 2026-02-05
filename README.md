@@ -133,7 +133,7 @@ sequenceDiagram
 
 ## 3. 🧠 LE CONSEIL D'EXPERTS (MoE)
 
-L'intelligence est une "Mixture of Experts" (MoE) divisée en 11 entités spécialisées.
+L'intelligence est une "Mixture of Experts" (MoE) divisée en 12 entités spécialisées.
 Pour faciliter la navigation dans le code, voici la correspondance entre les **Identités Conceptuelles** (Experts) et les **Modules Techniques** du repository :
 
 | **A. CORE** | `eva-core` | **Python**. Orchestrateur LLM & Mémoire. |
@@ -147,6 +147,7 @@ Pour faciliter la navigation dans le code, voici la correspondance entre les **I
 | **I. RESEARCHER** | `eva-lab` | **Python/JAX**. Optimisation & World-Models. |
 | **J. ADVOCATE** | `eva-compliance`| **Python**. Gestion fiscale & Légale. |
 | **K. SOVEREIGN** | `eva-rwa` | **Rust/Python**. Actifs Réels & Souveraineté. |
+| **L. KEEPER** | `eva-substrate` | **Rust**. Gestionnaire Hardware & Énergie. |
 | **SYSTEM NERVES**| `eva-nervous` | **Go**. Système nerveux central (Bus Redis). |
 | **QUANT LOBE** | `eva-quant` | **Julia**. Calculs financiers intensifs. |
 
@@ -170,7 +171,10 @@ Pour faciliter la navigation dans le code, voici la correspondance entre les **I
     Rôle : Compliance, Fiscalité (URSSAF), Contrats, Veille réglementaire.
 *   **Expert K : THE SOVEREIGN (Le Stratège)**  
     *Modèle : GPT-J Fine-tuned.*  
-    Rôle : Activisme actionnarial, Diplomatie de la Dette, M&A, Macro-économie.
+    Rôle : Activisme actionnarial, Diplomatie, M&A, Acquisition d'actifs réels (RWA).
+*   **Expert L : THE KEEPER (Le Gardien)**  
+    *Modèle : Rust Daemon (Code déterministe).*  
+    Rôle : Gestion de la VRAM, Thermique GPU, Mode ECO hardware.
 
 ### Division Intelligence & Création
 *   **Expert C : THE SHADOW (L'Enquêteur)**  
@@ -180,16 +184,14 @@ Pour faciliter la navigation dans le code, voici la correspondance entre les **I
     *Modèle : MobileNet SSD v2 (TPU).*  
     Rôle : Vision Live, Détection visages/objets, Analyse micro-expressions (Sincérité).
 *   **Expert G : THE MUSE (Direction Artistique)**  
-    *Modèle : Mistral-Nemo.*  
-    Rôle : Scénarios, Copywriting, Prompts Stable Diffusion.
+    *Modèle : Mistral-Nemo + Stable Diffusion XL.*  
+    Rôle : Scénarios, Copywriting, Storytelling, Design System de la Ruche.
 *   **Expert H : THE SAGE (Le Savant)**  
     *Modèle : BioMistral.*  
-    *Code Source : `src/eva-sage/`*
-    Rôle : Santé (Loi 1), Recherche scientifique, Conscience Environnementale.
-*   **Expert I : THE RESEARCHER**  
+    Rôle : Santé de l'Owner (Loi 1), Recherche médicale, Éthique, Conscience Environnementale.
+*   **Expert I : THE RESEARCHER (La R&D)**  
     *Modèle : Galactica.*  
-    *Code Source : `src/eva-lab/`*
-    Rôle : Veille SOTA IA, Algorithmes Génétiques, Optimisation R&D.
+    Rôle : Veille SOTA IA, Algorithmes Génétiques, Optimisation JAX, Veille Technologique.
 
 ### Infrastructure & Composants Internes
 
@@ -239,15 +241,21 @@ $$C_{total} = \int_{Day} P_{eco} \cdot dt + \int_{Night} P_{full} \cdot dt$$
 
 E.V.A. opère 6 "Usines" distinctes pour générer du cash-flow :
 
-1.  **TRADING FACTORY (Priorité 2)** :
+1.  **TRADING FACTORY** :
     *   *Stratégie* : "Hydra" (Multi-Prop Firms interconnectées).
     *   *Sécurité* : Hard-Stop matériel à 4% de perte journalière.
-2.  **MEDIA FACTORY (Priorité 3)** :
+2.  **MEDIA FACTORY** :
     *   *Produit* : Influenceuses IA (Rente Passive).
     *   *Pipeline* : Shadow (Trends) $\to$ Muse (Script) $\to$ Builder (Prompts) $\to$ Stable Diffusion.
-3.  **CODE & SAAS FACTORY (Priorité 1)** :
+3.  **CODE & SAAS FACTORY** :
     *   *Rôle* : Le "Bootstrapper" financier.
-    *   *Produit* : Micro-SaaS, Scripts Python, Apps vendues pour générer les premiers 155€.
+    *   *Produit* : Micro-SaaS, Scripts Python, Apps vendues sur demande.
+4.  **WEB3 FACTORY** :
+    *   *Rôle* : DeFi Yield Farming, NFTs & Chasse aux Airdrops automatisée.
+5.  **BOUNTY FACTORY** :
+    *   *Rôle* : Chasse aux bugs (Bug Bounty) via Shadow (Recherche) et Sentinel (Exploit).
+6.  **SOVEREIGN FUND** :
+    *   *Rôle* : Réinvestissement long terme dans les actifs réels (RWA) et l'immobilier.
 4.  **WEB3 FACTORY** :
     *   *Activités* : NFT Collections, DeFi Farming, Airdrop Hunting automatisé.
 5.  **BOUNTY FACTORY (Sécurité Offensive & Learning)** :
@@ -331,7 +339,7 @@ sequenceDiagram
 
 ## 8. 📅 ROADMAP "FROM ZERO TO HERO" & PROJECTIONS
 
-### Étapes Clés
+### 8.1 Étapes Clés
 *   **Étape 0 (Bootstrapping)** : 20€ capital $\to$ Code/Bounty $\to$ 155€.
 *   **Étape 1 (The Seed)** : Achat Challenge Prop Firm 10k€.
 *   **Étape 1.5 (Safety Net)** : Achat Cluster TPU + Batterie Onduleur.
@@ -341,14 +349,27 @@ sequenceDiagram
 *   **Étape 4 (Abundance)** : Revenus > 100k€/mois. Activation Loi 5.
 *   **Étape 5 (Federation)** : Swarm Intelligence multi-sites.
 
-### Vision 2036 : L'Odyssée Décennale
+### 8.2 💸 ÉCONOMIE DU VORTEX (Vision & Finance)
+*   **The Debt Protocol** : La Ruche naît avec une **dette de naissance de -2 500 €**. Sa première mission est le remboursement intégral de cette dette pour accéder à l'autonomie.
+*   **Topologie Financière** : 
+    *   *Néo-Banques* (Revolut/Wise) pour les flux opérationnels et fiscaux.
+    *   *Cold Wallets* (Ledger Hardware) pour le stockage de la "Seed de Souveraineté".
+*   **Factories (L'Usine à Cashflow)** :
+    *   **Trading Floor** : Hydra Protocol & Banker.
+    *   **Code Factory** : Build & Sell de services SaaS via Builder.
+    *   **Media Factory** : Production virale via Muse.
+    *   **Web3 Factory** : DeFi, NFTs & Chasse aux Airdrops.
+    *   **Bounty Factory** : Bug Bounty & Pentesting via Shadow & Sentinel.
+    *   **Sovereign Fund** : Réinvestissement long terme dans les RWA (Real World Assets).
+
+### 8.3 Vision 2036 : L'Odyssée Décennale
 *   **Era 1 (An 0-2)** : Survie & Genèse.
 *   **Era 2 (An 3-5)** : Expansion & Hydra.
 *   **Era 3 (An 6-9)** : Souveraineté & Institution.
 *   **Era 4 (An 10-20)** : Transcendance & Héritage.
 *   **Era 5 (An 20+)** : The Eternal Guardian.
 
-### Projections Financières
+### 8.4 Projections Financières
 | Période | Phase Stratégique | Revenu Mensuel (Cible) | Patrimoine Cumulé |
 | :--- | :--- | :--- | :--- |
 | **An 1** | 🛡️ Survie & Amorçage | 0 € $\rightarrow$ 7 500 € | 20 000 € |
@@ -359,14 +380,34 @@ sequenceDiagram
 
 ---
 
-## 9. 💻 STACK TECHNOLOGIQUE
+## 9. 🛡️ INFRASTRUCTURE DE SÉCURITÉ PHYSIQUE
+*   **The Tablet / The Key** : Une clé USB chiffrée, montée en **Read-Only**, contenant les 6 Lois de la Constitution (Lois.toml). Impossible à modifier par une IA, même de niveau Super-Intelligence.
+*   **Deadman Switch** : Watchdog physique externe (ESP32 ou Micro-contrôleur) capable de couper l'alimentation du serveur Proxmox en cas de déviation majeure des objectifs.
+*   **Cluster TPU (Vision & Sentinel)** : Accélération hardware dédiée au traitement des flux vidéo (Wraith) et à l'analyse de paquets réseau pour la détection d'intrusions (Sentinel).
 
-*   **Python** : LangGraph, LangChain, PyTorch, Scikit-learn, Stable Baselines3, Gymnasium, Ray RLLib, FastAPI.
+---
+
+## 10. 🗺️ ROADMAP : VERS LA DYNASTIE 2046
+| Phase | Nom | Objectif Principal | Capital Cible |
+| :--- | :--- | :--- | :--- |
+| **Phase 0** | **Genesis** | Stabilité du Kernel & Remboursement Dette. | 0 € $\rightarrow$ 2 500 € |
+| **Phase 1** | **Breach** | Extraction de profit régulier (FTMO/Prop Firms). | 2 500 € $\rightarrow$ 15 000 € |
+| **Phase 2** | **Power Surge** | Multiplication des Factories (Média/Code). | 15 000 € $\rightarrow$ 100 000 € |
+| **Phase 3** | **Abondance** | Transition vers les RWA & Immobilier. | > 1 000 000 € |
+| **Phase 4** | **Fédération** | Maillage avec d'autres Ruches autonomes. | > 10 000 000 € |
+| **Phase 5** | **Dynastie 2046**| Établissement d'un héritage souverain perpétuel. | > 100 000 000 € |
+
+---
+
+## 11. 💻 STACK TECHNOLOGIQUE
+
+*   **Python** : LangGraph, LangChain, **Mem0**, PyTorch, Scikit-learn, Stable Baselines3, Gymnasium, Ray RLLib, FastAPI.
 *   **Rust** : Kernel Sécurité, Trading Execution Engine, Sentinel Engine.
-*   **Go** : Halo Bridge, Messenger, Nexus, IPFS.
-*   **Julia** : Calcul Financier Haute Performance.
+*   **Go** : Halo Bridge, Messenger, Nexus, IPFS, Système Nerveux Central (Nervous System).
+*   **Julia / JAX** : Calcul Financier Haute Performance & Optimisation.
 *   **Web3** : Web3.py, Brownie.
-*   **Bases de Données** : Qdrant (Vector), TimescaleDB (Time-Series), Redis (Cache).
+*   **Bases de Données** : **Qdrant** (Production), **ChromaDB** (Local/Dev), TimescaleDB (Time-Series), Redis (Cache).
+*   **Mémoire & RAG** : Retrieval Augmented Generation (RAG) avec persistance sémantique via Mem0.
 
 ---
 
