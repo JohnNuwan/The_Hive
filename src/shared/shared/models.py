@@ -385,6 +385,23 @@ class AuditRecord(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+class AgentStatus(BaseModel):
+    """
+    État de santé et versioning d'un agent de la Ruche.
+
+    Attributes:
+        agent_id (str): Identifiant unique de l'agent.
+        status (str): État actuel (online, offline, error).
+        last_seen (datetime): Horodatage du dernier heartbeat.
+        version (str): Version du logiciel.
+    """
+    agent_id: str
+    status: str = "online"
+    last_seen: datetime = Field(default_factory=datetime.now)
+    version: str = "0.1.0"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class GPUMetrics(BaseModel):
     """
     Métriques de santé du GPU (Loi 0 - Préservation Matérielle).

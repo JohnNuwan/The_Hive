@@ -25,7 +25,9 @@ from shared.models import (
     # Sécurité
     SecurityEvent,
     AuditRecord,
-    # Système
+    SecuritySeverity,
+    # Agences / Système
+    AgentStatus,
     HardwareMetrics,
     GPUMetrics,
 )
