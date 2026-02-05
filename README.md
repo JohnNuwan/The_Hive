@@ -64,11 +64,85 @@ graph TD
     Bastion -- "Surveille" --> Brain
 ```
 
+### 2.4 Séquence Critique : Exécution d'un Ordre (Flow Finance)
+```mermaid
+sequenceDiagram
+    participant User as 👤 User
+    participant Core as 🧠 Core (Router)
+    participant Banker as 🏦 Banker
+    participant Risk as ⚖️ RiskGuard
+    participant MT5 as 💹 MetaTrader 5
+
+    User->>Core: "Achète 0.1 lot de XAUUSD"
+    Core->>Core: NLU & Intent Classification
+    Core->>Banker: Send Order(XAUUSD, BUY, 0.1)
+    
+    rect rgb(30, 0, 0)
+        Note over Banker, Risk: Zone Critique (Loi 2)
+        Banker->>Risk: CheckSolvency(Account)
+        Risk-->>Banker: OK (Drawdown < 4%)
+    end
+
+    Banker->>MT5: Execute(Order)
+    MT5-->>Banker: Ticket #123456
+    Banker-->>Core: Order Filled @ 2034.50
+    Core-->>User: "Ordre exécuté. Ticket #123456."
+```
+
+### 2.5 Pipeline d'Intelligence & Création (Flow OSINT)
+```mermaid
+sequenceDiagram
+    participant User as 👤 User
+    participant Shadow as 🕵️ Shadow
+    participant Muse as 🎨 Muse
+    participant Social as 🌐 Twitter/X
+
+    User->>Shadow: "Trouve les trends sur l'IA Agentique"
+    Shadow->>Shadow: Deep Web Search & Parsing
+    Shadow-->>Muse: Rapport de synthèse (JSON)
+    Muse->>Muse: Génération de narratifs & Threads
+    Muse-->>User: Proposition de 3 Tweets viraux
+    User->>Muse: "Valide le 2ème"
+    Muse->>Social: Post(Automated)
+```
+
+### 2.6 Cycle d'Auto-Amélioration & Légalité (Flow Life)
+```mermaid
+sequenceDiagram
+    participant Lab as 🔬 Lab
+    participant Sage as 🌿 Sage
+    participant Compliance as ⚖️ Advocate
+    participant Kernel as 🛡️ Kernel
+
+    Lab->>Lab: Entraînement Modèle (Dreamer)
+    Lab->>Sage: "Impact énergétique ?"
+    Sage-->>Lab: "Conforme Eco-Cycle (Nuit)"
+    Lab->>Compliance: "Déploiement Stratégie X ?"
+    Compliance->>Compliance: Check Légal (MiCA/GDPR)
+    Compliance-->>Kernel: "Approuvé"
+    Kernel->>Kernel: Update Poids Neuronaux (Hot-Swap)
+```
+
 ---
 
 ## 3. 🧠 LE CONSEIL D'EXPERTS (MoE)
 
-L'intelligence est une "Mixture of Experts" divisée en 11 entités spécialisées :
+L'intelligence est une "Mixture of Experts" (MoE) divisée en 11 entités spécialisées.
+Pour faciliter la navigation dans le code, voici la correspondance entre les **Identités Conceptuelles** (Experts) et les **Modules Techniques** du repository :
+
+| Expert (Concept) | Module Technique (`src/`) | Description |
+| :--- | :--- | :--- |
+| **A. CORE** | `eva-core` | Cerveau central. |
+| **B. BANKER** | `eva-banker` | Finance & Trading. |
+| **C. SHADOW** | `eva-shadow` | OSINT & Investigation. |
+| **D. WRAITH** | `eva-wraith` | Vision par ordinateur. |
+| **E. BUILDER** | `eva-builder` | DevOps & Système. |
+| **F. SENTINEL** | `eva-sentinel` | Cybersécurité. |
+| **G. MUSE** | `eva-muse` | Création de contenu. |
+| **H. SAGE** | `eva-sage` | Santé & Science. |
+| **I. RESEARCHER** | `eva-lab` | Laboratoire R&D. |
+| **J. ADVOCATE** | `eva-compliance` | Juridique & Fiscal. |
+| **K. SOVEREIGN** | `eva-rwa` | Real World Assets. |
 
 ### Noyau Central
 *   **Expert A : E.V.A. CORE (L'Arbitre)**  
@@ -104,10 +178,24 @@ L'intelligence est une "Mixture of Experts" divisée en 11 entités spécialisé
     Rôle : Scénarios, Copywriting, Prompts Stable Diffusion.
 *   **Expert H : THE SAGE (Le Savant)**  
     *Modèle : BioMistral.*  
+    *Code Source : `src/eva-sage/`*
     Rôle : Santé (Loi 1), Recherche scientifique, Conscience Environnementale.
 *   **Expert I : THE RESEARCHER**  
     *Modèle : Galactica.*  
+    *Code Source : `src/eva-lab/`*
     Rôle : Veille SOTA IA, Algorithmes Génétiques, Optimisation R&D.
+
+### Infrastructure & Composants Internes
+
+Ces entités assurent le fonctionnement bas-niveau de la Ruche :
+
+| Composant (Concept) | Implémentation (`src/`) | Rôle Technique |
+| :--- | :--- | :--- |
+| **THE SUBSTRATE** | `eva-substrate` | Gestionnaire Hardware & Énergie. |
+| **THE KEEPER** | `eva-substrate` | *Alias du Substrate*. Allocateur de Ressources (Scheduler). |
+| **THE TABLET** | *N/A (Physique)* | Clé USB "Read-Only" contenant `/Config/Lois.toml`. |
+| **THE VAULT** | `eva-banker` / ` .env` | Stockage sécurisé des clés Privées et Secrets. |
+| **THE WATCHDOG** | `eva-sentinel` | Service de surveillance des logs et intrusions. |
 
 ---
 
@@ -153,10 +241,31 @@ E.V.A. opère 6 "Usines" distinctes pour générer du cash-flow :
     *   *Produit* : Micro-SaaS, Scripts Python, Apps vendues pour générer les premiers 155€.
 4.  **WEB3 FACTORY** :
     *   *Activités* : NFT Collections, DeFi Farming, Airdrop Hunting automatisé.
-5.  **BOUNTY FACTORY** :
-    *   *Activité* : Chasse aux bugs (Bug Bounty) automatisée sur plateformes publiques (HackerOne). Revenu légal sans risque financier.
-6.  **THE SOVEREIGN FUND (Long Terme)** :
-    *   *Activité* : Gestion patrimoniale, Private Equity, Rachat de Dette Souveraine.
+5.  **BOUNTY FACTORY (Sécurité Offensive & Learning)** :
+    *   *Rôle* : Sentinel scanne le web pour trouver des 0-days (HackerOne).
+    *   *Gains* : Cash (Whitehat) + **Connaissance**.
+    *   *Boucle* : Chaque faille trouvée est patchée sur la Ruche AVANT d'être signalée.
+6.  **THE SOVEREIGN FUND (Vision Long Terme)** :
+    *   *Phase 1 : Indépendance Énergétique* : Achat de terrains, barrages hydro-électriques, fermes solaires.
+    *   *Phase 2 : Infrastructure Industrielle* : Rachat d'usines en faillite (robotisation par E.V.A.).
+    *   *Phase 3 : Diplomatie Financière* : Acquisition de **Dette Gouvernementale** pour influence géopolitique.
+
+### 5.1 Cycle d'Apprentissage Défensif (Flow Sentinel)
+```mermaid
+sequenceDiagram
+    participant Sentinel as 🛡️ Sentinel
+    participant Arena as 🏟️ Arena (Sandbox)
+    participant Target as 🎯 External Target
+    participant Kernel as ☢️ Kernel
+
+    Sentinel->>Target: Scan Vulnérabilités (Passive)
+    Target-->>Sentinel: Faille Potentielle trouvée
+    Sentinel->>Arena: Replication de la faille (Clone)
+    Arena->>Arena: Exploitation & Test de Patch
+    Arena-->>Sentinel: "Patch Validé"
+    Sentinel->>Kernel: Application du Patch (Self-Defense)
+    Sentinel->>Target: Rapport Bounty (HackerOne)
+```
 
 ---
 

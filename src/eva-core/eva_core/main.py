@@ -1,6 +1,17 @@
 """
-EVA Core - Application FastAPI Principale
-Point d'entrée pour l'API REST de l'Orchestrateur
+Application FastAPI Principale pour l'Orchestrateur EVA (Core).
+
+Ce module est le point d'entrée de l'API REST centrale de THE HIVE.
+Il gère :
+- L'orchestration des messages utilisateurs.
+- Le routage des intentions (Intents) vers les Experts appropriés via Redis.
+- La gestion de la mémoire à court et long terme (RAG).
+- Le cycle de vie de l'application (connexions BDD, Redis).
+
+Architecture :
+    - FastAPI pour le serveur web asynchrone.
+    - Redis pour la communication inter-agents (Pub/Sub).
+    - TimescaleDB/Qdrant pour le stockage.
 """
 
 import logging
@@ -71,8 +82,24 @@ class SessionResponse(BaseModel):
 
 
 @asynccontextmanager
+@asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Gestion du cycle de vie de l'application"""
+    """
+    Gère le cycle de vie de l'application (Démarrage et Arrêt).
+
+    Cette fonction est exécutée au lancement et à l'arrêt du serveur FastAPI.
+    Elle est responsable de :
+    1. Charger la configuration et les secrets.
+    2. Initialiser les connexions aux bases de données (Redis, Postgres, Qdrant).
+    3. Instancier les services singletons (LLM, Router, Memory).
+    4. Nettoyer les ressources proprement lors de l'arrêt (Graceful Shutdown).
+
+    Args:
+        app (FastAPI): L'instance de l'application en cours.
+
+    Yields:
+        None: Rend la main à l'application une fois l'initialisation terminée.
+    """
     # Startup
     logger.info("🚀 Démarrage EVA Core...")
     settings = get_settings()
@@ -130,7 +157,17 @@ app.add_middleware(
 
 @app.get("/health", response_model=HealthResponse, tags=["Système"])
 async def health_check() -> HealthResponse:
-    """Vérification de santé de l'API"""
+    """
+    Vérifie l'état de santé opérationnel de l'API (Health Check).
+
+    Utilisé par Docker, K8s ou le Watchdog (ESP32) pour vérifier si le service
+    est en vie et réactif. Ne vérifie pas nécessairement toutes les dépendances
+    profondes pour éviter les temps de latence, mais confirme que le thread
+    principal tourne.
+
+    Returns:
+        HealthResponse: Objet contenant le statut 'ok', la version et l'environnement.
+    """
     settings: Settings = app.state.settings
     return HealthResponse(
         status="ok",
@@ -140,7 +177,16 @@ async def health_check() -> HealthResponse:
 
 @app.post("/session", response_model=SessionResponse, tags=["Chat"])
 async def create_session() -> SessionResponse:
-    """Crée une nouvelle session de conversation"""
+    """
+    Initialise une nouvelle session de conversation.
+
+    Génère un identifiant unique (UUID) pour tracer le contexte d'une discussion
+    entre l'utilisateur et EVA. Cet ID doit être fourni dans les requêtes /chat
+    suivantes pour maintenir l'historique-mémoire.
+
+    Returns:
+        SessionResponse: Contient le nouvel UUID de session généré.
+    """
     session_id = uuid4()
     logger.info(f"Nouvelle session créée: {session_id}")
     return SessionResponse(session_id=session_id)
@@ -149,12 +195,25 @@ async def create_session() -> SessionResponse:
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
 async def chat(request: ChatRequest) -> ChatResponse:
     """
-    Point d'entrée principal pour la conversation avec EVA.
-    
-    1. Reçoit le message utilisateur
-    2. Classifie l'intent
-    3. Route vers l'expert approprié ou répond directement
-    4. Retourne la réponse
+    Traite un message utilisateur et génère une réponse orchestrée.
+
+    C'est le cœur réactif du système. Le flux de traitement est le suivant :
+    1. **Réception** : Validation du payload et récupération de la session.
+    2. **Classification** : Le Router analyse l'intention (Intent) du message.
+    3. **Routage** :
+        - Si l'intent concerne le CORE (Chat général), le LLM répond directement.
+        - Si l'intent est spécialisé (ex: Trading), le message est publié sur Redis
+          pour l'Expert concerné (ex: Banker).
+    4. **Mémorisation** : Le message utilisateur est archivé dans la mémoire vectorielle.
+
+    Args:
+        request (ChatRequest): Le message de l'utilisateur et l'ID de session.
+
+    Returns:
+        ChatResponse: La réponse textuelle (ou confirmation de dispatch) et les métadonnées.
+
+    Raises:
+        HTTPException(500): En cas d'erreur critique de traitement ou de connexion Redis.
     """
     session_id = request.session_id or uuid4()
     
@@ -220,7 +279,20 @@ async def search_memory(
     session_id: UUID | None = None,
     limit: int = 5,
 ) -> list[dict]:
-    """Recherche dans la mémoire vectorielle (RAG)"""
+    """
+    Effectue une recherche sémantique dans la mémoire vectorielle (RAG).
+
+    Permet de retrouver des fragments de conversations passées ou des documents
+    ingérés pertinents par rapport à la requête `query`. Utilise Qdrant en backend.
+
+    Args:
+        query (str): Le texte ou le concept à rechercher.
+        session_id (UUID | None, optional): Filtrer par session spécifique. Defaults to None.
+        limit (int, optional): Nombre maximum de résultats à retourner. Defaults to 5.
+
+    Returns:
+        list[dict]: Liste des documents trouvés avec leur score de similarité.
+    """
     memory_service: MemoryService = app.state.memory_service
     results = await memory_service.search(
         query=query,
@@ -232,7 +304,15 @@ async def search_memory(
 
 @app.get("/agents/status", tags=["Agents"])
 async def agents_status() -> dict[str, Any]:
-    """Retourne le statut des agents connectés"""
+    """
+    Récupère l'état de connexion de tous les Experts du Conseil.
+
+    Interroge le registre (Redis ou Heartbeat) pour savoir quels services sont
+    actuellement en ligne et prêts à recevoir des ordres.
+
+    Returns:
+        dict[str, Any]: Dictionnaire {nom_expert: {status: 'online'|'offline', ...}}
+    """
     # TODO: Implémenter la découverte des agents via Redis
     return {
         "core": {"status": "online", "version": "0.1.0"},

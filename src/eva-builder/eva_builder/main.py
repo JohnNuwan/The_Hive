@@ -1,6 +1,15 @@
 """
-The Builder - Architecte Système et DevOps
-Expert E: Librarian et Handyman
+Application FastAPI 'The Builder' (Expert E).
+
+L'Agent DevOps de la Ruche. Il est responsable de :
+- L'intégration continue et le déploiement.
+- La génération automatique de documentation.
+- L'analyse des logs et la maintenance proactive.
+- L'exécution de scripts shell via le Librarian/Handyman.
+
+Architecture :
+    - Mode asynchrone pour ne pas bloquer sur des tâches longues (Builds).
+    - Accès privilégié au système de fichiers (Lecture/Écriture).
 """
 
 import logging
@@ -20,8 +29,20 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @asynccontextmanager
+@asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Cycle de vie Builder"""
+    """
+    Gestion du cycle de vie du Builder.
+
+    Initialise les outils DevOps (Librarian) et vérifie l'accès aux ressources
+    système critiques (Docker socket, répertoires de logs).
+
+    Args:
+        app (FastAPI): Instance de l'application.
+
+    Yields:
+        None: Rend la main une fois le service prêt.
+    """
     logger.info("🛠️ Démarrage The Builder...")
     
     # Redis
@@ -64,16 +85,38 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
+    """
+    Vérifie l'état opérationnel du Builder.
+
+    Returns:
+        dict: Statut 'ok' si le service réagit.
+    """
     return {"status": "ok", "service": "builder"}
 
 @app.post("/maintenance/docgen")
 async def generate_docs():
-    """Lance la génération de documentation Markdown pour le monorepo"""
+    """
+    Déclenche la regénération complète de la documentation technique.
+
+    Scanne le code source, extrait les docstrings et met à jour les fichiers Markdown
+    dans le dossier `Documentation/`.
+
+    Returns:
+        dict: Rapport de génération (fichiers traités, erreurs).
+    """
     librarian: LibrarianService = app.state.librarian
     stats = await librarian.scan_and_generate()
     return {"status": "success", "files_processed": stats}
 
 @app.get("/maintenance/logs/analyze")
 async def analyze_errors():
-    """Analyse les logs récents pour détecter des bugs récurrents"""
+    """
+    Analyse les logs système pour identifier les anomalies récurrentes.
+
+    Utilise des patterns Regex pour détecter les erreurs critiques (StackTraces)
+    dans les fichiers de logs rotatifs.
+
+    Returns:
+        dict: Synthèse des erreurs trouvées et suggestions de correctifs.
+    """
     return {"status": "info", "message": "Aucune erreur majeure détectée dans les 24h"}

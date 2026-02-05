@@ -1,6 +1,15 @@
 """
-Modèles Pydantic Partagés - THE HIVE
-Basé sur Documentation/Models/python_models.py
+Modèles de Données Partagés Pydantic (DTOs).
+
+Ce module définit le "Langage Commun" de THE HIVE. Tous les agents (Core, Banker, etc.)
+communiquent en sérialisant/désérialisant ces modèles via Redis ou API REST.
+
+Contient :
+- Énumérations (Types d'ordres, Rôles, Sévérité).
+- Modèles Trading (Ordres, Positions, Risque).
+- Modèles Communication (Messages Chat & Inter-Agents).
+- Modèles Sécurité (Audit, Alertes).
+- Modèles Système (Métriques Hardware/GPU).
 """
 
 from datetime import datetime
@@ -18,7 +27,13 @@ from pydantic import BaseModel, Field
 
 
 class TradeAction(str, Enum):
-    """Action de trading"""
+    """
+    Direction d'un ordre de trading.
+
+    Values:
+        BUY: Achat (Long).
+        SELL: Vente (Short).
+    """
     BUY = "BUY"
     SELL = "SELL"
 
@@ -32,7 +47,18 @@ class OrderType(str, Enum):
 
 
 class OrderSource(str, Enum):
-    """Source de l'ordre"""
+    """
+    Origine de l'ordre de trading (Auditabilité).
+
+    Permet de savoir QUI ou QUOI a initié la transaction pour les logs de compliance.
+
+    Values:
+        VOICE: Commande vocale utilisateur.
+        CHAT: Commande textuelle chat.
+        API: Appel API externe.
+        STRATEGY: Automatisme/Stratégie interne (ex: Hedging).
+        COPY: Copy-Trading depuis un compte maître.
+    """
     VOICE = "VOICE"
     CHAT = "CHAT"
     API = "API"
@@ -41,7 +67,21 @@ class OrderSource(str, Enum):
 
 
 class IntentType(str, Enum):
-    """Types d'intent pour classification"""
+    """
+    Classification des intentions utilisateur (NLU).
+
+    Utilisé par le Router pour diriger la requête vers le bon Expert.
+
+    Values:
+        TRADING_ORDER: Demande d'achat/vente -> Banker.
+        POSITION_STATUS: Demande d'état des positions -> Banker.
+        RISK_INQUIRY: Question sur le risque/exposition -> Banker/Risk.
+        GENERAL_CHAT: Conversation banale -> Core/LLM.
+        MEMORY_RECALL: Recherche d'infos passées -> Core/Memory.
+        OSINT_REQUEST: Recherche d'infos sur le web -> Sentinel.
+        SYSTEM_COMMAND: Ordre technique (reboot, logs) -> Builder.
+        SECURITY_ALERT: Signalement de menace -> Kernel/Compliance.
+    """
     TRADING_ORDER = "TRADING_ORDER"
     POSITION_STATUS = "POSITION_STATUS"
     RISK_INQUIRY = "RISK_INQUIRY"
@@ -81,7 +121,20 @@ class AgentMessageType(str, Enum):
 
 
 class TradeOrder(BaseModel):
-    """Ordre de trading"""
+    """
+    Structure standardisée d'un ordre de trading.
+
+    Attributes:
+        id (UUID): Identifiant unique de l'ordre (interne).
+        symbol (str): Paire ou actif (ex: XAUUSD).
+        action (TradeAction): Achat ou Vente.
+        volume (Decimal): Taille du lot (0.01 à 10.0).
+        stop_loss_price (Decimal | None): Prix de sortie en perte (Obligatoire).
+        take_profit_price (Decimal | None): Prix de sortie en gain (Optionnel).
+        order_type (OrderType): Market, Limit, Stop...
+        source (OrderSource): Origine de la demande.
+        account_id (UUID | None): Compte cible (si multi-comptes).
+    """
     id: UUID = Field(default_factory=uuid4)
     symbol: str = Field(..., description="Symbole (ex: XAUUSD)")
     action: TradeAction
@@ -127,7 +180,18 @@ class Position(BaseModel):
 
 
 class RiskStatus(BaseModel):
-    """État actuel des risques (Loi 2)"""
+    """
+    Rapport d'état des risques en temps réel (Loi 2).
+
+    Agrège les données de tous les comptes pour donner une vision consolidée
+    de l'exposition au risque.
+
+    Attributes:
+        daily_drawdown_percent (Decimal): Perte journalière en % (Max 4%).
+        total_drawdown_percent (Decimal): Perte totale en % (Max 8%).
+        open_positions_count (int): Nombre de trades actifs.
+        trading_allowed (bool): Si False, le Kernel bloque tout nouvel ordre.
+    """
     account_id: UUID
     timestamp: datetime = Field(default_factory=datetime.now)
     daily_drawdown_percent: Decimal = Decimal("0")
@@ -144,7 +208,17 @@ class RiskStatus(BaseModel):
         max_total_dd: Decimal = Decimal("8.0"),
         max_positions: int = 3,
     ) -> tuple[bool, str | None]:
-        """Vérifie si le trading est autorisé selon Constitution Loi 2"""
+        """
+        Vérifie si le trading est autorisé selon les règles de la Constitution (Loi 2).
+
+        Args:
+            max_daily_dd (Decimal): Limite de perte journalière (défaut 4%).
+            max_total_dd (Decimal): Limite de perte totale (défaut 8%).
+            max_positions (int): Nombre max de positions simultanées (défaut 3).
+
+        Returns:
+            tuple[bool, str | None]: (Autorisé?, Raison du refus ou None).
+        """
         if self.anti_tilt_active:
             return False, "ANTI_TILT_ACTIVE"
         if self.news_filter_active:
@@ -208,7 +282,15 @@ class AgentMessage(BaseModel):
     ttl_seconds: int = 30
 
     def to_redis_channel(self) -> str:
-        """Génère le nom du channel Redis"""
+        """
+        Génère le topic Redis Pub/Sub pour ce message.
+
+        Format: eva.{target_agent}.{type}s
+        Exemple: eva.banker.requests
+
+        Returns:
+            str: Nom du channel Redis.
+        """
         return f"eva.{self.target_agent}.{self.type.value}s"
 
 
@@ -251,7 +333,16 @@ class SecurityEvent(BaseModel):
 
 
 class AuditRecord(BaseModel):
-    """Enregistrement d'audit (Black Box - Loi 3)"""
+    """
+    Enregistrement immuable pour la Black Box (Loi 3).
+
+    Chaque action critique du système modifie cet enregistrement, qui est ensuite
+    hashé et chaîné au précédent pour former une blockchain locale infalsifiable.
+
+    Attributes:
+        previous_hash (str): Hash de l'enregistrement précédent (Chaînage).
+        record_hash (str): Hash de l'enregistrement courant.
+    """
     id: UUID = Field(default_factory=uuid4)
     timestamp: datetime = Field(default_factory=datetime.now)
     agent: str
@@ -263,7 +354,17 @@ class AuditRecord(BaseModel):
     record_hash: str = ""
 
     def compute_hash(self, previous_hash: str = "") -> str:
-        """Calcule le hash SHA-256 de l'enregistrement"""
+        """
+        Calcule l'empreinte cryptographique (SHA-256) de l'audit.
+
+        Garantit l'intégrité des données en incluant le hash précédent.
+
+        Args:
+            previous_hash (str): Le hash du bloc précédent dans la chaîne.
+
+        Returns:
+            str: Le hash hexadécimal calculé.
+        """
         import hashlib
         import json
 
@@ -285,7 +386,16 @@ class AuditRecord(BaseModel):
 
 
 class GPUMetrics(BaseModel):
-    """Métriques GPU (Loi 0 - monitoring température)"""
+    """
+    Métriques de santé du GPU (Loi 0 - Préservation Matérielle).
+
+    Surveillance critique de la température pour éviter la dégradation du hardware
+    local (RTX 3090).
+
+    Attributes:
+        temperature_celsius (float): Température critique.
+        utilization_percent (float): Charge GPU.
+    """
     name: str = "NVIDIA GeForce RTX 3090"
     temperature_celsius: float
     utilization_percent: float
@@ -295,7 +405,15 @@ class GPUMetrics(BaseModel):
     fan_speed_percent: int = 0
 
     def is_overheating(self, threshold: float = 90.0) -> bool:
-        """Vérifie si le GPU surchauffe (Loi 0)"""
+        """
+        Vérifie si la température dépasse le seuil de sécurité.
+
+        Args:
+            threshold (float): Limite en degrés Celsius (défaut 90.0).
+
+        Returns:
+            bool: True si surchauffe détectée.
+        """
         return self.temperature_celsius >= threshold
 
 

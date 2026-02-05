@@ -1,6 +1,16 @@
 """
-The Banker - Application FastAPI Trading
-Expert B: Gestion du Trading et des Risques
+Application FastAPI de Trading et Gestion Financière (The Banker).
+
+Ce module est l'Expert B du système MoE. Il est responsable de :
+- L'exécution des ordres de trading sur MetaTrader 5 (via `eva_banker.services.mt5`).
+- La validation stricte du risque avant exécution (Loi 2 - Constitution).
+- La surveillance en temps réel des positions et du drawdown.
+- L'activation du Kill-Switch en cas de dépassement des limites.
+
+Architecture :
+    - FastAPI pour l'interface REST.
+    - Redis pour la communication avec le Core et la réception des signaux.
+    - MetaTrader 5 (Windows) comme moteur d'exécution (via service dédié).
 """
 
 import logging
@@ -87,8 +97,21 @@ class HealthResponse(BaseModel):
 
 
 @asynccontextmanager
+@asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Gestion du cycle de vie"""
+    """
+    Gestion du cycle de vie de l'application Banker.
+
+    Charge la configuration, connecte Redis et établit la liaison critique avec
+    le terminal MetaTrader 5. Si MT5 n'est pas disponible, bascule en mode
+    'Mock' pour permettre les tests hors-ligne (Simulation).
+
+    Args:
+        app (FastAPI): Instance de l'application.
+
+    Yields:
+        None: Rend le contrôle après initialisation.
+    """
     logger.info("🏦 Démarrage The Banker...")
     settings = get_settings()
 
@@ -148,7 +171,12 @@ app.add_middleware(
 
 @app.get("/health", response_model=HealthResponse, tags=["Système"])
 async def health_check() -> HealthResponse:
-    """Vérification de santé"""
+    """
+    Vérifie la santé du module Banker et la connexion MT5.
+
+    Returns:
+        HealthResponse: Statut global, état de la connexion MT5 et mode (Paper/Live).
+    """
     mt5_service: MT5Service = app.state.mt5_service
     settings = app.state.settings
     return HealthResponse(
@@ -161,11 +189,23 @@ async def health_check() -> HealthResponse:
 @app.post("/orders", response_model=OrderResponse, tags=["Trading"])
 async def create_order(request: OrderRequest) -> OrderResponse:
     """
-    Crée un nouvel ordre de trading.
-    
-    1. Vérifie les risques (Loi 2 - Constitution)
-    2. Si validé, exécute l'ordre sur MT5
-    3. Retourne le résultat
+    Traite une demande d'ordre de trading (Achat/Vente).
+
+    Cette fonction est critique et suit un protocole strict :
+    1. **Validation Initiale** : Vérifie la présence d'un Stop Loss (Obligatoire par ROE).
+    2. **Contrôle des Risques** : Appelle le `RiskValidator` pour simuler l'impact
+       sur le drawdown journalier et l'exposition totale.
+    3. **Exécution** : Si le risque est validé, transmet l'ordre au terminal MT5.
+    4. **Confirmation** : Retourne le ticket MT5 ou la raison du rejet.
+
+    Args:
+        request (OrderRequest): Détails de l'ordre (Symbole, Volume, SL, TP).
+
+    Returns:
+        OrderResponse: Résultat de l'exécution, incluant le ticket et l'audit risque.
+
+    Raises:
+        HTTPException(400): Si le Stop Loss est absent ou invalide.
     """
     # Vérification Stop Loss obligatoire (ROE Trading)
     if request.stop_loss is None:
@@ -210,14 +250,27 @@ async def create_order(request: OrderRequest) -> OrderResponse:
 
 @app.get("/positions", response_model=list[Position], tags=["Trading"])
 async def get_positions() -> list[Position]:
-    """Retourne les positions ouvertes"""
+    """
+    Récupère la liste des positions actuellement ouvertes sur MT5.
+
+    Returns:
+        list[Position]: Liste des positions avec P&L latent, Swap et Ticket.
+    """
     mt5_service: MT5Service = app.state.mt5_service
     return await mt5_service.get_open_positions()
 
 
 @app.delete("/positions/{ticket}", tags=["Trading"])
 async def close_position(ticket: int) -> dict[str, Any]:
-    """Ferme une position par son ticket"""
+    """
+    Ferme une position spécifique via son ticket MT5.
+
+    Args:
+        ticket (int): Identifiant unique MT5 de la position à fermer.
+
+    Returns:
+        dict[str, Any]: Résultat de la clôture (Succès, Prix de clôture, Profit réalisé).
+    """
     mt5_service: MT5Service = app.state.mt5_service
     result = await mt5_service.close_position(ticket)
     return result
@@ -225,21 +278,45 @@ async def close_position(ticket: int) -> dict[str, Any]:
 
 @app.get("/account", response_model=AccountBalance, tags=["Compte"])
 async def get_account_balance() -> AccountBalance:
-    """Retourne les informations du compte"""
+    """
+    Récupère les informations financières du compte de trading (Equity, Balance, Marge).
+
+    Returns:
+        AccountBalance: Données financières temps réel.
+    """
     mt5_service: MT5Service = app.state.mt5_service
     return await mt5_service.get_account_info()
 
 
 @app.get("/risk/status", response_model=RiskStatus, tags=["Risque"])
 async def get_risk_status() -> RiskStatus:
-    """Retourne le statut actuel des risques"""
+    """
+    Fournit un audit instantané de l'état des risques (Loi 2).
+
+    Inclut le pourcentage de Drawdown journalier, le nombre de positions ouvertes
+    et l'état des filtres (Anti-Tilt, News Trading).
+
+    Returns:
+        RiskStatus: Rapport complet de conformité risque.
+    """
     risk_validator: RiskValidator = app.state.risk_validator
     return await risk_validator.get_current_status()
 
 
 @app.post("/risk/check", response_model=RiskCheckResponse, tags=["Risque"])
 async def check_risk(request: RiskCheckRequest) -> RiskCheckResponse:
-    """Vérifie si un ordre potentiel respecte les limites de risque"""
+    """
+    Simule une prise de position pour vérifier sa conformité sans l'exécuter.
+
+    Utilisé par le Core ou l'UI pour pré-valider une stratégie avant d'envoyer
+    l'ordre réel.
+
+    Args:
+        request (RiskCheckRequest): Paramètres de l'ordre simulé.
+
+    Returns:
+        RiskCheckResponse: Booléen `allowed` et raison du refus si applicable.
+    """
     order = TradeOrder(
         symbol=request.symbol,
         action=request.action,
@@ -261,7 +338,16 @@ async def check_risk(request: RiskCheckRequest) -> RiskCheckResponse:
 
 @app.post("/risk/kill-switch", tags=["Risque"])
 async def trigger_kill_switch() -> dict[str, str]:
-    """Déclenche le Kill-Switch: ferme toutes les positions"""
+    """
+    🚨 KILL-SWITCH D'URGENCE.
+
+    Ferme IMMÉDIATEMENT toutes les positions ouvertes, annule les ordres en attente
+    et bloque toute nouvelle activité de trading.
+    Doit être appelé en cas de perte critique (>4% DD) ou d'anomalie système majeure.
+
+    Returns:
+        dict[str, str]: Rapport des fermetures effectuées.
+    """
     mt5_service: MT5Service = app.state.mt5_service
     positions = await mt5_service.get_open_positions()
 
