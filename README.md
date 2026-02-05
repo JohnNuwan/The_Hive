@@ -136,6 +136,8 @@ sequenceDiagram
 L'intelligence est une "Mixture of Experts" (MoE) divisée en 12 entités spécialisées.
 Pour faciliter la navigation dans le code, voici la correspondance entre les **Identités Conceptuelles** (Experts) et les **Modules Techniques** du repository :
 
+| Identité | Module | Rôle & Technologie |
+| :--- | :--- | :--- |
 | **A. CORE** | `eva-core` | **Python**. Orchestrateur LLM & Mémoire. |
 | **B. BANKER** | `eva-banker` | **Python**. Trading & Risque. |
 | **C. SHADOW** | `eva-shadow` | **Python**. OSINT & Investigation. |
