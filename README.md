@@ -1,9 +1,10 @@
 # 🐝 THE HIVE & E.V.A. : SPÉCIFICATIONS FONCTIONNELLES ET TECHNIQUES DÉTAILLÉES
 
 ![Status](https://img.shields.io/badge/Statut-Alpha_Genesis-gold?style=for-the-badge)
-![Security](https://img.shields.io/badge/S%C3%A9curit%C3%A9-ZFS_|_Proxmox_|_Rust_Kernel-red?style=for-the-badge)
-![Architecture](https://img.shields.io/badge/Arch-MoE_|_Proxmox_|_Ternary_Hybrid-blue?style=for-the-badge)
-![Finance](https://img.shields.io/badge/Financials-FTMO_|_Hydra_Protocol-green?style=for-the-badge)
+![Nervous](https://img.shields.io/badge/Messenger-Go_|_Redis-00ADD8?style=for-the-badge&logo=go)
+![Maths](https://img.shields.io/badge/Quant-Julia_|_JAX-9558B2?style=for-the-badge&logo=julia)
+![Security](https://img.shields.io/badge/S%C3%A9curit%C3%A9-Rust_|_ZFS-red?style=for-the-badge&logo=rust)
+![Finance](https://img.shields.io/badge/Financials-FTMO_|_Hydra-green?style=for-the-badge)
 
 > **"Un organisme numérique conçu pour une souveraineté financière, personnelle et architecturale absolue."**
 
@@ -38,8 +39,9 @@
 | **VM 101** | **[The Council]** | VM (GPU Pass) | Serveur d'inférence (Ollama/vLLM) partagé. |
 | **VM 102** | **[The District]** | VM (GPU Pass) | Serveur Unreal Engine 5 (Désactivé en Phase 0). |
 | **VM 200** | **[Trading Floor]** | VM (Win10) | **Hydra Protocol** : 20 instances MetaTrader 5 interconnectées. |
-| **CT 300+**| **[Workers]** | LXC | Agents OSINT, Bots Réseaux Sociaux, Scripts Python. |
-| **CT 400** | **[The Bastion]** | LXC (TPU) | Cybersécurité Fortifiée (Wazuh, Suricata). |
+| **CT 300** | **[Nervous Sys]**  | Container (Go) | Router de messages haute fréquence (Pub/Sub). |
+| **CT 301** | **[Quant Engine]** | Container (Julia)| Calculs mathématiques et probabilités de ruine. |
+| **CT 400** | **[The Bastion]**  | LXC (TPU) | Cybersécurité Fortifiée (Wazuh, Suricata). |
 | **CT 401** | **[Visual Cortex]**| LXC (TPU) | Traitement flux vidéo temps réel (Frigate). |
 | **CT 500+**| **[The Arena]** | VLAN Isolé | Laboratoire de Hacking Éthique & Simulation (Sandboxed). |
 
@@ -130,19 +132,19 @@ sequenceDiagram
 L'intelligence est une "Mixture of Experts" (MoE) divisée en 11 entités spécialisées.
 Pour faciliter la navigation dans le code, voici la correspondance entre les **Identités Conceptuelles** (Experts) et les **Modules Techniques** du repository :
 
-| Expert (Concept) | Module Technique (`src/`) | Description |
-| :--- | :--- | :--- |
-| **A. CORE** | `eva-core` | Cerveau central. |
-| **B. BANKER** | `eva-banker` | Finance & Trading. |
-| **C. SHADOW** | `eva-shadow` | OSINT & Investigation. |
-| **D. WRAITH** | `eva-wraith` | Vision par ordinateur. |
-| **E. BUILDER** | `eva-builder` | DevOps & Système. |
-| **F. SENTINEL** | `eva-sentinel` | Cybersécurité. |
-| **G. MUSE** | `eva-muse` | Création de contenu. |
-| **H. SAGE** | `eva-sage` | Santé & Science. |
-| **I. RESEARCHER** | `eva-lab` | Laboratoire R&D. |
-| **J. ADVOCATE** | `eva-compliance` | Juridique & Fiscal. |
-| **K. SOVEREIGN** | `eva-rwa` | Real World Assets. |
+| **A. CORE** | `eva-core` | **Python**. Orchestrateur LLM & Mémoire. |
+| **B. BANKER** | `eva-banker` | **Python**. Trading & Risque. |
+| **C. SHADOW** | `eva-shadow` | **Python**. OSINT & Investigation. |
+| **D. WRAITH** | `eva-wraith` | **Python/TPU**. Vision par ordinateur. |
+| **E. BUILDER** | `eva-builder` | **Python**. DevOps & Auto-coding. |
+| **F. SENTINEL** | `eva-sentinel` | **Rust**. Sécurité & Filtrage. |
+| **G. MUSE** | `eva-muse` | **Python**. Création de contenu & Marketing. |
+| **H. SAGE** | `eva-sage` | **Python**. Bio-Ethique & Santé. |
+| **I. RESEARCHER** | `eva-lab` | **Python/JAX**. Optimisation & World-Models. |
+| **J. ADVOCATE** | `eva-compliance`| **Python**. Gestion fiscale & Légale. |
+| **K. SOVEREIGN** | `eva-rwa` | **Rust/Python**. Actifs Réels & Souveraineté. |
+| **SYSTEM NERVES**| `eva-nervous` | **Go**. Système nerveux central (Bus Redis). |
+| **QUANT LOBE** | `eva-quant` | **Julia**. Calculs financiers intensifs. |
 
 ### Noyau Central
 *   **Expert A : E.V.A. CORE (L'Arbitre)**  
@@ -192,10 +194,13 @@ Ces entités assurent le fonctionnement bas-niveau de la Ruche :
 | Composant (Concept) | Implémentation (`src/`) | Rôle Technique |
 | :--- | :--- | :--- |
 | **THE SUBSTRATE** | `eva-substrate` | Gestionnaire Hardware & Énergie. |
-| **THE KEEPER** | `eva-substrate` | *Alias du Substrate*. Allocateur de Ressources (Scheduler). |
+| **THE KEEPER** | `eva-substrate` | Allocateur de Ressources (`scheduler.py`). |
+| **THE CONTROLLER**| `eva-compliance`| Le Comptable. Bloque 25% des gains (`tax_manager.py`). |
+| **THE ARENA** | `eva-lab` | Ring de combat Darwinien pour algos (`arena.py`). |
+| **THE EVOLVER** | `eva-lab` | Optimiseur différentiable (`jax_optimizer.py`). |
 | **THE TABLET** | *N/A (Physique)* | Clé USB "Read-Only" contenant `/Config/Lois.toml`. |
 | **THE VAULT** | `eva-banker` / ` .env` | Stockage sécurisé des clés Privées et Secrets. |
-| **THE WATCHDOG** | `eva-sentinel` | Service de surveillance des logs et intrusions. |
+| **THE WATCHDOG** | `eva-sentinel` | Surveillance active des logs et intrusions. |
 
 ---
 
