@@ -183,6 +183,7 @@ async def lifespan(app: FastAPI):
 
     # Intégration SWARM
     app.state.swarm = BankerSwarm()
+    await app.state.swarm.init_mqtt()
     
     # Tâche de fond pour écouter les ordres Swarm
     import asyncio

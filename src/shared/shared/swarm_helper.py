@@ -9,15 +9,22 @@ from shared.redis_client import get_redis_client
 
 logger = logging.getLogger(__name__)
 
+from shared.mqtt_client import EVAMQTTClient
+
 class DroneRunner:
     """
     Classe de base pour transformer un expert en contrôleur de Drones.
-    Permet de lancer des tâches autonomes persistantes.
+    Permet de lancer des tâches autonomes persistantes avec MQTT LWT.
     """
     def __init__(self, agent_name: str):
         self.agent_name = agent_name
         self.active_drones: Dict[str, asyncio.Task] = {}
         self.redis = get_redis_client()
+        self.mqtt = EVAMQTTClient(agent_name)
+
+    async def init_mqtt(self):
+        """Initialise la liaison MQTT pour le monitoring haute fiabilité."""
+        await self.mqtt.connect()
 
     async def spawn_drone(self, name: str, mission: str, coro, metadata: Optional[Dict] = None):
         """

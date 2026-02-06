@@ -121,7 +121,12 @@ async def lifespan(app: FastAPI):
     from eva_core.services.prompt_master import PromptMaster
     app.state.prompt_master = PromptMaster()
 
-    logger.info("✅ EVA Core prêt avec moteur de prompts Biblio_IA")
+    # Intégration MQTT
+    from shared.mqtt_client import EVAMQTTClient
+    app.state.mqtt = EVAMQTTClient("core")
+    await app.state.mqtt.connect()
+
+    logger.info("✅ EVA Core prêt avec moteur de prompts Biblio_IA et lien MQTT")
 
     # Démarrage de l'orchestrateur de survie
     import asyncio
@@ -272,16 +277,24 @@ async def chat(request: ChatRequest) -> ChatResponse:
         else:
             # Routage classique vers un expert unique
             redis_client = get_redis_client()
+            payload = {
+                "session_id": str(session_id),
+                "message": request.message,
+                "entities": intent.entities,
+            }
             await redis_client.send_to_agent(
                 source="core",
                 target=intent.target_expert,
                 action=intent.intent_type.value,
-                payload={
-                    "session_id": str(session_id),
-                    "message": request.message,
-                    "entities": intent.entities,
-                },
+                payload=payload,
             )
+            
+            # Si l'expert est le Banker, on double l'envoi sur MQTT pour la fiabilité (Critical Path)
+            if intent.target_expert == "banker" and intent.intent_type.value in ["TRADE", "ORDER"]:
+                mqtt_client: EVAMQTTClient = app.state.mqtt
+                await mqtt_client.publish("eva/banker/requests/critical", payload, qos=2)
+                logger.info("🛡️ Critical Order mirrored on MQTT (QoS 2)")
+
             response_text = f"Consultation de l'expert {intent.target_expert} lancée."
 
         # Sauvegarder en mémoire
