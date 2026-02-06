@@ -31,6 +31,7 @@ from shared.models import (
     HardwareMetrics,
     GPUMetrics,
 )
+from shared.math_ops import symlog, inv_symlog
 from shared.config import Settings, get_settings
 
 __all__ = [
@@ -59,7 +60,13 @@ __all__ = [
     # Système
     "HardwareMetrics",
     "GPUMetrics",
+    "AgentStatus",
     # Config
     "Settings",
     "get_settings",
+    # Math
+    "symlog",
+    "inv_symlog",
+    "calculate_var",
+    "calculate_cvar",
 ]

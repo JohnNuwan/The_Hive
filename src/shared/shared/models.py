@@ -113,6 +113,8 @@ class AgentMessageType(str, Enum):
     RESPONSE = "response"
     EVENT = "event"
     ALERT = "alert"
+    HEARTBEAT = "heartbeat"
+    SWARM_COMMAND = "swarm_command"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -284,14 +286,25 @@ class AgentMessage(BaseModel):
     def to_redis_channel(self) -> str:
         """
         Génère le topic Redis Pub/Sub pour ce message.
-
         Format: eva.{target_agent}.{type}s
-        Exemple: eva.banker.requests
-
-        Returns:
-            str: Nom du channel Redis.
+        Support du broadcast via target_agent='all'.
         """
         return f"eva.{self.target_agent}.{self.type.value}s"
+
+
+class SwarmDrone(BaseModel):
+    """
+    Représente un Agent Autonome (Drone) lancé en tâche de fond.
+    Permet la parallélisation Swarm.
+    """
+    id: UUID = Field(default_factory=uuid4)
+    name: str = Field(..., description="Nom du drone (ex: GoldSurveillance)")
+    parent_agent: str = Field(..., description="L'expert qui a lancé le drone")
+    mission: str = Field(..., description="Description de la tâche autonome")
+    status: str = "active"
+    started_at: datetime = Field(default_factory=datetime.now)
+    last_callback: datetime = Field(default_factory=datetime.now)
+    metadata: dict[str, Any] = {}
 
 
 class ChatMessage(BaseModel):

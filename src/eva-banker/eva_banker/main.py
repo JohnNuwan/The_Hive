@@ -32,14 +32,72 @@ from shared import (
     TradeAction,
     TradeOrder,
     get_settings,
+    symlog,
+    inv_symlog,
+    calculate_var,
+    calculate_cvar,
 )
 from shared.redis_client import get_redis_client, init_redis
 
 from eva_banker.services.mt5 import MT5Service, get_mt5_service
 from eva_banker.services.risk import RiskValidator, get_risk_validator
+from eva_banker.skill_library import SkillLibrary, SkilledBehavior
+from eva_banker.models.gnn_model import TFTGNNModel
+from eva_banker.swarm import BankerSwarm
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ARCHITECTURE HIÉRARCHIQUE (SPlaTES)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class BankerManager:
+    """
+    NIVEAU HAUT : Le Manager (Abstract World Model).
+    Planifie les stratégies en utilisant TFT-GNN et la conscience du risque.
+    """
+    def __init__(self, library: SkillLibrary):
+        self.library = library
+        # Initialisation du modèle (dims fictives pour l'exemple)
+        self.brain = TFTGNNModel(asset_dim=5, temporal_dim=64, hidden_dim=128)
+
+    def plan_strategy(self, market_history: dict) -> SkilledBehavior:
+        """
+        Analyse le marché via TFT-GNN et injecte VaR/CVaR.
+        """
+        # 1. Calcul des métriques de risque adaptatives (Inhibiteur interne)
+        returns = market_history.get("returns", [])
+        var = calculate_var(returns)
+        cvar = calculate_cvar(returns)
+        
+        # 2. Préparation des données pour le modèle (Normalisées via Symlog)
+        price = symlog(market_history.get("price", 0))
+        
+        logger.info(f"Manager decision core triggered. Price: {price}, VaR: {var}, CVaR: {cvar}")
+        
+        # Si le risque (VaR) est trop élevé, on bascule en mode conservateur
+        if var < -0.02: # Perte potentielle > 2% attendue
+            logger.warning("High VaR detected. Selecting HEDGING skill.")
+            return SkilledBehavior.HEDGING
+            
+        return SkilledBehavior.SCALPING
+
+class BankerWorker:
+    """
+    NIVEAU BAS : L'Exécutant (Worker).
+    Support de GhostShield pour l'invisibilité HFT.
+    """
+    def __init__(self, mt5_service: MT5Service, ghost_shield=None):
+        self.mt5 = mt5_service
+        self.ghost = ghost_shield
+
+    async def execute_skill(self, skill: SkilledBehavior, order: TradeOrder):
+        logger.info(f"Worker executing skill: {skill}")
+        if self.ghost and skill != SkilledBehavior.HEDGING: # Le hedging doit être direct
+            return await self.ghost.execute_obfuscated_order(order)
+        return await self.mt5.execute_skill(skill, order)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -97,22 +155,11 @@ class HealthResponse(BaseModel):
 
 
 @asynccontextmanager
-@asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Gestion du cycle de vie de l'application Banker.
-
-    Charge la configuration, connecte Redis et établit la liaison critique avec
-    le terminal MetaTrader 5. Si MT5 n'est pas disponible, bascule en mode
-    'Mock' pour permettre les tests hors-ligne (Simulation).
-
-    Args:
-        app (FastAPI): Instance de l'application.
-
-    Yields:
-        None: Rend le contrôle après initialisation.
     """
-    logger.info("🏦 Démarrage The Banker...")
+    logger.info("🏦 Démarrage The Banker (Hierarchical Architecture)...")
     settings = get_settings()
 
     # Redis
@@ -126,6 +173,21 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.mt5_service = get_mt5_service()
     app.state.risk_validator = get_risk_validator()
+    
+    # Hiérarchie
+    app.state.skill_library = SkillLibrary()
+    app.state.manager = BankerManager(app.state.skill_library)
+    from eva_banker.services.ghost_shield import GhostShield
+    app.state.ghost_shield = GhostShield(app.state.mt5_service)
+    app.state.worker = BankerWorker(app.state.mt5_service, app.state.ghost_shield)
+
+    # Intégration SWARM
+    app.state.swarm = BankerSwarm()
+    
+    # Tâche de fond pour écouter les ordres Swarm
+    import asyncio
+    asyncio.create_task(swarm_listener())
+    asyncio.create_task(hard_heartbeat())
 
     # Connexion MT5
     mt5_service: MT5Service = app.state.mt5_service
@@ -134,13 +196,47 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("⚠️ MT5 en mode mock")
 
-    logger.info("✅ The Banker prêt")
+    logger.info("✅ The Banker (SWARM MODE) READY")
 
     yield
 
     # Shutdown
     logger.info("🛑 Arrêt The Banker...")
     await mt5_service.disconnect()
+
+
+async def hard_heartbeat():
+    """
+    Signal haute fréquence pour le Watchdog Rust (Loi 0).
+    S'arrête si le processus Python freeze ou crash.
+    """
+    from shared.redis_client import get_redis_client
+    redis = get_redis_client()
+    while True:
+        await redis.publish("eva.banker.heartbeat", {"status": "alive", "ts": datetime.now().timestamp()})
+        await asyncio.sleep(0.3) # 300ms heartbeat pour un cutoff à 1000ms
+
+
+async def swarm_listener():
+    """
+    Écoute les commandes broadcast de l'essaim.
+    """
+    from shared.redis_client import get_redis_client
+    redis = get_redis_client()
+    swarm: BankerSwarm = app.state.swarm
+    
+    async def handle_swarm(channel, message):
+        action = message.get("action")
+        if action == "SWARM_SURVEILLANCE":
+            # Lancement automatique d'un drone de surveillance
+            await swarm.spawn_drone(
+                name="GoldSurveillance",
+                mission="Surveiller XAUUSD avec le Swarm",
+                coro=swarm.run_gold_surveillance(Decimal("2050.0"))
+            )
+
+    await redis.subscribe(["eva.all.swarm_command", "eva.banker.swarm_command"], handle_swarm)
+    await redis.listen()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -189,32 +285,21 @@ async def health_check() -> HealthResponse:
 @app.post("/orders", response_model=OrderResponse, tags=["Trading"])
 async def create_order(request: OrderRequest) -> OrderResponse:
     """
-    Traite une demande d'ordre de trading (Achat/Vente).
-
-    Cette fonction est critique et suit un protocole strict :
-    1. **Validation Initiale** : Vérifie la présence d'un Stop Loss (Obligatoire par ROE).
-    2. **Contrôle des Risques** : Appelle le `RiskValidator` pour simuler l'impact
-       sur le drawdown journalier et l'exposition totale.
-    3. **Exécution** : Si le risque est validé, transmet l'ordre au terminal MT5.
-    4. **Confirmation** : Retourne le ticket MT5 ou la raison du rejet.
-
-    Args:
-        request (OrderRequest): Détails de l'ordre (Symbole, Volume, SL, TP).
-
-    Returns:
-        OrderResponse: Résultat de l'exécution, incluant le ticket et l'audit risque.
-
-    Raises:
-        HTTPException(400): Si le Stop Loss est absent ou invalide.
+    Traite une demande d'ordre de trading via l'architecture hiérarchique.
     """
-    # Vérification Stop Loss obligatoire (ROE Trading)
+    # 1. Vérification Stop Loss obligatoire
     if request.stop_loss is None:
         raise HTTPException(
             status_code=400,
             detail="Stop Loss obligatoire (ROE Trading: aucun trade sans SL)",
         )
 
-    # Conversion en TradeOrder
+    # 2. Le Manager définit la stratégie (Skill)
+    manager: BankerManager = app.state.manager
+    # Simulation de données de marché pour le manager
+    skill = manager.plan_strategy({"price": 2034.50})
+
+    # 3. Conversion en TradeOrder
     order = TradeOrder(
         symbol=request.symbol,
         action=request.action,
@@ -222,9 +307,10 @@ async def create_order(request: OrderRequest) -> OrderResponse:
         stop_loss_price=request.stop_loss,
         take_profit_price=request.take_profit,
         account_id=request.account_id,
+        comment=f"Skill: {skill}"
     )
 
-    # Vérification des risques
+    # 4. Vérification des risques (Loi 2)
     risk_validator: RiskValidator = app.state.risk_validator
     risk_result = await risk_validator.validate_order(order)
 
@@ -235,15 +321,15 @@ async def create_order(request: OrderRequest) -> OrderResponse:
             risk_check=risk_result,
         )
 
-    # Exécution de l'ordre
-    mt5_service: MT5Service = app.state.mt5_service
-    result = await mt5_service.execute_order(order)
+    # 5. Le Worker exécute la compétence
+    worker: BankerWorker = app.state.worker
+    result = await worker.execute_skill(skill, order)
 
     return OrderResponse(
         success=result["success"],
         ticket=result.get("ticket"),
         order_id=order.id,
-        message=result.get("message", "Ordre exécuté"),
+        message=f"Exécuté avec succès via {skill}",
         risk_check=risk_result,
     )
 

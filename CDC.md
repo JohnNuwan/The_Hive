@@ -34,10 +34,12 @@ L'architecture logicielle a évolué pour devenir une "Société Numérique" com
     *   *Formule de Taxe* : $Provision = Revenu \times Taux_{URSSAF}$.
 2.  **EVA SUBSTRATE (Le Corps)** :
     *   *Rôle* : Interface avec le hardware EPYC/TPU. Gère le **Rythme Circadien** (Mode Jour Éco / Mode Nuit R&D) pour optimiser la facture électrique.
-3.  **EVA LAB (La R&D)** :
-    *   *Rôle* : Centre d'auto-amélioration. Utilise **MuZero/Dreamer** pour simuler des stratégies financières et proposer des Pull Requests (Auto-Coding).
+3.  **EVA LAB (La R&D / The Arena)** :
+    *   *Rôle* : Centre d'auto-amélioration et de simulations intensives. Utilise **FSQ World Models** et **DreamerV3** pour simuler des stratégies dans un espace latent discret. Intègre un moteur **PCG** pour générer des krachs synthétiques.
 4.  **EVA RWA (Le Monde Réel)** :
     *   *Rôle* : Interface avec les actifs physiques (IoT, Solaire) et tokenisés (RealT).
+5.  **EVA SWARM (L'Essaim)** :
+    *   *Rôle* : Orchestrateur de parallélisation. Permet de lancer des **Drones Autonomes** (back-tasks) pour des missions de surveillance longue durée sans bloquer le Core.
 
 ### 2.2 Infrastructure de Virtualisation (Proxmox VE)
 L'infrastructure physique est segmentée pour la sécurité :
@@ -55,10 +57,10 @@ Le système repose sur 11 modèles spécialisés travaillant en concert (Consens
 
 | Expert | Modèle IA | Fonction |
 | :--- | :--- | :--- |
-| **A. CORE** | Llama 3.1 8B | Arbitrage et Mémoire RAG. |
-| **B. BANKER** | DeepSeek-Coder | Trading & Risk Management. |
+| **A. CORE** | Llama 3.1 8B | Arbitrage, Mémoire RAG & Sincérité (Probes). |
+| **B. BANKER** | TFT-GNN | Systematic Quant Hedge Fund & Nemesis System. |
 | **C. SHADOW** | Dolphin-Qwen | OSINT & Investigation. |
-| **D. WRAITH** | MobileNet (TPU) | Vision & Analyse Faciale. |
+| **D. WRAITH** | V-JEPA (Vision) | Compréhension sémantique vidéo & Micro-expressions. |
 | **E. BUILDER** | Dolphin-Llama | DevOps & Auto-Repair. |
 | **F. SENTINEL**| Cyber-Llama | Cybersécurité Active. |
 | **G. MUSE** | Mistral-Nemo | Créativité & Copywriting. |
@@ -117,10 +119,10 @@ $$V(s) = \mathbb{E} \left[ \sum \gamma^t r_t \right]$$
 
 ## 7. TRAJECTOIRE DÉCENNALE (VISION 2036)
 
-*   **Phase 1 (An 0-2)** : **Survie**. Objectif : Rembourser la dette de 2500€.
-*   **Phase 2 (An 3-5)** : **Expansion**. Achat de la vue (Lunettes Halo) et du 2ème GPU.
-*   **Phase 3 (An 6-9)** : **Souveraineté**. Revenus > 100k€/mois. Indépendance totale.
-*   **Phase 4 (An 10+)** : **Héritage**. Transmission et Philanthropie massive.
+*   **Phase 1 (An 0-2)** : **Survie & Amorçage Quant**. Objectif : Rembourser la dette de 2500€. Target: 15k€/mois.
+*   **Phase 2 (An 3-5)** : **Expansion & Hydra GNN**. Achat du 2ème GPU. Target: 150k€/mois.
+*   **Phase 3 (An 6-9)** : **Souveraineté & Anti-fragile**. Revenus > 500k€/mois.
+*   **Phase 4 (An 10+)** : **Héritage & Empire**. Philanthropie massive.
 
 ---
 *Ce document fait autorité sur la spécification technique de THE HIVE.*

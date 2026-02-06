@@ -46,17 +46,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let validator = TradeValidator::new(constitution);
 
     info!("✅ EVA Kernel prêt");
-    info!("📊 Limites Trading:");
-    info!("   - Risque max par trade: {}%", validator.get_max_risk_per_trade());
-    info!("   - Drawdown journalier max: {}%", validator.get_max_daily_drawdown());
-    info!("   - Positions max: {}", validator.get_max_positions());
+    
+    // Initialisation Redis pour l'interception
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let client = redis::Client::open(redis_url)?;
+    let mut con = client.get_async_connection().await?;
+    let mut pubsub = con.into_pubsub();
+    
+    // On s'abonne aux ordres et au heartbeat
+    pubsub.subscribe("eva.banker.requests").await?;
+    pubsub.subscribe("eva.banker.heartbeat").await?;
+    
+    info!("🛡️ Kernel Monitoring: Interception et Watchdog actifs");
 
-    // TODO: Démarrer le serveur gRPC ou le listener Redis
-    // Pour l'instant, on attend indéfiniment
-    info!("🔄 En attente de requêtes...");
+    let mut msg_stream = pubsub.on_message();
+    let mut last_heartbeat = std::time::Instant::now();
 
-    tokio::signal::ctrl_c().await?;
-    info!("🛑 Arrêt du Kernel");
-
-    Ok(())
+    loop {
+        tokio::select! {
+            Some(msg) = msg_stream.next() => {
+                let channel = msg.get_channel_name();
+                let payload: String = msg.get_payload()?;
+                
+                if channel == "eva.banker.heartbeat" {
+                    last_heartbeat = std::time::Instant::now();
+                } else {
+                    info!("🔍 Kernel Interception ({}): {}", channel, payload);
+                    // Validation Loi 2 ici
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                if last_heartbeat.elapsed().as_millis() > 1000 {
+                    tracing::error!("🚨 WATCHDOG: BANKER HEARTBEAT LOST! TRIGGERING EMERGENCY HALT");
+                    // Logique de coupure forcée MT5 ici
+                }
+            }
+        }
+    }
 }

@@ -89,6 +89,21 @@ class RedisClient:
         await self.publish(channel, message)
         return message
 
+    async def broadcast_to_swarm(
+        self,
+        source: str,
+        action: str,
+        payload: dict[str, Any] | None = None,
+    ) -> AgentMessage:
+        """Diffuse un message à tous les agents (Swarm Mode)"""
+        return await self.send_to_agent(
+            source=source,
+            target="all",
+            action=action,
+            payload=payload,
+            msg_type=AgentMessageType.SWARM_COMMAND
+        )
+
     async def subscribe(
         self,
         channels: list[str],

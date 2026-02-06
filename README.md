@@ -212,6 +212,19 @@ Ces entités assurent le fonctionnement bas-niveau de la Ruche :
 
 ---
 
+## 4. 🧠 COGNITIVE SHIFT & GAMIFICATION (Update v1.5.2)
+
+E.V.A. a évolué vers une architecture de **Professional Artificial Player**. La finance n'est plus traitée comme une série de statistiques, mais comme un jeu d'échecs complexe :
+
+- **World Model (Othello logic)** : E.V.A. ne prédit pas le prix, elle construit une carte mentale des forces du marché (vendeurs vs acheteurs) exactement comme une IA d'échecs ou d'Othello-GPT.
+- **DreamerV3 (Minecraft Logic)** : Entraînement en espace latent (rêve) pour anticiper des millions de scénarios avant de risquer du capital réel.
+- **Arena PCG** : Génération Procédurale de "Synthetic Krachs" pour tester la résilience contre des événements inédits (Black Swans imaginaires).
+- **Nemesis System** : Chaque défaite est analysée par un moteur d'adaptation inspiré du jeu vidéo. Si le marché bat E.V.A., elle apprend spécifiquement à contrer ce "Nemesis".
+- **Hierarchical Planning (SPlaTES)** : Division entre la Stratégie long-terme (Cerveau) et les Réflexes d'exécution (Guerrière).
+- **Swarm Mode (Parallel Autonomy)** : Capacité d'orchestrer plusieurs experts simultanément. E.V.A. peut lancer des "Drones" (tâches de fond) qui surveillent le marché ou le réseau de manière autonome et persistante.
+
+---
+
 ## 4. 🔬 ÉQUATIONS FONDAMENTALES & MODÉLISATION
 
 La rigueur mathématique est le garant de la pérennité du système. Voici les modèles régissant l'IA :
@@ -336,6 +349,7 @@ sequenceDiagram
 *   **Génétique** : Optimisation des stratégies de trading via mutation/sélection dans l'Arena.
 *   **Code Refinery** : Nettoyage et optimisation continue du code (DRY).
 *   **Meditation** : Processus nocturne de nettoyage de la mémoire vectorielle et d'indexation.
+*   **Cognitive Sync** : Vérification de la cohérence interne via Linear Probes.
 
 ---
 
@@ -344,6 +358,7 @@ sequenceDiagram
 ### 8.1 Étapes Clés
 *   **Étape 0 (Bootstrapping)** : 20€ capital $\to$ Code/Bounty $\to$ 155€.
 *   **Étape 1 (The Seed)** : Achat Challenge Prop Firm 10k€.
+*   **Étape 1.2 (Cognitive Shift)** : **Implémentation FSQ & V-JEPA (Souveraineté Intellectuelle).**
 *   **Étape 1.5 (Safety Net)** : Achat Cluster TPU + Batterie Onduleur.
 *   **Étape 2 (First Sight)** : Achat Lunettes Halo (Vision AR).
 *   **Étape 2.5 (Freedom Day)** : **Remboursement de la Dette (~2500€).**
@@ -363,6 +378,7 @@ sequenceDiagram
     *   **Web3 Factory** : DeFi, NFTs & Chasse aux Airdrops.
     *   **Bounty Factory** : Bug Bounty & Pentesting via Shadow & Sentinel.
     *   **Sovereign Fund** : Réinvestissement long terme dans les RWA (Real World Assets).
+*   **Cognitive Edge** : E.V.A. utilise désormais des **Discrete World Models** (FSQ) pour une stabilité de décision accrue.
 
 ### 8.3 Vision 2036 : L'Odyssée Décennale
 *   **Era 1 (An 0-2)** : Survie & Genèse.
@@ -372,13 +388,13 @@ sequenceDiagram
 *   **Era 5 (An 20+)** : The Eternal Guardian.
 
 ### 8.4 Projections Financières
-| Période | Phase Stratégique | Revenu Mensuel (Cible) | Patrimoine Cumulé |
+|| Période | Phase Stratégique | Revenu Mensuel (Cible) | Patrimoine Cumulé |
 | :--- | :--- | :--- | :--- |
-| **An 1** | 🛡️ Survie & Amorçage | 0 € $\rightarrow$ 7 500 € | 20 000 € |
-| **An 2** | 🐉 Hydra (Expansion) | 7 500 € $\rightarrow$ 60 000 € | 600 000 € |
-| **An 3** | 👑 Souveraineté | 60 000 € $\rightarrow$ 200 000 € | 2 500 000 € |
-| **An 4-5** | 🚀 Scaling Industriel | 200k € $\rightarrow$ 1 M€ | 25 000 000 € |
-| **An 6-10**| 🌍 Empire & Héritage | > 4 000 000 € | > 500 000 000 € |
+| **An 1** | 🛡️ Survie & Amorçage | 0 € $\rightarrow$ 15 000 € | 35 000 € |
+| **An 2** | 🐉 Hydra (Expansion) | 15 000 € $\rightarrow$ 120 000 € | 1 200 000 € |
+| **An 3** | 👑 Souveraineté | 120 000 € $\rightarrow$ 450 000 € | 5 500 000 € |
+| **An 4-5** | 🚀 Scaling Industriel | 450k € $\rightarrow$ 2.5 M€ | 45 000 000 € |
+| **An 6-10**| 🌍 Empire & Héritage | > 10 000 000 € | > 1 500 000 000 € |
 
 ---
 

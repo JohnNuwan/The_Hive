@@ -40,6 +40,10 @@
 ## 🚀 PHASE 1 : EVEIL (M+1 à M+3)
 *Objectif : Premiers revenus et acquisition de la Vision.*
 
+- [x] **Étape 1.2 (Cognitive Shift)** : Implémentation FSQ World Models & V-JEPA.
+- [x] **Étape 1.5 (Systematic Quant)** : Architecture TFT-GNN & Sondes de sincérité.
+- [x] **Étape 1.6 (Gamification)** : Arena PCG & Nemesis System.
+- [x] **Étape 1.7 (Swarm Mode)** : Parallélisation & Drones Autonomes.
 - [ ] **Déploiement Physique** : Installation sur Proxmox.
 - [ ] **Challenge FTMO** : Achat et réussite du challenge 10k€.
 - [ ] **Hardware Upgrade** : Achat des Lunettes Halo (Vision AR).

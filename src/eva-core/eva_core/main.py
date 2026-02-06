@@ -82,7 +82,6 @@ class SessionResponse(BaseModel):
 
 
 @asynccontextmanager
-@asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Gère le cycle de vie de l'application (Démarrage et Arrêt).
@@ -123,6 +122,10 @@ async def lifespan(app: FastAPI):
     app.state.prompt_master = PromptMaster()
 
     logger.info("✅ EVA Core prêt avec moteur de prompts Biblio_IA")
+
+    # Démarrage de l'orchestrateur de survie
+    import asyncio
+    asyncio.create_task(self_healing_orchestrator())
 
     yield
 
@@ -239,12 +242,8 @@ async def chat(request: ChatRequest) -> ChatResponse:
         
         if intent.target_expert == "core":
             # Le Core répond directement
-            # Application de la méthode BMAD / CO-STAR par défaut
             prompt_master: PromptMaster = app.state.prompt_master
-            
-            # Si l'intent est complexe, on utilise ReAct
             method = "react" if intent.confidence < 0.8 else "costar"
-            
             wrapped_message = prompt_master.wrap_with_method(request.message, method=method)
             expert_injector = prompt_master.get_expert_injector("core")
             
@@ -254,10 +253,24 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     role=MessageRole.USER,
                     content=wrapped_message
                 )],
-                system_prompt=f"{expert_injector}\nTu es EVA, une IA assistante personnelle intelligente et bienveillante.",
+                system_prompt=f"{expert_injector}\nTu es EVA, une IA assistante personnelle intelligente.",
             )
+        elif intent.target_expert == "all":
+            # SWARM MODE: Parallélisation sur tous les agents concernés
+            redis_client = get_redis_client()
+            await redis_client.broadcast_to_swarm(
+                source="core",
+                action=intent.intent_type.value,
+                payload={
+                    "session_id": str(session_id),
+                    "message": request.message,
+                    "entities": intent.entities,
+                    "mode": "parallel"
+                },
+            )
+            response_text = "Activation du Swarm Mode. Tous les experts concernés travaillent en parallèle..."
         else:
-            # Router vers un autre expert via Redis
+            # Routage classique vers un expert unique
             redis_client = get_redis_client()
             await redis_client.send_to_agent(
                 source="core",
@@ -269,7 +282,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     "entities": intent.entities,
                 },
             )
-            response_text = f"J'ai transmis ta demande à l'expert {intent.target_expert}. Réponse en cours..."
+            response_text = f"Consultation de l'expert {intent.target_expert} lancée."
 
         # Sauvegarder en mémoire
         memory_service: MemoryService = app.state.memory_service
@@ -288,6 +301,55 @@ async def chat(request: ChatRequest) -> ChatResponse:
     except Exception as e:
         logger.exception(f"Erreur chat: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/swarm/drones", tags=["Swarm"])
+async def get_active_drones() -> list[dict]:
+    """
+    Récupère la liste des drones autonomes actifs dans la ruche.
+    """
+    redis_client = get_redis_client()
+    keys = await redis_client._client.keys("swarm:drone:*")
+    drones = []
+    for key in keys:
+        drone_data = await redis_client.cache_get(key)
+        if drone_data:
+            drones.append(drone_data)
+    return drones
+
+
+async def self_healing_orchestrator():
+    """
+    Surveille la santé des drones dans Redis.
+    Redémarre automatiquement les missions si un heartbeat est perdu.
+    """
+    from datetime import datetime
+    redis_client = get_redis_client()
+    
+    while True:
+        try:
+            keys = await redis_client._client.keys("swarm:drone:*")
+            for key in keys:
+                drone = await redis_client.cache_get(key)
+                if drone and drone.get("status") == "active":
+                    last_callback = datetime.fromisoformat(drone["last_callback"])
+                    delta = (datetime.now() - last_callback).total_seconds()
+                    
+                    if delta > 120: # Drone silencieux depuis 2 min
+                        logger.warning(f"Self-Healing: Drone {drone['name']} ({drone['id']}) perdu. Redéploiement...")
+                        await redis_client.broadcast_to_swarm(
+                            source="core",
+                            action="SWARM_SURVEILLANCE",
+                            payload={"redeploy_drone": drone["name"]}
+                        )
+                        # On marque le drone en erreur pour éviter les doublons
+                        drone["status"] = "healed"
+                        await redis_client.cache_set(key, drone, ttl_seconds=3600)
+                        
+        except Exception as e:
+            logger.error(f"Error in self-healing orchestrator: {e}")
+            
+        await asyncio.sleep(60) # Vérification chaque minute
 
 
 @app.get("/memory/search", tags=["Mémoire"])
