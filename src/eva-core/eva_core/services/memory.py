@@ -38,7 +38,7 @@ class MemoryService:
         self.port = port
         self.collection_name = collection_name
         self._client: AsyncQdrantClient | None = None
-        self._embedding_dim = 384  # all-MiniLM-L6-v2
+        self._embedding_dim = 768  # nomic-embed-text
         self.adaptive_memory = MemoryLayer()
         logger.info(f"MemoryService initialisé: {host}:{port}/{collection_name} + Mem0 Adaptive")
 
@@ -50,10 +50,19 @@ class MemoryService:
         return self._client
 
     async def _ensure_collection(self) -> None:
-        """Crée la collection si elle n'existe pas"""
+        """Crée la collection si elle n'existe pas ou si les dimensions ne matchent pas"""
         try:
             collections = await self._client.get_collections()
             existing = [c.name for c in collections.collections]
+
+            if self.collection_name in existing:
+                # Vérifier les dimensions
+                info = await self._client.get_collection(self.collection_name)
+                current_dim = info.config.params.vectors.size
+                if current_dim != self._embedding_dim:
+                    logger.warning(f"Dimension mismatch ({current_dim} vs {self._embedding_dim}). Recréation de la collection...")
+                    await self._client.delete_collection(self.collection_name)
+                    existing.remove(self.collection_name)
 
             if self.collection_name not in existing:
                 await self._client.create_collection(
@@ -63,42 +72,40 @@ class MemoryService:
                         distance=Distance.COSINE,
                     ),
                 )
-                logger.info(f"Collection '{self.collection_name}' créée")
+                logger.info(f"Collection '{self.collection_name}' créée (dim={self._embedding_dim})")
         except Exception as e:
             logger.warning(f"Qdrant non disponible: {e}")
 
-    def _embed_text(self, text: str) -> list[float]:
+    async def _embed_text(self, text: str) -> list[float]:
         """
-        Génère un embedding pour le texte.
+        Génère un embedding réel pour le texte via Ollama/nomic-embed-text.
+        """
+        from langchain_ollama import OllamaEmbeddings
+        from shared import get_settings
         
-        En production, utiliser sentence-transformers ou un API d'embedding.
-        Pour le dev, on utilise un hash déterministe.
-        """
-        # TODO: Remplacer par un vrai modèle d'embedding
-        # from sentence_transformers import SentenceTransformer
-        # model = SentenceTransformer('all-MiniLM-L6-v2')
-        # return model.encode(text).tolist()
-
-        # Mock: hash déterministe pour développement
-        import hashlib
-        import struct
-
-        hash_bytes = hashlib.sha384(text.encode()).digest()
-        # Convertir en 384 floats normalisés
-        floats = []
-        for i in range(0, len(hash_bytes), 4):
-            chunk = hash_bytes[i : i + 4]
-            if len(chunk) == 4:
-                value = struct.unpack("!f", chunk)[0]
-                # Normaliser entre -1 et 1
-                normalized = (value % 2.0) - 1.0
-                floats.append(normalized)
-
-        # Padding si nécessaire
-        while len(floats) < self._embedding_dim:
-            floats.append(0.0)
-
-        return floats[: self._embedding_dim]
+        settings = get_settings()
+        
+        try:
+            embeddings = OllamaEmbeddings(
+                model="nomic-embed-text",
+                base_url=f"http://{settings.ollama_host}:{settings.ollama_port}"
+            )
+            # Utilisation de aembed_query pour l’async
+            return await embeddings.aembed_query(text)
+        except Exception as e:
+            logger.error(f"Embedding error: {e}. Fallback sur hash (danger).")
+            # Fallback dégradé pour éviter de bloquer tout le système
+            import hashlib
+            import struct
+            hash_bytes = hashlib.sha384(text.encode()).digest()
+            floats = []
+            for i in range(0, len(hash_bytes), 4):
+                chunk = hash_bytes[i : i + 4]
+                if len(chunk) == 4:
+                    floats.append((struct.unpack("!f", chunk)[0] % 2.0) - 1.0)
+            while len(floats) < self._embedding_dim:
+                floats.append(0.0)
+            return floats[: self._embedding_dim]
 
     async def store_message(self, message: ChatMessage) -> str:
         """Stocke un message dans la mémoire vectorielle"""
@@ -106,7 +113,7 @@ class MemoryService:
             client = await self._get_client()
 
             point_id = str(message.id)
-            vector = self._embed_text(message.content)
+            vector = await self._embed_text(message.content)
 
             point = PointStruct(
                 id=point_id,
@@ -126,7 +133,6 @@ class MemoryService:
             )
 
             # Enrichissement de la mémoire adaptative (Mem0)
-            # Mem0 analyse le texte pour extraire des faits/préférences
             self.adaptive_memory.store_event(message.content)
 
             logger.debug(f"Message stocké: {point_id}")
@@ -148,18 +154,10 @@ class MemoryService:
     ) -> list[dict[str, Any]]:
         """
         Recherche sémantique dans la mémoire.
-        
-        Args:
-            query: Texte de recherche
-            session_id: Optionnel - filtrer par session
-            limit: Nombre max de résultats
-            
-        Returns:
-            Liste des messages similaires avec score
         """
         try:
             client = await self._get_client()
-            query_vector = self._embed_text(query)
+            query_vector = await self._embed_text(query)
 
             # Construire le filtre
             query_filter = None

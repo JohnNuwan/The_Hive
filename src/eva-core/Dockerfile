@@ -9,11 +9,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copier les dépendances partagées
 COPY src/shared /app/shared
-RUN pip install -e /app/shared
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir /app/shared
 
 # Copier eva-core
 COPY src/eva-core /app/eva-core
-RUN pip install -e /app/eva-core
+RUN pip install --no-cache-dir /app/eva-core
 
 WORKDIR /app/eva-core
 

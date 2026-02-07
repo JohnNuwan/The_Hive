@@ -31,8 +31,10 @@ from shared.models import (
     HardwareMetrics,
     GPUMetrics,
 )
-from shared.math_ops import symlog, inv_symlog
+from shared.math_ops import symlog, inv_symlog, calculate_var, calculate_cvar
 from shared.config import Settings, get_settings
+from shared.telemetry import Telemetry
+from shared.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 
 __all__ = [
     # Enums
@@ -69,4 +71,8 @@ __all__ = [
     "inv_symlog",
     "calculate_var",
     "calculate_cvar",
+    # Résilience & Observabilité
+    "Telemetry",
+    "CircuitBreaker",
+    "CircuitBreakerOpenError",
 ]

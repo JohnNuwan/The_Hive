@@ -6,16 +6,40 @@ description = "EVA Kernel - Composant de sécurité Rust THE HIVE"
 license = "Proprietary"
 
 [dependencies]
+# Async runtime
 tokio = { version = "1.35", features = ["full"] }
+
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = { version = "0.8", features = ["serde"] }
+
+# Error handling
 thiserror = "1.0"
+
+# Crypto (Audit hashing)
 sha2 = "0.10"
+
+# Time
 chrono = { version = "0.4", features = ["serde"] }
+
+# Logging / Tracing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json"] }
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# UUIDs
 uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# HTTP Server (Axum)
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Redis (Pub/Sub interception + watchdog)
+redis = { version = "0.24", features = ["tokio-comp", "aio"] }
+
+# MQTT (Neural Link Secondaire — signaux critiques)
+rumqttc = "0.24"
 
 # Pour bindings Python (optionnel)
 # pyo3 = { version = "0.20", features = ["extension-module"] }

@@ -1,23 +1,29 @@
-//! EVA Kernel - Point d'entrée principal
+//! EVA Kernel — Point d'entrée principal
 //!
 //! Le Kernel est le composant de sécurité critique de THE HIVE.
-//! Il valide les actions selon la Constitution et maintient l'audit trail.
+//! Il valide les actions selon la Constitution, maintient l'audit trail,
+//! et intercepte les signaux via Redis + MQTT en parallèle du serveur Axum.
 
 mod audit;
+mod kill_switch;
 mod laws;
+mod protocols;
+mod server;
 mod validator;
 
 use std::path::PathBuf;
-use tracing::{info, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
+use crate::kill_switch::KillSwitch;
 use crate::laws::Constitution;
+use crate::server::start_kernel_server;
 use crate::validator::TradeValidator;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configuration du logging
-    let subscriber = FmtSubscriber::builder()
+    let _subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .with_target(false)
         .pretty()
@@ -25,7 +31,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("🔒 EVA Kernel démarrage...");
 
-    // Charger la Constitution
+    // ═══════════════════════════════════════════════════════════════════
+    // CHARGER LA CONSTITUTION
+    // ═══════════════════════════════════════════════════════════════════
     let constitution_path = std::env::var("CONSTITUTION_PATH")
         .unwrap_or_else(|_| "/mnt/tablet/constitution.toml".to_string());
 
@@ -33,69 +41,157 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let constitution = match Constitution::load(&PathBuf::from(&constitution_path)) {
         Ok(c) => {
-            info!("✅ Constitution chargée: {} lois, {} ROE", c.laws.len(), c.roe.len());
+            info!(
+                "✅ Constitution chargée: {} lois, {} ROE",
+                c.laws.len(),
+                c.roe.len()
+            );
             c
         }
         Err(e) => {
-            info!("⚠️ Constitution non trouvée, utilisation des valeurs par défaut: {}", e);
+            warn!(
+                "⚠️ Constitution non trouvée, utilisation des valeurs par défaut: {}",
+                e
+            );
             Constitution::default()
         }
     };
 
-    // Créer le validateur
-    let validator = TradeValidator::new(constitution);
+    // ═══════════════════════════════════════════════════════════════════
+    // CRÉER LES COMPOSANTS CRITIQUES
+    // ═══════════════════════════════════════════════════════════════════
+    let validator = TradeValidator::new(constitution.clone());
+    let kill_switch = KillSwitch::new(constitution.trading.max_daily_drawdown_percent);
 
-    info!("✅ EVA Kernel prêt");
-    
-    // Initialisation Redis pour l'interception
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
-    let client = redis::Client::open(redis_url)?;
-    let mut con = client.get_async_connection().await?;
-    let mut pubsub = con.into_pubsub();
-    
-    let mut pubsub = con.into_pubsub();
-    
-    // Initialisation MQTT (Neural Link Secondaire)
-    use rumqttc::{AsyncClient, MqttOptions, QoS};
-    let mut mqttoptions = MqttOptions::new("eva_kernel", "localhost", 1883);
-    mqttoptions.set_keep_alive(std::time::Duration::from_secs(5));
+    info!("✅ EVA Kernel prêt — Lancement des systèmes parallèles");
 
-    let (mqtt_client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
-    mqtt_client.subscribe("eva/banker/requests/critical", QoS::AtLeastOnce).await?;
-    
-    info!("🛡️ Kernel Monitoring: Interception et Watchdog actifs (Redis + MQTT)");
+    // ═══════════════════════════════════════════════════════════════════
+    // LANCER LE SERVEUR AXUM EN PARALLÈLE
+    // ═══════════════════════════════════════════════════════════════════
+    tokio::spawn(start_kernel_server(
+        validator,
+        kill_switch,
+        constitution,
+    ));
 
-    let mut msg_stream = pubsub.on_message();
-    let mut last_heartbeat = std::time::Instant::now();
+    // ═══════════════════════════════════════════════════════════════════
+    // BOUCLE D'INTERCEPTION Redis + MQTT
+    // ═══════════════════════════════════════════════════════════════════
+    let redis_url = std::env::var("REDIS_URL")
+        .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
-    loop {
-        tokio::select! {
-            // Flux MQTT (Critique)
-            notification = eventloop.poll() => {
-                if let Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(p))) = notification {
-                    let payload = String::from_utf8_lossy(&p.payload);
-                    info!("🛡️ MQTT CRITICAL INTERCEPTION: {}", payload);
-                    // Validation prioritaire ici
+    // Connexion Redis (avec retry gracieux)
+    let redis_result = redis::Client::open(redis_url.as_str());
+    let redis_ok = match &redis_result {
+        Ok(client) => {
+            match client.get_multiplexed_async_connection().await {
+                Ok(_con) => {
+                    info!("✅ Redis connecté pour interception");
+                    true
                 }
-            }
-            // Flux Redis (Standard)
-            Some(msg) = msg_stream.next() => {
-                let channel = msg.get_channel_name();
-                let payload: String = msg.get_payload()?;
-                
-                if channel == "eva.banker.heartbeat" {
-                    last_heartbeat = std::time::Instant::now();
-                } else {
-                    info!("🔍 Kernel Interception ({}): {}", channel, payload);
-                    // Validation Loi 2 ici
-                }
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                if last_heartbeat.elapsed().as_millis() > 1000 {
-                    tracing::error!("🚨 WATCHDOG: BANKER HEARTBEAT LOST! TRIGGERING EMERGENCY HALT");
-                    // Logique de coupure forcée MT5 ici
+                Err(e) => {
+                    warn!("⚠️ Redis non disponible: {}. Mode dégradé.", e);
+                    false
                 }
             }
         }
+        Err(e) => {
+            warn!("⚠️ Redis URL invalide: {}. Mode dégradé.", e);
+            false
+        }
+    };
+
+    // Connexion MQTT (Neural Link Secondaire)
+    let mqtt_host = std::env::var("MQTT_HOST").unwrap_or_else(|_| "localhost".to_string());
+    let mqtt_port: u16 = std::env::var("MQTT_PORT")
+        .unwrap_or_else(|_| "1883".to_string())
+        .parse()
+        .unwrap_or(1883);
+
+    let mqtt_ok = {
+        use rumqttc::{AsyncClient, MqttOptions, QoS};
+        let mut mqttoptions = MqttOptions::new("eva_kernel", &mqtt_host, mqtt_port);
+        mqttoptions.set_keep_alive(std::time::Duration::from_secs(5));
+
+        match AsyncClient::new(mqttoptions, 10) {
+            (client, mut eventloop) => {
+                if let Err(e) = client
+                    .subscribe("eva/banker/requests/critical", QoS::AtLeastOnce)
+                    .await
+                {
+                    warn!("⚠️ MQTT subscribe échoué: {}", e);
+                    false
+                } else {
+                    info!("✅ MQTT connecté — interception signaux critiques");
+
+                    // Spawn MQTT listener
+                    tokio::spawn(async move {
+                        loop {
+                            match eventloop.poll().await {
+                                Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(p))) => {
+                                    let payload = String::from_utf8_lossy(&p.payload);
+                                    info!("🛡️ MQTT CRITICAL INTERCEPTION: {}", payload);
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    error!("⚠️ MQTT error: {}. Reconnecting...", e);
+                                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                }
+                            }
+                        }
+                    });
+                    true
+                }
+            }
+        }
+    };
+
+    // Redis PubSub listener (si disponible)
+    if redis_ok {
+        if let Ok(client) = redis_result {
+            if let Ok(con) = client.get_async_connection().await {
+                let mut pubsub = con.into_pubsub();
+                let _ = pubsub.subscribe("eva.banker.heartbeat").await;
+                let _ = pubsub.subscribe("eva.banker.requests.critical").await;
+
+                info!("🛡️ Kernel Monitoring: Interception Redis + Watchdog actifs");
+
+                let mut msg_stream = pubsub.on_message();
+                let mut last_heartbeat = std::time::Instant::now();
+
+                loop {
+                    tokio::select! {
+                        Some(msg) = msg_stream.next() => {
+                            let channel = msg.get_channel_name();
+                            if let Ok(payload) = msg.get_payload::<String>() {
+                                if channel == "eva.banker.heartbeat" {
+                                    last_heartbeat = std::time::Instant::now();
+                                } else {
+                                    info!("🔍 Kernel Interception ({}): {}", channel, payload);
+                                }
+                            }
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                            if last_heartbeat.elapsed().as_secs() > 10 {
+                                error!("🚨 WATCHDOG: BANKER HEARTBEAT LOST >10s! Alert triggered.");
+                                // En prod: déclencher kill-switch via channel Redis
+                                last_heartbeat = std::time::Instant::now(); // Reset pour éviter spam
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Mode dégradé : boucle keep-alive si ni Redis ni MQTT
+    if !redis_ok && !mqtt_ok {
+        warn!("⚠️ Kernel en mode dégradé — ni Redis ni MQTT disponibles");
+    }
+
+    // Keep-alive minimal
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        info!("💓 Kernel heartbeat — Axum server actif sur :8080");
     }
 }

@@ -14,6 +14,7 @@ Architecture :
     - TimescaleDB/Qdrant pour le stockage.
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -32,10 +33,12 @@ from shared import (
     get_settings,
 )
 from shared.redis_client import get_redis_client, init_redis
+from shared.mqtt_client import EVAMQTTClient
 
 from eva_core.router.intent import IntentRouter
 from eva_core.services.llm import LLMService, get_llm_service
 from eva_core.services.memory import MemoryService, get_memory_service
+from eva_core.services.prompt_master import PromptMaster
 
 # Configuration logging
 logging.basicConfig(level=logging.INFO)
@@ -113,23 +116,20 @@ async def lifespan(app: FastAPI):
 
     # Initialiser les services
     app.state.settings = settings
-    app.state.intent_router = IntentRouter()
+    app.state.intent_router = IntentRouter(use_llm=settings.use_ollama)
     app.state.llm_service = get_llm_service()
     app.state.memory_service = get_memory_service()
     
     # Intégration Biblio_IA / PromptMaster
-    from eva_core.services.prompt_master import PromptMaster
     app.state.prompt_master = PromptMaster()
 
     # Intégration MQTT
-    from shared.mqtt_client import EVAMQTTClient
     app.state.mqtt = EVAMQTTClient("core")
     await app.state.mqtt.connect()
 
     logger.info("✅ EVA Core prêt avec moteur de prompts Biblio_IA et lien MQTT")
 
     # Démarrage de l'orchestrateur de survie
-    import asyncio
     asyncio.create_task(self_healing_orchestrator())
 
     yield
@@ -336,7 +336,6 @@ async def self_healing_orchestrator():
     Surveille la santé des drones dans Redis.
     Redémarre automatiquement les missions si un heartbeat est perdu.
     """
-    from datetime import datetime
     redis_client = get_redis_client()
     
     while True:
@@ -397,17 +396,94 @@ async def search_memory(
 @app.get("/agents/status", tags=["Agents"])
 async def agents_status() -> dict[str, Any]:
     """
-    Récupère l'état de connexion de tous les Experts du Conseil.
-
-    Interroge le registre (Redis ou Heartbeat) pour savoir quels services sont
-    actuellement en ligne et prêts à recevoir des ordres.
-
-    Returns:
-        dict[str, Any]: Dictionnaire {nom_expert: {status: 'online'|'offline', ...}}
+    Récupère l'état de connexion de tous les Experts du Conseil via Redis.
     """
-    # TODO: Implémenter la découverte des agents via Redis
-    return {
-        "core": {"status": "online", "version": "0.1.0"},
-        "banker": {"status": "unknown"},
-        "sentinel": {"status": "unknown"},
+    redis_client = get_redis_client()
+    now = datetime.now().timestamp()
+    
+    # On définit les agents attendus (The Hive Council)
+    agents = ["banker", "sentinel", "shadow", "wraith", "keeper", "substrate", "accountant"]
+    status_report = {
+        "core": {"status": "online", "version": "0.1.0", "uptime": "active"}
     }
+    
+    for agent in agents:
+        # Le Banker publie sur eva.banker.heartbeat
+        # On peut aussi vérifier des clés de statut persistantes
+        heartbeat = await redis_client.cache_get(f"eva.{agent}.status")
+        if not heartbeat:
+            # Fallback sur la vérification du channel PubSub (pour le banker spécifique à son heartbeat 300ms)
+            status_report[agent] = {"status": "offline"}
+        else:
+            last_seen = heartbeat.get("ts", 0)
+            if now - last_seen < 30: # 30 secondes de grâce
+                status_report[agent] = {"status": "online", **heartbeat}
+            else:
+                status_report[agent] = {"status": "stale", "last_seen": last_seen}
+
+    return status_report
+
+
+@app.get("/trading/status", tags=["Trading"])
+async def trading_status() -> dict[str, Any]:
+    """
+    Agrège les données de trading provenant de l'expert Banker.
+    """
+    import httpx
+    settings: Settings = app.state.settings
+    banker_url = f"http://localhost:{settings.banker_api_port}"
+    
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            # On récupère tout en parallèle pour minimiser la latence
+            responses = await asyncio.gather(
+                client.get(f"{banker_url}/account"),
+                client.get(f"{banker_url}/positions"),
+                client.get(f"{banker_url}/risk/status"),
+                return_exceptions=True
+            )
+            
+            # Parsing des résultats
+            account = responses[0].json() if not isinstance(responses[0], Exception) and responses[0].status_code == 200 else {}
+            positions = responses[1].json() if not isinstance(responses[1], Exception) and responses[1].status_code == 200 else []
+            risk = responses[2].json() if not isinstance(responses[2], Exception) and responses[2].status_code == 200 else {}
+            
+            return {
+                "account": account,
+                "positions": positions,
+                "risk": risk,
+                "banker": {"status": "online" if not isinstance(responses[0], Exception) else "offline"}
+            }
+        except Exception as e:
+            logger.error(f"Erreur proxy Banker: {e}")
+            return {
+                "account": {},
+                "positions": [],
+                "risk": {},
+                "banker": {"status": "offline", "error": str(e)}
+            }
+
+
+@app.get("/system/status", tags=["Système"])
+async def system_status() -> dict[str, Any]:
+    """
+    Agrège les données de santé hardware provenant de l'expert Sentinel.
+    """
+    import httpx
+    settings: Settings = app.state.settings
+    sentinel_url = f"http://localhost:{settings.sentinel_api_port}"
+    
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        try:
+            response = await client.get(f"{sentinel_url}/system/metrics")
+            if response.status_code == 200:
+                metrics = response.json()
+                return {
+                    "health": "optimum",
+                    "metrics": metrics,
+                    "sentinel": {"status": "online"}
+                }
+            return {"health": "unknown", "sentinel": {"status": "offline"}}
+        except Exception as e:
+            logger.error(f"Erreur proxy Sentinel: {e}")
+            return {"health": "offline", "error": str(e), "sentinel": {"status": "offline"}}

@@ -153,12 +153,12 @@ class RiskValidator:
         # Valeur par lot (approximation)
         pip_value = Decimal("10") if "XAU" in order.symbol else Decimal("10")
 
-        # Perte potentielle
-        potential_loss = sl_distance * float(order.volume) * float(pip_value)
+        # Perte potentielle (tout en Decimal pour éviter TypeError)
+        potential_loss = sl_distance * Decimal(str(order.volume)) * pip_value
 
         # Pourcentage du capital
         if self._account_balance > 0:
-            risk_percent = (Decimal(potential_loss) / self._account_balance) * 100
+            risk_percent = (potential_loss / self._account_balance) * 100
         else:
             risk_percent = Decimal("100")
 

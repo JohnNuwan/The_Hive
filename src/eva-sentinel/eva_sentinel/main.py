@@ -36,13 +36,37 @@ async def lifespan(app: FastAPI):
     app.state.monitor = SystemMonitor()
     await app.state.monitor.start()
     
+    # Heartbeat
+    import asyncio
+    app.state.heartbeat_task = asyncio.create_task(hard_heartbeat())
+    
     logger.info("✅ The Sentinel actif")
     
     yield
     
     # Shutdown
+    app.state.heartbeat_task.cancel()
     await app.state.monitor.stop()
     logger.info("🛑 Arrêt The Sentinel")
+
+
+async def hard_heartbeat():
+    """
+    Signal haute fréquence pour l'Orchestrateur Core.
+    Persiste l'état dans Redis pour la découverte des agents.
+    """
+    from shared.redis_client import get_redis_client
+    from datetime import datetime
+    import asyncio
+    
+    redis = get_redis_client()
+    while True:
+        try:
+            payload = {"status": "online", "ts": datetime.now().timestamp(), "expert": "sentinel"}
+            await redis.cache_set("eva.sentinel.status", payload, ttl_seconds=10)
+        except Exception as e:
+            logger.error(f"Heartbeat error: {e}")
+        await asyncio.sleep(1.0)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # APPLICATION

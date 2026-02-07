@@ -10,9 +10,12 @@ dependencies = [
     "langgraph>=0.0.20",
     "langchain>=0.1.0",
     "langchain-community>=0.0.10",
+    "langchain-ollama>=0.1.0",
     "qdrant-client>=1.7.0",
     "httpx>=0.26.0",
     "python-multipart>=0.0.6",
+    "psutil>=5.9.0",
+    "docker>=7.0.0",
 ]
 
 [project.optional-dependencies]

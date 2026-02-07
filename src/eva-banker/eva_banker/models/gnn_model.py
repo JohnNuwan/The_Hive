@@ -1,8 +1,19 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GATConv, global_mean_pool
-from torch_geometric.data import Data, Batch
+
+try:
+    from torch_geometric.nn import GATConv, global_mean_pool
+    from torch_geometric.data import Data, Batch
+    TORCH_GEO_AVAILABLE = True
+except ImportError:
+    TORCH_GEO_AVAILABLE = False
+    GATConv = None
+    global_mean_pool = None
+
+import logging
+logger = logging.getLogger(__name__)
+
 
 class MultiAssetGNN(nn.Module):
     """
@@ -11,15 +22,20 @@ class MultiAssetGNN(nn.Module):
     """
     def __init__(self, in_channels, out_channels):
         super(MultiAssetGNN, self).__init__()
+        if not TORCH_GEO_AVAILABLE:
+            logger.warning("⚠️ torch_geometric non installé. GNN désactivé (mode stub).")
+            self.stub = True
+            self.fallback = nn.Linear(in_channels, out_channels)
+            return
+        self.stub = False
         self.conv1 = GATConv(in_channels, 32, heads=4)
         self.conv2 = GATConv(128, out_channels, heads=1, concat=False)
 
     def forward(self, x, edge_index, batch):
-        # x: [num_nodes, in_channels] (features des actifs: prix, vol, VaR)
-        # edge_index: [2, num_edges] (corrélations)
+        if self.stub:
+            return self.fallback(x.mean(dim=0, keepdim=True))
         x = F.elu(self.conv1(x, edge_index))
         x = self.conv2(x, edge_index)
-        # Pooling pour obtenir une représentation globale du marché
         return global_mean_pool(x, batch)
 
 class TemporalFusionTransformer(nn.Module):
@@ -56,7 +72,6 @@ class TFTGNNModel(nn.Module):
         temporal_embeddings = torch.stack([self.tft(d.unsqueeze(0)) for d in ts_data_list]).squeeze(1)
         
         # 2. Traitement structurel (GNN)
-        # On crée un batch factice pour le pooling
         batch = torch.zeros(temporal_embeddings.size(0), dtype=torch.long)
         market_state = self.gnn(temporal_embeddings, edge_index, batch)
         

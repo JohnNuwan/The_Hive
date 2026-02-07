@@ -7,6 +7,10 @@ interface Message {
     role: 'user' | 'assistant'
     content: string
     timestamp: Date
+    metadata?: {
+        expert?: string
+        confidence?: number
+    }
 }
 
 export default function Chat() {
@@ -56,13 +60,14 @@ export default function Chat() {
         setIsLoading(true)
 
         try {
-            const data = await sendChatMessage(input, sessionId || '')
+            const data = await sendChatMessage(input, sessionId || '00000000-0000-0000-0000-000000000000')
 
             const botMsg: Message = {
                 id: (Date.now() + 1).toString(),
                 role: 'assistant',
                 content: data.message,
-                timestamp: new Date()
+                timestamp: new Date(),
+                metadata: data.metadata
             }
             setMessages(prev => [...prev, botMsg])
         } catch (e) {
@@ -79,33 +84,49 @@ export default function Chat() {
     }
 
     return (
-        <div className="flex flex-col h-full glass rounded-3xl overflow-hidden animate-fade-in">
+        <div className="flex flex-col h-full glass rounded-[2rem] overflow-hidden animate-fade-in relative shadow-2xl">
+            {/* Ambient Background Glow */}
+            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-sky-500/50 to-transparent opacity-50" />
+
             {/* Chat Messages */}
             <div
                 ref={scrollRef}
-                className="flex-grow overflow-y-auto p-6 space-y-6"
+                className="flex-grow overflow-y-auto p-8 space-y-8 scroll-smooth"
             >
                 {messages.map((msg) => (
                     <div
                         key={msg.id}
-                        className={`flex items-start gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}
+                        className={`flex items-start gap-5 ${msg.role === 'user' ? 'flex-row-reverse' : ''} animate-fade-in`}
                     >
                         <div className={`
-              w-10 h-10 rounded-2xl flex items-center justify-center shrink-0
-              ${msg.role === 'user' ? 'bg-indigo-600 shadow-indigo-500/20' : 'bg-slate-800 border border-slate-700'}
+              w-11 h-11 rounded-xl flex items-center justify-center shrink-0 shadow-lg transition-transform hover:scale-105
+              ${msg.role === 'user'
+                                ? 'bg-gradient-to-br from-indigo-500 to-indigo-700 shadow-indigo-500/20'
+                                : 'bg-slate-900 border border-white/10 shadow-black/40'}
             `}>
-                            {msg.role === 'user' ? <User size={20} /> : <Bot size={20} className="text-sky-400" />}
+                            {msg.role === 'user' ? <User size={22} className="text-white" /> : <Bot size={22} className="text-sky-400" />}
                         </div>
 
                         <div className={`
-              max-w-[80%] p-4 rounded-2xl text-sm leading-relaxed
+              max-w-[75%] p-5 rounded-2xl text-[13px] leading-relaxed relative group shadow-xl transition-all
               ${msg.role === 'user'
-                                ? 'bg-indigo-600/10 border border-indigo-500/20 text-slate-100'
-                                : 'bg-slate-800/40 border border-slate-800 text-slate-200'}
+                                ? 'bg-indigo-500/5 border border-indigo-500/20 text-slate-100'
+                                : 'bg-white/[0.03] border border-white/10 text-slate-200'}
             `}>
-                            {msg.content}
-                            <div className="mt-2 text-[10px] text-slate-500">
-                                {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            {msg.metadata?.expert && msg.role === 'assistant' && (
+                                <div className="absolute -top-3 left-4 px-3 py-1 bg-slate-900 border border-sky-500/30 rounded-lg text-[9px] font-black text-sky-400 uppercase tracking-[0.2em] shadow-2xl">
+                                    Agent {msg.metadata.expert}
+                                </div>
+                            )}
+                            <div className="whitespace-pre-wrap">{msg.content}</div>
+                            <div className="mt-3 flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                                <span>{msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                {msg.metadata?.confidence && (
+                                    <div className="flex items-center gap-2 px-2 py-0.5 bg-white/5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <div className="w-1 h-1 rounded-full bg-sky-500" />
+                                        <span>Confiance: {Math.round(msg.metadata.confidence * 100)}%</span>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -123,35 +144,39 @@ export default function Chat() {
             </div>
 
             {/* Input Area */}
-            <div className="p-5 border-t border-slate-800 bg-slate-900/40 backdrop-blur-md">
-                <div className="relative max-w-4xl mx-auto flex items-center gap-3">
-                    <div className="absolute left-4 top-1/2 -translate-y-1/2 text-sky-500">
-                        <Sparkles size={18} />
+            <div className="p-6 border-t border-white/5 bg-black/20 backdrop-blur-xl">
+                <div className="relative max-w-5xl mx-auto flex items-center gap-4">
+                    <div className="absolute left-5 top-1/2 -translate-y-1/2 text-sky-400 group-focus-within:animate-pulse">
+                        <Sparkles size={20} />
                     </div>
                     <input
                         type="text"
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                        placeholder="Commandez votre entité... (ex: 'Quel est l'état du DAX ?')"
-                        className="w-full bg-slate-950/50 border border-slate-700/50 focus:border-sky-500/50 focus:ring-1 focus:ring-sky-500/30 rounded-2xl py-4 pl-12 pr-14 text-sm transition-all outline-none placeholder:text-slate-600"
+                        placeholder="Envoyez une commande à la Ruche..."
+                        className="w-full bg-white/[0.03] border border-white/10 focus:border-sky-500/50 focus:ring-4 focus:ring-sky-500/5 rounded-2xl py-5 pl-14 pr-16 text-sm transition-all outline-none placeholder:text-slate-600 font-medium"
                     />
                     <button
                         onClick={handleSend}
                         disabled={!input.trim() || isLoading}
                         className={`
-              absolute right-3 top-1/2 -translate-y-1/2 p-2.5 rounded-xl transition-all
+              absolute right-3.5 top-1/2 -translate-y-1/2 p-3 rounded-xl transition-all duration-300
               ${input.trim() && !isLoading
-                                ? 'bg-sky-500 text-white shadow-lg shadow-sky-500/20 hover:bg-sky-400'
-                                : 'bg-slate-800 text-slate-500 cursor-not-allowed'}
+                                ? 'bg-gradient-to-br from-sky-400 to-indigo-600 text-white shadow-xl shadow-sky-500/20 hover:scale-105 active:scale-95'
+                                : 'bg-white/5 text-slate-600 cursor-not-allowed'}
             `}
                     >
-                        <Send size={18} />
+                        <Send size={20} />
                     </button>
                 </div>
-                <p className="text-center text-[10px] text-slate-600 mt-2">
-                    Protocoles de sécurité actifs • Constitution Genesis 1.0
-                </p>
+                <div className="flex items-center justify-center gap-4 mt-3 opacity-40">
+                    <div className="h-[1px] w-12 bg-gradient-to-r from-transparent to-slate-500" />
+                    <p className="text-[9px] font-black uppercase tracking-[0.3em] text-slate-400">
+                        Constitution Genesis 1.0 • Sécurité Active
+                    </p>
+                    <div className="h-[1px] w-12 bg-gradient-to-l from-transparent to-slate-500" />
+                </div>
             </div>
         </div>
     )

@@ -10,10 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY src/shared /app/shared
-RUN pip install -e /app/shared
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir /app/shared
 
 COPY src/eva-banker /app/eva-banker
-RUN pip install -e /app/eva-banker
+RUN pip install --no-cache-dir /app/eva-banker
 
 WORKDIR /app/eva-banker
 

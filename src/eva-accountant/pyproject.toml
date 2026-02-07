@@ -1,0 +1,19 @@
+[project]
+name = "eva-accountant"
+version = "0.1.0"
+description = "EVA Accountant Expert - Financial auditing and P&L optimization"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "pydantic-settings>=2.1.0",
+    "redis>=5.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eva_accountant*"]

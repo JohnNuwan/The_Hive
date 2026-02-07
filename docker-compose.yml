@@ -1,0 +1,136 @@
+# THE HIVE - Professional Orchestrated Swarm
+
+services:
+  # --- INFRASTRUCTURE ---
+  redis:
+    image: redis:7-alpine
+    container_name: hive-infra-redis
+    ports: ["6379:6379"]
+    command: redis-server --requirepass devpassword
+    networks: ["hive-net"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: hive-infra-qdrant
+    ports: ["6333:6333"]
+    networks: ["hive-net"]
+    healthcheck:
+      test: ["CMD-SHELL", "/bin/bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- CORE & EXPERTS ---
+  core:
+    build:
+      context: .
+      dockerfile: src/eva-core/Dockerfile
+    container_name: hive-core
+    ports: ["8000:8000"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=devpassword
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_HOST=host.docker.internal
+      - USE_LLM=True
+      - ENVIRONMENT=development
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: ["hive-net"]
+
+  banker:
+    build:
+      context: .
+      dockerfile: src/eva-banker/Dockerfile
+    container_name: hive-banker
+    ports: ["8100:8100"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=devpassword
+      - MT5_MODE=mock # Docker ne supporte pas MT5 natif
+    networks: ["hive-net"]
+
+  sentinel:
+    build:
+      context: .
+      dockerfile: src/eva-sentinel/Dockerfile
+    container_name: hive-sentinel
+    ports: ["8200:8200"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=devpassword
+    networks: ["hive-net"]
+
+  compliance:
+    build:
+      context: .
+      dockerfile: src/eva-compliance/Dockerfile
+    container_name: hive-compliance
+    ports: ["8300:8300"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=devpassword
+    networks: ["hive-net"]
+
+  substrate:
+    build:
+      context: .
+      dockerfile: src/eva-substrate/Dockerfile
+    container_name: hive-substrate
+    ports: ["8400:8400"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=devpassword
+    networks: ["hive-net"]
+
+  accountant:
+    build:
+      context: .
+      dockerfile: src/eva-accountant/Dockerfile
+    container_name: hive-accountant
+    ports: ["8500:8500"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=devpassword
+    networks: ["hive-net"]
+
+  # --- FRONTEND ---
+  nexus:
+    build:
+      context: src/eva-nexus
+    container_name: hive-nexus
+    ports: ["3030:80"]
+    depends_on:
+      - core
+    networks: ["hive-net"]
+
+networks:
+  hive-net:
+    driver: bridge

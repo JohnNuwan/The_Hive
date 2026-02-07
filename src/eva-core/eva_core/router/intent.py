@@ -162,7 +162,77 @@ class IntentRouter:
         return entities
 
     async def _classify_with_llm(self, text: str) -> Intent:
-        """Classification utilisant le LLM (production)"""
-        # TODO: Implémenter avec LangGraph en production
-        # Pour l'instant, fallback sur patterns
-        return self._classify_with_patterns(text.lower())
+        """Classification utilisant le LLM via LangChain/Ollama"""
+        from langchain_ollama import ChatOllama
+        from langchain_core.prompts import ChatPromptTemplate
+        from shared import get_settings
+        import json
+
+        settings = get_settings()
+        
+        # Initialisation du LLM spécialisé pour la classification
+        llm = ChatOllama(
+            model=settings.ollama_model,
+            base_url=f"http://{settings.ollama_host}:{settings.ollama_port}",
+            temperature=0,
+        )
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """Tu es le routeur d'intentions d'E.V.A., une IA de trading et sécurité.
+            Ta mission est d'analyser le message utilisateur et de retourner un JSON strict.
+            
+            Types d'intentions (intent_type) :
+            - TRADING_ORDER : Passer un ordre d'achat ou vente.
+            - POSITION_STATUS : Consulter l'état des trades ou profits.
+            - RISK_INQUIRY : Question sur le drawdown, le risque ou les limites.
+            - MEMORY_RECALL : Rappel de faits passés ou historique.
+            - OSINT_REQUEST : Recherche d'infos externes (web, news).
+            - SECURITY_ALERT : Alerte sur une menace ou intrusion.
+            - SYSTEM_COMMAND : Commande technique (logs, reboot).
+            - GENERAL_CHAT : Conversation normale ou question diverse.
+
+            Pour TRADING_ORDER, extrais les entités: action (BUY/SELL), symbol (XAUUSD, EURUSD, etc.), volume (float), stop_loss (float), take_profit (float).
+            
+            Réponds UNIQUEMENT avec un JSON au format:
+            {{
+                "intent": "NOM_INTENT",
+                "confidence": 0.0-1.0,
+                "entities": {{ ... }},
+                "explanation": "brève raison"
+            }}
+            """),
+            ("user", "{input}")
+        ])
+
+        try:
+            chain = prompt | llm
+            response = await chain.ainvoke({"input": text})
+            
+            # Nettoyage de la réponse si le LLM ajoute du texte autour
+            content = response.content.strip()
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+            
+            data = json.loads(content)
+            
+            intent_val = data.get("intent", "GENERAL_CHAT")
+            # Validation de l'enum
+            try:
+                intent_type = IntentType(intent_val)
+            except ValueError:
+                intent_type = IntentType.GENERAL_CHAT
+
+            return Intent(
+                intent_type=intent_type,
+                confidence=data.get("confidence", 0.9),
+                entities=data.get("entities", {}),
+                target_expert=INTENT_TO_EXPERT.get(intent_type, "core"),
+                raw_text=text
+            )
+
+        except Exception as e:
+            logger.error(f"Férocité LLM Router error: {e}")
+            # Fallback sur patterns en cas d'erreur
+            return self._classify_with_patterns(text.lower())

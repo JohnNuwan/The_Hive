@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     # Alternative: Ollama
     ollama_host: str = "localhost"
     ollama_port: int = 11434
-    ollama_model: str = "llama3:8b"
+    ollama_model: str = "qwen2.5:7b"
     use_ollama: bool = True  # True pour dev, False pour prod (vLLM)
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     # SECURITY (Sentinel)
     # ═══════════════════════════════════════════════════════════════════════════
     sentinel_api_port: int = 8200
+    compliance_api_port: int = 8300
+    substrate_api_port: int = 8400
+    accountant_api_port: int = 8500
 
     # Constitution Loi 0 - Seuils température
     gpu_temp_warning: float = 80.0

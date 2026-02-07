@@ -8,10 +8,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY src/shared /app/shared
-RUN pip install -e /app/shared
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir /app/shared
 
 COPY src/eva-sentinel /app/eva-sentinel
-RUN pip install -e /app/eva-sentinel
+RUN pip install --no-cache-dir /app/eva-sentinel
 
 WORKDIR /app/eva-sentinel
 

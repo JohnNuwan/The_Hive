@@ -13,6 +13,7 @@ Architecture :
     - MetaTrader 5 (Windows) comme moteur d'exécution (via service dédié).
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -186,7 +187,6 @@ async def lifespan(app: FastAPI):
     await app.state.swarm.init_mqtt()
     
     # Tâche de fond pour écouter les ordres Swarm
-    import asyncio
     asyncio.create_task(swarm_listener())
     asyncio.create_task(hard_heartbeat())
 
@@ -208,14 +208,18 @@ async def lifespan(app: FastAPI):
 
 async def hard_heartbeat():
     """
-    Signal haute fréquence pour le Watchdog Rust (Loi 0).
-    S'arrête si le processus Python freeze ou crash.
+    Signal haute fréquence pour le Watchdog Rust (Loi 0) et l'Orchestrateur Core.
+    Persiste l'état dans Redis pour la découverte des agents.
     """
     from shared.redis_client import get_redis_client
     redis = get_redis_client()
     while True:
-        await redis.publish("eva.banker.heartbeat", {"status": "alive", "ts": datetime.now().timestamp()})
-        await asyncio.sleep(0.3) # 300ms heartbeat pour un cutoff à 1000ms
+        payload = {"status": "online", "ts": datetime.now().timestamp(), "expert": "banker"}
+        # Publication Pub/Sub (temps réel)
+        await redis.publish("eva.banker.heartbeat", payload)
+        # Persistence (découverte)
+        await redis.cache_set("eva.banker.status", payload, ttl_seconds=10)
+        await asyncio.sleep(0.3)
 
 
 async def swarm_listener():
@@ -360,6 +364,20 @@ async def close_position(ticket: int) -> dict[str, Any]:
     """
     mt5_service: MT5Service = app.state.mt5_service
     result = await mt5_service.close_position(ticket)
+    
+    # Intégration Compliance (Juriste / Loi 5)
+    # Si le trade est profitable, on informe l'expert Compliance pour provisionnement URSSAF
+    if result.get("success") and result.get("profit", 0) > 0:
+        from shared.redis_client import get_redis_client
+        redis = get_redis_client()
+        await redis.publish("eva.compliance.trades", {
+            "ticket_id": ticket,
+            "profit": result.get("profit"),
+            "symbol": result.get("symbol", "UNKNOWN"),
+            "timestamp": datetime.now().isoformat()
+        })
+        logger.info(f"⚖️ Trade profit envoyé à Compliance pour provisionnement")
+        
     return result
 
 
