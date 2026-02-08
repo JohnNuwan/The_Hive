@@ -21,7 +21,7 @@ class TelegramNotifier:
         settings = get_settings()
         self.bot_token = getattr(settings, "telegram_bot_token", None)
         self.chat_id = getattr(settings, "telegram_chat_id", None)
-        self.enabled = self.bot_token and self.chat_id
+        self.enabled = bool(self.bot_token and self.chat_id)
         
         if not self.enabled:
             logger.warning("🔔 Telegram Notifier in MOCK MODE (No credentials found in .env)")

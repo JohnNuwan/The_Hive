@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # ═══════════════════════════════════════════════════════════════════════════
     # GENERAL
     # ═══════════════════════════════════════════════════════════════════════════
+    app_name: str = "THE HIVE"
     environment: Literal["development", "staging", "production"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     timezone: str = "Europe/Paris"

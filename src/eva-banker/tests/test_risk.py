@@ -3,23 +3,35 @@ Tests de gestion des risques pour The Banker
 """
 
 import pytest
-from eva_banker.services.risk import RiskManager
+from decimal import Decimal
+from eva_banker.services.risk import RiskValidator
 
 def test_drawdown_limit():
-    """Vérifie que le RiskManager détecte un drawdown excessif"""
-    manager = RiskManager(max_daily_drawdown_percent=4.0)
+    """Vérifie que le RiskValidator détecte un drawdown excessif"""
+    manager = RiskValidator(max_daily_drawdown=Decimal("4.0"))
+    manager.update_account_balance(Decimal("10000"))
     
     # Cas OK : 2% de perte
-    assert manager.is_risk_acceptable(current_equity=9800, balance_start_day=10000) is True
+    manager.record_trade_result(Decimal("-200"))
+    # Daily PnL = -200, Balance = 9800
+    # DD% = 200 / 10000 = 2%
+    assert manager._get_daily_drawdown_percent() < Decimal("4.0")
     
-    # Cas Critique : 5% de perte
-    assert manager.is_risk_acceptable(current_equity=9400, balance_start_day=10000) is False
+    # Cas Critique : 5% de perte (total)
+    manager.record_trade_result(Decimal("-300"))
+    # Daily PnL = -500
+    # DD% = 500 / 10000 = 5%
+    assert manager._get_daily_drawdown_percent() >= Decimal("4.0")
 
 def test_lot_size_calculation():
     """Vérifie le calcul de taille de lot (exemple simplifié)"""
-    manager = RiskManager()
+    manager = RiskValidator()
     # Risque 1% sur 100k avec stop loss de 100 pips
-    # Formule simplifiée pour le test
-    lot = manager.calculate_lot_size(balance=100000, risk_percent=1.0, stop_loss_pips=100)
-    assert lot > 0
+    lot = manager.calculate_lot_size(
+        balance=Decimal("100000"),
+        risk_percent=Decimal("1.0"),
+        stop_loss_pips=Decimal("100")
+    )
+    # Risk amount = 1000. SL points value = 100 * 10 = 1000. Lot = 1.0
+    assert lot == 1.0
     assert isinstance(lot, float)
