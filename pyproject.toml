@@ -60,6 +60,11 @@ dependencies = [
     "pydantic>=2.0.0",
     "fastapi>=0.100.0",
     "scipy>=1.10.0",
+    "httpx>=0.20.0",
+    "redis>=4.0.0",
+    "pyjwt>=2.0.0",
+    "qdrant-client>=1.0.0",
+    "pydantic-settings>=2.0.0",
 ]
 
 [build-system]

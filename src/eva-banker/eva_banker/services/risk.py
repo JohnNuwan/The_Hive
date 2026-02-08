@@ -225,6 +225,22 @@ class RiskValidator:
         """Met à jour le solde du compte"""
         self._account_balance = balance
 
+    def calculate_lot_size(self, balance: Decimal, risk_percent: Decimal, stop_loss_pips: Decimal, symbol: str = "EURUSD") -> float:
+        """Calculates lot size based on risk parameters."""
+        pip_value = Decimal("10")  # Default to standard lot value per pip ($10)
+        if "XAU" in symbol:
+             pip_value = Decimal("10") # Or whatever is appropriate for Gold
+
+        # Risk amount
+        risk_amount = balance * (risk_percent / Decimal("100"))
+
+        # Lot size = Risk Amount / (Stop Loss in Pips * Pip Value)
+        if stop_loss_pips <= 0:
+            return 0.0
+
+        lot_size = risk_amount / (stop_loss_pips * pip_value)
+        return float(lot_size)
+
     async def get_current_status(self) -> RiskStatus:
         """Retourne le statut actuel des risques"""
         return RiskStatus(
