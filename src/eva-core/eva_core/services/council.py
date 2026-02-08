@@ -28,6 +28,7 @@ class CouncilService:
     async def prepare_model(self, role: str = "general") -> str:
         """
         Prépare le modèle pour un rôle spécifique.
+        Si le modèle n'est pas présent, il le télécharge (Pull).
         Si le modèle n'est pas celui chargé, il effectue le swap.
         """
         target_model = self.role_map.get(role, self.settings.council_model_general)
@@ -35,24 +36,38 @@ class CouncilService:
         if self.current_model == target_model:
             return target_model
 
-        logger.info(f"🔮 COUNCIL: Switching model to '{target_model}' for role '{role}'")
+        logger.info(f"🔮 COUNCIL: Preparing model '{target_model}' for role '{role}'")
         
         try:
-            # 1. Charger le nouveau modèle (Ollama charge automatiquement au premier call ou via /api/generate vide)
-            # On utilise l'API /api/generate avec un prompt vide pour forcer le chargement
+            # 1. Vérifier si le modèle est déjà présent localement
+            list_response = await self._client.get(f"{self.base_url}/api/tags")
+            if list_response.status_code == 200:
+                tags = [m["name"] for m in list_response.json().get("models", [])]
+                if target_model not in tags and f"{target_model}:latest" not in tags:
+                    logger.info(f"📥 COUNCIL: Model '{target_model}' not found. Initiating Pull...")
+                    # Utilisation d'un timeout très long pour le pull
+                    pull_response = await self._client.post(
+                        f"{self.base_url}/api/pull",
+                        json={"name": target_model},
+                        timeout=600.0
+                    )
+                    pull_response.raise_for_status()
+                    logger.info(f"✅ COUNCIL: Pull of '{target_model}' complete.")
+
+            # 2. Charger le modèle en VRAM (via un call vide)
+            logger.info(f"🚀 COUNCIL: Loading '{target_model}' into VRAM (RTX 2060)")
             response = await self._client.post(
                 f"{self.base_url}/api/generate",
-                json={"model": target_model, "prompt": "", "keep_alive": "5m"}
+                json={"model": target_model, "prompt": "", "keep_alive": "10m"}
             )
             response.raise_for_status()
             
             self.current_model = target_model
-            logger.info(f"✅ COUNCIL: Model '{target_model}' ready.")
+            logger.info(f"✨ COUNCIL: Expert role '{role}' is now active with '{target_model}'.")
             return target_model
             
         except Exception as e:
-            logger.error(f"❌ COUNCIL Error: Failed to load model '{target_model}': {e}")
-            # Fallback sur le modèle général par défaut si possible
+            logger.error(f"❌ COUNCIL Error: Failed to prepare model '{target_model}': {e}")
             return self.settings.council_model_general
 
     async def unload_current(self):
