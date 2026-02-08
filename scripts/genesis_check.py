@@ -46,6 +46,9 @@ sys.modules["qdrant_client"] = MagicMock()
 sys.modules["qdrant_client.models"] = MagicMock()
 sys.modules["qdrant_client.http"] = MagicMock()
 sys.modules["bs4"] = MagicMock()
+sys.modules["pydantic"] = MagicMock()
+sys.modules["pydantic_settings"] = MagicMock()
+sys.modules["torch"] = MagicMock()
 
 # Liste des modules à vérifier
 # Format: (Nom Module, Chemin d'import, Classe/Objet à vérifier)
@@ -58,7 +61,7 @@ MODULES_TO_CHECK = [
     # --- DIVISION FINANCIÈRE ---
     ("Expert B: BANKER", "eva-banker.eva_banker.main", "app"),
     ("Expert J: ADVOCATE (Compliance)", "eva-compliance.eva_compliance.main", "app"),
-    ("Expert K: SOVEREIGN (RWA)", "eva-rwa.eva_rwa.main", "app"), # Fix import path if needed, check main.py location
+    ("Expert K: SOVEREIGN (RWA)", "eva-rwa.eva_rwa.main", "app"),
 
     # --- DIVISION INTELLIGENCE ---
     ("Expert C: SHADOW", "eva-shadow.eva_shadow.main", "app"),
