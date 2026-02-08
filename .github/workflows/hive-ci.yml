@@ -24,14 +24,15 @@ jobs:
 
       - name: Run Unit Tests
         run: |
-          # Add src to PYTHONPATH
-          export PYTHONPATH=$PYTHONPATH:$(pwd)/src
+          # Add src to PYTHONPATH and also src/shared for shared module access
+          # We use a find command to include all src subdirectories as packages
+          export PYTHONPATH=$(find src -maxdepth 1 -type d | tr '\n' ':')
           pytest src/shared/tests
           pytest src/eva-sentinel/tests
 
       - name: Logic Verification
         run: |
-          export PYTHONPATH=$PYTHONPATH:$(pwd)/src
+          export PYTHONPATH=$(find src -maxdepth 1 -type d | tr '\n' ':')
           python verify_logic.py
 
   build:
