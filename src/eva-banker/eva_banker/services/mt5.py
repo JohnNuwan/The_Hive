@@ -3,6 +3,7 @@ Service MT5 - Client MetaTrader 5
 Gère la connexion et l'exécution des ordres sur MT5
 """
 
+import asyncio
 import logging
 import sys
 from datetime import datetime
@@ -55,34 +56,35 @@ class MT5Service:
 
         try:
             # Initialisation MT5
-            if not mt5.initialize():
+            if not await asyncio.to_thread(mt5.initialize):
                 logger.error(f"MT5 initialize failed: {mt5.last_error()}")
                 return False
 
             # Verifier si le terminal est deja connecte au bon compte
-            account_info = mt5.account_info()
+            account_info = await asyncio.to_thread(mt5.account_info)
             if account_info and account_info.login == self._login:
                 logger.info(f"MT5 deja connecte: compte {account_info.login} sur {account_info.server} "
                            f"(Balance: {account_info.balance}, Equity: {account_info.equity})")
             elif self._login and self._password and self._server:
                 # Login automatique si credentials fournis et pas encore connecte
-                authorized = mt5.login(
+                authorized = await asyncio.to_thread(
+                    mt5.login,
                     login=self._login,
                     password=self._password,
                     server=self._server
                 )
                 if authorized:
-                    account_info = mt5.account_info()
+                    account_info = await asyncio.to_thread(mt5.account_info)
                     logger.info(f"MT5 login reussi: compte {self._login} sur {self._server}")
                 else:
                     # Le terminal est peut-etre deja connecte mais login() echoue
-                    account_info = mt5.account_info()
+                    account_info = await asyncio.to_thread(mt5.account_info)
                     if account_info:
                         logger.info(f"MT5 terminal deja actif: compte {account_info.login} sur {account_info.server} "
                                    f"(Balance: {account_info.balance})")
                     else:
                         logger.error(f"MT5 login echoue pour {self._login}@{self._server}: {mt5.last_error()}")
-                        mt5.shutdown()
+                        await asyncio.to_thread(mt5.shutdown)
                         return False
             elif account_info:
                 logger.info(f"MT5 connecte: compte {account_info.login} sur {account_info.server}")
@@ -98,7 +100,7 @@ class MT5Service:
     async def disconnect(self) -> None:
         """Déconnexion de MT5"""
         if not self.mock_mode and MT5_AVAILABLE:
-            mt5.shutdown()
+            await asyncio.to_thread(mt5.shutdown)
         self.is_connected = False
         logger.info("MT5 déconnecté")
 
@@ -115,7 +117,7 @@ class MT5Service:
                 leverage=100,
             )
 
-        info = mt5.account_info()
+        info = await asyncio.to_thread(mt5.account_info)
         if info is None:
             raise RuntimeError("Impossible de récupérer les infos du compte")
 
@@ -136,7 +138,7 @@ class MT5Service:
         if self.mock_mode:
             return self._mock_positions
 
-        positions_data = mt5.positions_get()
+        positions_data = await asyncio.to_thread(mt5.positions_get)
         if positions_data is None:
             return []
 
@@ -179,7 +181,7 @@ class MT5Service:
                 "time": datetime.now().timestamp()
             }
 
-        tick = mt5.symbol_info_tick(symbol)
+        tick = await asyncio.to_thread(mt5.symbol_info_tick, symbol)
         if tick is None:
             return {"success": False, "message": f"Dernier tick non disponible pour {symbol}"}
 
@@ -196,11 +198,11 @@ class MT5Service:
             return await self._execute_mock_order(order)
 
         # Préparation de la requête MT5
-        symbol_info = mt5.symbol_info(order.symbol)
+        symbol_info = await asyncio.to_thread(mt5.symbol_info, order.symbol)
         if symbol_info is None:
             return {"success": False, "message": f"Symbole {order.symbol} non trouvé"}
 
-        price = mt5.symbol_info_tick(order.symbol)
+        price = await asyncio.to_thread(mt5.symbol_info_tick, order.symbol)
         if price is None:
             return {"success": False, "message": "Prix non disponible"}
 
@@ -222,7 +224,7 @@ class MT5Service:
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
 
-        result = mt5.order_send(request)
+        result = await asyncio.to_thread(mt5.order_send, request)
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             return {
                 "success": False,
@@ -254,13 +256,13 @@ class MT5Service:
                 "symbol": pos.symbol
             }
 
-        position = mt5.positions_get(ticket=ticket)
+        position = await asyncio.to_thread(mt5.positions_get, ticket=ticket)
         if not position:
             return {"success": False, "message": f"Position {ticket} non trouvée"}
 
         pos = position[0]
         close_type = mt5.ORDER_TYPE_SELL if pos.type == 0 else mt5.ORDER_TYPE_BUY
-        price = mt5.symbol_info_tick(pos.symbol)
+        price = await asyncio.to_thread(mt5.symbol_info_tick, pos.symbol)
         close_price = price.bid if pos.type == 0 else price.ask
 
         request = {
@@ -277,7 +279,7 @@ class MT5Service:
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
 
-        result = mt5.order_send(request)
+        result = await asyncio.to_thread(mt5.order_send, request)
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             return {"success": False, "message": f"Erreur fermeture: {result.comment}"}
 
