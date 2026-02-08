@@ -101,8 +101,16 @@ func waitForRedis(rdb *redis.Client) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PRIORITY CHANNELS
+// STANDARD SWARM PROTOCOL
 // ═══════════════════════════════════════════════════════════════════════════════
+
+type SwarmMessage struct {
+	Source   string          `json:"source"`
+	Target   string          `json:"target"`
+	Payload  json.RawMessage `json:"payload"`
+	AuthHash string          `json:"auth_hash"`
+	Ts       int64           `json:"ts"`
+}
 
 // Canal 1 : DANGER — Priorité Absolue (latence <1ms visée)
 func listenDangerSignals(rdb *redis.Client) {
@@ -117,8 +125,18 @@ func listenDangerSignals(rdb *redis.Client) {
 
 			log.Printf("🚨 DANGER [%s]: %s — Routing to KILL_SWITCH", msg.Channel, msg.Payload)
 
+			// Standardisation du message
+			swarmMsg := SwarmMessage{
+				Source:   msg.Channel,
+				Target:   "Kernel",
+				Payload:  json.RawMessage(msg.Payload),
+				AuthHash: "INTERNAL_CORE_HASH", // TODO: Implement real HMAC
+				Ts:       time.Now().Unix(),
+			}
+			jsonMsg, _ := json.Marshal(swarmMsg)
+
 			// Priorité Absolue : Forward direct au Kernel
-			rdb.Publish(ctx, "kernel_action", fmt.Sprintf(`{"action":"ACTIVATE_KILL_SWITCH","source":"%s","payload":%s}`, msg.Channel, msg.Payload))
+			rdb.Publish(ctx, "kernel_action", jsonMsg)
 
 			elapsed := time.Since(start)
 			promMessagesRouted.WithLabelValues(msg.Channel, "P0").Inc()
@@ -144,11 +162,21 @@ func listenTradeSignals(rdb *redis.Client) {
 
 			log.Printf("💰 TRADE [%s]: %s — Routing to Banker via Kernel validation", msg.Channel, msg.Payload)
 
+			// Standardisation
+			swarmMsg := SwarmMessage{
+				Source:   msg.Channel,
+				Target:   "Banker/Kernel",
+				Payload:  json.RawMessage(msg.Payload),
+				AuthHash: "INTERNAL_TRADE_HASH",
+				Ts:       time.Now().Unix(),
+			}
+			jsonMsg, _ := json.Marshal(swarmMsg)
+
 			// Étape 1 : Envoyer au Kernel pour validation Loi 2
-			rdb.Publish(ctx, "eva.banker.requests.critical", msg.Payload)
+			rdb.Publish(ctx, "eva.banker.requests.critical", jsonMsg)
 
 			// Étape 2 : Forward au Banker (le Kernel intercepte en parallèle)
-			rdb.Publish(ctx, "banker_orders", msg.Payload)
+			rdb.Publish(ctx, "banker_orders", jsonMsg)
 
 			promMessagesRouted.WithLabelValues(msg.Channel, "P1").Inc()
 		}
@@ -171,9 +199,19 @@ func listenSwarmEvents(rdb *redis.Client) {
 
 			log.Printf("🐝 SWARM [%s]: %s", msg.Channel, msg.Payload)
 
+			// Standardisation
+			swarmMsg := SwarmMessage{
+				Source:   msg.Channel,
+				Target:   "Broadcast",
+				Payload:  json.RawMessage(msg.Payload),
+				AuthHash: "INTERNAL_SWARM_HASH",
+				Ts:       time.Now().Unix(),
+			}
+			jsonMsg, _ := json.Marshal(swarmMsg)
+
 			// Broadcast à tous les agents intéressés
-			rdb.Publish(ctx, "eva.core.swarm_event", msg.Payload)
-			rdb.Publish(ctx, "eva.banker.swarm_event", msg.Payload)
+			rdb.Publish(ctx, "eva.core.swarm_event", jsonMsg)
+			rdb.Publish(ctx, "eva.banker.swarm_event", jsonMsg)
 		}
 
 		log.Println("⚠️ Swarm channel fermé, reconnecting...")

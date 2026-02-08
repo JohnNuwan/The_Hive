@@ -161,6 +161,35 @@ class MT5Service:
             )
         return positions
 
+    async def get_symbol_tick(self, symbol: str) -> dict[str, Any]:
+        """Récupère le dernier tick pour un symbole"""
+        if self.mock_mode:
+            # Prix simulés
+            mock_prices = {
+                "XAUUSD": Decimal("2080.50"),
+                "EURUSD": Decimal("1.0855"),
+                "GBPUSD": Decimal("1.2655"),
+                "USDJPY": Decimal("150.55"),
+            }
+            price = mock_prices.get(symbol, Decimal("100.00"))
+            return {
+                "symbol": symbol,
+                "bid": float(price),
+                "ask": float(price) + 0.0001,
+                "time": datetime.now().timestamp()
+            }
+
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            return {"success": False, "message": f"Dernier tick non disponible pour {symbol}"}
+
+        return {
+            "symbol": symbol,
+            "bid": tick.bid,
+            "ask": tick.ask,
+            "time": tick.time
+        }
+
     async def execute_order(self, order: TradeOrder) -> dict[str, Any]:
         """Exécute un ordre de trading"""
         if self.mock_mode:
@@ -210,8 +239,20 @@ class MT5Service:
     async def close_position(self, ticket: int) -> dict[str, Any]:
         """Ferme une position par son ticket"""
         if self.mock_mode:
+            pos = next((p for p in self._mock_positions if p.ticket == ticket), None)
+            if not pos:
+                return {"success": False, "message": f"Position {ticket} non trouvée"}
+            
             self._mock_positions = [p for p in self._mock_positions if p.ticket != ticket]
-            return {"success": True, "message": f"Position {ticket} fermée (mock)"}
+            # Simulation de profit pour le mock (entre -50 et +150)
+            import random
+            profit = Decimal(str(random.uniform(-50, 150)))
+            return {
+                "success": True, 
+                "message": f"Position {ticket} fermée (mock)",
+                "profit": float(profit),
+                "symbol": pos.symbol
+            }
 
         position = mt5.positions_get(ticket=ticket)
         if not position:
@@ -240,7 +281,13 @@ class MT5Service:
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             return {"success": False, "message": f"Erreur fermeture: {result.comment}"}
 
-        return {"success": True, "ticket": ticket, "message": "Position fermée"}
+        return {
+            "success": True, 
+            "ticket": ticket, 
+            "message": "Position fermée",
+            "profit": pos.profit,
+            "symbol": pos.symbol
+        }
 
     async def _execute_mock_order(self, order: TradeOrder) -> dict[str, Any]:
         """Exécute un ordre en mode mock"""

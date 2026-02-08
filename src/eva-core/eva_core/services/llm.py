@@ -10,6 +10,8 @@ import httpx
 
 from shared import ChatMessage, get_settings
 
+from eva_core.services.council import get_council_service
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,13 +22,14 @@ class LLMService:
     Supporte:
     - Ollama (développement) - API /api/generate
     - vLLM (production) - API OpenAI-compatible
+    - The Council - Gestion des rôles et Model Swapping
     """
 
     def __init__(
         self,
         host: str = "localhost",
         port: int = 11434,
-        model: str = "llama3:8b",
+        model: str = "llama3.2:1b",
         use_ollama: bool = True,
     ):
         self.host = host
@@ -35,6 +38,7 @@ class LLMService:
         self.use_ollama = use_ollama
         self.base_url = f"http://{host}:{port}"
         self._client = httpx.AsyncClient(timeout=120.0)
+        self.council = get_council_service()
         logger.info(f"LLMService initialisé: {self.base_url} (model={model})")
 
     async def generate_response(
@@ -43,18 +47,23 @@ class LLMService:
         system_prompt: str = "",
         max_tokens: int = 2000,
         temperature: float = 0.7,
+        role: str = "general",
     ) -> str:
         """
         Génère une réponse à partir d'une liste de messages.
+        Utilise le Council pour préparer le modèle selon le rôle.
         """
         try:
+            # 1. Préparer le modèle via le Council (Swap si nécessaire)
+            target_model = await self.council.prepare_model(role)
+            
             if self.use_ollama:
                 return await self._generate_ollama(
-                    messages, system_prompt, max_tokens, temperature
+                    messages, system_prompt, max_tokens, temperature, model_override=target_model
                 )
             else:
                 return await self._generate_vllm(
-                    messages, system_prompt, max_tokens, temperature
+                    messages, system_prompt, max_tokens, temperature, model_override=target_model
                 )
         except httpx.ConnectError:
             logger.warning("LLM non disponible - mode mock")
@@ -69,6 +78,7 @@ class LLMService:
         system_prompt: str,
         max_tokens: int,
         temperature: float,
+        model_override: str = None,
     ) -> str:
         """Génération via Ollama API"""
         # Construire le prompt
@@ -86,7 +96,7 @@ class LLMService:
         response = await self._client.post(
             f"{self.base_url}/api/generate",
             json={
-                "model": self.model,
+                "model": model_override or self.model,
                 "prompt": prompt,
                 "stream": False,
                 "options": {
@@ -105,6 +115,7 @@ class LLMService:
         system_prompt: str,
         max_tokens: int,
         temperature: float,
+        model_override: str = None,
     ) -> str:
         """Génération via vLLM (API OpenAI-compatible)"""
         api_messages = []
@@ -120,7 +131,7 @@ class LLMService:
         response = await self._client.post(
             f"{self.base_url}/v1/chat/completions",
             json={
-                "model": self.model,
+                "model": model_override or self.model,
                 "messages": api_messages,
                 "max_tokens": max_tokens,
                 "temperature": temperature,

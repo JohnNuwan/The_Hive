@@ -49,7 +49,7 @@ from eva_banker.nemesis import NemesisSystem, get_nemesis_system
 from eva_banker.skill_library import SkillLibrary, SkilledBehavior
 from eva_banker.models.gnn_model import TFTGNNModel
 from eva_banker.swarm import BankerSwarm
-from eva_core.probes import check_cognitive_sincerity
+from shared.probes import check_cognitive_sincerity
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -231,15 +231,30 @@ async def hard_heartbeat():
     """
     Signal haute fréquence pour le Watchdog Rust (Loi 0) et l'Orchestrateur Core.
     Persiste l'état dans Redis pour la découverte des agents.
+    Inclut désormais l'équité pour le Kill-Switch financier.
     """
     from shared.redis_client import get_redis_client
     redis = get_redis_client()
+    mt5_service = app.state.mt5_service
+    
     while True:
-        payload = {"status": "online", "ts": datetime.now().timestamp(), "expert": "banker"}
-        # Publication Pub/Sub (temps réel)
-        await redis.publish("eva.banker.heartbeat", payload)
-        # Persistence (découverte)
-        await redis.cache_set("eva.banker.status", payload, ttl_seconds=10)
+        try:
+            account = await mt5_service.get_account_info()
+            payload = {
+                "status": "online",
+                "ts": datetime.now().timestamp(),
+                "expert": "banker",
+                "equity": float(account.equity),
+                "balance": float(account.balance),
+                "currency": account.currency
+            }
+            # Publication Pub/Sub (temps réel pour le Kernel)
+            await redis.publish("eva.banker.heartbeat", payload)
+            # Persistence (découverte)
+            await redis.cache_set("eva.banker.status", payload, ttl_seconds=10)
+        except Exception as e:
+            logger.error(f"Heartbeat error: {e}")
+            
         await asyncio.sleep(0.3)
 
 
@@ -447,6 +462,13 @@ async def get_account_balance() -> AccountBalance:
     """
     mt5_service: MT5Service = app.state.mt5_service
     return await mt5_service.get_account_info()
+
+
+@app.get("/ticks/{symbol}", tags=["Trading"])
+async def get_tick(symbol: str):
+    """Récupère le dernier prix (tick) pour un symbole"""
+    mt5_service: MT5Service = app.state.mt5_service
+    return await mt5_service.get_symbol_tick(symbol.upper())
 
 
 @app.get("/risk/status", response_model=RiskStatus, tags=["Risque"])

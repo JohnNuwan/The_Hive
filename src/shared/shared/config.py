@@ -46,8 +46,15 @@ class Settings(BaseSettings):
     # Alternative: Ollama
     ollama_host: str = "localhost"
     ollama_port: int = 11434
-    ollama_model: str = "qwen2.5:7b"
+    ollama_model: str = "llama3:8b"
     use_ollama: bool = True  # True pour dev, False pour prod (vLLM)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # THE COUNCIL (Model Swapping)
+    # ═══════════════════════════════════════════════════════════════════════════
+    council_model_general: str = "llama3.2:1b"
+    council_model_research: str = "qwen2.5:3b"
+    council_model_banker: str = "qwen2.5-coder:3b"
 
     # ═══════════════════════════════════════════════════════════════════════════
     # REDIS

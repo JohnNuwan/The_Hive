@@ -272,6 +272,15 @@ async def chat(request: ChatRequest) -> ChatResponse:
             wrapped_message = prompt_master.wrap_with_method(request.message, method=method)
             expert_injector = prompt_master.get_expert_injector("core")
             
+            # Map expert to model role
+            role_map = {
+                "banker": "banker",
+                "researcher": "research",
+                "shadow": "research",
+                "lab": "research",
+            }
+            target_role = role_map.get(intent.target_expert, "general")
+
             response_text = await llm_service.generate_response(
                 messages=[ChatMessage(
                     session_id=session_id,
@@ -279,6 +288,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     content=wrapped_message
                 )],
                 system_prompt=f"{expert_injector}\nTu es EVA, une IA assistante personnelle intelligente.",
+                role=target_role,
             )
         elif intent.target_expert == "all":
             # SWARM MODE: Parallélisation sur tous les agents concernés

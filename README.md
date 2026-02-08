@@ -32,7 +32,7 @@
 ### 2.1 Couche Hardware (Substrat Physique)
 *   **Calcul (CPU)** : AMD Epyc 7302P (16 Cores / 32 Threads). *Rôle : Cerveau central multitâche.*
 *   **Mémoire (RAM)** : 128 Go DDR4 ECC. *Allocation dynamique stricte.*
-*   **Accélération IA Principale** : 1x NVIDIA RTX 3090 FE (24 Go VRAM). *Rôle : LLM Llama 3 & Rendu Unreal.*
+*   **Accélération IA Principale** : NVIDIA RTX 2060 (6 Go VRAM) - *Mode Dev*. (Prévu : RTX 3090 FE 24 Go).
 *   **Accélération IA Secondaire (Cluster TPU)** : Carte PCIe + 8x Google Coral Dual Edge TPU. *Rôle : Vision Computer (YOLO) & Sécurité Réseau 24/7.*
 *   **Stockage** : 1 To NVMe (System) + 4 To HDD (Cold Storage).
 
@@ -406,17 +406,17 @@ sequenceDiagram
 ---
 
 ## 10. 🗺️ ROADMAP : VERS LA DYNASTIE 2046
-| Phase | Nom | Objectif Principal | Capital Cible |
+| Phase | Nom | Objectif Principal | Statut |
 | :--- | :--- | :--- | :--- |
-| **Phase 0** | **Genesis** | Stabilité du Kernel & Remboursement Dette. | ✅ COMPLÉTÉE |
-| **Phase 1** | **Breach** | Extraction de profit régulier. | ✅ COMPLÉTÉE |
-| **Phase 2** | **Power Surge** | Multiplication des Factories. | ✅ COMPLÉTÉE |
-| **Phase 5** | **Production** | Hardening Rust, Watchdog & Monitor. | ✅ COMPLÉTÉE |
-| **Phase 6** | **Sovereignty** | Sentinel Pro, Sincerity Meter & Stress-Tests. | ✅ COMPLÉTÉE |
-| **Phase 7** | **Evolution** | Self-Healing, Ghost Shield & Alpha Memory. | ✅ COMPLÉTÉE |
-| **Phase 8** | **Metamorphosis**| Multi-Broker, Shadow Expert & Strategy DNA. | ✅ COMPLÉTÉE |
-| **Phase 9** | **Neural Link** | MQTT, QoS & Last Will. | ✅ COMPLÉTÉE |
-| **Phase 10**| **Singularity** | Auto-Builder, P2P & Forensic Black-Box. | ✅ COMPLÉTÉE |
+| **Phase 0** | **Genesis** | Stabilité du Kernel & Remboursement Dette. | ✅ FONDATIONS OK |
+| **Phase 1** | **Breach** | Extraction de profit régulier (Banker/Hydra). | 🏗️ EN COURS |
+| **Phase 2** | **Power Surge** | Multiplication des Factories & The Council. | 🏗️ EN COURS (Dev 2060) |
+| **Phase 3** | **Production** | Hardening Rust, Watchdog & Monitor. | 📅 PROGRAMMÉ |
+| **Phase 4** | **Sovereignty** | Sentinel Pro, Sincerity Meter & Stress-Tests. | 📅 PROGRAMMÉ |
+| **Phase 5** | **Evolution** | Self-Healing, Ghost Shield & Alpha Memory. | 🕒 FUTURE |
+| **Phase 6** | **Metamorphosis**| Multi-Broker, Shadow Expert & Strategy DNA. | 🕒 FUTURE |
+| **Phase 7** | **Neural Link** | MQTT, QoS & Last Will. | 🕒 FUTURE |
+| **Phase 8** | **Singularity** | Auto-Builder, P2P & Forensic Black-Box. | 🕒 FUTURE |
 
 ---
 

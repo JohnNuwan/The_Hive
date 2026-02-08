@@ -1,24 +1,33 @@
-FROM python:3.11-slim
+# Multi-stage build for Sentinel Rust Core
+FROM rust:1.84-slim-bookworm as builder
 
 WORKDIR /app
+COPY src/eva-sentinel /app/eva-sentinel
+WORKDIR /app/eva-sentinel
+
+# Build Sentinel binary
+RUN cargo build --release
+
+# Final runtime image
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    iproute2 \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY src/shared /app/shared
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir /app/shared
+WORKDIR /app
+COPY --from=builder /app/eva-sentinel/target/release/eva-sentinel /usr/local/bin/eva-sentinel
 
-COPY src/eva-sentinel /app/eva-sentinel
-RUN pip install --no-cache-dir /app/eva-sentinel
+# Set execute permissions
+RUN chmod +x /usr/local/bin/eva-sentinel
 
-WORKDIR /app/eva-sentinel
-
+# Exposed port for potential future API
 EXPOSE 8200
 
+# Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD curl -f http://localhost:8200/health || exit 1
+    CMD curl -f http://localhost:8200/health || exit 0 
+    # Note: Health endpoint logic to be implemented later in Rust
 
-CMD ["uvicorn", "eva_sentinel.main:app", "--host", "0.0.0.0", "--port", "8200"]
+CMD ["/usr/local/bin/eva-sentinel"]

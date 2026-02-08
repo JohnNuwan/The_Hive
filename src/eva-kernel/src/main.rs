@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     audit_trail.set_persistence_path(audit_path.clone());
 
     let validator = TradeValidator::new(constitution.clone());
-    let kill_switch = KillSwitch::new();
+    let kill_switch = KillSwitch::new(constitution.trading.max_daily_drawdown_percent);
 
     let constitution_arc = Arc::new(Mutex::new(constitution.clone()));
     let validator_arc = Arc::new(Mutex::new(validator));

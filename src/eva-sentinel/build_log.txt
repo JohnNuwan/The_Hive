@@ -1,0 +1,62 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded futures-sink v0.3.31
+  Downloaded cfg-if v1.0.4
+  Downloaded dyn-clone v1.0.20
+  Downloaded futures-core v0.3.31
+  Downloaded httpdate v1.0.3
+  Downloaded equivalent v1.0.2
+  Downloaded form_urlencoded v1.2.2
+  Downloaded toml_write v0.1.2
+  Downloaded futures-macro v0.3.31
+  Downloaded http-body v0.4.6
+  Downloaded serde_spanned v0.6.9
+  Downloaded serde_repr v0.1.20
+  Downloaded yoke-derive v0.8.1
+  Downloaded scopeguard v1.2.0
+  Downloaded powerfmt v0.2.0
+  Downloaded utf8_iter v1.0.4
+  Downloaded serde_urlencoded v0.7.1
+  Downloaded idna_adapter v1.2.1
+  Downloaded matchers v0.2.0
+  Downloaded lazy_static v1.5.0
+  Downloaded tower-service v0.3.3
+  Downloaded thread_local v1.1.9
+  Downloaded thiserror v1.0.69
+  Downloaded zerofrom-derive v0.1.6
+  Downloaded zerofrom v0.1.6
+  Downloaded litemap v0.8.1
+  Downloaded quote v1.0.44
+  Downloaded parking_lot_core v0.9.12
+  Downloaded pin-project-lite v0.2.16
+  Downloaded socket2 v0.5.10
+  Downloaded socket2 v0.6.2
+  Downloaded smallvec v1.15.1
+  Downloaded zerovec-derive v0.11.2
+  Downloaded serde v1.0.228
+  Downloaded mio v1.1.1
+  Downloaded zmij v1.0.19
+  Downloaded idna v1.1.0
+  Downloaded futures-util v0.3.31
+  Downloaded tracing-attributes v0.1.31
+  Downloaded tracing-core v0.1.36
+  Downloaded regex-syntax v0.8.9
+  Downloaded zerotrie v0.2.3
+  Downloaded libc v0.2.180
+  Downloaded zerovec v0.11.5
+  Downloaded winnow v0.7.14
+  Downloaded tracing v0.1.44
+  Downloaded tokio v1.49.0
+  Downloaded tracing-subscriber v0.3.22
+  Downloaded time v0.3.47
+error: failed to download replaced source registry `crates-io`
+
+Caused by:
+  failed to parse manifest at `/usr/local/cargo/registry/src/index.crates.io-6f17d22bba15001f/time-0.3.47/Cargo.toml`
+
+Caused by:
+  feature `edition2024` is required
+
+  The package requires the Cargo feature called `edition2024`, but that feature is not stabilized in this version of Cargo (1.75.0 (1d8b05cdd 2023-11-20)).
+  Consider trying a newer version of Cargo (this may require the nightly release).
+  See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#edition-2024 for more information about the status of this feature.
