@@ -1,13 +1,18 @@
 import logging
 import asyncio
+import json
+import os
 from datetime import datetime
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from pydantic import BaseModel
 from shared.redis_client import init_redis, get_redis_client
+from shared.auth_middleware import InternalAuthMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+LEDGER_FILE = "ledger.json"
 
 class OperatingExpense(BaseModel):
     description: str
@@ -21,6 +26,9 @@ async def lifespan(app: FastAPI):
     logger.info("💰 Démarrage EVA Accountant (L'Auditeur)...")
     await init_redis()
     
+    # Charger les données persistantes
+    load_ledger()
+    
     # Heartbeat
     asyncio.create_task(hard_heartbeat())
     
@@ -29,8 +37,9 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Arrêt EVA Accountant")
 
 app = FastAPI(title="EVA Accountant", lifespan=lifespan)
+app.add_middleware(InternalAuthMiddleware)
 
-# État financier simple (en mémoire pour l'instant, à persister plus tard)
+# État financier global
 financial_state = {
     "gross_profit": 0.0,
     "tax_provision": 0.0,
@@ -38,6 +47,29 @@ financial_state = {
     "net_roi": 0.0,
     "expenses_detail": []
 }
+
+def save_ledger():
+    """Sauvegarde l'état financier sur disque"""
+    try:
+        with open(LEDGER_FILE, "w") as f:
+            json.dump(financial_state, f, indent=4, default=str)
+        logger.info("💾 Ledger sauvegardé")
+    except Exception as e:
+        logger.error(f"❌ Erreur sauvegarde ledger: {e}")
+
+def load_ledger():
+    """Charge le ledger depuis le disque"""
+    global financial_state
+    if os.path.exists(LEDGER_FILE):
+        try:
+            with open(LEDGER_FILE, "r") as f:
+                data = json.load(f)
+                financial_state.update(data)
+            logger.info("📂 Ledger chargé avec succès")
+        except Exception as e:
+            logger.error(f"❌ Erreur chargement ledger: {e}")
+    else:
+        logger.info("🆕 Aucun ledger trouvé, démarrage à zéro.")
 
 async def hard_heartbeat():
     """Signal de présence pour l'orchestrateur Hive"""
@@ -79,6 +111,7 @@ async def register_expense(expense: OperatingExpense):
     # Recalcul ROI
     financial_state["net_roi"] = financial_state["gross_profit"] - financial_state["tax_provision"] - financial_state["operating_expenses"]
     
+    save_ledger()
     logger.info(f"💸 Dépense enregistrée : {expense.description} ({expense.amount} €)")
     return {"status": "recorded", "new_net_roi": financial_state["net_roi"]}
 
@@ -91,4 +124,5 @@ async def sync_with_compliance(data: dict):
     # Recalcul ROI
     financial_state["net_roi"] = financial_state["gross_profit"] - financial_state["tax_provision"] - financial_state["operating_expenses"]
     
+    save_ledger()
     return {"status": "synchronized", "net_roi": financial_state["net_roi"]}

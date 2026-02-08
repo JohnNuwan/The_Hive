@@ -86,6 +86,7 @@ pub struct AuditTrail {
     records: VecDeque<AuditRecord>,
     max_records: usize,
     last_hash: String,
+    persistence_path: Option<std::path::PathBuf>,
 }
 
 impl AuditTrail {
@@ -95,7 +96,13 @@ impl AuditTrail {
             records: VecDeque::new(),
             max_records,
             last_hash: "genesis".to_string(),
+            persistence_path: None,
         }
+    }
+
+    /// Définit le chemin de persistance
+    pub fn set_persistence_path(&mut self, path: std::path::PathBuf) {
+        self.persistence_path = Some(path);
     }
 
     /// Ajoute un enregistrement à la chaîne
@@ -103,7 +110,7 @@ impl AuditTrail {
         &mut self,
         agent: &str,
         action: &str,
-        details: serde_json::Value,
+        details: serde_json::value::Value,
     ) -> AuditRecord {
         let record = AuditRecord::new(
             agent.to_string(),
@@ -118,6 +125,13 @@ impl AuditTrail {
         // Garder seulement les N derniers enregistrements en mémoire
         while self.records.len() > self.max_records {
             self.records.pop_front();
+        }
+
+        // Persistance automatique si le chemin est défini
+        if let Some(path) = &self.persistence_path {
+            if let Err(e) = self.save_to_disk(path) {
+                eprintln!("⚠️ Erreur lors de la sauvegarde de l'audit trail: {}", e);
+            }
         }
 
         record
@@ -166,6 +180,32 @@ impl AuditTrail {
     /// Retourne le dernier hash
     pub fn get_last_hash(&self) -> &str {
         &self.last_hash
+    }
+
+    /// Sauvegarde l'audit trail sur le disque (Black Box)
+    pub fn save_to_disk(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(&self.records)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Charge l'audit trail depuis le disque
+    pub fn load_from_disk(path: &std::path::Path, max_records: usize) -> std::io::Result<Self> {
+        if !path.exists() {
+            return Ok(Self::new(max_records));
+        }
+
+        let content = std::fs::read_to_string(path)?;
+        let records: VecDeque<AuditRecord> = serde_json::from_str(&content)?;
+        let last_hash = records.back()
+            .map(|r| r.record_hash.clone())
+            .unwrap_or_else(|| "genesis".to_string());
+
+        Ok(Self {
+            records,
+            max_records,
+            last_hash,
+        })
     }
 }
 

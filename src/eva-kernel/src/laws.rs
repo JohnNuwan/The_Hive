@@ -143,6 +143,11 @@ impl Constitution {
         Ok(constitution)
     }
 
+    /// Retourne le temps de modification du fichier
+    pub fn get_modification_time(path: &Path) -> Option<std::time::SystemTime> {
+        fs::metadata(path).ok()?.modified().ok()
+    }
+
     /// Vérifie si un risque de trade est autorisé selon Loi 2
     pub fn is_trade_risk_allowed(&self, risk_percent: f64) -> bool {
         risk_percent <= self.trading.max_risk_per_trade_percent

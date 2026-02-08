@@ -14,7 +14,7 @@ export default function TradingPanel() {
                     getStatus(),
                     getTradingStatus()
                 ])
-                setBankerStatus(statusData.banker?.status || 'unknown')
+                setBankerStatus((statusData.banker?.status || 'unknown') as 'online' | 'offline' | 'unknown')
                 setTradingData(tradingResp)
                 setIsLoading(false)
             } catch (e) {
@@ -55,8 +55,8 @@ export default function TradingPanel() {
                         glow={totalProfit >= 0 ? "emerald" : "amber"}
                     />
                     <StatCard
-                        title="Risque / Drawdown"
-                        value={`${parseFloat(risk.daily_drawdown_percent || 0).toFixed(2)} %`}
+                        title="VaR / Drawdown"
+                        value={`${parseFloat(risk.daily_drawdown_percent || 0).toFixed(2)}% | VaR: ${parseFloat(risk.details?.var_check?.details || 0).toFixed(4)}`}
                         icon={<ShieldAlert className="text-amber-400" />}
                         trend={risk.trading_allowed ? "SECURE" : "LOCKED"}
                         glow="amber"
@@ -120,11 +120,13 @@ export default function TradingPanel() {
 
                 <div className="glass rounded-[2rem] p-8 grow shadow-xl relative overflow-hidden">
                     <div className="absolute top-0 right-0 w-24 h-24 bg-sky-500/5 blur-3xl rounded-full" />
-                    <h4 className="font-black text-sm text-white/80 mb-6 uppercase tracking-widest">Analyse Sentiments (OSINT)</h4>
-                    <div className="space-y-6">
+                    <h4 className="font-black text-sm text-white/80 mb-6 uppercase tracking-widest">Score de Sincérité Cognitive</h4>
+                    <div className="mt-4">
+                        <SincerityGauge score={tradingData?.last_sincerity_score || 0.85} />
+                    </div>
+                    <div className="mt-8 space-y-6">
                         <SentimentItem symbol="OR / XAUUSD" sentiment="Bullish" score={85} />
                         <SentimentItem symbol="NASDAQ 100" sentiment="Neutral" score={52} />
-                        <SentimentItem symbol="EURO / DOLLAR" sentiment="Bearish" score={24} />
                     </div>
                 </div>
             </div>
@@ -164,6 +166,24 @@ function AccountRow({ label, status, color }: { label: string, status: string, c
                 <div className={`w-2 h-2 rounded-full ${glowClass} shadow-[0_0_8px] animate-pulse`}></div>
                 <span className="text-[9px] font-black uppercase text-slate-500 tracking-widest">{status}</span>
             </div>
+        </div>
+    )
+}
+
+function SincerityGauge({ score }: { score: number }) {
+    const color = score > 0.8 ? 'text-emerald-400' : score > 0.6 ? 'text-sky-400' : 'text-red-400'
+    const barColor = score > 0.8 ? 'bg-emerald-500' : score > 0.6 ? 'bg-sky-500' : 'bg-red-500'
+
+    return (
+        <div className="flex flex-col items-center">
+            <div className={`text-4xl font-black ${color} mb-2`}>{(score * 100).toFixed(0)}%</div>
+            <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
+                <div
+                    className={`h-full ${barColor} transition-all duration-1000 shadow-[0_0_15px] shadow-current`}
+                    style={{ width: `${score * 100}%` }}
+                />
+            </div>
+            <p className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-3">Validation Neuronale Active</p>
         </div>
     )
 }

@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from shared import Settings, get_settings
 from shared.redis_client import init_redis
+from shared.auth_middleware import InternalAuthMiddleware
 
 from eva_sentinel.services.monitor import SystemMonitor
 
@@ -86,6 +87,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Sécurité Inter-Agents
+app.add_middleware(InternalAuthMiddleware)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENDPOINTS

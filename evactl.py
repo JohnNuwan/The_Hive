@@ -20,10 +20,12 @@ from datetime import datetime
 SERVICES = {
     "core": "http://localhost:8000",
     "banker": "http://localhost:8100",
+    "sentinel": "http://localhost:8200",
     "compliance": "http://localhost:8300",
     "substrate": "http://localhost:8400",
-    "lab": "http://localhost:8500",
-    "rwa": "http://localhost:8600"
+    "accountant": "http://localhost:8500",
+    "lab": "http://localhost:8600",
+    "rwa": "http://localhost:8700"
 }
 
 LOCKDOWN_FILE = "lockdown.mode"
@@ -35,14 +37,23 @@ def check_status(args):
     print(f"{'SERVICE':<15} | {'URL':<25} | {'STATUS':<10}")
     print("-" * 60)
     
+    import httpx
+    
     all_up = True
     for name, url in SERVICES.items():
-        # En mode offline/dev sans Docker, on simule ou on check le ping
-        status = "DOWN"
-        # Ici on pourrait utiliser requests.get(url + "/health")
-        # Mais pour la démo offline, on indique que ce sont des mocks
+        try:
+            # On tente de joindre le point d'entrée health ou l'index
+            response = httpx.get(f"{url}/health", timeout=1.0)
+            if response.status_code == 200:
+                status = "UP ✅"
+            else:
+                status = f"WARN ({response.status_code})"
+                all_up = False
+        except (httpx.ConnectError, httpx.TimeoutException):
+            status = "DOWN ❌"
+            all_up = False
+        
         print(f"{name:<15} | {url:<25} | {status:<10}")
-        all_up = False
     
     print("-" * 60)
     if os.path.exists(LOCKDOWN_FILE):

@@ -32,9 +32,9 @@ use crate::validator::{TradeValidationRequest, TradeValidator, ValidationResult}
 /// État partagé entre tous les handlers Axum (Arc pour concurrence)
 #[derive(Clone)]
 pub struct AppState {
-    pub validator: Arc<TradeValidator>,
+    pub validator: Arc<Mutex<TradeValidator>>,
     pub kill_switch: Arc<Mutex<KillSwitch>>,
-    pub constitution: Arc<Constitution>,
+    pub constitution: Arc<Mutex<Constitution>>,
     pub audit_trail: Arc<Mutex<AuditTrail>>,
 }
 
@@ -72,12 +72,13 @@ pub struct KillSwitchResponse {
 pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
     let ks = state.kill_switch.lock().await;
     let audit = state.audit_trail.lock().await;
+    let constitution = state.constitution.lock().await;
 
     Json(HealthResponse {
         status: "operational".to_string(),
         message: "EVA Kernel is running.".to_string(),
         kill_switch_active: ks.is_active(),
-        constitution_version: state.constitution.version.clone(),
+        constitution_version: constitution.version.clone(),
         audit_records: audit.len(),
     })
 }
@@ -105,7 +106,9 @@ pub async fn validate_trade(
     drop(ks); // Libérer le lock avant la validation
 
     // Valider le trade
-    let result = state.validator.validate(&request);
+    let validator = state.validator.lock().await;
+    let result = validator.validate(&request);
+    drop(validator);
 
     // Enregistrer dans l'Audit Trail (Black Box)
     let mut audit = state.audit_trail.lock().await;
@@ -203,7 +206,8 @@ pub async fn get_kill_switch_status(State(state): State<AppState>) -> Json<KillS
 
 /// GET /constitution — Retourne la Constitution complète
 pub async fn get_constitution(State(state): State<AppState>) -> Json<Constitution> {
-    Json((*state.constitution).clone())
+    let constitution = state.constitution.lock().await;
+    Json((*constitution).clone())
 }
 
 /// GET /audit — Retourne les derniers enregistrements de l'Audit Trail
@@ -220,15 +224,16 @@ pub async fn get_audit_trail(State(state): State<AppState>) -> impl IntoResponse
 
 /// Démarre le serveur Axum du Kernel sur le port 8080
 pub async fn start_kernel_server(
-    validator: TradeValidator,
-    kill_switch: KillSwitch,
-    constitution: Constitution,
+    validator: Arc<Mutex<TradeValidator>>,
+    kill_switch: Arc<Mutex<KillSwitch>>,
+    constitution: Arc<Mutex<Constitution>>,
+    audit_trail: Arc<Mutex<AuditTrail>>,
 ) {
     let state = AppState {
-        validator: Arc::new(validator),
-        kill_switch: Arc::new(Mutex::new(kill_switch)),
-        constitution: Arc::new(constitution),
-        audit_trail: Arc::new(Mutex::new(AuditTrail::new(10_000))),
+        validator,
+        kill_switch,
+        constitution,
+        audit_trail,
     };
 
     let app = Router::new()

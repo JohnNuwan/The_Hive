@@ -1,0 +1,46 @@
+# THE HIVE - CONSTITUTION (The Tablet)
+# Version: 1.1.0
+# Last Updated: 2026-02-08
+
+version = "1.1.0"
+last_updated = "2026-02-08"
+
+# --- FUNDAMENTAL LAWS ---
+
+[[laws]]
+id = 0
+name = "Systemic Integrity"
+description = "Preserve the integrity of THE HIVE at all costs."
+priority = 100
+enforcement = "hardware"
+
+[[laws]]
+id = 1
+name = "Human Flourishing"
+description = "The well-being of the Master is the highest priority."
+priority = 95
+enforcement = "software"
+
+[[laws]]
+id = 2
+name = "Capital Protection"
+description = "Never risk more than the defined limits."
+priority = 90
+enforcement = "kernel"
+
+# --- RULES OF ENGAGEMENT (ROE) ---
+
+[trading]
+max_risk_per_trade_percent = 1.0
+max_daily_drawdown_percent = 4.0
+max_total_drawdown_percent = 8.0
+max_concurrent_positions = 3
+require_stop_loss = true
+anti_tilt_consecutive_losses = 2
+anti_tilt_duration_hours = 24
+news_filter_minutes = 30
+
+[security]
+max_login_attempts = 3
+lockout_duration_minutes = 30
+gpu_temp_critical_celsius = 90.0

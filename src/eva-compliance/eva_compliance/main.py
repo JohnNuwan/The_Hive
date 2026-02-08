@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from eva_compliance.legal_wrapper import LegalWrapper
 from eva_compliance.tax_manager import TaxManager
 from shared.redis_client import init_redis, get_redis_client
+from shared.auth_middleware import InternalAuthMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Arrêt EVA Compliance")
 
 app = FastAPI(title="EVA Compliance", lifespan=lifespan)
+app.add_middleware(InternalAuthMiddleware)
 legal = LegalWrapper()
 tax_manager = TaxManager()
 

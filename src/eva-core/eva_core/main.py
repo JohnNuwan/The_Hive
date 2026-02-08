@@ -34,11 +34,15 @@ from shared import (
 )
 from shared.redis_client import get_redis_client, init_redis
 from shared.mqtt_client import EVAMQTTClient
+from shared.auth_middleware import InternalAuthMiddleware
+from shared.internal_auth import get_internal_headers
 
 from eva_core.router.intent import IntentRouter
 from eva_core.services.llm import LLMService, get_llm_service
 from eva_core.services.memory import MemoryService, get_memory_service
 from eva_core.services.prompt_master import PromptMaster
+from eva_core.strategy import StrategyOrchestrator
+from eva_core.self_healing import SelfHealingService
 
 # Configuration logging
 logging.basicConfig(level=logging.INFO)
@@ -127,10 +131,14 @@ async def lifespan(app: FastAPI):
     app.state.mqtt = EVAMQTTClient("core")
     await app.state.mqtt.connect()
 
+    # Intégration Strategy Orchestrator & Self-Healing
+    app.state.strategy_orchestrator = StrategyOrchestrator()
+    app.state.self_healing = SelfHealingService()
+
     logger.info("✅ EVA Core prêt avec moteur de prompts Biblio_IA et lien MQTT")
 
-    # Démarrage de l'orchestrateur de survie
-    asyncio.create_task(self_healing_orchestrator())
+    # Démarrage de l'orchestrateur de survie Phoenix
+    asyncio.create_task(app.state.self_healing.start_monitoring())
 
     yield
 
@@ -160,6 +168,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Internal Security Middleware
+app.add_middleware(InternalAuthMiddleware)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -237,10 +248,10 @@ async def chat(request: ChatRequest) -> ChatResponse:
             content=request.message,
         )
 
-        # Classification de l'intent
-        intent_router: IntentRouter = app.state.intent_router
-        intent = await intent_router.classify(request.message)
-        logger.info(f"Intent classifié: {intent.intent_type} (confiance: {intent.confidence:.2f})")
+        # Classification de l'intent (Via Strategy Orchestrator pour plus de "profondeur")
+        strategy: StrategyOrchestrator = app.state.strategy_orchestrator
+        intent = await strategy.route_request(request.message)
+        logger.info(f"Intent orchestré: {intent.intent_type} -> {intent.target_expert} (confiance: {intent.confidence:.2f})")
 
         # Générer la réponse selon l'intent
         llm_service: LLMService = app.state.llm_service
@@ -331,37 +342,7 @@ async def get_active_drones() -> list[dict]:
     return drones
 
 
-async def self_healing_orchestrator():
-    """
-    Surveille la santé des drones dans Redis.
-    Redémarre automatiquement les missions si un heartbeat est perdu.
-    """
-    redis_client = get_redis_client()
-    
-    while True:
-        try:
-            keys = await redis_client._client.keys("swarm:drone:*")
-            for key in keys:
-                drone = await redis_client.cache_get(key)
-                if drone and drone.get("status") == "active":
-                    last_callback = datetime.fromisoformat(drone["last_callback"])
-                    delta = (datetime.now() - last_callback).total_seconds()
-                    
-                    if delta > 120: # Drone silencieux depuis 2 min
-                        logger.warning(f"Self-Healing: Drone {drone['name']} ({drone['id']}) perdu. Redéploiement...")
-                        await redis_client.broadcast_to_swarm(
-                            source="core",
-                            action="SWARM_SURVEILLANCE",
-                            payload={"redeploy_drone": drone["name"]}
-                        )
-                        # On marque le drone en erreur pour éviter les doublons
-                        drone["status"] = "healed"
-                        await redis_client.cache_set(key, drone, ttl_seconds=3600)
-                        
-        except Exception as e:
-            logger.error(f"Error in self-healing orchestrator: {e}")
-            
-        await asyncio.sleep(60) # Vérification chaque minute
+# Note: The old self_healing_orchestrator is replaced by SelfHealingService
 
 
 @app.get("/memory/search", tags=["Mémoire"])
@@ -435,11 +416,12 @@ async def trading_status() -> dict[str, Any]:
     
     async with httpx.AsyncClient(timeout=5.0) as client:
         try:
-            # On récupère tout en parallèle pour minimiser la latence
+            # On récupère tout en parallèle avec les headers de sécurité internes
+            internal_headers = get_internal_headers("core")
             responses = await asyncio.gather(
-                client.get(f"{banker_url}/account"),
-                client.get(f"{banker_url}/positions"),
-                client.get(f"{banker_url}/risk/status"),
+                client.get(f"{banker_url}/account", headers=internal_headers),
+                client.get(f"{banker_url}/positions", headers=internal_headers),
+                client.get(f"{banker_url}/risk/status", headers=internal_headers),
                 return_exceptions=True
             )
             
@@ -475,7 +457,10 @@ async def system_status() -> dict[str, Any]:
     
     async with httpx.AsyncClient(timeout=3.0) as client:
         try:
-            response = await client.get(f"{sentinel_url}/system/metrics")
+            response = await client.get(
+                f"{sentinel_url}/system/metrics", 
+                headers=get_internal_headers("core")
+            )
             if response.status_code == 200:
                 metrics = response.json()
                 return {

@@ -39,12 +39,15 @@ from shared import (
     calculate_cvar,
 )
 from shared.redis_client import get_redis_client, init_redis
+from shared.auth_middleware import InternalAuthMiddleware
 
 from eva_banker.services.mt5 import MT5Service, get_mt5_service
 from eva_banker.services.risk import RiskValidator, get_risk_validator
+from eva_banker.services.binance_service import BinanceService
 from eva_banker.skill_library import SkillLibrary, SkilledBehavior
 from eva_banker.models.gnn_model import TFTGNNModel
 from eva_banker.swarm import BankerSwarm
+from eva_core.probes import check_cognitive_sincerity
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -174,6 +177,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.mt5_service = get_mt5_service()
     app.state.risk_validator = get_risk_validator()
+    app.state.binance_service = BinanceService()
     
     # Hiérarchie
     app.state.skill_library = SkillLibrary()
@@ -264,6 +268,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Securité Inter-Agents
+app.add_middleware(InternalAuthMiddleware)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENDPOINTS
@@ -301,10 +308,29 @@ async def create_order(request: OrderRequest) -> OrderResponse:
 
     # 2. Le Manager définit la stratégie (Skill)
     manager: BankerManager = app.state.manager
-    # Simulation de données de marché pour le manager
-    skill = manager.plan_strategy({"price": 2034.50})
+    # Simulation de données de marché pour le manager (incluant VaR)
+    market_data = {"price": 2034.50, "returns": [0.001, -0.002, 0.005]}
+    skill = manager.plan_strategy(market_data)
 
-    # 3. Conversion en TradeOrder
+    # 3. Vérification de la "Sincérité Cognitive"
+    # On simule l'obtention des activations du LLM
+    import torch
+    mock_activations = torch.randn(1, 4096)
+    is_sincere, sincerity_msg = check_cognitive_sincerity(
+        mock_activations, 
+        "The market shows a strong bullish trend on H4.", 
+        request.action
+    )
+    
+    if not is_sincere:
+        logger.warning(f"🚫 BLOCKING ORDER: {sincerity_msg}")
+        return OrderResponse(
+            success=False,
+            message=sincerity_msg,
+            risk_check={"allowed": False, "reason": "COGNITIVE_SINCERITY_FAILURE"}
+        )
+
+    # 4. Conversion en TradeOrder
     order = TradeOrder(
         symbol=request.symbol,
         action=request.action,
@@ -315,7 +341,7 @@ async def create_order(request: OrderRequest) -> OrderResponse:
         comment=f"Skill: {skill}"
     )
 
-    # 4. Vérification des risques (Loi 2)
+    # 5. Vérification des risques (Loi 2)
     risk_validator: RiskValidator = app.state.risk_validator
     risk_result = await risk_validator.validate_order(order)
 
@@ -326,7 +352,7 @@ async def create_order(request: OrderRequest) -> OrderResponse:
             risk_check=risk_result,
         )
 
-    # 5. Le Worker exécute la compétence
+    # 6. Le Worker exécute la compétence
     worker: BankerWorker = app.state.worker
     result = await worker.execute_skill(skill, order)
 
@@ -468,3 +494,12 @@ async def trigger_kill_switch() -> dict[str, str]:
         "status": "kill_switch_triggered",
         "message": f"{closed} positions fermées sur {len(positions)}",
     }
+
+
+@app.get("/status/crypto", tags=["Compte"])
+async def get_crypto_status():
+    """Récupère l'état des comptes Crypto (Binance)"""
+    from eva_banker.services.binance_service import BinanceService
+    binance: BinanceService = app.state.binance_service
+    balances = await binance.get_account_balances()
+    return {k: float(v) for k, v in balances.items()}

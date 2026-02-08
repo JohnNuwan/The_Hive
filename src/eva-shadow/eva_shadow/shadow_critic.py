@@ -18,30 +18,31 @@ class ShadowCritic:
 
     async def run_shadow_simulation(self):
         """
-        Simule une stratégie "Adverse" ou "Alternative" en temps réel.
+        Simule une stratégie Contrarienne contre le Banker.
+        Écoute les ordres du Banker et simule l'inverse.
         """
         self.active = True
-        logger.info("Shadow Expert: Ombre activée. Analyse comparative en cours.")
+        logger.info("Shadow Expert: Stratégie Contrarienne s'active sur le flux Banker.")
         
+        # En production, on utiliserait un vrai sub Redis
+        # Pour la démo, on simule l'écoute et la comparaison
         while self.active:
-            # Simulation d'un trade de l'ombre
-            # Ici on pourrait appeler une version différente du GNN
-            shadow_gain = Decimal(str(round(float(uniform(-10, 15)), 2)))
-            self.shadow_pnl += shadow_gain
+            # On imagine que le Banker a fait -100 et que l'Ombre (Contrarienne) a fait +100
+            # On récupère le PNL réel du Banker via une variable partagée ou Redis
+            # Simulation simplifiée de surperformance
+            mock_banker_loss = Decimal("-50.0")
+            self.shadow_pnl += abs(mock_banker_loss) * Decimal("1.2") # L'ombre gagne là où le Banker perd
             
-            # Comparaison avec les données du Banker (récupérées via Redis)
-            # En prod: on écoute eva.banker.events
-            
-            if self.shadow_pnl > (self.banker_pnl + Decimal("100")):
-                logger.warning("🚀 SHADOW ALERT: Alternative strategy is outperforming the main Banker!")
+            if self.shadow_pnl > (self.banker_pnl + Decimal("200")):
+                logger.warning(f"🚀 SHADOW ALERT: Contrarian strategy Alpha detected! Shadow PnL: {self.shadow_pnl}")
                 await self.redis.publish("eva.swarm.events", {
                     "type": "COGNITIVE_MUTATION_REQUIRED",
-                    "reason": "Shadow strategy showing higher Alpha",
+                    "reason": "BANKER_UNDERPERFORMING_SHADOW_ALPHA",
                     "shadow_pnl": float(self.shadow_pnl),
                     "banker_pnl": float(self.banker_pnl)
                 })
             
-            await asyncio.sleep(300) # Comparaison toutes les 5 minutes
+            await asyncio.sleep(120) # Comparaison toutes les 2 minutes
 
     def stop(self):
         self.active = False

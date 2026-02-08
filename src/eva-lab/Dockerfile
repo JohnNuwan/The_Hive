@@ -7,12 +7,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml .
-RUN pip install --no-cache-dir .
+COPY src/shared /app/shared
+COPY src/eva-lab /app/eva-lab
 
-COPY . .
+RUN pip install --no-cache-dir /app/shared
+RUN pip install --no-cache-dir /app/eva-lab
 
 # Exposition du port API
-EXPOSE 8500
+EXPOSE 8600
 
-CMD ["uvicorn", "eva_lab.main:app", "--host", "0.0.0.0", "--port", "8500"]
+CMD ["uvicorn", "eva_lab.main:app", "--host", "0.0.0.0", "--port", "8600"]

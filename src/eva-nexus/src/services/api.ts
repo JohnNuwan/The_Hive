@@ -1,8 +1,8 @@
 /**
  * THE HIVE — API Service
- * Communication avec les microservices EVA
- * Inclut authentification JWT automatique sur tous les appels
  */
+
+
 
 // ═══ AUTH HELPERS ═══
 const TOKEN_KEY = 'hive-auth-token'
@@ -162,6 +162,14 @@ export async function getAllNodesHealth(): Promise<NodeHealth[]> {
     return Promise.all(nodes.map(n => checkNodeHealth(n.name, n.url)))
 }
 
+export async function getStatus() {
+    return safeFetch('/api/core/system/status', {
+        core: { status: 'online' },
+        banker: { status: 'online' },
+        sentinel: { status: 'online' }
+    })
+}
+
 // ═══ KERNEL ═══
 export async function getKillSwitchStatus(): Promise<KillSwitchStatus> {
     return safeFetch('/api/kernel/health', { is_active: false, message: 'OFFLINE' })
@@ -262,7 +270,7 @@ export async function getDockerContainers(): Promise<ContainerStats[]> {
 }
 
 export async function getSystemStatus() {
-    const response = await fetch(`${API_BASE_URL}/system/status`)
+    const response = await fetch('/api/core/system/status')
     if (!response.ok) throw new Error('Sentinel unreachable')
     return response.json()
 }

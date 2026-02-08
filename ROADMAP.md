@@ -65,6 +65,21 @@
 
 ---
 
+## 🛠️ PHASE 15 : ENGINE DEEPENING - ✅ COMPLÉTÉE
+- [x] **Self-Healing** : Phoenix Protocol (Redémarrage auto via Docker SDK).
+- [x] **Strategy Orchestrator** : Mixture of Experts (MoE) via LLM.
+- [x] **Persistent Audit** : Black Box avec sauvegarde sur disque (Rust).
+
+---
+
+## 🛡️ PHASE 16 : PROFESSIONAL INFRASTRUCTURE - ✅ COMPLÉTÉE
+- [x] **Centralized Logging** : Stack Loki / Promtail / Grafana intégrée.
+- [x] **Internal Security** : Authentification inter-experts via JWT.
+- [x] **Dynamic Laws** : Hot-reload de la Constitution (The Tablet) sans restart.
+- [x] **Performance Metrics** : Instrumentation Prometheus dans le Nervous System (Go).
+
+---
+
 ## 📊 VÉRIFICATIONS TECHNIQUES (AUDIT)
 
 | Module | Code Présent ? | Tests Unitaires ? | Doc à jour ? |
@@ -75,6 +90,7 @@
 | `eva-sentinel`| ✅ | ⚠️ (Partiel) | ✅ |
 | `eva-lab` | ✅ | ✅ | ✅ |
 | `eva-nexus` | ✅ | ✅ | ✅ |
+| `eva-accountant`| ✅ | ✅ | ✅ |
 | `docker-compose`| ✅ | N/A | ✅ |
 
 ---

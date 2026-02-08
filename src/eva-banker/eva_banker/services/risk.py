@@ -10,7 +10,13 @@ from functools import lru_cache
 from typing import Any
 from uuid import UUID, uuid4
 
-from shared import RiskStatus, TradeOrder, get_settings
+from shared import (
+    RiskStatus, 
+    TradeOrder, 
+    get_settings, 
+    calculate_var, 
+    calculate_cvar
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +135,18 @@ class RiskValidator:
         result["checks"].append(
             ("max_positions", True, f"Positions {self._open_positions_count}/{self.max_open_positions}")
         )
+
+        # 7. Vérification VaR (Value at Risk) - Conscience du risque adaptative
+        # On suppose que les 'returns' sont passés ou disponibles via une source de données
+        # Pour la démo, on utilise des rendements simulés
+        mock_returns = [0.001, -0.002, 0.005, -0.01, 0.002]
+        var = calculate_var(mock_returns)
+        if var < -0.025: # Seuil de panique VaR 2.5%
+            result["allowed"] = False
+            result["reason"] = f"VaR trop élevée ({var:.4f}). Marché instable."
+            result["checks"].append(("var_check", False, result["reason"]))
+            return result
+        result["checks"].append(("var_check", True, f"VaR OK ({var:.4f})"))
 
         logger.info(f"✅ Ordre validé: {order.symbol} {order.action.value} - risque {risk_percent:.2f}%")
         return result

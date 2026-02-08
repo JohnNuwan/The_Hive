@@ -58,10 +58,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // ═══════════════════════════════════════════════════════════════════
-    // CRÉER LES COMPOSANTS CRITIQUES
+    // CRÉER LES COMPOSANTS CRITIQUES (PARTAGÉS)
     // ═══════════════════════════════════════════════════════════════════
-    let validator = TradeValidator::new(constitution.clone());
-    let kill_switch = KillSwitch::new(constitution.trading.max_daily_drawdown_percent);
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use crate::audit::AuditTrail;
+
+    let audit_path = std::path::PathBuf::from("/mnt/black_box/audit.json");
+    let mut audit_trail = AuditTrail::load_from_disk(&audit_path, 10_000)
+        .unwrap_or_else(|_| AuditTrail::new(10_000));
+    audit_trail.set_persistence_path(audit_path);
+
+    let constitution_arc = Arc::new(Mutex::new(constitution.clone()));
+    let validator_arc = Arc::new(Mutex::new(validator));
+    let kill_switch_arc = Arc::new(Mutex::new(kill_switch));
+    let audit_trail_arc = Arc::new(Mutex::new(audit_trail));
 
     info!("✅ EVA Kernel prêt — Lancement des systèmes parallèles");
 
@@ -69,10 +80,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // LANCER LE SERVEUR AXUM EN PARALLÈLE
     // ═══════════════════════════════════════════════════════════════════
     tokio::spawn(start_kernel_server(
-        validator,
-        kill_switch,
-        constitution,
+        validator_arc.clone(),
+        kill_switch_arc.clone(),
+        constitution_arc.clone(),
+        audit_trail_arc.clone(),
     ));
+
+    // ═══════════════════════════════════════════════════════════════════
+    // HOT-RELOAD CONSTITUTION (The Tablet Watchdog)
+    // ═══════════════════════════════════════════════════════════════════
+    let path_clone = PathBuf::from(&constitution_path);
+    let const_clone = constitution_arc.clone();
+    let valid_clone = validator_arc.clone();
+
+    tokio::spawn(async move {
+        let mut last_mod = Constitution::get_modification_time(&path_clone);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let current_mod = Constitution::get_modification_time(&path_clone);
+            
+            if current_mod != last_mod {
+                info!("📜 Modification Constitution détectée. Hot-reloading...");
+                if let Ok(new_const) = Constitution::load(&path_clone) {
+                    let mut c = const_clone.lock().await;
+                    *c = new_const.clone();
+                    
+                    let mut v = valid_clone.lock().await;
+                    *v = TradeValidator::new(new_const);
+                    
+                    last_mod = current_mod;
+                    info!("✅ Constitution rechargée à chaud avec succès.");
+                } else {
+                    error!("❌ Échec du rechargement de la Constitution (Erreur de parsing).");
+                }
+            }
+        }
+    });
 
     // ═══════════════════════════════════════════════════════════════════
     // BOUCLE D'INTERCEPTION Redis + MQTT

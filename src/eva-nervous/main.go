@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -43,6 +46,25 @@ type Metrics struct {
 var metrics = Metrics{
 	UptimeStart: time.Now(),
 }
+
+// Prometheus Metrics
+var (
+	promMessagesRouted = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "nervous_messages_routed_total",
+		Help: "The total number of routed messages",
+	}, []string{"channel", "priority"})
+
+	promRoutingLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "nervous_routing_latency_seconds",
+		Help:    "Latency of message routing in seconds",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"channel"})
+
+	promErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "nervous_errors_total",
+		Help: "The total number of errors encountered",
+	})
+)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // REDIS CONNECTION (avec retry + auth)
@@ -99,6 +121,8 @@ func listenDangerSignals(rdb *redis.Client) {
 			rdb.Publish(ctx, "kernel_action", fmt.Sprintf(`{"action":"ACTIVATE_KILL_SWITCH","source":"%s","payload":%s}`, msg.Channel, msg.Payload))
 
 			elapsed := time.Since(start)
+			promMessagesRouted.WithLabelValues(msg.Channel, "P0").Inc()
+			promRoutingLatency.WithLabelValues(msg.Channel).Observe(elapsed.Seconds())
 			log.Printf("   ⚡ Routed in %v", elapsed)
 		}
 
@@ -125,6 +149,8 @@ func listenTradeSignals(rdb *redis.Client) {
 
 			// Étape 2 : Forward au Banker (le Kernel intercepte en parallèle)
 			rdb.Publish(ctx, "banker_orders", msg.Payload)
+
+			promMessagesRouted.WithLabelValues(msg.Channel, "P1").Inc()
 		}
 
 		log.Println("⚠️ Trade channel fermé, reconnecting...")
@@ -202,6 +228,7 @@ func watchdogLoop(rdb *redis.Client) {
 			lastBeat := val.(time.Time)
 			if now.Sub(lastBeat) > 10*time.Second {
 				metrics.ErrorsTotal.Add(1)
+				promErrors.Inc()
 				log.Printf("🚨 WATCHDOG: %s HEARTBEAT LOST (>10s)! Alerte Kernel.", agent)
 				rdb.Publish(ctx, "kernel_action", fmt.Sprintf(`{"action":"WATCHDOG_ALERT","agent":"%s","last_seen":"%s"}`, agent, lastBeat.Format(time.RFC3339)))
 			}
@@ -275,6 +302,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 func startHealthServer() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
+	mux.Handle("/metrics", promhttp.Handler())
 
 	port := getEnv("HEALTH_PORT", "9090")
 	log.Printf("📊 Health endpoint: http://0.0.0.0:%s/health", port)
