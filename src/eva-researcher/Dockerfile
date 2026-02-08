@@ -7,7 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY src/shared /app/shared
-RUN pip install --no-cache-dir /app/shared
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir /app/shared
 
 COPY src/eva-researcher /app/eva-researcher
 RUN pip install --no-cache-dir /app/eva-researcher
