@@ -13,6 +13,7 @@ from shared.redis_client import init_redis
 from shared.auth_middleware import InternalAuthMiddleware
 
 from eva_sentinel.services.monitor import SystemMonitor
+from eva_sentinel.services.notifier import TelegramNotifier
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,9 +38,15 @@ async def lifespan(app: FastAPI):
     app.state.monitor = SystemMonitor()
     await app.state.monitor.start()
     
+    # Notifier
+    app.state.notifier = TelegramNotifier()
+    
     # Heartbeat
     import asyncio
     app.state.heartbeat_task = asyncio.create_task(hard_heartbeat())
+    
+    # Listeners de notifications
+    app.state.notif_task = asyncio.create_task(notif_listener(app.state.notifier))
     
     logger.info("✅ The Sentinel actif")
     
@@ -68,6 +75,45 @@ async def hard_heartbeat():
         except Exception as e:
             logger.error(f"Heartbeat error: {e}")
         await asyncio.sleep(1.0)
+
+
+async def notif_listener(notifier: TelegramNotifier):
+    """
+    Écoute les canaux de la ruche et envoie des notifications Telegram.
+    """
+    from shared.redis_client import get_redis_client
+    redis = get_redis_client()
+    
+    async def handle_alert(channel, message):
+        # Dispatcher les alertes selon le canal
+        if channel == "danger_signal":
+            await notifier.notify_emergency("Nervous System", f"Signal critique détecté: {message}")
+        
+        elif channel == "eva.banker.trades":
+            # Format attendu {ticket, symbol, profit}
+            try:
+                await notifier.notify_trade(
+                    symbol=message.get("symbol", "UNKNOWN"),
+                    profit=float(message.get("profit", 0.0)),
+                    ticket=int(message.get("ticket_id", 0))
+                )
+            except Exception as e:
+                logger.error(f"Failed to process trade notification: {e}")
+        
+        elif channel == "eva.swarm.healing":
+            await notifier.notify_self_healing(
+                service=message.get("service", "unknown"),
+                event=message.get("event", "restart")
+            )
+
+    await redis.subscribe([
+        "danger_signal", 
+        "eva.banker.trades", 
+        "eva.swarm.healing"
+    ], handle_alert)
+    
+    logger.info("📡 Listener de notifications opérationnel")
+    await redis.listen()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # APPLICATION

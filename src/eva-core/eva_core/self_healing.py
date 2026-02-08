@@ -74,5 +74,14 @@ class SelfHealingService:
             await loop.run_in_executor(None, container.restart)
             logger.info(f"✅ {name} successfully resurrected.")
             
+            # Notifier la ruche via Redis (pour alerte Telegram)
+            from shared.redis_client import get_redis_client
+            redis = get_redis_client()
+            await redis.publish("eva.swarm.healing", {
+                "service": name,
+                "event": "resurrection",
+                "status": "success"
+            })
+            
         except Exception as e:
             logger.error(f"Failed to resurrect {name}: {e}")

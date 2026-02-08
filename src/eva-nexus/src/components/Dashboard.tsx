@@ -267,6 +267,38 @@ export default function Dashboard() {
                     </div>
                 </div>
             </div>
+
+            {/* ═══ NEW ROW: Visual Probes (Grafana) ═══ */}
+            <div className="grid grid-cols-2 gap-3">
+                <div className="cyber-panel hud-corners p-4">
+                    <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">VISUAL PROBE: SWARM LOGS (LOKI)</div>
+                    <div className="aspect-video bg-black/40 border border-matrix/10 rounded flex flex-col items-center justify-center space-y-3">
+                        <span className="text-[10px] text-matrix/60">LIVE LOKI FEED AGGREGATOR</span>
+                        <a
+                            href="http://localhost:3000/explore?orgId=1&left=%5B%22now-1h%22,%22now%22,%22Loki%22,%7B%22expr%22:%22%7Bcontainer%3D~%5C%22hive-.*%5C%22%7D%22%7D%5D"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="cyber-btn text-[9px] px-4 py-1.5"
+                        >
+                            🔗 OPEN EXPLORER
+                        </a>
+                    </div>
+                </div>
+                <div className="cyber-panel hud-corners p-4">
+                    <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">VISUAL PROBE: PERFORMANCE (PROMETHEUS)</div>
+                    <div className="aspect-video bg-black/40 border border-matrix/10 rounded flex flex-col items-center justify-center space-y-3">
+                        <span className="text-[10px] text-matrix/60">NERVOUS SYSTEM THROUGHPUT</span>
+                        <a
+                            href="http://localhost:3000/dashboards"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="cyber-btn text-[9px] px-4 py-1.5"
+                        >
+                            🔗 OPEN DASHBOARDS
+                        </a>
+                    </div>
+                </div>
+            </div>
         </div>
     )
 }

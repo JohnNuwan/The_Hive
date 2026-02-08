@@ -393,16 +393,22 @@ async def close_position(ticket: int) -> dict[str, Any]:
     
     # Intégration Compliance (Juriste / Loi 5)
     # Si le trade est profitable, on informe l'expert Compliance pour provisionnement URSSAF
-    if result.get("success") and result.get("profit", 0) > 0:
-        from shared.redis_client import get_redis_client
-        redis = get_redis_client()
+        # Signal pour Compliance (URSSAF)
         await redis.publish("eva.compliance.trades", {
             "ticket_id": ticket,
             "profit": result.get("profit"),
             "symbol": result.get("symbol", "UNKNOWN"),
             "timestamp": datetime.now().isoformat()
         })
-        logger.info(f"⚖️ Trade profit envoyé à Compliance pour provisionnement")
+        
+        # Signal pour Master Notification (Sentinel/Telegram)
+        await redis.publish("eva.banker.trades", {
+            "ticket_id": ticket,
+            "profit": result.get("profit"),
+            "symbol": result.get("symbol", "UNKNOWN")
+        })
+        
+        logger.info(f"⚖️ Trade profit envoyé à Compliance et Sentinel")
         
     return result
 

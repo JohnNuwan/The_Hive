@@ -80,6 +80,22 @@
 
 ---
 
+---
+
+## 🛰️ PHASE 17 : REAL-TIME ALERTING & UI SOVEREIGNTY - ✅ COMPLÉTÉE
+- [x] **Telegram Alerts** : Notifications instantanées des profits et urgences.
+- [x] **Nexus Integration** : Visual Probes Grafana (Loki/Prometheus) intégrées.
+- [x] **Chaos Resilience** : Phoenix Protocol validé via script de stress-test.
+
+---
+
+## 🔮 PROCHAINES ÉTAPES (PHASE 18+)
+- [ ] **Sovereign Database** : Migration vers une base de données distribuée (CockroachDB).
+- [ ] **Advanced Quant** : Intégration de modèles de Deep Learning (Julia/Flux).
+- [ ] **Neural Web** : Interface de visualisation GNN 3D pour le Swarm.
+
+---
+
 ## 📊 VÉRIFICATIONS TECHNIQUES (AUDIT)
 
 | Module | Code Présent ? | Tests Unitaires ? | Doc à jour ? |
