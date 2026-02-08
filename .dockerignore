@@ -1,0 +1,18 @@
+.git
+.venv
+node_modules
+target
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.db
+.ipynb_checkpoints
+Documentation
+CAHIER DES CHARGES_UPDATE
+CDC.md
+README.md
+ROADMAP.md
+mnt
+logs
+*.log

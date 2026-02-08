@@ -205,6 +205,7 @@ impl AuditTrail {
             records,
             max_records,
             last_hash,
+            persistence_path: Some(path.to_path_buf()),
         })
     }
 }

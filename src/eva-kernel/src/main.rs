@@ -18,6 +18,7 @@ use tracing_subscriber::FmtSubscriber;
 use crate::kill_switch::KillSwitch;
 use crate::laws::Constitution;
 use crate::server::start_kernel_server;
+use futures::StreamExt;
 use crate::validator::TradeValidator;
 
 #[tokio::main]
@@ -67,7 +68,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let audit_path = std::path::PathBuf::from("/mnt/black_box/audit.json");
     let mut audit_trail = AuditTrail::load_from_disk(&audit_path, 10_000)
         .unwrap_or_else(|_| AuditTrail::new(10_000));
-    audit_trail.set_persistence_path(audit_path);
+    audit_trail.set_persistence_path(audit_path.clone());
+
+    let validator = TradeValidator::new(constitution.clone());
+    let kill_switch = KillSwitch::new();
 
     let constitution_arc = Arc::new(Mutex::new(constitution.clone()));
     let validator_arc = Arc::new(Mutex::new(validator));
