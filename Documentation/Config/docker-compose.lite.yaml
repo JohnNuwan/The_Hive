@@ -1,34 +1,90 @@
-# Docker Compose - THE HIVE Hybrid Infrastructure
-# Only base databases and messaging
+# ═══════════════════════════════════════════════════════════════════════════════
+# THE HIVE — Docker Compose Lite (Infrastructure Only)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Mode Lite : Lance uniquement l'infrastructure (Redis, Qdrant, TimescaleDB).
+# Les services Python tournent nativement sur Windows via start_lite.py.
+#
+# Usage:
+#   docker compose -f Documentation/Config/docker-compose.lite.yaml up -d
+#
 # ═══════════════════════════════════════════════════════════════════════════════
 
-version: '3.8'
-
 services:
-  # --- INFRASTRUCTURE ---
+  # --- MESSAGING & CACHE ---
   redis:
     image: redis:7-alpine
     container_name: hive-infra-redis
     ports: ["6379:6379"]
-    command: redis-server --requirepass devpassword
+    command: redis-server --requirepass devpassword --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "devpassword", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
     networks: ["hive-infra-net"]
 
+  # --- VECTOR DATABASE (Mémoire sémantique) ---
   qdrant:
     image: qdrant/qdrant:latest
     container_name: hive-infra-qdrant
     ports: ["6333:6333"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
     networks: ["hive-infra-net"]
 
+  # --- TIME-SERIES DATABASE (Données trading/métriques) ---
   timescaledb:
     image: timescale/timescaledb:latest-pg15
     container_name: hive-infra-timescale
     ports: ["5432:5432"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eva -d thehive"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     environment:
       - POSTGRES_USER=eva
       - POSTGRES_PASSWORD=devpassword
       - POSTGRES_DB=thehive
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+    networks: ["hive-infra-net"]
+
+  # --- MQTT BROKER (Système Nerveux Secondaire) ---
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: hive-infra-mosquitto
+    ports: ["1883:1883"]
+    restart: unless-stopped
+    command: mosquitto -c /mosquitto-no-auth.conf
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 3 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - mosquitto_data:/mosquitto/data
     networks: ["hive-infra-net"]
 
 networks:
   hive-infra-net:
     driver: bridge
+
+volumes:
+  redis_data:
+  qdrant_data:
+  timescale_data:
+  mosquitto_data:

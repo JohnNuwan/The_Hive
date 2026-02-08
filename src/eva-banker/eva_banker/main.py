@@ -44,6 +44,8 @@ from shared.auth_middleware import InternalAuthMiddleware
 from eva_banker.services.mt5 import MT5Service, get_mt5_service
 from eva_banker.services.risk import RiskValidator, get_risk_validator
 from eva_banker.services.binance_service import BinanceService
+from eva_banker.services.news_filter import NewsFilterService
+from eva_banker.nemesis import NemesisSystem, get_nemesis_system
 from eva_banker.skill_library import SkillLibrary, SkilledBehavior
 from eva_banker.models.gnn_model import TFTGNNModel
 from eva_banker.swarm import BankerSwarm
@@ -186,13 +188,28 @@ async def lifespan(app: FastAPI):
     app.state.ghost_shield = GhostShield(app.state.mt5_service)
     app.state.worker = BankerWorker(app.state.mt5_service, app.state.ghost_shield)
 
+    # Nemesis System
+    app.state.nemesis = get_nemesis_system()
+    await app.state.nemesis.load_state()
+    
+    # News Filter
+    app.state.news_filter = NewsFilterService(
+        filter_minutes=settings.risk_news_filter_minutes
+    )
+
+    # Telemetry
+    app.state.start_time = datetime.now()
+    app.state.request_count = 0
+    app.state.error_count = 0
+
     # Intégration SWARM
     app.state.swarm = BankerSwarm()
     await app.state.swarm.init_mqtt()
     
-    # Tâche de fond pour écouter les ordres Swarm
+    # Tâches de fond
     asyncio.create_task(swarm_listener())
     asyncio.create_task(hard_heartbeat())
+    asyncio.create_task(app.state.news_filter.start_monitoring())
 
     # Connexion MT5
     mt5_service: MT5Service = app.state.mt5_service
@@ -393,22 +410,29 @@ async def close_position(ticket: int) -> dict[str, Any]:
     
     # Intégration Compliance (Juriste / Loi 5)
     # Si le trade est profitable, on informe l'expert Compliance pour provisionnement URSSAF
-        # Signal pour Compliance (URSSAF)
-        await redis.publish("eva.compliance.trades", {
-            "ticket_id": ticket,
-            "profit": result.get("profit"),
-            "symbol": result.get("symbol", "UNKNOWN"),
-            "timestamp": datetime.now().isoformat()
-        })
+    try:
+        redis = get_redis_client()
+        profit = result.get("profit", 0)
         
-        # Signal pour Master Notification (Sentinel/Telegram)
-        await redis.publish("eva.banker.trades", {
-            "ticket_id": ticket,
-            "profit": result.get("profit"),
-            "symbol": result.get("symbol", "UNKNOWN")
-        })
-        
-        logger.info(f"⚖️ Trade profit envoyé à Compliance et Sentinel")
+        if profit and float(profit) != 0:
+            # Signal pour Compliance (URSSAF)
+            await redis.publish("eva.compliance.trades", {
+                "ticket_id": ticket,
+                "profit": profit,
+                "symbol": result.get("symbol", "UNKNOWN"),
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # Signal pour Master Notification (Sentinel/Telegram)
+            await redis.publish("eva.banker.trades", {
+                "ticket_id": ticket,
+                "profit": profit,
+                "symbol": result.get("symbol", "UNKNOWN")
+            })
+            
+            logger.info(f"⚖️ Trade profit envoyé à Compliance et Sentinel")
+    except Exception as e:
+        logger.error(f"Erreur notification trade: {e}")
         
     return result
 
@@ -509,3 +533,137 @@ async def get_crypto_status():
     binance: BinanceService = app.state.binance_service
     balances = await binance.get_account_balances()
     return {k: float(v) for k, v in balances.items()}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS NEMESIS & NEWS FILTER & TELEMETRY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/nemesis/status", tags=["Nemesis"])
+async def get_nemesis_status():
+    """Retourne l'état du Nemesis System (mémoire des défaites)"""
+    nemesis: NemesisSystem = app.state.nemesis
+    return nemesis.get_status()
+
+
+@app.get("/news/filter", tags=["News"])
+async def get_news_filter():
+    """Retourne l'état du filtre de nouvelles économiques"""
+    news: NewsFilterService = app.state.news_filter
+    status = news.get_status()
+    # Reformatter pour le frontend
+    upcoming = status.get("upcoming_events", [])
+    return {
+        "is_active": status["is_active"],
+        "blocked_until": status["blocked_until"],
+        "next_high_impact_events": [
+            {
+                "event": e["name"],
+                "impact": e["impact"],
+                "time": e["time"]
+            }
+            for e in upcoming[:5]
+        ]
+    }
+
+
+@app.get("/trading/status", tags=["Trading"])
+async def get_trading_status():
+    """Agrège les données de trading pour le frontend"""
+    mt5_service: MT5Service = app.state.mt5_service
+    risk_validator: RiskValidator = app.state.risk_validator
+
+    account = await mt5_service.get_account_info()
+    positions = await mt5_service.get_open_positions()
+    risk = await risk_validator.get_current_status()
+
+    return {
+        "account": {
+            "equity": float(account.equity),
+            "balance": float(account.balance),
+            "margin": float(account.margin),
+            "free_margin": float(account.free_margin),
+            "currency": account.currency,
+            "leverage": account.leverage,
+        },
+        "positions": [
+            {
+                "ticket": p.ticket,
+                "symbol": p.symbol,
+                "action": p.action.value if hasattr(p.action, 'value') else str(p.action),
+                "volume": float(p.volume),
+                "profit": float(p.profit),
+                "open_price": float(p.open_price),
+                "current_price": float(p.current_price),
+            }
+            for p in positions
+        ],
+        "risk": {
+            "daily_drawdown_percent": float(risk.daily_drawdown_percent),
+            "trading_allowed": risk.trading_allowed,
+            "open_positions": risk.open_positions_count,
+            "anti_tilt_active": risk.anti_tilt_active,
+            "news_filter_active": risk.news_filter_active,
+        },
+    }
+
+
+@app.get("/telemetry", tags=["Système"])
+async def get_telemetry():
+    """Retourne les métriques de télémétrie du Banker"""
+    start_time: datetime = app.state.start_time
+    uptime = (datetime.now() - start_time).total_seconds()
+    return {
+        "service_name": "banker",
+        "uptime_seconds": int(uptime),
+        "requests_total": app.state.request_count,
+        "errors_total": app.state.error_count,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.get("/circuit-breaker/status", tags=["Système"])
+async def get_circuit_breaker():
+    """Retourne l'état du circuit-breaker du Banker"""
+    nemesis: NemesisSystem = app.state.nemesis
+    news: NewsFilterService = app.state.news_filter
+
+    # Le circuit-breaker est "OPEN" si Nemesis ou News bloquent le trading
+    trading_blocked = nemesis.should_block_trading() or news.should_block_trading()
+
+    if trading_blocked:
+        state = "OPEN"
+        failures = sum(nemesis.known_nemeses.values())
+    else:
+        state = "CLOSED"
+        failures = 0
+
+    return {
+        "name": "banker_trading",
+        "state": state,
+        "failures": failures,
+        "failure_threshold": 3,  # Nemesis threshold
+    }
+
+
+@app.get("/accounts/propfirm", tags=["Compte"])
+async def get_propfirm_accounts():
+    """Retourne les comptes Prop Firm (Hydra Protocol)"""
+    mt5_service: MT5Service = app.state.mt5_service
+    account = await mt5_service.get_account_info()
+
+    # En mode lite, on retourne le compte principal comme un "prop firm account"
+    return [
+        {
+            "id": str(account.login),
+            "name": f"Account {account.login}",
+            "server": account.server,
+            "balance": float(account.balance),
+            "equity": float(account.equity),
+            "phase": "CHALLENGE",
+            "status": "active",
+            "max_drawdown": 4.0,
+            "daily_drawdown": 0.0,
+        }
+    ]

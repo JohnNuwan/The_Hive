@@ -43,6 +43,7 @@ from eva_core.services.memory import MemoryService, get_memory_service
 from eva_core.services.prompt_master import PromptMaster
 from eva_core.strategy import StrategyOrchestrator
 from eva_core.self_healing import SelfHealingService
+from eva_core.services.docker_monitor import SystemMonitor
 
 # Configuration logging
 logging.basicConfig(level=logging.INFO)
@@ -134,6 +135,14 @@ async def lifespan(app: FastAPI):
     # Intégration Strategy Orchestrator & Self-Healing
     app.state.strategy_orchestrator = StrategyOrchestrator()
     app.state.self_healing = SelfHealingService()
+    
+    # System Monitor (Docker + Hardware)
+    app.state.system_monitor = SystemMonitor()
+    
+    # Telemetry
+    app.state.start_time = datetime.now()
+    app.state.request_count = 0
+    app.state.error_count = 0
 
     logger.info("✅ EVA Core prêt avec moteur de prompts Biblio_IA et lien MQTT")
 
@@ -472,3 +481,58 @@ async def system_status() -> dict[str, Any]:
         except Exception as e:
             logger.error(f"Erreur proxy Sentinel: {e}")
             return {"health": "offline", "error": str(e), "sentinel": {"status": "offline"}}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS MONITORING DIRECT (Docker, System Metrics, Telemetry)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/system/metrics", tags=["Monitoring"])
+async def get_system_metrics_direct() -> dict[str, Any]:
+    """
+    Retourne les métriques système directement via psutil/nvidia-smi.
+    Utilisé par le frontend MonitoringView quand Sentinel est offline.
+    """
+    monitor: SystemMonitor = app.state.system_monitor
+    return await monitor.get_system_metrics()
+
+
+@app.get("/docker/containers", tags=["Monitoring"])
+async def get_docker_containers() -> list[dict[str, Any]]:
+    """
+    Retourne la liste des conteneurs Docker et leurs stats en temps réel.
+    """
+    monitor: SystemMonitor = app.state.system_monitor
+    return await monitor.get_docker_containers()
+
+
+@app.get("/telemetry", tags=["Système"])
+async def get_telemetry():
+    """Retourne les métriques de télémétrie du Core"""
+    start_time: datetime = app.state.start_time
+    uptime = (datetime.now() - start_time).total_seconds()
+    return {
+        "service_name": "core",
+        "uptime_seconds": int(uptime),
+        "requests_total": app.state.request_count,
+        "errors_total": app.state.error_count,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.get("/circuit-breaker/status", tags=["Système"])
+async def get_circuit_breaker_status():
+    """Retourne l'état du circuit-breaker du Core"""
+    # Vérifie si un circuit-breaker est attaché au self-healing service
+    self_healing: SelfHealingService = app.state.self_healing
+    if hasattr(self_healing, 'circuit_breaker') and self_healing.circuit_breaker:
+        return self_healing.circuit_breaker.get_status()
+    
+    # Fallback : état nominal
+    return {
+        "name": "core_circuit_breaker",
+        "state": "CLOSED",
+        "failures": 0,
+        "failure_threshold": 5,
+    }

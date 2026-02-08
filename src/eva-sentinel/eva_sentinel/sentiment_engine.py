@@ -1,80 +1,136 @@
-import asyncio
-import logging
-import httpx
-from random import uniform
-from shared.redis_client import get_redis_client
+"""
+Sentiment & Security Engine — THE HIVE
+Analyse de sentiment basique + surveillance d'intégrité système.
+"""
 
-# Dictionnaire de sentiment pour analyse heuristique
-SENTIMENT_KEYWORDS = {
-    "bullish": 0.4, "growth": 0.3, "hike": -0.2, "cut": 0.5,
-    "inflation": -0.3, "recession": -0.6, "recovery": 0.4,
-    "war": -0.8, "crisis": -0.7, "stable": 0.1, "surge": 0.5,
-    "plummet": -0.6, "gain": 0.3, "loss": -0.3, "fed": -0.1
-}
+import asyncio
+import hashlib
+import logging
+import os
+from datetime import datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-class SentimentEngine:
+
+class SecurityEngine:
     """
-    Moteur d'analyse de sentiment institutionnel (Bloomberg/Reuters).
-    Cible les flux de la Smart Money pour anticiper les retournements.
+    Moteur de sécurité pour The Sentinel.
+    - Vérifie l'intégrité des fichiers critiques (Constitution, Kernel)
+    - Surveille les connexions réseau suspectes
+    - Maintient un journal d'alertes
     """
+
     def __init__(self):
-        self.redis = get_redis_client()
-        self.active = False
-        
-    async def analyze_sentiment(self, text: str) -> float:
-        """Analyse heuristique de sentiment simple par mot-clé"""
-        score = 0.0
-        words = text.lower().split()
-        for word in words:
-            if word in SENTIMENT_KEYWORDS:
-                score += SENTIMENT_KEYWORDS[word]
-        # Clipping entre -1 et 1
-        return max(-1.0, min(1.0, score))
+        self.alerts: list[dict[str, Any]] = []
+        self.integrity_hashes: dict[str, str] = {}
+        self.max_alerts = 100
 
-    async def start_feed_monitoring(self):
+    def _hash_file(self, filepath: str) -> str | None:
+        """Calcule le hash SHA256 d'un fichier"""
+        try:
+            with open(filepath, "rb") as f:
+                return hashlib.sha256(f.read()).hexdigest()
+        except Exception:
+            return None
+
+    async def check_integrity(self, files: list[str] | None = None) -> list[dict[str, Any]]:
         """
-        Surveillance des flux Bloomberg et Reuters.
-        Récupère des titres réels (simulés par un endpoint public pour le moment).
+        Vérifie l'intégrité des fichiers critiques.
+        Retourne les alertes si un fichier a changé.
         """
-        self.active = True
-        logger.info("Sentinel: Bureau Bloomberg/Reuters connecté. Analyse FinBERT active.")
-        
-        async with httpx.AsyncClient() as client:
-            while self.active:
-                try:
-                    # Simulation d'un appel à un flux RSS ou News API
-                    # Pour la démo sans API Key, on utilise une liste de titres représentatifs
-                    headlines = [
-                        "Fed signals potential rate cut in Q3",
-                        "Tech stocks surge on AI breakthrough",
-                        "Middle East tensions spark global oil crisis",
-                        "Inflation data shows unexpected recovery",
-                        "Major bank warns of looming recession"
-                    ]
-                    
-                    for headline in headlines:
-                        sentiment_score = await self.analyze_sentiment(headline)
-                        
-                        # On ne publie que si le sentiment est significatif
-                        if abs(sentiment_score) > 0.3:
-                            alert_type = "BULLISH_EXUBERANCE" if sentiment_score > 0 else "BEARISH_PANIC"
-                            logger.warning(f"Sentiment Alert: {alert_type} | {headline} (Score: {sentiment_score:.2f})")
-                            
-                            await self.redis.publish("eva.swarm.events", {
-                                "type": "SENTIMENT_ALERT",
-                                "source": "Reuters_Terminal",
-                                "headline": headline,
-                                "score": sentiment_score,
-                                "condition": alert_type
-                            })
-                            await asyncio.sleep(2) # Pause entre alertes
+        if files is None:
+            files = [
+                "mnt/tablet/constitution.toml",
+                "src/eva-kernel/src/main.rs",
+                "src/eva-kernel/src/laws.rs",
+            ]
 
-                except Exception as e:
-                    logger.error(f"Sentinel Error: {e}")
-                
-                await asyncio.sleep(60) # Vérification minute par minute
+        results = []
+        for filepath in files:
+            current_hash = self._hash_file(filepath)
+            if current_hash is None:
+                results.append({
+                    "file": filepath,
+                    "status": "NOT_FOUND",
+                    "severity": "warning"
+                })
+                continue
 
-    def stop(self):
-        self.active = False
+            if filepath in self.integrity_hashes:
+                if self.integrity_hashes[filepath] != current_hash:
+                    alert = {
+                        "id": f"integrity-{len(self.alerts):04d}",
+                        "type": "INTEGRITY_VIOLATION",
+                        "severity": "critical",
+                        "message": f"Fichier modifié: {filepath}",
+                        "file": filepath,
+                        "old_hash": self.integrity_hashes[filepath][:16],
+                        "new_hash": current_hash[:16],
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    self._add_alert(alert)
+                    results.append({"file": filepath, "status": "MODIFIED", "severity": "critical"})
+                else:
+                    results.append({"file": filepath, "status": "OK", "severity": "info"})
+            else:
+                results.append({"file": filepath, "status": "BASELINE_SET", "severity": "info"})
+
+            self.integrity_hashes[filepath] = current_hash
+
+        return results
+
+    async def check_network(self) -> list[dict[str, Any]]:
+        """Vérifie les connexions réseau (basique)"""
+        alerts = []
+        try:
+            import psutil
+            connections = psutil.net_connections(kind='inet')
+            
+            # Compter les connexions par état
+            states = {}
+            for conn in connections:
+                state = conn.status
+                states[state] = states.get(state, 0) + 1
+            
+            # Alerte si trop de connexions ESTABLISHED
+            established = states.get("ESTABLISHED", 0)
+            if established > 200:
+                alert = {
+                    "id": f"network-{len(self.alerts):04d}",
+                    "type": "NETWORK_ANOMALY",
+                    "severity": "warning",
+                    "message": f"Nombre élevé de connexions: {established}",
+                    "timestamp": datetime.now().isoformat()
+                }
+                self._add_alert(alert)
+                alerts.append(alert)
+        except Exception as e:
+            logger.error(f"Erreur surveillance réseau: {e}")
+
+        return alerts
+
+    def _add_alert(self, alert: dict[str, Any]):
+        """Ajoute une alerte et maintient la taille du journal"""
+        self.alerts.append(alert)
+        if len(self.alerts) > self.max_alerts:
+            self.alerts = self.alerts[-self.max_alerts:]
+
+    def get_alerts(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Retourne les alertes récentes"""
+        return self.alerts[-limit:]
+
+    async def run_full_scan(self) -> dict[str, Any]:
+        """Exécute un scan de sécurité complet"""
+        integrity = await self.check_integrity()
+        network = await self.check_network()
+
+        return {
+            "scan_time": datetime.now().isoformat(),
+            "integrity_checks": integrity,
+            "network_alerts": network,
+            "total_alerts": len(self.alerts),
+            "status": "secure" if not any(
+                a["severity"] == "critical" for a in integrity
+            ) else "compromised"
+        }

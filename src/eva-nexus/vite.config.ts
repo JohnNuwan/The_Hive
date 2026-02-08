@@ -16,7 +16,7 @@ export default defineConfig({
     server: {
         port: 3001,
         proxy: {
-            // ═══ CORE SERVICES ═══
+            // ═══ CORE SERVICES (Triumvirat Vital) ═══
             '/api/core': {
                 target: 'http://localhost:8000',
                 changeOrigin: true,
@@ -24,93 +24,94 @@ export default defineConfig({
                 configure: silentProxy,
             },
             '/api/banker': {
-                target: 'http://localhost:8001',
+                target: 'http://localhost:8100',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/api\/banker/, ''),
                 configure: silentProxy,
             },
             '/api/kernel': {
-                target: 'http://localhost:8080',
+                target: 'http://localhost:8800',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/api\/kernel/, ''),
                 configure: silentProxy,
             },
             '/api/nervous': {
-                target: 'http://localhost:8081',
+                target: 'http://localhost:9090',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/api\/nervous/, ''),
                 configure: silentProxy,
             },
-            // ═══ OSINT & SECURITY ═══
-            '/api/shadow': {
-                target: 'http://localhost:8002',
-                changeOrigin: true,
-                rewrite: (path) => path.replace(/^\/api\/shadow/, ''),
-                configure: silentProxy,
-            },
+            // ═══ SECURITY & INTELLIGENCE ═══
             '/api/sentinel': {
-                target: 'http://localhost:8007',
+                target: 'http://localhost:8200',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/api\/sentinel/, ''),
                 configure: silentProxy,
             },
+            '/api/shadow': {
+                target: 'http://localhost:8900',
+                changeOrigin: true,
+                rewrite: (path) => path.replace(/^\/api\/shadow/, ''),
+                configure: silentProxy,
+            },
             '/api/wraith': {
-                target: 'http://localhost:8012',
+                target: 'http://localhost:9400',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/api\/wraith/, ''),
                 configure: silentProxy,
             },
             '/api/researcher': {
-                target: 'http://localhost:8013',
+                target: 'http://localhost:9300',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/api\/researcher/, ''),
                 configure: silentProxy,
             },
-            // ═══ FACTORIES & SUPPORT ═══
-            '/api/builder': {
-                target: 'http://localhost:8003',
-                changeOrigin: true,
-                rewrite: (path) => path.replace(/^\/api\/builder/, ''),
-                configure: silentProxy,
-            },
-            '/api/lab': {
-                target: 'http://localhost:8004',
-                changeOrigin: true,
-                rewrite: (path) => path.replace(/^\/api\/lab/, ''),
-                configure: silentProxy,
-            },
-            '/api/muse': {
-                target: 'http://localhost:8005',
-                changeOrigin: true,
-                rewrite: (path) => path.replace(/^\/api\/muse/, ''),
-                configure: silentProxy,
-            },
-            '/api/rwa': {
-                target: 'http://localhost:8006',
-                changeOrigin: true,
-                rewrite: (path) => path.replace(/^\/api\/rwa/, ''),
-                configure: silentProxy,
-            },
+            // ═══ SUPPORT SERVICES ═══
             '/api/compliance': {
-                target: 'http://localhost:8008',
+                target: 'http://localhost:8300',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/api\/compliance/, ''),
                 configure: silentProxy,
             },
-            '/api/accountant': {
-                target: 'http://localhost:8009',
-                changeOrigin: true,
-                rewrite: (path) => path.replace(/^\/api\/accountant/, ''),
-                configure: silentProxy,
-            },
             '/api/substrate': {
-                target: 'http://localhost:8010',
+                target: 'http://localhost:8400',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/api\/substrate/, ''),
                 configure: silentProxy,
             },
+            '/api/accountant': {
+                target: 'http://localhost:8500',
+                changeOrigin: true,
+                rewrite: (path) => path.replace(/^\/api\/accountant/, ''),
+                configure: silentProxy,
+            },
+            // ═══ FACTORIES ═══
+            '/api/lab': {
+                target: 'http://localhost:8600',
+                changeOrigin: true,
+                rewrite: (path) => path.replace(/^\/api\/lab/, ''),
+                configure: silentProxy,
+            },
+            '/api/rwa': {
+                target: 'http://localhost:8700',
+                changeOrigin: true,
+                rewrite: (path) => path.replace(/^\/api\/rwa/, ''),
+                configure: silentProxy,
+            },
+            '/api/builder': {
+                target: 'http://localhost:9000',
+                changeOrigin: true,
+                rewrite: (path) => path.replace(/^\/api\/builder/, ''),
+                configure: silentProxy,
+            },
+            '/api/muse': {
+                target: 'http://localhost:9100',
+                changeOrigin: true,
+                rewrite: (path) => path.replace(/^\/api\/muse/, ''),
+                configure: silentProxy,
+            },
             '/api/sage': {
-                target: 'http://localhost:8011',
+                target: 'http://localhost:9200',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/api\/sage/, ''),
                 configure: silentProxy,

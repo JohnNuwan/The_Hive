@@ -34,27 +34,62 @@ class MT5Service:
     - Mode mock (développement / paper trading)
     """
 
-    def __init__(self, mock_mode: bool = True):
+    def __init__(self, mock_mode: bool = True, login: int = 0, password: str = "", server: str = ""):
         self.mock_mode = mock_mode or not MT5_AVAILABLE
         self.is_connected = False
         self._mock_positions: list[Position] = []
         self._mock_balance = Decimal("100000.00")
         self._next_ticket = 12345678
-        logger.info(f"MT5Service initialisé (mock={self.mock_mode})")
+        # Credentials pour login automatique
+        self._login = login
+        self._password = password
+        self._server = server
+        logger.info(f"MT5Service initialise (mock={self.mock_mode}, login={login}, server={server})")
 
     async def connect(self) -> bool:
-        """Connexion à MT5"""
+        """Connexion a MT5"""
         if self.mock_mode:
             self.is_connected = True
-            logger.info("MT5 Mock: connecté")
+            logger.info("MT5 Mock: connecte")
             return True
 
         try:
+            # Initialisation MT5
             if not mt5.initialize():
                 logger.error(f"MT5 initialize failed: {mt5.last_error()}")
                 return False
+
+            # Verifier si le terminal est deja connecte au bon compte
+            account_info = mt5.account_info()
+            if account_info and account_info.login == self._login:
+                logger.info(f"MT5 deja connecte: compte {account_info.login} sur {account_info.server} "
+                           f"(Balance: {account_info.balance}, Equity: {account_info.equity})")
+            elif self._login and self._password and self._server:
+                # Login automatique si credentials fournis et pas encore connecte
+                authorized = mt5.login(
+                    login=self._login,
+                    password=self._password,
+                    server=self._server
+                )
+                if authorized:
+                    account_info = mt5.account_info()
+                    logger.info(f"MT5 login reussi: compte {self._login} sur {self._server}")
+                else:
+                    # Le terminal est peut-etre deja connecte mais login() echoue
+                    account_info = mt5.account_info()
+                    if account_info:
+                        logger.info(f"MT5 terminal deja actif: compte {account_info.login} sur {account_info.server} "
+                                   f"(Balance: {account_info.balance})")
+                    else:
+                        logger.error(f"MT5 login echoue pour {self._login}@{self._server}: {mt5.last_error()}")
+                        mt5.shutdown()
+                        return False
+            elif account_info:
+                logger.info(f"MT5 connecte: compte {account_info.login} sur {account_info.server}")
+            else:
+                logger.warning("MT5 initialise mais aucun compte connecte")
+
             self.is_connected = True
-            logger.info("MT5 connecté")
             return True
         except Exception as e:
             logger.exception(f"Erreur connexion MT5: {e}")
@@ -244,6 +279,29 @@ class MT5Service:
             "message": f"[MOCK] {order.action.value} {order.volume} {order.symbol}",
         }
 
+    async def execute_skill(self, skill, order: TradeOrder) -> dict[str, Any]:
+        """
+        Execute un ordre en utilisant une compétence (Skill) spécifique.
+
+        Dispatche l'exécution en fonction du type de skill sélectionné
+        par le Manager (niveau haut de l'architecture hiérarchique SPlaTES).
+        En mode lite, délègue simplement à execute_order().
+
+        Args:
+            skill: Le type de compétence à utiliser (SkilledBehavior enum).
+            order: L'ordre de trading à exécuter.
+
+        Returns:
+            dict[str, Any]: Résultat de l'exécution avec 'success', 'ticket', 'message'.
+        """
+        logger.info(f"Exécution via skill: {skill} pour {order.symbol}")
+        # En production, chaque skill aurait sa propre logique d'exécution
+        # (timing, slicing, obfuscation, etc.)
+        # En mode lite, on délègue directement à execute_order()
+        result = await self.execute_order(order)
+        result["skill_used"] = str(skill)
+        return result
+
     def _get_mock_pnl(self) -> Decimal:
         """Calcule le P&L mock total"""
         return sum(p.profit for p in self._mock_positions)
@@ -251,6 +309,11 @@ class MT5Service:
 
 @lru_cache
 def get_mt5_service() -> MT5Service:
-    """Retourne l'instance MT5 configurée"""
+    """Retourne l'instance MT5 configuree avec credentials FTMO"""
     settings = get_settings()
-    return MT5Service(mock_mode=settings.mock_mt5)
+    return MT5Service(
+        mock_mode=settings.mock_mt5,
+        login=settings.mt5_login,
+        password=settings.mt5_password.get_secret_value(),
+        server=settings.mt5_server,
+    )

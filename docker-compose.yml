@@ -1,37 +1,93 @@
-# THE HIVE - Professional Orchestrated Swarm
+# ═══════════════════════════════════════════════════════════════════════════════
+# THE HIVE — Docker Compose Full Stack
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Lance l'intégralité de la Ruche : Infrastructure, Experts, Frontend, Observabilité.
+# Tous les langages (Python, Rust, Go) compilent et tournent dans leurs conteneurs.
+#
+# Usage:
+#   docker compose up -d --build
+#   docker compose down
+#
+# ═══════════════════════════════════════════════════════════════════════════════
 
 services:
-  # --- INFRASTRUCTURE ---
+  # ─────────────────────────────────────────────────────────────────────────────
+  # INFRASTRUCTURE
+  # ─────────────────────────────────────────────────────────────────────────────
+
   redis:
     image: redis:7-alpine
     container_name: hive-infra-redis
-    ports: [ "6379:6379" ]
-    command: redis-server --requirepass devpassword
-    networks: [ "hive-net" ]
+    ports: ["6379:6379"]
+    command: redis-server --requirepass devpassword --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks: ["hive-net"]
+    restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
+      test: ["CMD", "redis-cli", "-a", "devpassword", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+    volumes:
+      - redis_data:/data
 
   qdrant:
     image: qdrant/qdrant:latest
     container_name: hive-infra-qdrant
-    ports: [ "6333:6333" ]
-    networks: [ "hive-net" ]
+    ports: ["6333:6333"]
+    networks: ["hive-net"]
+    restart: unless-stopped
     healthcheck:
-      test: [ "CMD-SHELL", "/bin/bash -c 'echo > /dev/tcp/localhost/6333'" ]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
+    volumes:
+      - qdrant_data:/qdrant/storage
 
-  # --- CORE & EXPERTS ---
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: hive-infra-timescale
+    ports: ["5432:5432"]
+    networks: ["hive-net"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eva -d thehive"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    environment:
+      - POSTGRES_USER=eva
+      - POSTGRES_PASSWORD=devpassword
+      - POSTGRES_DB=thehive
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: hive-infra-mosquitto
+    ports: ["1883:1883"]
+    networks: ["hive-net"]
+    restart: unless-stopped
+    command: mosquitto -c /mosquitto-no-auth.conf
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 3 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - mosquitto_data:/mosquitto/data
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CORE & KERNEL (Triumvirat Vital)
+  # ─────────────────────────────────────────────────────────────────────────────
+
   core:
     build:
       context: .
       dockerfile: src/eva-core/Dockerfile
     container_name: hive-core
-    ports: [ "8000:8000" ]
+    ports: ["8000:8000"]
     depends_on:
       redis:
         condition: service_healthy
@@ -46,18 +102,19 @@ services:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
       - OLLAMA_HOST=host.docker.internal
-      - USE_LLM=True
+      - USE_OLLAMA=true
       - ENVIRONMENT=development
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    networks: [ "hive-net" ]
+    networks: ["hive-net"]
+    restart: unless-stopped
 
   kernel:
     build:
       context: .
       dockerfile: src/eva-kernel/Dockerfile
     container_name: hive-kernel
-    ports: [ "8800:8800" ]
+    ports: ["8800:8800"]
     depends_on:
       redis:
         condition: service_healthy
@@ -67,13 +124,14 @@ services:
       - REDIS_PASSWORD=devpassword
     volumes:
       - black_box:/mnt/black_box
-    networks: [ "hive-net" ]
+    networks: ["hive-net"]
+    restart: unless-stopped
 
   nervous:
     build:
       context: src/eva-nervous
     container_name: hive-nervous
-    ports: [ "9090:9090" ]
+    ports: ["9090:9090"]
     depends_on:
       redis:
         condition: service_healthy
@@ -81,142 +139,267 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-    networks: [ "hive-net" ]
+    networks: ["hive-net"]
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EXPERTS PYTHON
+  # ─────────────────────────────────────────────────────────────────────────────
 
   banker:
     build:
       context: .
       dockerfile: src/eva-banker/Dockerfile
     container_name: hive-banker
-    ports: [ "8100:8100" ]
+    ports: ["8100:8100"]
     depends_on:
       redis:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
-      - MT5_MODE=mock # Docker ne supporte pas MT5 natif
-    networks: [ "hive-net" ]
+      - MOCK_MT5=true
+    networks: ["hive-net"]
+    restart: unless-stopped
 
   sentinel:
     build:
       context: .
       dockerfile: src/eva-sentinel/Dockerfile
     container_name: hive-sentinel
-    ports: [ "8200:8200" ]
+    ports: ["8200:8200"]
     depends_on:
       redis:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
-    networks: [ "hive-net" ]
+    networks: ["hive-net"]
+    restart: unless-stopped
 
   compliance:
     build:
       context: .
       dockerfile: src/eva-compliance/Dockerfile
     container_name: hive-compliance
-    ports: [ "8300:8300" ]
+    ports: ["8300:8300"]
     depends_on:
       redis:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
-    networks: [ "hive-net" ]
+    networks: ["hive-net"]
+    restart: unless-stopped
 
   substrate:
     build:
       context: .
       dockerfile: src/eva-substrate/Dockerfile
     container_name: hive-substrate
-    ports: [ "8400:8400" ]
+    ports: ["8400:8400"]
     depends_on:
       redis:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
-    networks: [ "hive-net" ]
+    networks: ["hive-net"]
+    restart: unless-stopped
 
   accountant:
     build:
       context: .
       dockerfile: src/eva-accountant/Dockerfile
     container_name: hive-accountant
-    ports: [ "8500:8500" ]
+    ports: ["8500:8500"]
     depends_on:
       redis:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
-    networks: [ "hive-net" ]
+    networks: ["hive-net"]
+    restart: unless-stopped
 
   lab:
     build:
       context: .
       dockerfile: src/eva-lab/Dockerfile
     container_name: hive-lab
-    ports: [ "8600:8600" ]
+    ports: ["8600:8600"]
     depends_on:
       redis:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
-    networks: [ "hive-net" ]
+    networks: ["hive-net"]
+    restart: unless-stopped
 
   rwa:
     build:
       context: .
       dockerfile: src/eva-rwa/Dockerfile
     container_name: hive-rwa
-    ports: [ "8700:8700" ]
+    ports: ["8700:8700"]
     depends_on:
       redis:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
-    networks: [ "hive-net" ]
+    networks: ["hive-net"]
+    restart: unless-stopped
 
-  # --- FRONTEND ---
+  shadow:
+    build:
+      context: .
+      dockerfile: src/eva-shadow/Dockerfile
+    container_name: hive-shadow
+    ports: ["8900:8900"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=devpassword
+    networks: ["hive-net"]
+    restart: unless-stopped
+
+  builder:
+    build:
+      context: .
+      dockerfile: src/eva-builder/Dockerfile
+    container_name: hive-builder
+    ports: ["9000:9000"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=devpassword
+    networks: ["hive-net"]
+    restart: unless-stopped
+
+  muse:
+    build:
+      context: .
+      dockerfile: src/eva-muse/Dockerfile
+    container_name: hive-muse
+    ports: ["9100:9100"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=devpassword
+      - OLLAMA_HOST=host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: ["hive-net"]
+    restart: unless-stopped
+
+  sage:
+    build:
+      context: .
+      dockerfile: src/eva-sage/Dockerfile
+    container_name: hive-sage
+    ports: ["9200:9200"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=devpassword
+    networks: ["hive-net"]
+    restart: unless-stopped
+
+  researcher:
+    build:
+      context: .
+      dockerfile: src/eva-researcher/Dockerfile
+    container_name: hive-researcher
+    ports: ["9300:9300"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=devpassword
+      - OLLAMA_HOST=host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: ["hive-net"]
+    restart: unless-stopped
+
+  wraith:
+    build:
+      context: .
+      dockerfile: src/eva-wraith/Dockerfile
+    container_name: hive-wraith
+    ports: ["9400:9400"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=devpassword
+      - OLLAMA_HOST=host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: ["hive-net"]
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # FRONTEND
+  # ─────────────────────────────────────────────────────────────────────────────
+
   nexus:
     build:
       context: src/eva-nexus
     container_name: hive-nexus
-    ports: [ "3030:80" ]
+    ports: ["3030:80"]
     depends_on:
       - core
-    networks: [ "hive-net" ]
+    networks: ["hive-net"]
+    restart: unless-stopped
 
-  # --- OBSERVABILITY ---
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OBSERVABILITY (Grafana + Loki + Promtail)
+  # ─────────────────────────────────────────────────────────────────────────────
+
   loki:
     image: grafana/loki:latest
     container_name: hive-infra-loki
-    ports: [ "3100:3100" ]
+    ports: ["3100:3100"]
     volumes:
-      - ./loki-config.yaml:/etc/loki/local-config.yaml
-    networks: [ "hive-net" ]
+      - ./infra/config/loki-config.yaml:/etc/loki/local-config.yaml
+    networks: ["hive-net"]
+    restart: unless-stopped
 
   promtail:
     image: grafana/promtail:latest
     container_name: hive-infra-promtail
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./promtail-config.yaml:/etc/promtail/config.yml
+      - ./infra/config/promtail-config.yaml:/etc/promtail/config.yml
     command: -config.file=/etc/promtail/config.yml
-    networks: [ "hive-net" ]
+    networks: ["hive-net"]
+    restart: unless-stopped
 
   grafana:
     image: grafana/grafana:latest
     container_name: hive-infra-grafana
-    ports: [ "3000:3000" ]
+    ports: ["3000:3000"]
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
-    networks: [ "hive-net" ]
+    networks: ["hive-net"]
+    restart: unless-stopped
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NETWORKS & VOLUMES
+# ─────────────────────────────────────────────────────────────────────────────
 
 networks:
   hive-net:
@@ -224,3 +407,7 @@ networks:
 
 volumes:
   black_box:
+  redis_data:
+  qdrant_data:
+  timescale_data:
+  mosquitto_data:

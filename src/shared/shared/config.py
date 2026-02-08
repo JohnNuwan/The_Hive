@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     mt5_magic_number: int = 12345
     mock_mt5: bool = True  # True pour dev sans MT5 réel
     paper_trading: bool = True
+    mt5_login: int = 0
+    mt5_password: SecretStr = Field(default=SecretStr(""))
+    mt5_server: str = ""
 
     # Constitution Loi 2 - Limites de risque
     risk_max_daily_drawdown_percent: float = 4.0
@@ -110,12 +113,22 @@ class Settings(BaseSettings):
     risk_news_filter_minutes: int = 30
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # SECURITY (Sentinel)
+    # SECURITY & SUPPORT SERVICES
     # ═══════════════════════════════════════════════════════════════════════════
     sentinel_api_port: int = 8200
     compliance_api_port: int = 8300
     substrate_api_port: int = 8400
     accountant_api_port: int = 8500
+    lab_api_port: int = 8600
+    rwa_api_port: int = 8700
+    kernel_api_port: int = 8800
+    shadow_api_port: int = 8900
+    builder_api_port: int = 9000
+    nervous_api_port: int = 9090
+    muse_api_port: int = 9100
+    sage_api_port: int = 9200
+    researcher_api_port: int = 9300
+    wraith_api_port: int = 9400
 
     # Constitution Loi 0 - Seuils température
     gpu_temp_warning: float = 80.0
@@ -124,6 +137,8 @@ class Settings(BaseSettings):
     # ═══════════════════════════════════════════════════════════════════════════
     # NOTIFICATIONS
     # ═══════════════════════════════════════════════════════════════════════════
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
     discord_webhook_alerts: str = ""
     discord_webhook_trades: str = ""
 
