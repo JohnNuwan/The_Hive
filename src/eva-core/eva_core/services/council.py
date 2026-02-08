@@ -16,6 +16,7 @@ class CouncilService:
         self.settings = get_settings()
         self.base_url = f"http://{self.settings.ollama_host}:{self.settings.ollama_port}"
         self.current_model: Optional[str] = None
+        self.current_role: str = "general"
         self._client = httpx.AsyncClient(timeout=300.0) # Long timeout for pulls/loads
 
         # Mapping des rôles vers les modèles configurés
@@ -63,6 +64,7 @@ class CouncilService:
             response.raise_for_status()
             
             self.current_model = target_model
+            self.current_role = role
             logger.info(f"✨ COUNCIL: Expert role '{role}' is now active with '{target_model}'.")
             return target_model
             

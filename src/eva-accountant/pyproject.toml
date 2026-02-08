@@ -2,7 +2,7 @@
 name = "eva-accountant"
 version = "0.1.0"
 description = "EVA Accountant Expert - Financial auditing and P&L optimization"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.109.0",
     "uvicorn>=0.27.0",

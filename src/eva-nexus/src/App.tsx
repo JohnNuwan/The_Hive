@@ -10,7 +10,9 @@ import {
     Briefcase,
     Zap,
     Lock,
-    Globe
+    Globe,
+    Share2,
+    Database
 } from 'lucide-react'
 
 // Core Components
@@ -22,11 +24,13 @@ import OSINTView from './components/OSINTView'
 import FactoriesView from './components/FactoriesView'
 import AdminPanel from './components/AdminPanel'
 import MatrixRain from './components/MatrixRain'
+import GraphView from './components/GraphView'
+import MemoryExplorer from './components/MemoryExplorer'
 
 // Services
 import { getStatus } from './services/api'
 
-type TabId = 'dashboard' | 'chat' | 'trading' | 'monitoring' | 'osint' | 'factories' | 'admin' | 'settings'
+type TabId = 'dashboard' | 'chat' | 'trading' | 'graph' | 'memory' | 'monitoring' | 'osint' | 'factories' | 'admin' | 'settings'
 
 function App() {
     const [activeTab, setActiveTab] = useState<TabId>('chat')
@@ -90,6 +94,20 @@ function App() {
                         label="Trading Floor"
                         active={activeTab === 'trading'}
                         onClick={() => setActiveTab('trading')}
+                    />
+                    <NavItem
+                        id="graph"
+                        icon={<Share2 size={18} />}
+                        label="Nexus Graph"
+                        active={activeTab === 'graph'}
+                        onClick={() => setActiveTab('graph')}
+                    />
+                    <NavItem
+                        id="memory"
+                        icon={<Database size={18} />}
+                        label="Memory Store"
+                        active={activeTab === 'memory'}
+                        onClick={() => setActiveTab('memory')}
                     />
                     <div className="my-2 border-t border-matrix/5 mx-2"></div>
                     <NavItem
@@ -186,6 +204,8 @@ function ViewSwitcher({ activeTab }: { activeTab: TabId }) {
         case 'dashboard': return <Dashboard />
         case 'chat': return <Chat />
         case 'trading': return <TradingPanel />
+        case 'graph': return <GraphView />
+        case 'memory': return <MemoryExplorer />
         case 'monitoring': return <MonitoringView />
         case 'osint': return <OSINTView />
         case 'factories': return <FactoriesView />

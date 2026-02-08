@@ -97,12 +97,12 @@ export default function Dashboard() {
     }
 
     const nodeIcons: Record<string, string> = {
-        'EVA Core': '🧠', 'Banker': '💰', 'Kernel': '🔒', 'Nervous': '⚡',
-        'Sentinel': '👁', 'Quant': '🧮'
+        'EVA Core': '🧠', 'Banker': '💰', 'Sentinel': '👁', 'Shadow': '🌑',
+        'Researcher': '🔬', 'Wraith': '👻'
     }
     const nodeLangs: Record<string, string> = {
-        'EVA Core': 'PYTHON', 'Banker': 'PYTHON', 'Kernel': 'RUST',
-        'Nervous': 'GO', 'Sentinel': 'PYTHON', 'Quant': 'JULIA'
+        'EVA Core': 'PYTHON', 'Banker': 'PYTHON', 'Sentinel': 'PYTHON',
+        'Shadow': 'PYTHON', 'Researcher': 'PYTHON', 'Wraith': 'PYTHON'
     }
 
     return (
@@ -128,22 +128,18 @@ export default function Dashboard() {
 
             {/* ═══ MIDDLE ROW: Kill-Switch / Equity / Nemesis / Circuit Breaker ═══ */}
             <div className="grid grid-cols-4 gap-3">
-                {/* Kill-Switch */}
-                <div className={`cyber-panel hud-corners p-4 ${killSwitch.is_active ? 'border-cyber-pink/40' : 'border-matrix/20'}`}>
-                    <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">KILL-SWITCH</div>
+                {/* Council Status */}
+                <div className="cyber-panel hud-corners p-4">
+                    <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">COUNCIL EXPERT</div>
                     <div className="flex items-center justify-between mb-3">
-                        <span className={`font-display text-xl font-bold tracking-wider ${killSwitch.is_active ? 'neon-text-pink' : 'neon-text'}`}>
-                            {killSwitch.is_active ? 'HALTED' : 'ARMED'}
+                        <span className="font-display text-xl font-bold tracking-wider neon-text-cyan">
+                            {telemetry?.active_role?.toUpperCase() || 'GENERAL'}
                         </span>
-                        <div className={`w-3 h-3 rounded-full ${killSwitch.is_active ? 'bg-cyber-pink animate-pulse shadow-[0_0_10px_rgba(255,0,60,0.6)]' : 'bg-matrix shadow-[0_0_10px_rgba(0,255,65,0.4)]'}`} />
+                        <div className="text-[10px] text-white/30 truncate max-w-[100px]">{telemetry?.active_model || 'Ollama'}</div>
                     </div>
-                    <button
-                        onClick={handleKillSwitch}
-                        disabled={killSwitchLoading}
-                        className={`w-full py-2 text-[10px] uppercase tracking-[0.15em] transition-all ${killSwitch.is_active ? 'cyber-btn' : 'cyber-btn cyber-btn-danger'}`}
-                    >
-                        {killSwitchLoading ? '...' : killSwitch.is_active ? '↻ RESET SYSTEM' : '⚡ EMERGENCY HALT'}
-                    </button>
+                    <div className="text-[8px] text-matrix/40 tracking-widest uppercase">
+                        Active Model Prepared
+                    </div>
                 </div>
 
                 {/* Equity / P&L */}

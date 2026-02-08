@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, Bot, User, Loader2, Sparkles } from 'lucide-react'
+import { Send, Bot, User, Loader2, Sparkles, Terminal } from 'lucide-react'
 import { sendChatMessage, createSession } from '../services/api'
 
 interface Message {
     id: string
     role: 'user' | 'assistant'
     content: string
+    thoughts?: string | null
     timestamp: Date
     metadata?: {
         expert?: string
@@ -29,9 +30,15 @@ export default function Chat() {
 
     useEffect(() => {
         const init = async () => {
+            const savedSession = localStorage.getItem('eva-chat-session')
+            if (savedSession) {
+                setSessionId(savedSession)
+                return
+            }
             try {
                 const data = await createSession()
                 setSessionId(data.session_id)
+                localStorage.setItem('eva-chat-session', data.session_id)
             } catch (e) {
                 console.error("Session init error", e)
             }
@@ -66,6 +73,7 @@ export default function Chat() {
                 id: (Date.now() + 1).toString(),
                 role: 'assistant',
                 content: data.message,
+                thoughts: data.thoughts,
                 timestamp: new Date(),
                 metadata: data.metadata
             }
@@ -116,6 +124,17 @@ export default function Chat() {
                             {msg.metadata?.expert && msg.role === 'assistant' && (
                                 <div className="absolute -top-3 left-4 px-3 py-1 bg-slate-900 border border-sky-500/30 rounded-lg text-[9px] font-black text-sky-400 uppercase tracking-[0.2em] shadow-2xl">
                                     Agent {msg.metadata.expert}
+                                </div>
+                            )}
+                            {msg.thoughts && (
+                                <div className="mb-4 p-3 bg-black/40 border border-sky-500/20 rounded-lg overflow-hidden animate-pulse-slow">
+                                    <div className="flex items-center gap-2 mb-2 text-[10px] font-black text-sky-400 uppercase tracking-widest opacity-70">
+                                        <Terminal size={12} />
+                                        <span>Expert Reasoning Trace</span>
+                                    </div>
+                                    <div className="font-mono text-[11px] text-sky-300/60 leading-relaxed whitespace-pre-wrap selection:bg-sky-500/30">
+                                        {msg.thoughts}
+                                    </div>
                                 </div>
                             )}
                             <div className="whitespace-pre-wrap">{msg.content}</div>

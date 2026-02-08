@@ -313,6 +313,7 @@ class ChatMessage(BaseModel):
     session_id: UUID
     role: MessageRole
     content: str
+    thoughts: str | None = None  # Trace de raisonnement de l'expert
     timestamp: datetime = Field(default_factory=datetime.now)
     metadata: dict[str, Any] = {}
 

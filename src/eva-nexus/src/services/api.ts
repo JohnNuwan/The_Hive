@@ -34,6 +34,8 @@ export interface TelemetryData {
     uptime_seconds: number
     requests_total: number
     errors_total: number
+    active_role?: string
+    active_model?: string
     timestamp: string
 }
 
@@ -77,6 +79,7 @@ export interface AccountInfo {
 export interface ChatMessage {
     message: string
     session_id?: string
+    thoughts?: string | null  // Reasoning trace from the expert
     metadata?: Record<string, unknown>
 }
 
@@ -126,7 +129,7 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeout 
     }
 }
 
-async function safeFetch<T>(url: string, fallback: T, timeout = 3000): Promise<T> {
+export async function safeFetch<T>(url: string, fallback: T, timeout = 3000): Promise<T> {
     try {
         const res = await fetchWithTimeout(url, {}, timeout)
         if (!res.ok) return fallback
@@ -156,8 +159,8 @@ export async function getAllNodesHealth(): Promise<NodeHealth[]> {
     const nodes = [
         { name: 'EVA Core', url: '/api/core/health' },
         { name: 'Banker', url: '/api/banker/health' },
-        { name: 'Kernel', url: '/api/kernel/health' },
-        { name: 'Nervous', url: '/api/nervous/health' },
+        { name: 'Sentinel', url: '/api/sentinel/health' },
+        { name: 'Shadow', url: '/api/shadow/health' },
     ]
     return Promise.all(nodes.map(n => checkNodeHealth(n.name, n.url)))
 }
@@ -172,7 +175,7 @@ export async function getStatus() {
 
 // ═══ KERNEL ═══
 export async function getKillSwitchStatus(): Promise<KillSwitchStatus> {
-    return safeFetch('/api/kernel/health', { is_active: false, message: 'OFFLINE' })
+    return safeFetch('/api/sentinel/health', { is_active: false, message: 'OFFLINE' })
         .then(data => ({
             is_active: (data as any)?.kill_switch_active ?? false,
             message: (data as any)?.message ?? 'OFFLINE'
@@ -181,7 +184,7 @@ export async function getKillSwitchStatus(): Promise<KillSwitchStatus> {
 
 export async function toggleKillSwitch(action: 'activate' | 'reset'): Promise<KillSwitchStatus> {
     try {
-        const res = await fetchWithTimeout('/api/kernel/kill-switch', {
+        const res = await fetchWithTimeout('/api/sentinel/kill-switch', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action })
@@ -219,7 +222,7 @@ export async function sendChatMessage(message: string, sessionId: string, image?
 }
 
 export async function createSession(): Promise<{ session_id: string }> {
-    return safeFetch('/api/core/session', { session_id: crypto.randomUUID() })
+    return safeFetch('/api/core/session', { session_id: (typeof window !== 'undefined' && window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : '00000000-0000-0000-0000-000000000000' })
 }
 
 // ═══ BANKER ═══
@@ -273,4 +276,8 @@ export async function getSystemStatus() {
     const response = await fetch('/api/core/system/status')
     if (!response.ok) throw new Error('Sentinel unreachable')
     return response.json()
+}
+
+export async function getMemoryGraph(limit = 50, similarityThreshold = 0.8) {
+    return safeFetch(`/api/core/memory/graph?limit=${limit}&similarity_threshold=${similarityThreshold}`, { nodes: [], links: [] })
 }

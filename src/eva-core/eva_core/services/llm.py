@@ -48,29 +48,46 @@ class LLMService:
         max_tokens: int = 2000,
         temperature: float = 0.7,
         role: str = "general",
-    ) -> str:
+    ) -> tuple[str, str | None]:
         """
         Génère une réponse à partir d'une liste de messages.
         Utilise le Council pour préparer le modèle selon le rôle.
+        Retourne (réponse_nettoyée, trace_de_raisonnement).
         """
         try:
             # 1. Préparer le modèle via le Council (Swap si nécessaire)
             target_model = await self.council.prepare_model(role)
             
+            # Ajouter une instruction de raisonnement si le rôle est "research"
+            if role == "research":
+                system_prompt += "\nUtilise les balises <thought>...</thought> pour détailler ton raisonnement avant de répondre."
+
             if self.use_ollama:
-                return await self._generate_ollama(
+                raw_response = await self._generate_ollama(
                     messages, system_prompt, max_tokens, temperature, model_override=target_model
                 )
             else:
-                return await self._generate_vllm(
+                raw_response = await self._generate_vllm(
                     messages, system_prompt, max_tokens, temperature, model_override=target_model
                 )
+            
+            # 2. Extraire les pensées (<thought>...</thought>)
+            thoughts = None
+            if "<thought>" in raw_response and "</thought>" in raw_response:
+                start = raw_response.find("<thought>") + len("<thought>")
+                end = raw_response.find("</thought>")
+                thoughts = raw_response[start:end].strip()
+                clean_response = raw_response[end + len("</thought>"):].strip()
+                return clean_response, thoughts
+            
+            return raw_response, None
+
         except httpx.ConnectError:
             logger.warning("LLM non disponible - mode mock")
-            return self._mock_response(messages)
+            return self._mock_response(messages), None
         except Exception as e:
             logger.exception(f"Erreur LLM: {e}")
-            return f"Désolé, j'ai rencontré une erreur: {str(e)}"
+            return f"Désolé, j'ai rencontré une erreur: {str(e)}", None
 
     async def _generate_ollama(
         self,
@@ -87,8 +104,8 @@ class LLMService:
             prompt_parts.append(f"System: {system_prompt}\n")
 
         for msg in messages:
-            role = msg.role.value.capitalize()
-            prompt_parts.append(f"{role}: {msg.content}\n")
+            role_str = msg.role.value.capitalize()
+            prompt_parts.append(f"{role_str}: {msg.content}\n")
 
         prompt_parts.append("Assistant: ")
         prompt = "".join(prompt_parts)

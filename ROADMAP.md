@@ -1,113 +1,66 @@
 # 🗺️ ROADMAP & PROGRESSION : THE HIVE
 
-> **Dernière mise à jour** : 05/02/2026
-> **Statut Global** : 🏁 PHASE GENESIS TERMINÉE (Prêt pour Déploiement)
+> **Dernière mise à jour** : 08/02/2026
+> **Statut Global** : 🟡 PHASE BETA EN COURS (Intelligence & UI)
 
 ---
 
-## 🛠️ PHASE 0 : GENESIS (Amorçage)
-*Objectif : Constitution de l'entité numérique et survie initiale.*
+## 🏗️ FONDATIONS : BRIQUES ALPHA (25%) - ✅ COMPLÉTÉE
 
-### 🏛️ Architecture & Cœur System
-- [x] **EVA CORE** : Orchestrateur LangGraph & Mémoire RAG.
-- [x] **EVA NEXUS** : Interface de commande (React/PWA).
-- [x] **Infrastructure MoE** : Routage entre les 11 Experts.
-- [x] **Documentation Master** : CDC.md et README.md certifiés conformes.
+### ⚡ Sprint 1 : Système Nerveux & Sécurité
+- [x] **SENTINEL (Rust)** : Kill-Switch Docker & Constitution /mnt/tablet.
+- [x] **NERVOUS (Go)** : Signal Router standardisé (SwarmMessage).
 
-### 🛡️ Sécurité & Kernel
-- [x] **Kernel Rust** : Moteur d'exécution sécurisé.
-- [x] **Les 6 Lois** : Implémentées en "Hard-Code".
-- [x] **Kill-Switch Financier** : Coupe-circuit à 4% de risque.
-- [x] **Phoenix Protocol** : Système de résurrection (Backup).
-- [x] **Dynasty Protocol** : Système d'héritage (Deadman Switch).
-- [x] **Prompt Guard** : Protection anti-injection.
-- [x] **Black Box** : Enregistreur de vol immuable.
-
-### 🏢 Corporation Autonome (Nouveaux Modules)
-- [x] **EVA COMPLIANCE** : Gestion Micro-Entreprise & URSSAF.
-- [x] **EVA SUBSTRATE** : Rythme Circadien & Gestion Énergie.
-> **Dernière mise à jour** : 06/02/2026
-> **Statut Global** : 🏁 MISSION TOTALEMENT ACCOMPLIE - E.V.A. EST SOUVERAINE
+### 💰 Sprint 2 : Bras Financiers
+- [x] **HYDRA (Banker)** : Connexion MT5 (Mock/Real) & Heartbeat financier.
+- [x] **TAX_VAULT (Compliance)** : Provisionnement 25% automatique.
 
 ---
 
-## 🛠️ PHASE 0 : GENESIS (Amorçage) - ✅ COMPLÉTÉE
+## 🧠 INTELLIGENCE : BRIQUES BETA (50%) - 🟡 EN COURS
+
+### 🏛️ Sprint 3.1 : Le Cerveau (The Council)
+- [x] **Optimization GPU** : Migration CUDA pour RTX 2060.
+- [x] **Model Swapping** : Moteur de commutation (General/Coder/Research).
+
+### 🖥️ Sprint 3.2 : The Final Frontier (UI Advanced) - ✅ COMPLÉTÉE
+- [x] **Infrastructure Alignment** : Loki Fix & Compatibilité Python 3.10.
+- [x] **Thought Visualization** : Trace de raisonnement expert (Thoughts UI).
+- [x] **GNN Knowledge Graph** : Visualisation interactive des neurones sémantiques.
+- [x] **Memory Explorer** : Navigation directe dans le stockage Qdrant.
+
+### ⚙️ Sprint 3.3 : Polyglot Hardening (Performance) - 🚀 PROCHAINE ÉTAPE
+- [ ] **Sentinel (Rust)** : Hardened P2P communication (libp2p).
+- [ ] **Nervous (Go)** : Migration gRPC pour routage <1ms.
+- [ ] **Quant-Lab (Julia)** : Simulations de portefeuille haute performance.
+- [ ] **Lab (JAX)** : Implémentation du moteur DreamerV3.
 
 ---
 
-## 🚀 PHASE 1 : EVEIL (Évolutions Maître) - ✅ COMPLÉTÉE
+## 🌌 VISION & AUTONOMIE : BRIQUES GAMMA (100%) - ⏳ PLANIFIÉ
 
----
+### 🌍 Sprint 4 : World Model & Simulation
+- [ ] **World Model** : Workspace 8x8 pour prédiction d'actions.
+- [ ] **Gymnasium Arena** : Environnement d'entraînement pour DreamerV3.
 
-## 🛡️ PHASES 5-6 : PRODUCTION & SOUVERAINETÉ - ✅ COMPLÉTÉE
-- [x] **Hardened Kernel** : Watchdog Rust (Loi 0 & 2).
-- [x] **Sentinel Pro** : News Bloomberg/Reuters (Institutional Sentiment).
-- [x] **Sincerity Meter** : Visualisation Linear Probes.
-- [x] **Apocalypse Stress-Tests** : Résilience aux krachs (1987, 2020).
-
----
-
-## 🌌 PHASES 7-8 : ÉVOLUTION & MÉTAMORPHOSE - ✅ COMPLÉTÉE
-- [x] **Self-Healing** : Orchestrateur de survie autonome.
-- [x] **Ghost Shield** : Invisibilité HFT (Fragmentation des ordres).
-- [x] **Alpha Memory** : Mémoire sémantique Qdrant long-terme.
-- [x] **Multi-Broker** : Pont Binance / IBKR / MT5.
-- [x] **Strategy DNA** : Optimisation génétique de la ruche.
-
----
-
-## 🌋 PHASES 9-10 : NEURAL LINK & SINGULARITÉ - ✅ COMPLÉTÉE
-- [x] **MQTT Link** : Fiabilité duale (QoS 2) & Last Will.
-- [x] **Cyber-Forge** : Auto-codage supervise par E.V.A.
-- [x] **P2P Grid** : Décentralisation maillée.
-- [x] **Forensic Black-Box** : Chaînage de hash immuable.
-- [x] **Genesis Pre-Flight** : Validation totale avant envol.
-
----
-
-## 🛠️ PHASE 15 : ENGINE DEEPENING - ✅ COMPLÉTÉE
-- [x] **Self-Healing** : Phoenix Protocol (Redémarrage auto via Docker SDK).
-- [x] **Strategy Orchestrator** : Mixture of Experts (MoE) via LLM.
-- [x] **Persistent Audit** : Black Box avec sauvegarde sur disque (Rust).
-
----
-
-## 🛡️ PHASE 16 : PROFESSIONAL INFRASTRUCTURE - ✅ COMPLÉTÉE
-- [x] **Centralized Logging** : Stack Loki / Promtail / Grafana intégrée.
-- [x] **Internal Security** : Authentification inter-experts via JWT.
-- [x] **Dynamic Laws** : Hot-reload de la Constitution (The Tablet) sans restart.
-- [x] **Performance Metrics** : Instrumentation Prometheus dans le Nervous System (Go).
-
----
-
----
-
-## 🛰️ PHASE 17 : REAL-TIME ALERTING & UI SOVEREIGNTY - ✅ COMPLÉTÉE
-- [x] **Telegram Alerts** : Notifications instantanées des profits et urgences.
-- [x] **Nexus Integration** : Visual Probes Grafana (Loki/Prometheus) intégrées.
-- [x] **Chaos Resilience** : Phoenix Protocol validé via script de stress-test.
-
----
-
-## 🔮 PROCHAINES ÉTAPES (PHASE 18+)
-- [ ] **Sovereign Database** : Migration vers une base de données distribuée (CockroachDB).
-- [ ] **Advanced Quant** : Intégration de modèles de Deep Learning (Julia/Flux).
-- [ ] **Neural Web** : Interface de visualisation GNN 3D pour le Swarm.
+### 🐝 Sprint 5 : L'Essaim Autonome
+- [ ] **Orchestration Phoenix** : Auto-réparation multimodale.
+- [ ] **Evolutionary Code** : Auto-optimisation des experts.
 
 ---
 
 ## 📊 VÉRIFICATIONS TECHNIQUES (AUDIT)
 
-| Module | Code Présent ? | Tests Unitaires ? | Doc à jour ? |
-| :--- | :---: | :---: | :---: |
-| `eva-core` | ✅ | ✅ | ✅ |
-| `eva-kernel` | ✅ | ✅ | ✅ |
-| `eva-banker` | ✅ | ✅ | ✅ |
-| `eva-sentinel`| ✅ | ⚠️ (Partiel) | ✅ |
-| `eva-lab` | ✅ | ✅ | ✅ |
-| `eva-nexus` | ✅ | ✅ | ✅ |
-| `eva-accountant`| ✅ | ✅ | ✅ |
-| `docker-compose`| ✅ | N/A | ✅ |
+| Module | Code Présent ? | Tests Unitaires ? | Doc à jour ? | Statut |
+| :--- | :---: | :---: | :---: | :--- |
+| `eva-core` | ✅ | ✅ | ✅ | Operationnel |
+| `eva-kernel` | ✅ | ✅ | ✅ | Operationnel |
+| `eva-banker` | ✅ | ✅ | ✅ | Operationnel |
+| `eva-sentinel`| ✅ | ⚠️ (Partiel) | ✅ | Operationnel |
+| `eva-lab` | ✅ | ✅ | ✅ | Operationnel |
+| `eva-nexus` | ✅ | ✅ | ✅ | Operationnel |
+| `eva-accountant`| ✅ | ✅ | ✅ | Operationnel |
+| `docker-compose`| ✅ | N/A | ✅ | Prêt |
 
 ---
-*Ce document doit être mis à jour à chaque fin de sprint.*
+*Ce document sert de référence officielle pour l'évolution de la Singularité.*

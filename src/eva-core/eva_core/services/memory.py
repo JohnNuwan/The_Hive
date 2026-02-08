@@ -198,24 +198,28 @@ class MemoryService:
 
     async def get_session_history(
         self,
-        session_id: UUID,
+        session_id: UUID | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """Récupère l'historique d'une session"""
+        """Récupère l'historique d'une session ou toute la mémoire si session_id est None"""
         try:
             client = await self._get_client()
             from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-            results, _ = await client.scroll(
-                collection_name=self.collection_name,
-                scroll_filter=Filter(
+            scroll_filter = None
+            if session_id:
+                scroll_filter = Filter(
                     must=[
                         FieldCondition(
                             key="session_id",
                             match=MatchValue(value=str(session_id)),
                         )
                     ]
-                ),
+                )
+
+            results, _ = await client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=scroll_filter,
                 limit=limit,
             )
 
@@ -236,6 +240,64 @@ class MemoryService:
         except Exception as e:
             logger.warning(f"Erreur récupération historique: {e}")
             return []
+
+    async def get_graph_data(self, limit: int = 50, similarity_threshold: float = 0.8) -> dict[str, list]:
+        """
+        Génère les données pour la visualisation du graphe de connaissances.
+        Retourne une structure {nodes: [], links: []}.
+        Les liens sont créés si la similarité cosinus est > threshold.
+        """
+        try:
+            client = await self._get_client()
+            
+            # 1. Récupérer les derniers points
+            results, _ = await client.scroll(
+                collection_name=self.collection_name,
+                limit=limit,
+                with_vectors=True,
+                with_payload=True,
+            )
+            
+            nodes = []
+            vectors = []
+            for r in results:
+                nodes.append({
+                    "id": str(r.id),
+                    "label": r.payload.get("content", "")[:30] + "...",
+                    "role": r.payload.get("role", "unknown"),
+                    "expert": r.payload.get("metadata", {}).get("expert", "core"),
+                    "timestamp": r.payload.get("timestamp", ""),
+                })
+                vectors.append(r.vector)
+            
+            # 2. Calculer les liens basés sur la similarité (Simplifié)
+            links = []
+            import numpy as np
+            
+            if len(vectors) > 1:
+                vec_arr = np.array(vectors)
+                # Normalisation pour cosinus
+                norms = np.linalg.norm(vec_arr, axis=1, keepdims=True)
+                vec_arr = vec_arr / (norms + 1e-9)
+                
+                # Matrice de similarité
+                similarity_matrix = np.dot(vec_arr, vec_arr.T)
+                
+                for i in range(len(nodes)):
+                    for j in range(i + 1, len(nodes)):
+                        score = similarity_matrix[i, j]
+                        if score > similarity_threshold:
+                            links.append({
+                                "source": nodes[i]["id"],
+                                "target": nodes[j]["id"],
+                                "value": float(score)
+                            })
+            
+            return {"nodes": nodes, "links": links}
+
+        except Exception as e:
+            logger.error(f"Erreur génération graphe: {e}")
+            return {"nodes": [], "links": []}
 
 
 @lru_cache

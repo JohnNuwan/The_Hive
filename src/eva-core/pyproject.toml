@@ -2,7 +2,7 @@
 name = "eva-core"
 version = "0.1.0"
 description = "EVA Core - Orchestrateur principal THE HIVE"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "shared",
     "fastapi>=0.109.0",

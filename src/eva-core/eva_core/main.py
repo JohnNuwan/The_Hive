@@ -66,6 +66,7 @@ class ChatResponse(BaseModel):
     message: str
     session_id: UUID
     intent: Intent | None = None
+    thoughts: str | None = None  # Trace de raisonnement extraite
     metadata: dict[str, Any] = {}
     timestamp: datetime = Field(default_factory=datetime.now)
 
@@ -281,7 +282,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             }
             target_role = role_map.get(intent.target_expert, "general")
 
-            response_text = await llm_service.generate_response(
+            response_text, thoughts = await llm_service.generate_response(
                 messages=[ChatMessage(
                     session_id=session_id,
                     role=MessageRole.USER,
@@ -289,6 +290,13 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 )],
                 system_prompt=f"{expert_injector}\nTu es EVA, une IA assistante personnelle intelligente.",
                 role=target_role,
+            )
+            # Créer le message de l'expert avec les pensées
+            expert_message = ChatMessage(
+                session_id=session_id,
+                role=MessageRole.ASSISTANT,
+                content=response_text,
+                thoughts=thoughts,
             )
         elif intent.target_expert == "all":
             # SWARM MODE: Parallélisation sur tous les agents concernés
@@ -335,6 +343,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             message=response_text,
             session_id=session_id,
             intent=intent,
+            thoughts=thoughts if intent.target_expert == "core" else None,
             metadata={
                 "expert": intent.target_expert,
                 "confidence": intent.confidence,
@@ -362,6 +371,29 @@ async def get_active_drones() -> list[dict]:
 
 
 # Note: The old self_healing_orchestrator is replaced by SelfHealingService
+
+
+@app.get("/memory/fragments", tags=["Mémoire"])
+async def get_memory_fragments(limit: int = 50) -> list[dict[str, Any]]:
+    """
+    Récupère les derniers fragments de mémoire stockés.
+    """
+    memory_service: MemoryService = app.state.memory_service
+    # Réutiliser une version simplifiée de scroll
+    results = await memory_service.get_session_history(session_id=None, limit=limit) # None means all if implemented
+    return results
+
+
+@app.get("/memory/graph", tags=["Mémoire"])
+async def get_memory_graph(
+    limit: int = 50,
+    similarity_threshold: float = 0.8,
+) -> dict[str, Any]:
+    """
+    Retourne les données du graphe de connaissances (nodes & links).
+    """
+    memory_service: MemoryService = app.state.memory_service
+    return await memory_service.get_graph_data(limit=limit, similarity_threshold=similarity_threshold)
 
 
 @app.get("/memory/search", tags=["Mémoire"])
@@ -490,7 +522,13 @@ async def system_status() -> dict[str, Any]:
             return {"health": "unknown", "sentinel": {"status": "offline"}}
         except Exception as e:
             logger.error(f"Erreur proxy Sentinel: {e}")
-            return {"health": "offline", "error": str(e), "sentinel": {"status": "offline"}}
+            llm_service = get_llm_service()
+            return {
+                "health": "degraded",
+                "sentinel": {"status": "offline"},
+                "active_role": llm_service.council.current_role,
+                "active_model": llm_service.council.current_model
+            }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -522,11 +560,14 @@ async def get_telemetry():
     """Retourne les métriques de télémétrie du Core"""
     start_time: datetime = app.state.start_time
     uptime = (datetime.now() - start_time).total_seconds()
+    llm_service = get_llm_service()
     return {
         "service_name": "core",
         "uptime_seconds": int(uptime),
         "requests_total": app.state.request_count,
         "errors_total": app.state.error_count,
+        "active_role": llm_service.council.current_role,
+        "active_model": llm_service.council.current_model,
         "timestamp": datetime.now().isoformat(),
     }
 
