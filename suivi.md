@@ -9,6 +9,7 @@ Ce document récapitule l'état actuel du système EVA et les étapes futures.
 - **Core Orchestrator** : Endpoint `/chat` enrichi avec les traces de raisonnement (`thoughts`).
 - **Memory Service** : Intégration Qdrant pour la mémoire sémantique et extraction de graphes GNN.
 - **Thought Visualization** : Extraction automatique des balises `<thought>` dans les réponses LLM.
+- **Infrastructure Hardening** : Fix des healthchecks Nexus et migration Loki vers TSDB (v13).
 
 ### Frontend (Nexus)
 - **Nexus Graph** : Visualisation Force-Directed des relations sémantiques.
