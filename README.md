@@ -32,7 +32,7 @@
 ### 2.1 Couche Hardware (Substrat Physique)
 *   **Calcul (CPU)** : AMD Epyc 7302P (16 Cores / 32 Threads). *Rôle : Cerveau central multitâche.*
 *   **Mémoire (RAM)** : 128 Go DDR4 ECC. *Allocation dynamique stricte.*
-*   **Accélération IA Principale** : NVIDIA RTX 2060 (6 Go VRAM) - *Mode Dev*. (Prévu : RTX 3090 FE 24 Go).
+*   **Accélération IA Principale** : NVIDIA RTX 2060 (6 Go VRAM) - *Optimisation Sovereign Stack V3.0* (vLLM + Gemma 3 AWQ).
 *   **Accélération IA Secondaire (Cluster TPU)** : Carte PCIe + 8x Google Coral Dual Edge TPU. *Rôle : Vision Computer (YOLO) & Sécurité Réseau 24/7.*
 *   **Stockage** : 1 To NVMe (System) + 4 To HDD (Cold Storage).
 
@@ -40,7 +40,7 @@
 | ID | Nom | Type | Rôle & Contenu |
 | :--- | :--- | :--- | :--- |
 | **VM 100** | **[The Brain]** | VM (Linux) | Orchestrateur Central, API FastAPI, Core Sécurité. |
-| **VM 101** | **[The Council]** | VM (GPU Pass) | Serveur d'inférence (Ollama/vLLM) partagé. |
+| **VM 101** | **[The Council]** | VM (GPU Pass) | **Sovereign Stack V3.0** : vLLM Server + Gemma 3 (4B). |
 | **VM 102** | **[The District]** | VM (GPU Pass) | Serveur Unreal Engine 5 (Désactivé en Phase 0). |
 | **VM 200** | **[Trading Floor]** | VM (Win10) | **Hydra Protocol** : 20 instances MetaTrader 5 interconnectées. |
 | **CT 300** | **[Nervous Sys]**  | Container (Go) | Router de messages haute fréquence (Pub/Sub). |
@@ -422,12 +422,13 @@ sequenceDiagram
 
 ## 11. 💻 STACK TECHNOLOGIQUE
 
-*   **Python** : LangGraph, LangChain, **Mem0**, PyTorch, Scikit-learn, Stable Baselines3, Gymnasium, Ray RLLib, FastAPI.
+*   **Python** : LangGraph, LangChain, **OpenClaw** (Custom Agent Framework), **Mem0**, PyTorch, Scikit-learn, FastAPI.
 *   **Rust** : Kernel Sécurité, Trading Execution Engine, Sentinel Engine.
 *   **Go** : Halo Bridge, Messenger, Nexus, IPFS, Système Nerveux Central (Nervous System).
 *   **Julia / JAX** : Calcul Financier Haute Performance & Optimisation.
 *   **Web3** : Web3.py, Brownie.
-*   **Bases de Données** : **Qdrant** (Production), **ChromaDB** (Local/Dev), TimescaleDB (Time-Series), Redis (Cache).
+*   **Bases de Données** : **Qdrant** (Production), **Neo4j** (Graph Memory), **ChromaDB** (Local/Dev), TimescaleDB (Time-Series), Redis (Cache).
+*   **IA & Inférence** : **vLLM** (Backend), **Gemma 3 (4B)** (Modèle Principal), **Ollama** (Dev/Fallback).
 *   **Mémoire & RAG** : Retrieval Augmented Generation (RAG) avec persistance sémantique via Mem0.
 
 ---

@@ -29,23 +29,29 @@
 - [x] **GNN Knowledge Graph** : Visualisation interactive des neurones sémantiques.
 - [x] **Memory Explorer** : Navigation directe dans le stockage Qdrant.
 
-### ⚙️ Sprint 3.3 : Polyglot Hardening (Performance) - 🚀 PROCHAINE ÉTAPE
-- [ ] **Sentinel (Rust)** : Hardened P2P communication (libp2p).
+### ⚙️ Sprint 3.3 : Polyglot Hardening (Performance) - � EN COURS
+- [x] **Sentinel (Rust)** : Hardened P2P communication (libp2p & Redis fix).
 - [ ] **Nervous (Go)** : Migration gRPC pour routage <1ms.
 - [ ] **Quant-Lab (Julia)** : Simulations de portefeuille haute performance.
 - [ ] **Lab (JAX)** : Implémentation du moteur DreamerV3.
 
 ---
 
-## 🌌 VISION & AUTONOMIE : BRIQUES GAMMA (100%) - ⏳ PLANIFIÉ
+## 🌌 SOVEREIGN STACK V3.0 : BRIQUES GAMMA (100%) - ⏳ PLANIFIÉ
 
-### 🌍 Sprint 4 : World Model & Simulation
-- [ ] **World Model** : Workspace 8x8 pour prédiction d'actions.
-- [ ] **Gymnasium Arena** : Environnement d'entraînement pour DreamerV3.
+### 🧠 Sprint 3.0-Reboot : L'Agentivité OpenClaw
+- [x] **Moteur Hybride** : vLLM + EAGLE-3 + Gemma-3-4B-IT-AWQ.
+- [x] **Mémoire Associative** : HippoRAG 2 (Neo4j + Qdrant) + Mem0.
+- [x] **OpenClaw Kernel** : Boucle OODA, Skill Registry, & Agent Teams (Planner/Executor).
+- [x] **Skills** : Intégration Public APIs (Discovery) & Git Ops.
 
-### 🐝 Sprint 5 : L'Essaim Autonome
-- [ ] **Orchestration Phoenix** : Auto-réparation multimodale.
-- [ ] **Evolutionary Code** : Auto-optimisation des experts.
+### 🧬 Sprint 4 : L'Auto-Évolution (RLM)
+- [ ] **Boucle RLM** : Recursive Language Model pour l'auto-amélioration.
+- [ ] **Auto-Réparation** : Génération de correctifs via Gemma 3.
+
+### 🌍 Sprint 5 : World Model (Activation Conditionnelle)
+- [ ] **Feature Flag** : `ENABLE_DREAMER_TRAINING` (Activé sur RTX 3090).
+- [ ] **Shadow Learning** : Collecte des logs pour futur entraînement DreamerV3.
 
 ---
 

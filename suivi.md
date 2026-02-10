@@ -25,15 +25,17 @@ Ce document récapitule l'état actuel du système EVA et les étapes futures.
 
 ## Ce qu'il reste à faire
 
-### Sprint 3.3 : Polyglot Hardening (Performance)
-- [ ] **Sentinel (Rust)** : Durcir la communication P2P (libp2p).
+### Sprint 3.3 : Polyglot Hardening (Performance) - 🟡 EN COURS
+- [x] **Sentinel (Rust)** : Hardened P2P communication (libp2p & Redis fix).
 - [ ] **Nervous (Go)** : Migration gRPC pour un routage < 1ms.
 - [ ] **Quant-Lab (Julia)** : Intégration pour simulations de portefeuille lourdes.
 - [ ] **Lab (JAX)** : Implémentation du cœur DreamerV3.
 
-### Sprint 4 : Vision & Simulation
-- [ ] **World Model** : Workspace 8x8 pour la simulation d'actions.
-- [ ] **Gymnasium Arena** : Environnement d'entraînement pour DreamerV3.
+### Sprint 3.0-Reboot (Sovereign Stack V3.0)
+- [x] **Architecture** : vLLM + Gemma 3 + EAGLE-3 (Moteur Hybride).
+- [x] **Mémoire** : HippoRAG 2 (Neo4j).
+- [x] **Mémoire Suite** : Mem0 (Bridge intégré).
+- [x] **OpenClaw** : Agentivité (Kernel + Skills + Teams).
 
-### Sprint 5 : Autonomie
-- [ ] **Orchestration Phoenix** : Auto-réparation et auto-évolution du code expert.
+### Sprint 4 : L'Auto-Évolution (RLM)
+- [ ] **Boucle RLM** : Auto-amélioration et auto-réparation.

@@ -45,6 +45,20 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
 
+  neo4j:
+    image: neo4j:5-community
+    container_name: hive-infra-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/devpassword
+      - NEO4J_PLUGINS=["apoc"]
+    networks: [ "hive-net" ]
+    restart: unless-stopped
+    volumes:
+      - neo4j_data:/data
+
   timescaledb:
     image: timescale/timescaledb:latest-pg15
     container_name: hive-infra-timescale
@@ -78,6 +92,27 @@ services:
     volumes:
       - mosquitto_data:/mosquitto/data
 
+  vllm-server:
+    build:
+      context: .
+      dockerfile: src/eva-core/vllm/Dockerfile
+    container_name: hive-infra-vllm
+    ports: [ "8000:8000" ]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    command: --model google/gemma-3-4b-it --quantization awq --gpu-memory-utilization 0.85 --enforce-eager
+    networks: [ "hive-net" ]
+    restart: unless-stopped
+
   # ─────────────────────────────────────────────────────────────────────────────
   # CORE & KERNEL (Triumvirat Vital)
   # ─────────────────────────────────────────────────────────────────────────────
@@ -93,6 +128,8 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+      vllm-server:
+        condition: service_started
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -101,8 +138,11 @@ services:
       - REDIS_PASSWORD=devpassword
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
-      - OLLAMA_HOST=localhost
-      - USE_OLLAMA=true
+      - OLLAMA_HOST=vllm-server # Pointing to vLLM container
+      - OLLAMA_PORT=8000
+      - USE_OLLAMA=true # Kept true for compatibility, handled in code
+      - LLM_BACKEND=vllm # Explicit backend switch
+      - MODEL_NAME=google/gemma-3-4b-it
       - ENVIRONMENT=development
     deploy:
       resources:
@@ -430,3 +470,4 @@ volumes:
   qdrant_data:
   timescale_data:
   mosquitto_data:
+  neo4j_data:

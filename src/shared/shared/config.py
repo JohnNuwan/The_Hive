@@ -41,9 +41,10 @@ class Settings(BaseSettings):
     # ═══════════════════════════════════════════════════════════════════════════
     # LLM SERVER
     # ═══════════════════════════════════════════════════════════════════════════
-    vllm_host: str = "localhost"
-    vllm_port: int = 8080
-    vllm_model: str = "meta-llama/Meta-Llama-3-8B-Instruct"
+    vllm_host: str = "vllm-server"
+    vllm_port: int = 8000
+    vllm_model: str = "google/gemma-3-4b-it"
+    llm_backend: Literal["ollama", "vllm"] = "vllm"
     # Alternative: Ollama
     ollama_host: str = "localhost"
     ollama_port: int = 11434
@@ -73,6 +74,14 @@ class Settings(BaseSettings):
     qdrant_api_key: SecretStr = Field(default=SecretStr(""))
     qdrant_collection_conversations: str = "conversations"
     qdrant_collection_documents: str = "documents"
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # NEO4J (Graph Memory)
+    # ═══════════════════════════════════════════════════════════════════════════
+    neo4j_host: str = "localhost"
+    neo4j_port: int = 7687
+    neo4j_user: str = "neo4j"
+    neo4j_password: SecretStr = Field(default=SecretStr("devpassword"))
 
     # ═══════════════════════════════════════════════════════════════════════════
     # TIMESCALEDB

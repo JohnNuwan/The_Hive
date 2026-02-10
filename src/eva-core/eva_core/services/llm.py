@@ -11,6 +11,7 @@ import httpx
 from shared import ChatMessage, get_settings
 
 from eva_core.services.council import get_council_service
+from shared.memory_bridge import get_memory_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class LLMService:
         self.base_url = f"http://{host}:{port}"
         self._client = httpx.AsyncClient(timeout=120.0)
         self.council = get_council_service()
+        self.memory = get_memory_bridge()
         logger.info(f"LLMService initialisé: {self.base_url} (model={model})")
 
     async def generate_response(
@@ -57,6 +59,18 @@ class LLMService:
         try:
             # 1. Préparer le modèle via le Council (Swap si nécessaire)
             target_model = await self.council.prepare_model(role)
+
+            # 1.5. Récupération Contextuelle (Mem0 / Neo4j)
+            try:
+                # On utilise le dernier message utilisateur comme requête
+                last_user_msg = next((m for m in reversed(messages) if m.role.value == "user"), None)
+                if last_user_msg:
+                    memories = await self.memory.search(last_user_msg.content, limit=3)
+                    if memories:
+                        memory_block = "\n".join([f"- {m}" for m in memories])
+                        system_prompt += f"\n\n[CONTEXTE MÉMORIEL (Souvenirs Pertinents)]:\n{memory_block}\nInfluence ta réponse avec ces faits si nécessaire."
+            except Exception as e:
+                logger.warning(f"Memory retrieval passed: {e}")
             
             # Ajouter une instruction de raisonnement si le rôle est "research"
             if role == "research":
@@ -172,9 +186,22 @@ class LLMService:
 def get_llm_service() -> LLMService:
     """Retourne l'instance LLM configurée"""
     settings = get_settings()
+    
+    use_vllm = settings.llm_backend == "vllm"
+    
+    # Priority to settings.llm_backend, fallback to settings.use_ollama if legacy
+    if settings.llm_backend == "vllm":
+        host = settings.vllm_host
+        port = settings.vllm_port
+        model = settings.vllm_model
+    else:
+        host = settings.ollama_host
+        port = settings.ollama_port
+        model = settings.ollama_model
+        
     return LLMService(
-        host=settings.ollama_host if settings.use_ollama else settings.vllm_host,
-        port=settings.ollama_port if settings.use_ollama else settings.vllm_port,
-        model=settings.ollama_model if settings.use_ollama else settings.vllm_model,
-        use_ollama=settings.use_ollama,
+        host=host,
+        port=port,
+        model=model,
+        use_ollama=not use_vllm,
     )

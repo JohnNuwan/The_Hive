@@ -3,11 +3,17 @@ use bollard::Docker;
 use redis::AsyncCommands;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
+use libp2p::{
+    gossipsub, mdns, noise, swarm::{NetworkBehaviour, SwarmEvent}, tcp, yamux, Multiaddr, PeerId,
+};
+use std::error::Error;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct BankerHeartbeat {
     status: String,
     ts: f64,
@@ -28,12 +34,18 @@ struct Constitution {
     loi_2_risque: Loi2,
 }
 
+#[derive(NetworkBehaviour)]
+struct MyBehaviour {
+    gossipsub: gossipsub::Behaviour,
+    mdns: mdns::tokio::Behaviour,
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn Error>> {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
-    info!("⚡ SENTINEL CORE (Rust) Starting...");
+    info!("⚡ SENTINEL CORE (Rust) Starting with Polyglot Hardening (libp2p)...");
 
     // 1. Load Constitution (Loi 1.3 - Hardware Key check)
     let constitution_path = "/mnt/tablet/Lois.toml";
@@ -47,12 +59,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_drawdown = constitution.loi_2_risque.max_daily_drawdown_percent;
     let monitored_containers = constitution.loi_2_risque.monitored_containers;
 
-    info!("✅ Constitution loaded from 'The Tablet'. Loi 2: {}% DD limit.", max_drawdown);
+    info!("✅ Constitution loaded. Loi 2: {}% DD limit.", max_drawdown);
 
-    // 2. Connection to Docker
+    // 2. Setup libp2p
+    let mut swarm = libp2p::SwarmBuilder::with_new_identity()
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )?
+        .with_behaviour(|key| {
+            let message_id_fn = |message: &gossipsub::Message| {
+                let mut s = DefaultHasher::new();
+                message.data.hash(&mut s);
+                gossipsub::MessageId::from(s.finish().to_string())
+            };
+
+            let gossipsub_config = gossipsub::ConfigBuilder::default()
+                .heartbeat_interval(Duration::from_secs(10))
+                .validation_mode(gossipsub::ValidationMode::Strict)
+                .message_id_fn(message_id_fn)
+                .build()
+                .map_err(|msg| std::io::Error::new(std::io::ErrorKind::Other, msg))?;
+
+            let gossipsub = gossipsub::Behaviour::new(
+                gossipsub::MessageAuthenticity::Signed(key.clone()),
+                gossipsub_config,
+            )?;
+
+            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
+            Ok(MyBehaviour { gossipsub, mdns })
+        })?
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        .build();
+
+    let topic = gossipsub::IdentTopic::new("eva.swarm.heartbeats");
+    swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    // 3. Connection to Docker
     let docker = Docker::connect_with_unix_defaults()?;
 
-    // 3. Connect to Redis
+    // 4. Connect to Redis (Fallback)
     let redis_host = std::env::var("REDIS_HOST").unwrap_or_else(|_| "localhost".to_string());
     let redis_password = std::env::var("REDIS_PASSWORD").unwrap_or_default();
     let redis_url = if redis_password.is_empty() {
@@ -62,46 +112,95 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let client = redis::Client::open(redis_url)?;
-    let mut connection = client.get_async_connection().await?;
-    let mut pubsub = client.get_async_pubsub().await?;
+    // Use multiplexed async connection to fix deprecation and get_db error
+    let redis_conn = client.get_multiplexed_async_connection().await.ok();
 
-    info!("✅ Connected to Redis, subscribing to heartbeats...");
-    pubsub.subscribe("eva.banker.heartbeat").await?;
+    let mut redis_pubsub = if redis_conn.is_some() {
+        if let Ok(mut ps) = client.get_async_pubsub().await {
+            let _ = ps.subscribe("eva.banker.heartbeat").await;
+            Some(ps)
+        } else { None }
+    } else { None };
+    
+    // We need a separate connection for publishing if we want to publish from the loop
+    let mut redis_publish_conn = client.get_multiplexed_async_connection().await.ok();
 
-    let mut pubsub_stream = pubsub.on_message();
+    info!("✅ P2P Node Started. PeerID: {}", swarm.local_peer_id());
 
-    // 4. Monitoring Loop
+    // 5. Monitoring Loop
     loop {
         tokio::select! {
-            msg = pubsub_stream.next() => {
-                if let Some(msg) = msg {
-                    let payload: String = msg.get_payload()?;
-                    match serde_json::from_str::<BankerHeartbeat>(&payload) {
-                        Ok(hb) => {
-                            let drawdown = (1.0 - (hb.equity / hb.balance)) * 100.0;
-                            
-                            if drawdown >= max_drawdown {
-                                warn!("🚨 CRITICAL DRAWDOWN DETECTED: {:.2}%! TRIGGERING KILL-SWITCH...", drawdown);
-                                
-                                for container in &monitored_containers {
-                                    info!("🛑 Killing container: {}", container);
-                                    let options = Some(StopContainerOptions { t: 0 });
-                                    if let Err(e) = docker.stop_container(container, options).await {
-                                        error!("❌ Failed to kill container {}: {}", container, e);
-                                    }
-                                }
-                                
-                                // Send emergency broadcast
-                                let _ : () = connection.publish("eva.kernel.emergency", 
-                                    format!("{{\"action\":\"KILL_SWITCH_TRIGGERED\", \"drawdown\":{}}}", drawdown)).await?;
+             event = swarm.select_next_some() => match event {
+                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                    for (peer_id, _multiaddr) in list {
+                        info!("🌐 P2P: Discovered peer {}", peer_id);
+                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                    }
+                },
+                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                    propagation_source: _,
+                    message_id: _,
+                    message,
+                })) => {
+                    if let Ok(hb) = serde_json::from_slice::<BankerHeartbeat>(&message.data) {
+                        let drawdown = (1.0 - (hb.equity / hb.balance)) * 100.0;
+                        if drawdown >= max_drawdown {
+                            warn!("🚨 P2P ALERT: Critical Drawdown {:.2}% from {}", drawdown, hb.expert);
+                            // Logic to kill containers (shared with Redis logic)
+                            for container in &monitored_containers {
+                                let _ = docker.stop_container(container, Some(StopContainerOptions { t: 0 })).await;
                             }
                         }
-                        Err(e) => error!("Failed to parse heartbeat: {}", e),
+                    }
+                },
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    info!("📍 Sentinel listening on {}", address);
+                },
+                _ => {}
+            },
+            msg = async {
+                if let Some(ref mut ps) = redis_pubsub {
+                    ps.on_message().next().await
+                } else {
+                    futures_util::future::pending().await
+                }
+            } => {
+                if let Some(msg) = msg {
+                    let payload: String = msg.get_payload().unwrap_or_default();
+                    if let Ok(hb) = serde_json::from_str::<BankerHeartbeat>(&payload) {
+                        let drawdown = (1.0 - (hb.equity / hb.balance)) * 100.0;
+                        if drawdown >= max_drawdown {
+                            warn!("🚨 REDIS ALERT: Critical Drawdown {:.2}%", drawdown);
+                            for container in &monitored_containers {
+                                let _ = docker.stop_container(container, Some(StopContainerOptions { t: 0 })).await;
+                            }
+                            // Broadcast to P2P as well!
+                            let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), payload.into_bytes());
+                            
+                            // Publish to Kernel via Redis if connected
+                             if let Some(ref mut conn) = redis_publish_conn {
+                                let _ : () = conn.publish("eva.kernel.emergency", 
+                                    format!("{{\"action\":\"KILL_SWITCH_TRIGGERED\", \"drawdown\":{}}}", drawdown)).await.unwrap_or(());
+                            }
+                        }
                     }
                 }
-            }
+            },
             _ = sleep(Duration::from_secs(30)) => {
-                info!("💓 Sentinel Check: All systems nominal");
+                info!("💓 Sentinel Check: P2P Peers: {}", swarm.connected_peers().count());
+                // Publish local heartbeat to P2P
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+                let hb = BankerHeartbeat {
+                    status: "online".to_string(),
+                    ts: now,
+                    expert: "sentinel_rust".to_string(),
+                    equity: 0.0,
+                    balance: 0.0,
+                    currency: "N/A".to_string(),
+                };
+                if let Ok(data) = serde_json::to_vec(&hb) {
+                    let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), data);
+                }
             }
         }
     }

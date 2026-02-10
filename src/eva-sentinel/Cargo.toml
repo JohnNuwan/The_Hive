@@ -16,3 +16,5 @@ time = "=0.3.36"
 toml = "0.8"
 thiserror = "1.0"
 futures-util = "0.3"
+libp2p = { version = "0.53", features = ["tokio", "gossipsub", "mdns", "noise", "tcp", "yamux", "macros"] }
+async-trait = "0.1"
