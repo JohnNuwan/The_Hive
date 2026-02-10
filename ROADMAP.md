@@ -1,6 +1,6 @@
 # 🗺️ ROADMAP & PROGRESSION : THE HIVE
 
-> **Dernière mise à jour** : 08/02/2026
+> **Dernière mise à jour** : 10/02/2026
 > **Statut Global** : 🟡 PHASE BETA EN COURS (Intelligence & UI)
 
 ---
@@ -44,6 +44,7 @@
 - [x] **Mémoire Associative** : HippoRAG 2 (Neo4j + Qdrant) + Mem0.
 - [x] **OpenClaw Kernel** : Boucle OODA, Skill Registry, & Agent Teams (Planner/Executor).
 - [x] **Skills** : Intégration Public APIs (Discovery) & Git Ops.
+- [x] **War Rooms** : Débat contradictoire (DEFCON) — Council, Dojo, High Court, Quiet Room.
 
 ### 🧬 Sprint 4 : L'Auto-Évolution (RLM)
 - [ ] **Boucle RLM** : Recursive Language Model pour l'auto-amélioration.
