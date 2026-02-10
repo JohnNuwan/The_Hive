@@ -44,7 +44,7 @@
 - [x] **Mémoire Associative** : HippoRAG 2 (Neo4j + Qdrant) + Mem0.
 - [x] **OpenClaw Kernel** : Boucle OODA, Skill Registry, & Agent Teams (Planner/Executor).
 - [x] **Skills** : Intégration Public APIs (Discovery) & Git Ops.
-- [x] **War Rooms** : Débat contradictoire (DEFCON) — Council, Dojo, High Court, Quiet Room.
+- [x] **War Rooms** : Débat contradictoire (DEFCON) — Council, Dojo, High Court, Quiet Room + Scénarios (Red/Blue Teaming, Hard Veto, Psycho-Cyber Auto-Convocation).
 
 ### 🧬 Sprint 4 : L'Auto-Évolution (RLM)
 - [ ] **Boucle RLM** : Recursive Language Model pour l'auto-amélioration.

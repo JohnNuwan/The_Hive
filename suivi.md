@@ -36,7 +36,7 @@ Ce document récapitule l'état actuel du système EVA et les étapes futures.
 - [x] **Mémoire** : HippoRAG 2 (Neo4j).
 - [x] **Mémoire Suite** : Mem0 (Bridge intégré).
 - [x] **OpenClaw** : Agentivité (Kernel + Skills + Teams).
-- [x] **War Rooms** : Débat contradictoire DEFCON (Council, Dojo, High Court, Quiet Room).
+- [x] **War Rooms** : Débat contradictoire DEFCON + Scénarios (Dojo, Council, Quiet Room).
 
 ### Sprint 4 : L'Auto-Évolution (RLM)
 - [ ] **Boucle RLM** : Auto-amélioration et auto-réparation.
