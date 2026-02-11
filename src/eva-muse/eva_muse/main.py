@@ -10,13 +10,13 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
 from shared import get_settings
-from shared.redis_client import init_redis, get_redis_client
+from shared.redis_client import get_redis_client, init_redis
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -185,8 +185,8 @@ async def hard_heartbeat():
         try:
             payload = {"status": "online", "ts": datetime.now().timestamp(), "expert": "muse"}
             await redis.cache_set("eva.muse.status", payload, ttl_seconds=10)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Error in heartbeat: {e}")
         await asyncio.sleep(2.0)
 
 
