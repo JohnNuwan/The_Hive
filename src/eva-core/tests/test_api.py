@@ -23,21 +23,28 @@ def client(mock_redis):
     # Patch init_redis to avoid connecting to real Redis
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
          patch("eva_core.main.get_redis_client", return_value=mock_redis), \
-         patch("shared.redis_client.get_redis_client", return_value=mock_redis):
+         patch("shared.redis_client.get_redis_client", return_value=mock_redis), \
+         patch("eva_core.main.get_memory_service", return_value=MagicMock()), \
+         patch("eva_core.main.get_llm_service", return_value=MagicMock()), \
+         patch("eva_core.main.EVAMQTTClient", return_value=AsyncMock()), \
+         patch("eva_core.main.StrategyOrchestrator", return_value=MagicMock()), \
+         patch("eva_core.main.SelfHealingService", return_value=MagicMock()), \
+         patch("eva_core.main.SystemMonitor", return_value=MagicMock()), \
+         patch("eva_core.main.PromptMaster", return_value=MagicMock()):
 
-        # Initialize app state manually to avoid relying on lifespan if it fails or if test client behaves oddly
-        app.state.settings = get_settings()
-        app.state.intent_router = MagicMock()
-        app.state.llm_service = MagicMock()
-        app.state.memory_service = MagicMock()
-        app.state.prompt_master = MagicMock()
-        app.state.mqtt = AsyncMock()
-        app.state.strategy_orchestrator = MagicMock()
-        app.state.self_healing = MagicMock()
-        app.state.system_monitor = MagicMock()
+        # Ensure MQTT connect is awaited properly in lifespan
+        mqtt_mock = AsyncMock()
+        mqtt_mock.connect = AsyncMock()
 
-        with TestClient(app) as c:
-            yield c
+        # Self Healing start_monitoring is a task
+        healing_mock = MagicMock()
+        healing_mock.start_monitoring = AsyncMock()
+
+        with patch("eva_core.main.EVAMQTTClient", return_value=mqtt_mock), \
+             patch("eva_core.main.SelfHealingService", return_value=healing_mock):
+
+            with TestClient(app) as c:
+                yield c
 
 @pytest.fixture
 def auth_headers():
