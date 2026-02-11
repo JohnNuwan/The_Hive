@@ -2,6 +2,7 @@ import sys
 import io
 import logging
 import traceback
+import contextlib
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ class CyberForge:
 
         try:
             # Exécution supervisée
-            with io.redirect_stdout(stdout_capture), io.redirect_stderr(stderr_capture):
+            with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
                 exec(code, exec_globals)
             
             success = True
