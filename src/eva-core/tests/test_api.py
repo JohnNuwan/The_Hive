@@ -20,21 +20,34 @@ def mock_redis():
 
 @pytest.fixture
 def client(mock_redis):
-    # Patch init_redis to avoid connecting to real Redis
+    # Prepare mocks for lifespan services
+    mock_memory_service = MagicMock()
+    mock_llm_service = MagicMock()
+    mock_intent_router = MagicMock()
+    mock_prompt_master = MagicMock()
+
+    mock_mqtt_client = MagicMock()
+    mock_mqtt_client.connect = AsyncMock() # connect is awaited
+
+    mock_strategy_orchestrator = MagicMock()
+
+    mock_self_healing = MagicMock()
+    mock_self_healing.start_monitoring = AsyncMock() # scheduled as task
+
+    mock_system_monitor = MagicMock()
+
+    # Patch everything used in lifespan
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
          patch("eva_core.main.get_redis_client", return_value=mock_redis), \
-         patch("shared.redis_client.get_redis_client", return_value=mock_redis):
-
-        # Initialize app state manually to avoid relying on lifespan if it fails or if test client behaves oddly
-        app.state.settings = get_settings()
-        app.state.intent_router = MagicMock()
-        app.state.llm_service = MagicMock()
-        app.state.memory_service = MagicMock()
-        app.state.prompt_master = MagicMock()
-        app.state.mqtt = AsyncMock()
-        app.state.strategy_orchestrator = MagicMock()
-        app.state.self_healing = MagicMock()
-        app.state.system_monitor = MagicMock()
+         patch("shared.redis_client.get_redis_client", return_value=mock_redis), \
+         patch("eva_core.main.get_memory_service", return_value=mock_memory_service), \
+         patch("eva_core.main.get_llm_service", return_value=mock_llm_service), \
+         patch("eva_core.main.IntentRouter", return_value=mock_intent_router), \
+         patch("eva_core.main.PromptMaster", return_value=mock_prompt_master), \
+         patch("eva_core.main.EVAMQTTClient", return_value=mock_mqtt_client), \
+         patch("eva_core.main.StrategyOrchestrator", return_value=mock_strategy_orchestrator), \
+         patch("eva_core.main.SelfHealingService", return_value=mock_self_healing), \
+         patch("eva_core.main.SystemMonitor", return_value=mock_system_monitor):
 
         with TestClient(app) as c:
             yield c
