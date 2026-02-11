@@ -8,6 +8,7 @@ l'intégrité du code Python, les paths et la syntaxe avant le déploiement.
 import sys
 import os
 import importlib
+from unittest.mock import MagicMock
 
 # Ajout du dossier src au PYTHONPATH pour simuler l'environnement Docker
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -18,7 +19,7 @@ sys.path.append(src_path)
 sys.path.append(shared_path)
 
 # Mocking des libs tierces manquantes (car on est en environnement restreint)
-from unittest.mock import MagicMock
+# Note: httpx, fastapi, pydantic, starlette sont installés via pip pour la vérification
 sys.modules["psutil"] = MagicMock()
 sys.modules["paho"] = MagicMock()
 sys.modules["paho.mqtt"] = MagicMock()
@@ -32,9 +33,9 @@ sys.modules["asyncpg"] = MagicMock()
 sys.modules["sqlalchemy"] = MagicMock()
 sys.modules["sqlalchemy.orm"] = MagicMock()
 sys.modules["sqlalchemy.ext.asyncio"] = MagicMock()
-sys.modules["fastapi"] = MagicMock()
-sys.modules["fastapi.middleware.cors"] = MagicMock()
-sys.modules["uvicorn"] = MagicMock()
+# sys.modules["fastapi"] = MagicMock()  # Installé
+# sys.modules["fastapi.middleware.cors"] = MagicMock() # Installé
+# sys.modules["uvicorn"] = MagicMock() # Installé
 sys.modules["cryptography"] = MagicMock()
 sys.modules["cryptography.fernet"] = MagicMock()
 sys.modules["jose"] = MagicMock()
@@ -46,12 +47,17 @@ sys.modules["qdrant_client"] = MagicMock()
 sys.modules["qdrant_client.models"] = MagicMock()
 sys.modules["qdrant_client.http"] = MagicMock()
 sys.modules["bs4"] = MagicMock()
-sys.modules["pydantic"] = MagicMock()
-sys.modules["pydantic_settings"] = MagicMock()
+# sys.modules["pydantic"] = MagicMock() # Installé
+sys.modules["pydantic_settings"] = MagicMock() # Mocked car non installé explicitement
 sys.modules["torch"] = MagicMock()
-sys.modules["starlette"] = MagicMock()
-sys.modules["starlette.middleware"] = MagicMock()
-sys.modules["starlette.middleware.base"] = MagicMock()
+sys.modules["torch.nn"] = MagicMock()
+sys.modules["torch.nn.functional"] = MagicMock()
+sys.modules["torch_geometric"] = MagicMock()
+sys.modules["torch_geometric.nn"] = MagicMock()
+sys.modules["torch_geometric.data"] = MagicMock()
+# sys.modules["starlette"] = MagicMock() # Installé
+# sys.modules["starlette.middleware"] = MagicMock() # Installé
+# sys.modules["starlette.middleware.base"] = MagicMock() # Installé
 sys.modules["langchain_ollama"] = MagicMock()
 sys.modules["langchain_core"] = MagicMock()
 sys.modules["langchain_community"] = MagicMock()
