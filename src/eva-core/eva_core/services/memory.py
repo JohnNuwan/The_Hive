@@ -3,17 +3,27 @@ Service Mémoire - Client Qdrant pour RAG
 Gère le stockage et la recherche vectorielle des conversations
 """
 
+import hashlib
 import logging
+import struct
 from functools import lru_cache
 from typing import Any
 from uuid import UUID
 
+import numpy as np
+from langchain_ollama import OllamaEmbeddings
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
-
-from shared import ChatMessage, get_settings
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 from eva_core.memory_layer import MemoryLayer
+from shared import ChatMessage, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -80,11 +90,8 @@ class MemoryService:
         """
         Génère un embedding réel pour le texte via Ollama/nomic-embed-text.
         """
-        from langchain_ollama import OllamaEmbeddings
-        from shared import get_settings
-        
         settings = get_settings()
-        
+
         try:
             embeddings = OllamaEmbeddings(
                 model="nomic-embed-text",
@@ -95,8 +102,6 @@ class MemoryService:
         except Exception as e:
             logger.error(f"Embedding error: {e}. Fallback sur hash (danger).")
             # Fallback dégradé pour éviter de bloquer tout le système
-            import hashlib
-            import struct
             hash_bytes = hashlib.sha384(text.encode()).digest()
             floats = []
             for i in range(0, len(hash_bytes), 4):
@@ -162,8 +167,6 @@ class MemoryService:
             # Construire le filtre
             query_filter = None
             if session_id:
-                from qdrant_client.models import FieldCondition, Filter, MatchValue
-
                 query_filter = Filter(
                     must=[
                         FieldCondition(
@@ -204,7 +207,6 @@ class MemoryService:
         """Récupère l'historique d'une session ou toute la mémoire si session_id est None"""
         try:
             client = await self._get_client()
-            from qdrant_client.models import FieldCondition, Filter, MatchValue
 
             scroll_filter = None
             if session_id:
@@ -249,7 +251,7 @@ class MemoryService:
         """
         try:
             client = await self._get_client()
-            
+
             # 1. Récupérer les derniers points
             results, _ = await client.scroll(
                 collection_name=self.collection_name,
@@ -257,7 +259,7 @@ class MemoryService:
                 with_vectors=True,
                 with_payload=True,
             )
-            
+
             nodes = []
             vectors = []
             for r in results:
@@ -269,20 +271,19 @@ class MemoryService:
                     "timestamp": r.payload.get("timestamp", ""),
                 })
                 vectors.append(r.vector)
-            
+
             # 2. Calculer les liens basés sur la similarité (Simplifié)
             links = []
-            import numpy as np
-            
+
             if len(vectors) > 1:
                 vec_arr = np.array(vectors)
                 # Normalisation pour cosinus
                 norms = np.linalg.norm(vec_arr, axis=1, keepdims=True)
                 vec_arr = vec_arr / (norms + 1e-9)
-                
+
                 # Matrice de similarité
                 similarity_matrix = np.dot(vec_arr, vec_arr.T)
-                
+
                 for i in range(len(nodes)):
                     for j in range(i + 1, len(nodes)):
                         score = similarity_matrix[i, j]
@@ -292,7 +293,7 @@ class MemoryService:
                                 "target": nodes[j]["id"],
                                 "value": float(score)
                             })
-            
+
             return {"nodes": nodes, "links": links}
 
         except Exception as e:
