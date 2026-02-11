@@ -21,9 +21,14 @@ def mock_redis():
 @pytest.fixture
 def client(mock_redis):
     # Patch init_redis to avoid connecting to real Redis
+    # Also patch MemoryService to avoid connecting to OpenAI via mem0
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
          patch("eva_core.main.get_redis_client", return_value=mock_redis), \
-         patch("shared.redis_client.get_redis_client", return_value=mock_redis):
+         patch("shared.redis_client.get_redis_client", return_value=mock_redis), \
+         patch("eva_core.main.get_memory_service", return_value=MagicMock()), \
+         patch("eva_core.services.memory.get_memory_service", return_value=MagicMock()), \
+         patch("eva_core.main.get_llm_service", return_value=MagicMock()), \
+         patch("eva_core.services.llm.get_llm_service", return_value=MagicMock()):
 
         # Initialize app state manually to avoid relying on lifespan if it fails or if test client behaves oddly
         app.state.settings = get_settings()
