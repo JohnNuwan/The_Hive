@@ -20,21 +20,30 @@ def mock_redis():
 
 @pytest.fixture
 def client(mock_redis):
-    # Patch init_redis to avoid connecting to real Redis
+    # Patch all dependencies initialized in lifespan to avoid side effects (e.g. OpenAI connection)
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
          patch("eva_core.main.get_redis_client", return_value=mock_redis), \
-         patch("shared.redis_client.get_redis_client", return_value=mock_redis):
+         patch("shared.redis_client.get_redis_client", return_value=mock_redis), \
+         patch("eva_core.main.get_llm_service") as mock_get_llm, \
+         patch("eva_core.main.get_memory_service") as mock_get_memory, \
+         patch("eva_core.main.IntentRouter") as mock_intent_router, \
+         patch("eva_core.main.PromptMaster") as mock_prompt_master, \
+         patch("eva_core.main.EVAMQTTClient") as mock_mqtt_client_cls, \
+         patch("eva_core.main.StrategyOrchestrator") as mock_strategy_orch, \
+         patch("eva_core.main.SelfHealingService") as mock_self_healing, \
+         patch("eva_core.main.SystemMonitor") as mock_system_monitor:
 
-        # Initialize app state manually to avoid relying on lifespan if it fails or if test client behaves oddly
-        app.state.settings = get_settings()
-        app.state.intent_router = MagicMock()
-        app.state.llm_service = MagicMock()
-        app.state.memory_service = MagicMock()
-        app.state.prompt_master = MagicMock()
-        app.state.mqtt = AsyncMock()
-        app.state.strategy_orchestrator = MagicMock()
-        app.state.self_healing = MagicMock()
-        app.state.system_monitor = MagicMock()
+        # Setup MQTT mock
+        mock_mqtt_instance = AsyncMock()
+        mock_mqtt_client_cls.return_value = mock_mqtt_instance
+
+        # Setup SelfHealingService mock
+        mock_self_healing_instance = MagicMock()
+        mock_self_healing_instance.start_monitoring = AsyncMock()
+        mock_self_healing.return_value = mock_self_healing_instance
+
+        # Initialize app state manually if needed, or let patched lifespan handle it
+        # Since we patched the factories/classes called in lifespan, app.state will be populated with mocks
 
         with TestClient(app) as c:
             yield c
