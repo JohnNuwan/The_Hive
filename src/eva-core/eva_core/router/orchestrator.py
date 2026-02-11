@@ -1,6 +1,5 @@
-import os
-import json
 import logging
+
 
 class Orchestrator:
     """
@@ -31,7 +30,7 @@ class Orchestrator:
         # 1. Routage vers les Experts Polyglottes (Julia/JAX)
         if intent == "CALCULATE_RISK_COMPLEX":
             return self.delegate_to_math(data)
-        
+
         if intent == "OPTIMIZE_STRATEGY":
             return self.delegate_to_evolution(data)
 
@@ -59,12 +58,12 @@ class Orchestrator:
         L'Arbitre vérifie que Sentinel (Sécurité) ne bloque pas Banker (Profit).
         """
         risk_level = trade_data.get("risk_factor", 1.0)
-        
+
         # Simulation d'un blocage de sécurité
         if risk_level > 0.04: # Loi 2 (4% max)
             self.logger.warning("☣️ TRADE REJECTED: Risk exceeds safety kernel limits (Loi 2).")
             return {"status": "ABORTED", "reason": "KERNEL_FIREWALL_VIOLATION"}
-        
+
         return {"status": "APPROVED", "expert": "BANKER"}
 
 if __name__ == "__main__":
