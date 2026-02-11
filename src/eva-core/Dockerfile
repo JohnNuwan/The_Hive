@@ -39,12 +39,12 @@ RUN python3 -m pip install --no-cache-dir /app/eva-core
 WORKDIR /app/eva-core
 
 # Port exposé (FastAPI)
-EXPOSE 8000
+EXPOSE 8080
 # Port exposé (Ollama)
 EXPOSE 11434
 
 # 5. Script de démarrage double (Ollama + Uvicorn)
-RUN echo '#!/bin/bash\nollama serve & \nsleep 10\necho "--- PIP LIST ---"\npython3 -m pip list\necho "--- STARTING UVICORN ---"\nexport PYTHONPATH=$PYTHONPATH:/app/eva-core\npython3 -m uvicorn eva_core.main:app --host 0.0.0.0 --port 8000' > /app/start.sh
+RUN echo '#!/bin/bash\nollama serve & \nsleep 10\necho "--- PIP LIST ---"\npython3 -m pip list\necho "--- STARTING UVICORN ---"\nexport PYTHONPATH=$PYTHONPATH:/app/eva-core\npython3 -m uvicorn eva_core.main:app --host 0.0.0.0 --port 8080' > /app/start.sh
 RUN chmod +x /app/start.sh
 
 CMD ["/app/start.sh"]

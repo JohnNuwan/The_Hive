@@ -123,7 +123,7 @@ services:
       context: .
       dockerfile: src/eva-core/Dockerfile
     container_name: hive-core
-    ports: [ "8000:8000" ]
+    ports: [ "8080:8080" ]
     depends_on:
       redis:
         condition: service_healthy
