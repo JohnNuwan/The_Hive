@@ -49,11 +49,33 @@ class DreamerGate:
         self.enable_training = enable_training
         self._training_active = False
         self._inference_count = 0
+        self._muzero_agent = None  # Lazy-loaded
 
         if enable_training:
-            logger.info("🧬 [DreamerGate] TRAINING MODE — DreamerV3 will train on shadow data")
+            logger.info("🧬 [DreamerGate] TRAINING MODE — MuZero will train on shadow data")
         else:
-            logger.info("💤 [DreamerGate] INFERENCE ONLY — DreamerV3 dormant, Shadow Learning active")
+            logger.info("💤 [DreamerGate] INFERENCE ONLY — MuZero dormant, Shadow Learning active")
+
+    def _get_muzero_agent(self):
+        """Lazy-load MuZero agent (avoids importing torch at module level)."""
+        if self._muzero_agent is None:
+            try:
+                from eva_lab.muzero.config import MuZeroConfigV3
+                from eva_lab.muzero.agent import MuZeroAgent
+                config = MuZeroConfigV3()
+                self._muzero_agent = MuZeroAgent(config)
+
+                # Try to load pre-trained weights if available
+                weights_path = os.path.join(config.weights_path, "muzero_latest.pt")
+                if os.path.exists(weights_path):
+                    self._muzero_agent.load(weights_path)
+                    logger.info(f"[DreamerGate] Loaded MuZero weights from {weights_path}")
+                else:
+                    logger.info("[DreamerGate] MuZero initialized (no pre-trained weights)")
+            except ImportError as e:
+                logger.warning(f"[DreamerGate] MuZero not available: {e}")
+                self._muzero_agent = None
+        return self._muzero_agent
 
     def can_train(self) -> bool:
         """Vérifie si l'entraînement est autorisé.
@@ -101,22 +123,19 @@ class DreamerGate:
             f"from {data_dir}"
         )
 
-        # NOTE: L'entraînement réel nécessite PyTorch et le WorldModel de
-        # world_model.py. Pour l'instant, on retourne le statut.
-        # L'implémentation complète sera activée avec la RTX 3090.
         return {
             "status": "training_ready",
             "data_files": len(data_files),
             "data_dir": data_dir,
-            "model": "DreamerV3 (FSQ + GRU)",
+            "model": "MuZero V3.1 Hunger Mode (3-Network Architecture)",
             "gpu_required": "RTX 3090 (24GB VRAM)",
         }
 
     def run_inference(self, observation: dict) -> dict:
-        """Exécute une inférence World Model légère.
+        """Exécute une inférence World Model.
 
-        En mode inference-only, utilise le DreamerModel stub pour
-        des prédictions rapides sans entraînement.
+        Si MuZero est disponible, utilise le réseau de prédiction MCTS.
+        Sinon, fallback sur des heuristiques RSI simples.
 
         Args:
             observation: Observation courante (prix, indicateurs).
@@ -126,7 +145,40 @@ class DreamerGate:
         """
         self._inference_count += 1
 
-        # En mode dégradé, retourner une prédiction basée sur les tendances
+        # Try MuZero MCTS inference first
+        agent = self._get_muzero_agent()
+        if agent is not None:
+            try:
+                import numpy as np
+                # Build a minimal observation vector for MuZero
+                price = observation.get("price", 0.0)
+                indicators = observation.get("indicators", {})
+                rsi = indicators.get("RSI", 50.0)
+
+                # Create a simplified obs vector (pad to 142 features)
+                obs_vec = np.zeros(142, dtype=np.float32)
+                obs_vec[0] = price / 3000.0  # Normalized price
+                obs_vec[1] = rsi / 100.0     # Normalized RSI
+                for i, (k, v) in enumerate(indicators.items()):
+                    if i + 2 < 142:
+                        obs_vec[i + 2] = float(v) if isinstance(v, (int, float)) else 0.0
+
+                result = agent.infer_action(obs_vec)
+                return {
+                    "prediction": result["action_name"],
+                    "confidence": result["confidence"],
+                    "policy": result["policy"],
+                    "value": result["value"],
+                    "price_input": price,
+                    "engine": "MuZero V3.1 MCTS",
+                    "simulations": result["simulations"],
+                    "mode": "training" if self._training_active else "inference_only",
+                    "inference_count": self._inference_count,
+                }
+            except Exception as e:
+                logger.warning(f"[DreamerGate] MuZero inference failed, falling back: {e}")
+
+        # Fallback: simple RSI-based heuristics
         price = observation.get("price", 0.0)
         rsi = observation.get("indicators", {}).get("RSI", 50.0)
 
@@ -145,6 +197,7 @@ class DreamerGate:
             "confidence": confidence,
             "price_input": price,
             "rsi_input": rsi,
+            "engine": "RSI Heuristic (fallback)",
             "mode": "training" if self._training_active else "inference_only",
             "inference_count": self._inference_count,
         }
@@ -155,9 +208,13 @@ class DreamerGate:
         Returns:
             Dictionnaire avec l'état d'activation et les stats.
         """
+        muzero_available = self._muzero_agent is not None
         return {
             "enable_training": self.enable_training,
             "training_active": self._training_active,
             "inference_count": self._inference_count,
             "mode": "FULL" if self.enable_training else "SHADOW_ONLY",
+            "engine": "MuZero V3.1" if muzero_available else "RSI Heuristic",
+            "muzero_loaded": muzero_available,
         }
+

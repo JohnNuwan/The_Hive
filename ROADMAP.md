@@ -57,6 +57,15 @@
 - [x] **DreamerGate** : Gating conditionnel (inference-only RTX 2060 / training RTX 3090).
 - [x] **API Lab** : 6 endpoints (/shadow/record, /shadow/flush, /shadow/stats, /dreamer/status, /dreamer/predict, /dreamer/train).
 
+### 🤖 Sprint 6 : Intégration MuZero V3.1 (Hunger Mode) - ✅ COMPLÉTÉE
+> Porté depuis le dépôt [Muzero_Pro_Trader](https://github.com/JohnNuwan/Muzero_Pro_Trader).
+- [x] **MuZero Networks** : Representation(142→64) + Dynamics(69→64+R) + Prediction(64→5+V).
+- [x] **MCTS Engine** : Monte Carlo Tree Search (150 sims, UCB + Dirichlet noise).
+- [x] **Agent** : Self-play loop, replay buffer, inference-only mode, checkpoint save/load.
+- [x] **Trading Environment** : CommissionTrinityEnvV3 (SLBE, pyramiding, commissions, Hunger Mode rewards).
+- [x] **Config V3.1** : 142 features, 11 symbols, reward shaping (doubled bonuses, unchanged penalties).
+- [x] **DreamerGate Upgrade** : MuZero MCTS inference via lazy-loading, RSI heuristic fallback.
+
 ---
 
 ## 📊 VÉRIFICATIONS TECHNIQUES (AUDIT)

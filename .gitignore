@@ -103,3 +103,7 @@ secrets.toml
 *.ex5
 *.mq5
 terminal64.exe
+
+# MuZero
+muzero_ref/
+data/muzero/
