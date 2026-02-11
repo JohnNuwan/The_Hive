@@ -13,14 +13,20 @@ async def test_hard_heartbeat_logs_error():
          patch('asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
 
         # Setup mock redis
-        mock_redis = AsyncMock()
-        mock_get_client.return_value = mock_redis
+        # get_redis_client is synchronous in main.py, returning a RedisClient instance
+        # The RedisClient instance has async methods like cache_set
+        mock_redis_client = MagicMock()
+        mock_get_client.return_value = mock_redis_client
+
+        # Configure cache_set as an AsyncMock to be awaited
+        mock_cache_set = AsyncMock()
+        mock_redis_client.cache_set = mock_cache_set
 
         # Configure side effect to raise Exception first, then CancelledError to stop loop
         # The Exception should be caught and logged
         # The CancelledError should propagate and stop the test
         error_msg = "Redis connection failed"
-        mock_redis.cache_set.side_effect = [Exception(error_msg), asyncio.CancelledError()]
+        mock_cache_set.side_effect = [Exception(error_msg), asyncio.CancelledError()]
 
         # Run the function
         try:
