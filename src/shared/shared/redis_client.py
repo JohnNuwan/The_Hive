@@ -2,11 +2,11 @@
 Client Redis Pub/Sub - Communication Inter-Agents THE HIVE
 """
 
-import asyncio
 import json
 import logging
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 from uuid import UUID
 
 import redis.asyncio as redis
@@ -57,10 +57,7 @@ class RedisClient:
     async def publish(self, channel: str, message: AgentMessage | dict) -> int:
         """Publie un message sur un channel"""
         await self.connect()
-        if isinstance(message, BaseModel):
-            data = message.model_dump()
-        else:
-            data = message
+        data = message.model_dump() if isinstance(message, BaseModel) else message
 
         json_data = json.dumps(data, cls=UUIDEncoder)
         result = await self._client.publish(channel, json_data)
@@ -145,6 +142,11 @@ class RedisClient:
         await self.connect()
         return await self._client.get(key)
 
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        """Récupère plusieurs valeurs Redis"""
+        await self.connect()
+        return await self._client.mget(keys)
+
     async def set(
         self,
         key: str,
@@ -163,6 +165,17 @@ class RedisClient:
         if data:
             return json.loads(data)
         return None
+
+    async def cache_mget(self, keys: list[str]) -> list[dict | None]:
+        """Récupère plusieurs valeurs JSON du cache"""
+        data_list = await self.mget(keys)
+        results = []
+        for data in data_list:
+            if data:
+                results.append(json.loads(data))
+            else:
+                results.append(None)
+        return results
 
     async def cache_set(
         self,

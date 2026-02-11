@@ -25,6 +25,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from eva_core.router.intent import IntentRouter
+from eva_core.self_healing import SelfHealingService
+from eva_core.services.docker_monitor import SystemMonitor
+from eva_core.services.llm import LLMService, get_llm_service
+from eva_core.services.memory import MemoryService, get_memory_service
+from eva_core.services.prompt_master import PromptMaster
+from eva_core.strategy import StrategyOrchestrator
 from shared import (
     ChatMessage,
     Intent,
@@ -32,18 +39,10 @@ from shared import (
     Settings,
     get_settings,
 )
-from shared.redis_client import get_redis_client, init_redis
-from shared.mqtt_client import EVAMQTTClient
 from shared.auth_middleware import InternalAuthMiddleware
 from shared.internal_auth import get_internal_headers
-
-from eva_core.router.intent import IntentRouter
-from eva_core.services.llm import LLMService, get_llm_service
-from eva_core.services.memory import MemoryService, get_memory_service
-from eva_core.services.prompt_master import PromptMaster
-from eva_core.strategy import StrategyOrchestrator
-from eva_core.self_healing import SelfHealingService
-from eva_core.services.docker_monitor import SystemMonitor
+from shared.mqtt_client import EVAMQTTClient
+from shared.redis_client import get_redis_client, init_redis
 
 # Configuration logging
 logging.basicConfig(level=logging.INFO)
@@ -125,7 +124,7 @@ async def lifespan(app: FastAPI):
     app.state.intent_router = IntentRouter(use_llm=settings.use_ollama)
     app.state.llm_service = get_llm_service()
     app.state.memory_service = get_memory_service()
-    
+
     # Intégration Biblio_IA / PromptMaster
     app.state.prompt_master = PromptMaster()
 
@@ -136,10 +135,10 @@ async def lifespan(app: FastAPI):
     # Intégration Strategy Orchestrator & Self-Healing
     app.state.strategy_orchestrator = StrategyOrchestrator()
     app.state.self_healing = SelfHealingService()
-    
+
     # System Monitor (Docker + Hardware)
     app.state.system_monitor = SystemMonitor()
-    
+
     # Telemetry
     app.state.start_time = datetime.now()
     app.state.request_count = 0
@@ -249,7 +248,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         HTTPException(500): En cas d'erreur critique de traitement ou de connexion Redis.
     """
     session_id = request.session_id or uuid4()
-    
+
     try:
         # Créer le message utilisateur
         user_message = ChatMessage(
@@ -265,14 +264,14 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
         # Générer la réponse selon l'intent
         llm_service: LLMService = app.state.llm_service
-        
+
         if intent.target_expert == "core":
             # Le Core répond directement
             prompt_master: PromptMaster = app.state.prompt_master
             method = "react" if intent.confidence < 0.8 else "costar"
             wrapped_message = prompt_master.wrap_with_method(request.message, method=method)
             expert_injector = prompt_master.get_expert_injector("core")
-            
+
             # Map expert to model role
             role_map = {
                 "banker": "banker",
@@ -292,7 +291,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 role=target_role,
             )
             # Créer le message de l'expert avec les pensées
-            expert_message = ChatMessage(
+            ChatMessage(
                 session_id=session_id,
                 role=MessageRole.ASSISTANT,
                 content=response_text,
@@ -326,7 +325,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 action=intent.intent_type.value,
                 payload=payload,
             )
-            
+
             # Si l'expert est le Banker, on double l'envoi sur MQTT pour la fiabilité (Critical Path)
             if intent.target_expert == "banker" and intent.intent_type.value in ["TRADE", "ORDER"]:
                 mqtt_client: EVAMQTTClient = app.state.mqtt
@@ -352,7 +351,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
     except Exception as e:
         logger.exception(f"Erreur chat: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/swarm/drones", tags=["Swarm"])
@@ -432,17 +431,19 @@ async def agents_status() -> dict[str, Any]:
     """
     redis_client = get_redis_client()
     now = datetime.now().timestamp()
-    
+
     # On définit les agents attendus (The Hive Council)
     agents = ["banker", "sentinel", "shadow", "wraith", "keeper", "substrate", "accountant"]
     status_report = {
         "core": {"status": "online", "version": "0.1.0", "uptime": "active"}
     }
-    
-    for agent in agents:
+
+    agent_keys = [f"eva.{agent}.status" for agent in agents]
+    heartbeats = await redis_client.cache_mget(agent_keys)
+
+    for agent, heartbeat in zip(agents, heartbeats, strict=True):
         # Le Banker publie sur eva.banker.heartbeat
         # On peut aussi vérifier des clés de statut persistantes
-        heartbeat = await redis_client.cache_get(f"eva.{agent}.status")
         if not heartbeat:
             # Fallback sur la vérification du channel PubSub (pour le banker spécifique à son heartbeat 300ms)
             status_report[agent] = {"status": "offline"}
@@ -464,7 +465,7 @@ async def trading_status() -> dict[str, Any]:
     import httpx
     settings: Settings = app.state.settings
     banker_url = f"http://localhost:{settings.banker_api_port}"
-    
+
     async with httpx.AsyncClient(timeout=5.0) as client:
         try:
             # On récupère tout en parallèle avec les headers de sécurité internes
@@ -475,12 +476,12 @@ async def trading_status() -> dict[str, Any]:
                 client.get(f"{banker_url}/risk/status", headers=internal_headers),
                 return_exceptions=True
             )
-            
+
             # Parsing des résultats
             account = responses[0].json() if not isinstance(responses[0], Exception) and responses[0].status_code == 200 else {}
             positions = responses[1].json() if not isinstance(responses[1], Exception) and responses[1].status_code == 200 else []
             risk = responses[2].json() if not isinstance(responses[2], Exception) and responses[2].status_code == 200 else {}
-            
+
             return {
                 "account": account,
                 "positions": positions,
@@ -505,11 +506,11 @@ async def system_status() -> dict[str, Any]:
     import httpx
     settings: Settings = app.state.settings
     sentinel_url = f"http://localhost:{settings.sentinel_api_port}"
-    
+
     async with httpx.AsyncClient(timeout=3.0) as client:
         try:
             response = await client.get(
-                f"{sentinel_url}/system/metrics", 
+                f"{sentinel_url}/system/metrics",
                 headers=get_internal_headers("core")
             )
             if response.status_code == 200:
@@ -579,7 +580,7 @@ async def get_circuit_breaker_status():
     self_healing: SelfHealingService = app.state.self_healing
     if hasattr(self_healing, 'circuit_breaker') and self_healing.circuit_breaker:
         return self_healing.circuit_breaker.get_status()
-    
+
     # Fallback : état nominal
     return {
         "name": "core_circuit_breaker",
