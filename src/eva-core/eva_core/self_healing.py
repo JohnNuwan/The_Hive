@@ -14,6 +14,10 @@ class SelfHealingService:
     """
     Service responsible for the 'Self-Healing' of the Hive Swarm.
     It monitors unhealthy or exited containers and attempts to resurrect them.
+    
+    Integration RLM (Sprint 4):
+        Chaque résurrection est loggée dans `resurrection_events` pour que
+        le RLM Evaluator puisse analyser les crashs récurrents.
     """
 
     def __init__(self):
@@ -26,6 +30,8 @@ class SelfHealingService:
             "hive-sentinel",
             "hive-kernel"
         ]
+        # RLM Hook: collect resurrection events for deeper analysis
+        self.resurrection_events: list = []
 
     async def start_monitoring(self, interval_seconds: int = 30):
         """
@@ -59,6 +65,7 @@ class SelfHealingService:
     async def _resurrect_container(self, name: str):
         """
         Attempts to restart a container using the Docker SDK.
+        Logs the event for RLM analysis.
         """
         if not self.monitor._docker_client:
             logger.error("Cannot resurrect: Docker client not connected.")
@@ -74,6 +81,14 @@ class SelfHealingService:
             await loop.run_in_executor(None, container.restart)
             logger.info(f"✅ {name} successfully resurrected.")
             
+            # RLM Hook: enregistrer l'événement pour analyse RLM
+            self.resurrection_events.append({
+                "service": name,
+                "event": "resurrection",
+                "status": "success",
+                "timestamp": __import__("datetime").datetime.now().isoformat(),
+            })
+            
             # Notifier la ruche via Redis (pour alerte Telegram)
             from shared.redis_client import get_redis_client
             redis = get_redis_client()
@@ -85,3 +100,11 @@ class SelfHealingService:
             
         except Exception as e:
             logger.error(f"Failed to resurrect {name}: {e}")
+            # RLM Hook: enregistrer l'échec aussi
+            self.resurrection_events.append({
+                "service": name,
+                "event": "resurrection_failed",
+                "error": str(e),
+                "timestamp": __import__("datetime").datetime.now().isoformat(),
+            })
+

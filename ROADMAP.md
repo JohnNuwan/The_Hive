@@ -1,6 +1,6 @@
 # 🗺️ ROADMAP & PROGRESSION : THE HIVE
 
-> **Dernière mise à jour** : 10/02/2026
+> **Dernière mise à jour** : 10/02/2026 (Sprint 4 RLM)
 > **Statut Global** : 🟡 PHASE BETA EN COURS (Intelligence & UI)
 
 ---
@@ -46,9 +46,10 @@
 - [x] **Skills** : Intégration Public APIs (Discovery) & Git Ops.
 - [x] **War Rooms** : Débat contradictoire (DEFCON) — Council, Dojo, High Court, Quiet Room + Scénarios (Red/Blue Teaming, Hard Veto, Psycho-Cyber Auto-Convocation).
 
-### 🧬 Sprint 4 : L'Auto-Évolution (RLM)
-- [ ] **Boucle RLM** : Recursive Language Model pour l'auto-amélioration.
-- [ ] **Auto-Réparation** : Génération de correctifs via Gemma 3.
+### 🧬 Sprint 4 : L'Auto-Évolution (RLM) - ✅ COMPLÉTÉE
+- [x] **Boucle RLM** : Evaluator (scan logs/probes), Patcher (LLM patches + backup/rollback), Evolver (boucle auto).
+- [x] **Auto-Réparation** : Génération de correctifs via Gemma 3 + validation Dojo.
+- [x] **Intégration Phoenix Protocol** : Hook Self-Healing → RLM Evaluator.
 
 ### 🌍 Sprint 5 : World Model (Activation Conditionnelle)
 - [ ] **Feature Flag** : `ENABLE_DREAMER_TRAINING` (Activé sur RTX 3090).
