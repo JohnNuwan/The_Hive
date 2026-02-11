@@ -16,24 +16,44 @@ def mock_redis():
     mock_client.cache_get.return_value = {"status": "online", "ts": 1234567890}
     # Mock keys
     mock_client._client.keys.return_value = []
+    # Mock mget/cache_mget to return a list of non-None values
+    # The endpoint expects a list of dictionaries (or None)
+    mock_client.cache_mget.return_value = [{"status": "online", "ts": 1234567890}] * 7
     return mock_client
 
 @pytest.fixture
 def client(mock_redis):
     # Patch init_redis to avoid connecting to real Redis
+    # Also patch all services initialized in lifespan to avoid side effects (like OpenAI connection)
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
          patch("eva_core.main.get_redis_client", return_value=mock_redis), \
-         patch("shared.redis_client.get_redis_client", return_value=mock_redis):
+         patch("shared.redis_client.get_redis_client", return_value=mock_redis), \
+         patch("eva_core.main.get_memory_service", return_value=MagicMock()), \
+         patch("eva_core.main.get_llm_service", return_value=MagicMock()), \
+         patch("eva_core.main.IntentRouter", return_value=MagicMock()), \
+         patch("eva_core.main.PromptMaster", return_value=MagicMock()), \
+         patch("eva_core.main.EVAMQTTClient") as MockMQTT, \
+         patch("eva_core.main.StrategyOrchestrator", return_value=MagicMock()), \
+         patch("eva_core.main.SelfHealingService") as MockHealing, \
+         patch("eva_core.main.SystemMonitor", return_value=MagicMock()):
+
+        # Configure AsyncMocks for awaited methods
+        mock_mqtt_instance = MockMQTT.return_value
+        mock_mqtt_instance.connect = AsyncMock()
+
+        mock_healing_instance = MockHealing.return_value
+        mock_healing_instance.start_monitoring = AsyncMock()
 
         # Initialize app state manually to avoid relying on lifespan if it fails or if test client behaves oddly
+        # Even though lifespan runs, our patches ensure it uses mocks
         app.state.settings = get_settings()
         app.state.intent_router = MagicMock()
         app.state.llm_service = MagicMock()
         app.state.memory_service = MagicMock()
         app.state.prompt_master = MagicMock()
-        app.state.mqtt = AsyncMock()
+        app.state.mqtt = mock_mqtt_instance
         app.state.strategy_orchestrator = MagicMock()
-        app.state.self_healing = MagicMock()
+        app.state.self_healing = mock_healing_instance
         app.state.system_monitor = MagicMock()
 
         with TestClient(app) as c:
