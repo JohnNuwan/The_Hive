@@ -33,7 +33,7 @@ jobs:
       - name: Logic Verification
         run: |
           export PYTHONPATH=$(find src -maxdepth 1 -type d | tr '\n' ':')
-          python verify_logic.py
+          python scripts/verify_logic.py
 
   build:
     needs: verify
