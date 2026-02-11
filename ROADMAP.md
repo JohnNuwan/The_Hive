@@ -1,6 +1,6 @@
 # 🗺️ ROADMAP & PROGRESSION : THE HIVE
 
-> **Dernière mise à jour** : 10/02/2026 (Sprint 4 RLM)
+> **Derniere mise a jour** : 11/02/2026 (Sprint 7 EAGLE-3 + HippoRAG 2)
 > **Statut Global** : 🟡 PHASE BETA EN COURS (Intelligence & UI)
 
 ---
@@ -65,6 +65,16 @@
 - [x] **Trading Environment** : CommissionTrinityEnvV3 (SLBE, pyramiding, commissions, Hunger Mode rewards).
 - [x] **Config V3.1** : 142 features, 11 symbols, reward shaping (doubled bonuses, unchanged penalties).
 - [x] **DreamerGate Upgrade** : MuZero MCTS inference via lazy-loading, RSI heuristic fallback.
+
+### 🔬 Sprint 7 : EAGLE-3 + HippoRAG 2 (CDcs Completion) - ✅ COMPLETEE
+> Les 2 derniers composants manquants du Sovereign Stack V3.0.
+- [x] **EAGLE-3 Speculative Decoding** : Draft head `yuhuili/EAGLE3-Gemma3-4B-IT`, latence inference ÷3.
+- [x] **vLLM Config** : `--speculative-model`, `--num-speculative-tokens 5`, Dockerfile healthcheck.
+- [x] **HippoRAG 2 Triple Extraction** : Rule-based (5 patterns) + LLM fallback extraction.
+- [x] **HippoRAG 2 Knowledge Graph** : Typed Entity/Relation nodes, auto-indexes Neo4j.
+- [x] **Personalized PageRank (PPR)** : 3-hop BFS avec scoring PPR-inspired pour retrieval associatif.
+- [x] **Pattern Completion** : Retrouver des strategies complexes depuis un mot-cle vague.
+- [x] **Hybrid Search** : Mem0 vectoriel + Neo4j PPR dans MemoryBridge.
 
 ---
 

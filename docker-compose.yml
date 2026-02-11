@@ -109,7 +109,8 @@ services:
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
-    command: --model google/gemma-3-4b-it --quantization awq --gpu-memory-utilization 0.85 --enforce-eager
+    command: >
+      --model google/gemma-3-4b-it --quantization awq --gpu-memory-utilization 0.85 --enforce-eager --speculative-model yuhuili/EAGLE3-Gemma3-4B-IT --num-speculative-tokens 5 --speculative-draft-tensor-parallel-size 1
     networks: [ "hive-net" ]
     restart: unless-stopped
 

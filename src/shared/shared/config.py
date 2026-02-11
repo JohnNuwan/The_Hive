@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     ollama_model: str = "llama3:8b"
     use_ollama: bool = True  # True pour dev, False pour prod (vLLM)
 
+    # EAGLE-3 Speculative Decoding (latence ÷3)
+    eagle_enabled: bool = True
+    eagle_draft_model: str = "yuhuili/EAGLE3-Gemma3-4B-IT"
+    eagle_num_speculative_tokens: int = 5
+
+
     # ═══════════════════════════════════════════════════════════════════════════
     # THE COUNCIL (Model Swapping)
     # ═══════════════════════════════════════════════════════════════════════════
