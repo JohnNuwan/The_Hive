@@ -45,13 +45,13 @@ class Orchestrator:
 
     def delegate_to_math(self, data):
         """Délégation au Lobe Quant (Julia)"""
-        print("🧮 DELEGATING TO JULIA (Quant Engine)...")
+        self.logger.info("🧮 DELEGATING TO JULIA (Quant Engine)...")
         # En production, cela passerait par eva-nervous (REDIS)
         return {"engine": "JULIA", "target": "src/eva-quant", "status": "ROUTED"}
 
     def delegate_to_evolution(self, data):
         """Délégation à l'Évolutionniste (JAX)"""
-        print("🧬 DELEGATING TO JAX (Evolver)...")
+        self.logger.info("🧬 DELEGATING TO JAX (Evolver)...")
         return {"engine": "JAX", "target": "src/eva-lab/jax_optimizer", "status": "ROUTED"}
 
     def arbitrate_trade(self, trade_data):
