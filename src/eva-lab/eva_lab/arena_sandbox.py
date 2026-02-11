@@ -1,12 +1,8 @@
-import json
 import asyncio
 import logging
-import pandas as pd
-from datetime import datetime
-from pathlib import Path
-from typing import Optional, List, Dict
 
-from shared.math_ops import symlog
+import pandas as pd
+
 from shared.redis_client import get_redis_client
 
 logger = logging.getLogger(__name__)
@@ -16,7 +12,7 @@ class ArenaSandbox:
     Simulateur de marché offline pour THE HIVE.
     Permet à E.V.A. de "rêver" sur des données historiques.
     """
-    def __init__(self, data_path: Optional[str] = None):
+    def __init__(self, data_path: str | None = None):
         self.data_path = data_path
         self.history: pd.DataFrame = pd.DataFrame()
         self.current_index = 0
@@ -36,10 +32,10 @@ class ArenaSandbox:
         # Simulation d'un gap de prix violent
         redis = get_redis_client()
         base_price = 2040.0
-        
+
         if scenario_name == "BLACK_MONDAY_1987":
-            crash_factor = 0.78 # -22%
-            for i in range(10):
+            # -22% crash simulation
+            for _ in range(10):
                 base_price *= (1 - (0.022)) # Chute progressive par step
                 await redis.publish("eva.market.tick", {
                     "symbol": "XAUUSD_SIM",
@@ -47,7 +43,7 @@ class ArenaSandbox:
                     "type": "CATASTROPHIC_EVENT"
                 })
                 await asyncio.sleep(0.1)
-        
+
         logger.info(f"Scenario {scenario_name} completed.")
 
     async def start_simulation(self, speed: float = 1.0):
@@ -58,11 +54,11 @@ class ArenaSandbox:
 
         self.is_running = True
         redis = get_redis_client()
-        
+
         logger.info("Simulation started.")
         while self.is_running and self.current_index < len(self.history):
             row = self.history.iloc[self.current_index]
-            
+
             # Simulation d'un événement de prix
             price_data = {
                 "symbol": "XAUUSD_SIM",
@@ -72,14 +68,14 @@ class ArenaSandbox:
                 "last": float(row['close']),
                 "volume": int(row.get('tick_volume', 0))
             }
-            
+
             # Publication pour le Banker et le Lab
             await redis.publish("eva.market.tick", price_data)
-            
+
             # Avancement
             self.current_index += 1
             await asyncio.sleep(1.0 / speed)
-            
+
         logger.info("Simulation finished.")
         self.is_running = False
 
