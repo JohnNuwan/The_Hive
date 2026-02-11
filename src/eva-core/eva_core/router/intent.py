@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 # Patterns de détection d'intent (version simplifiée, à remplacer par LLM)
-INTENT_PATTERNS: dict[IntentType, list[str]] = {
+_INTENT_PATTERNS_RAW: dict[IntentType, list[str]] = {
     IntentType.TRADING_ORDER: [
         r"(achète|acheter|buy|vends|vendre|sell|ouvre|ferme|close)",
         r"(lot|lots|position)",
@@ -45,6 +45,28 @@ INTENT_PATTERNS: dict[IntentType, list[str]] = {
         r"(système|system|config|configuration)",
         r"(redémarre|restart|stop|arrête)",
     ],
+}
+
+# Pre-compile intent patterns for performance
+COMPILED_INTENT_PATTERNS: dict[IntentType, list[re.Pattern]] = {
+    intent: [re.compile(p, re.IGNORECASE) for p in patterns]
+    for intent, patterns in _INTENT_PATTERNS_RAW.items()
+}
+
+# Compiled patterns for entity extraction
+ACTION_BUY_PATTERN = re.compile(r"(achète|acheter|buy|ouvre|long)", re.IGNORECASE)
+ACTION_SELL_PATTERN = re.compile(r"(vends|vendre|sell|short)", re.IGNORECASE)
+VOLUME_PATTERN = re.compile(r"(\d+\.?\d*)\s*(lot|lots)", re.IGNORECASE)
+SL_PATTERN = re.compile(r"(sl|stop.?loss|stop)\s*[àa]?\s*(\d+\.?\d*)", re.IGNORECASE)
+TP_PATTERN = re.compile(r"(tp|take.?profit|profit)\s*[àa]?\s*(\d+\.?\d*)", re.IGNORECASE)
+
+SYMBOL_PATTERNS = {
+    re.compile(r"(gold|xauusd|or)", re.IGNORECASE): "XAUUSD",
+    re.compile(r"(eurusd|eur/usd|euro.dollar)", re.IGNORECASE): "EURUSD",
+    re.compile(r"(gbpusd|gbp/usd|livre.dollar)", re.IGNORECASE): "GBPUSD",
+    re.compile(r"(usdjpy|usd/jpy|dollar.yen)", re.IGNORECASE): "USDJPY",
+    re.compile(r"(nasdaq|nas100|nq)", re.IGNORECASE): "NAS100",
+    re.compile(r"(us30|dow.jones|dji)", re.IGNORECASE): "US30",
 }
 
 # Mapping intent -> expert cible
@@ -95,10 +117,10 @@ class IntentRouter:
         best_score = 0.0
         entities: dict[str, Any] = {}
 
-        for intent_type, patterns in INTENT_PATTERNS.items():
+        for intent_type, patterns in COMPILED_INTENT_PATTERNS.items():
             score = 0.0
             for pattern in patterns:
-                if re.search(pattern, text, re.IGNORECASE):
+                if pattern.search(text):
                     score += 0.3
 
             if score > best_score:
@@ -125,37 +147,29 @@ class IntentRouter:
         entities: dict[str, Any] = {}
 
         # Action (BUY/SELL)
-        if re.search(r"(achète|acheter|buy|ouvre|long)", text, re.IGNORECASE):
+        if ACTION_BUY_PATTERN.search(text):
             entities["action"] = "BUY"
-        elif re.search(r"(vends|vendre|sell|short)", text, re.IGNORECASE):
+        elif ACTION_SELL_PATTERN.search(text):
             entities["action"] = "SELL"
 
         # Symbole
-        symbols = {
-            r"(gold|xauusd|or)": "XAUUSD",
-            r"(eurusd|eur/usd|euro.dollar)": "EURUSD",
-            r"(gbpusd|gbp/usd|livre.dollar)": "GBPUSD",
-            r"(usdjpy|usd/jpy|dollar.yen)": "USDJPY",
-            r"(nasdaq|nas100|nq)": "NAS100",
-            r"(us30|dow.jones|dji)": "US30",
-        }
-        for pattern, symbol in symbols.items():
-            if re.search(pattern, text, re.IGNORECASE):
+        for pattern, symbol in SYMBOL_PATTERNS.items():
+            if pattern.search(text):
                 entities["symbol"] = symbol
                 break
 
         # Volume (lots)
-        volume_match = re.search(r"(\d+\.?\d*)\s*(lot|lots)", text, re.IGNORECASE)
+        volume_match = VOLUME_PATTERN.search(text)
         if volume_match:
             entities["volume"] = float(volume_match.group(1))
 
         # Stop Loss
-        sl_match = re.search(r"(sl|stop.?loss|stop)\s*[àa]?\s*(\d+\.?\d*)", text, re.IGNORECASE)
+        sl_match = SL_PATTERN.search(text)
         if sl_match:
             entities["stop_loss"] = float(sl_match.group(2))
 
         # Take Profit
-        tp_match = re.search(r"(tp|take.?profit|profit)\s*[àa]?\s*(\d+\.?\d*)", text, re.IGNORECASE)
+        tp_match = TP_PATTERN.search(text)
         if tp_match:
             entities["take_profit"] = float(tp_match.group(2))
 
