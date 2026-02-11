@@ -19,16 +19,31 @@ def mock_redis():
     return mock_client
 
 @pytest.fixture
-def client(mock_redis):
+def mock_llm():
+    mock = MagicMock()
+    mock.council.current_role = "general"
+    mock.council.current_model = "test-model"
+    return mock
+
+@pytest.fixture
+def client(mock_redis, mock_llm):
     # Patch init_redis to avoid connecting to real Redis
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
          patch("eva_core.main.get_redis_client", return_value=mock_redis), \
-         patch("shared.redis_client.get_redis_client", return_value=mock_redis):
+         patch("shared.redis_client.get_redis_client", return_value=mock_redis), \
+         patch("eva_core.main.get_llm_service", return_value=mock_llm), \
+         patch("eva_core.main.get_memory_service", return_value=MagicMock()), \
+         patch("eva_core.main.PromptMaster", return_value=MagicMock()), \
+         patch("eva_core.main.EVAMQTTClient", return_value=AsyncMock()), \
+         patch("eva_core.main.StrategyOrchestrator", return_value=MagicMock()), \
+         patch("eva_core.main.SelfHealingService", return_value=AsyncMock()), \
+         patch("eva_core.main.SystemMonitor", return_value=MagicMock()), \
+         patch("eva_core.main.IntentRouter", return_value=MagicMock()):
 
         # Initialize app state manually to avoid relying on lifespan if it fails or if test client behaves oddly
         app.state.settings = get_settings()
         app.state.intent_router = MagicMock()
-        app.state.llm_service = MagicMock()
+        app.state.llm_service = mock_llm
         app.state.memory_service = MagicMock()
         app.state.prompt_master = MagicMock()
         app.state.mqtt = AsyncMock()
@@ -56,3 +71,19 @@ def test_agent_status_endpoint(client, auth_headers):
     response = client.get("/agents/status", headers=auth_headers)
     assert response.status_code == 200
     assert "core" in response.json()
+
+def test_telemetry_endpoint(client, auth_headers):
+    """Vérifie l'endpoint /telemetry"""
+    response = client.get("/telemetry", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["service_name"] == "core"
+    assert "uptime_seconds" in data
+    assert "requests_total" in data
+    assert "errors_total" in data
+    assert "timestamp" in data
+
+    # Check mocked LLM values
+    assert data["active_role"] == "general"
+    assert data["active_model"] == "test-model"
