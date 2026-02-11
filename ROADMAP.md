@@ -51,9 +51,11 @@
 - [x] **Auto-Réparation** : Génération de correctifs via Gemma 3 + validation Dojo.
 - [x] **Intégration Phoenix Protocol** : Hook Self-Healing → RLM Evaluator.
 
-### 🌍 Sprint 5 : World Model (Activation Conditionnelle)
-- [ ] **Feature Flag** : `ENABLE_DREAMER_TRAINING` (Activé sur RTX 3090).
-- [ ] **Shadow Learning** : Collecte des logs pour futur entraînement DreamerV3.
+### 🌍 Sprint 5 : World Model (Activation Conditionnelle) - ✅ COMPLÉTÉE
+- [x] **Feature Flag** : `ENABLE_DREAMER_TRAINING` (Settings + .env).
+- [x] **Shadow Learning** : Collecte passive (buffer circulaire 10k, flush JSONL, trade/signal/probe).
+- [x] **DreamerGate** : Gating conditionnel (inference-only RTX 2060 / training RTX 3090).
+- [x] **API Lab** : 6 endpoints (/shadow/record, /shadow/flush, /shadow/stats, /dreamer/status, /dreamer/predict, /dreamer/train).
 
 ---
 

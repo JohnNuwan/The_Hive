@@ -147,6 +147,14 @@ class Settings(BaseSettings):
     researcher_api_port: int = 9300
     wraith_api_port: int = 9400
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # EVA LAB (Feature Flags — Sprint 5)
+    # ═══════════════════════════════════════════════════════════════════════════
+    enable_dreamer_training: bool = False  # RTX 3090 only — active DreamerV3 training
+    enable_shadow_learning: bool = True    # Collecte passive des données pour DreamerV3
+    shadow_learning_buffer_size: int = 10000  # Nombre max de transitions en mémoire
+    shadow_learning_flush_interval: int = 300  # Flush sur disque toutes les N secondes
+
     # Constitution Loi 0 - Seuils température
     gpu_temp_warning: float = 80.0
     gpu_temp_critical: float = 90.0
