@@ -16,28 +16,38 @@ def mock_redis():
     mock_client.cache_get.return_value = {"status": "online", "ts": 1234567890}
     # Mock keys
     mock_client._client.keys.return_value = []
+    # Mock broadcast_to_swarm and send_to_agent to be awaitable
+    mock_client.broadcast_to_swarm = AsyncMock()
+    mock_client.send_to_agent = AsyncMock()
+    mock_client.disconnect = AsyncMock()
     return mock_client
 
 @pytest.fixture
 def client(mock_redis):
-    # Patch init_redis to avoid connecting to real Redis
+    # Setup mocks for all dependencies used in lifespan
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
          patch("eva_core.main.get_redis_client", return_value=mock_redis), \
-         patch("shared.redis_client.get_redis_client", return_value=mock_redis):
+         patch("shared.redis_client.get_redis_client", return_value=mock_redis), \
+         patch("eva_core.main.get_memory_service", return_value=MagicMock()), \
+         patch("eva_core.main.get_llm_service", return_value=MagicMock()), \
+         patch("eva_core.main.IntentRouter", return_value=MagicMock()), \
+         patch("eva_core.main.PromptMaster", return_value=MagicMock()), \
+         patch("eva_core.main.StrategyOrchestrator", return_value=MagicMock()), \
+         patch("eva_core.main.SystemMonitor", return_value=MagicMock()):
 
-        # Initialize app state manually to avoid relying on lifespan if it fails or if test client behaves oddly
-        app.state.settings = get_settings()
-        app.state.intent_router = MagicMock()
-        app.state.llm_service = MagicMock()
-        app.state.memory_service = MagicMock()
-        app.state.prompt_master = MagicMock()
-        app.state.mqtt = AsyncMock()
-        app.state.strategy_orchestrator = MagicMock()
-        app.state.self_healing = MagicMock()
-        app.state.system_monitor = MagicMock()
+        # Handle EVAMQTTClient separately to mock async connect
+        mock_mqtt = MagicMock()
+        mock_mqtt.connect = AsyncMock()
 
-        with TestClient(app) as c:
-            yield c
+        # Handle SelfHealingService separately to mock async start_monitoring
+        mock_self_healing = MagicMock()
+        mock_self_healing.start_monitoring = AsyncMock()
+
+        with patch("eva_core.main.EVAMQTTClient", return_value=mock_mqtt), \
+             patch("eva_core.main.SelfHealingService", return_value=mock_self_healing):
+
+            with TestClient(app) as c:
+                yield c
 
 @pytest.fixture
 def auth_headers():
