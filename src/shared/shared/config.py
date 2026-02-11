@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     core_api_host: str = "0.0.0.0"
     core_api_port: int = 8000
     core_api_workers: int = 4
+    internal_secret_key: SecretStr = Field(default=SecretStr("dev-internal-secret-change-in-prod"))
     jwt_secret_key: SecretStr = Field(default=SecretStr("dev-secret-change-in-prod"))
     jwt_algorithm: str = "HS256"
     jwt_expiration_hours: int = 24

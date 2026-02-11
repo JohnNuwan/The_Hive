@@ -11,10 +11,6 @@ from shared.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Secret key for internal signing (Sync with all experts)
-# In production, this should come from a secure env var or Vault.
-INTERNAL_SECRET = "hive-swarm-distributed-secret-2026"
-
 class InternalAuth:
     """
     Handles generation and validation of tokens for internal expert requests.
@@ -25,6 +21,9 @@ class InternalAuth:
         """
         Generates a short-lived token for an internal request.
         """
+        settings = get_settings()
+        secret = settings.internal_secret_key.get_secret_value()
+
         payload = {
             "iss": "hive-core",
             "sub": "internal-swarm-request",
@@ -32,15 +31,18 @@ class InternalAuth:
             "iat": int(time.time()),
             "exp": int(time.time()) + 60  # 60 seconds expiry (high speed swarm)
         }
-        return jwt.encode(payload, INTERNAL_SECRET, algorithm="HS256")
+        return jwt.encode(payload, secret, algorithm="HS256")
 
     @staticmethod
     def verify_token(token: str) -> Optional[dict]:
         """
         Verifies an internal token and returns the payload if valid.
         """
+        settings = get_settings()
+        secret = settings.internal_secret_key.get_secret_value()
+
         try:
-            payload = jwt.decode(token, INTERNAL_SECRET, algorithms=["HS256"])
+            payload = jwt.decode(token, secret, algorithms=["HS256"])
             return payload
         except jwt.ExpiredSignatureError:
             logger.warning("Internal token expired")
