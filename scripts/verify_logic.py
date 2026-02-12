@@ -6,6 +6,19 @@ import os
 sys.path.append(os.path.join(os.getcwd(), 'src', 'shared'))
 sys.path.append(os.path.join(os.getcwd(), 'src', 'eva-sentinel'))
 
+# Mock heavy dependencies if missing
+from unittest.mock import MagicMock
+try:
+    import numpy
+except ImportError:
+    sys.modules["numpy"] = MagicMock()
+
+try:
+    import torch
+except ImportError:
+    sys.modules["torch"] = MagicMock()
+    sys.modules["torch.nn"] = MagicMock()
+
 try:
     from shared.internal_auth import InternalAuth
     print("✅ InternalAuth import success")
