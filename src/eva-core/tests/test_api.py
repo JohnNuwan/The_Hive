@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from eva_core.main import app
 from shared.internal_auth import InternalAuth
 from shared.config import get_settings
+import shared.redis_client
 
 @pytest.fixture
 def mock_redis():
@@ -40,7 +41,9 @@ def client(mock_redis):
     mock_system_monitor = MagicMock()
 
     # Patch all external services and lifespan dependencies
-    with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
+    # Patch the singleton directly to ensure get_redis_client returns the mock
+    with patch.object(shared.redis_client, "_redis_client", mock_redis), \
+         patch("eva_core.main.init_redis", new_callable=AsyncMock), \
          patch("eva_core.main.get_redis_client", return_value=mock_redis), \
          patch("shared.redis_client.get_redis_client", return_value=mock_redis), \
          patch("eva_core.memory_layer.Memory"), \
