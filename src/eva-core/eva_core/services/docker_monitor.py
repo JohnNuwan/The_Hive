@@ -245,13 +245,27 @@ class SystemMonitor:
             None, lambda: self._docker_client.containers.list(all=True)
         )
 
+        # Pre-fetch stats for all running containers concurrently
+        running_containers = [c for c in docker_containers if c.status == "running"]
+        running_tasks = [
+            loop.run_in_executor(None, lambda cont=c: cont.stats(stream=False))
+            for c in running_containers
+        ]
+
+        results = []
+        if running_tasks:
+            results = await asyncio.gather(*running_tasks, return_exceptions=True)
+
+        stats_map = {c.short_id: res for c, res in zip(running_containers, results)}
+
         containers = []
         for c in docker_containers:
             try:
                 if c.status == "running":
-                    stats = await loop.run_in_executor(
-                        None, lambda cont=c: cont.stats(stream=False)
-                    )
+                    stats_result = stats_map.get(c.short_id)
+                    if isinstance(stats_result, Exception):
+                        raise stats_result
+                    stats = stats_result
 
                     # CPU percentage
                     cpu_percent = 0.0
