@@ -25,31 +25,24 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from eva_banker.nemesis import NemesisSystem, get_nemesis_system
+from eva_banker.services.binance_service import BinanceService
+from eva_banker.services.mt5 import MT5Service, get_mt5_service
+from eva_banker.services.news_filter import NewsFilterService
+from eva_banker.services.risk import RiskValidator, get_risk_validator
+from eva_banker.skill_library import SkillLibrary
+from eva_banker.swarm import BankerSwarm
 from shared import (
     AccountBalance,
     Position,
-    PropFirmAccount,
     RiskStatus,
     TradeAction,
     TradeOrder,
     get_settings,
-    symlog,
-    inv_symlog,
-    calculate_var,
-    calculate_cvar,
 )
-from shared.redis_client import get_redis_client, init_redis
 from shared.auth_middleware import InternalAuthMiddleware
-
-from eva_banker.services.mt5 import MT5Service, get_mt5_service
-from eva_banker.services.risk import RiskValidator, get_risk_validator
-from eva_banker.services.binance_service import BinanceService
-from eva_banker.services.news_filter import NewsFilterService
-from eva_banker.nemesis import NemesisSystem, get_nemesis_system
-from eva_banker.skill_library import SkillLibrary, SkilledBehavior
-from eva_banker.models.gnn_model import TFTGNNModel
-from eva_banker.swarm import BankerSwarm
 from shared.probes import check_cognitive_sincerity
+from shared.redis_client import get_redis_client, init_redis
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,7 +52,7 @@ logger = logging.getLogger(__name__)
 # ARCHITECTURE HIÉRARCHIQUE (SPlaTES)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-from eva_banker.brain import BankerManager, BankerWorker, AutoTradingEngine
+from eva_banker.brain import AutoTradingEngine, BankerManager, BankerWorker
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ARCHITECTURE HIÉRARCHIQUE (SPlaTES) - MOVED TO BRAIN.PY
@@ -140,7 +133,7 @@ async def lifespan(app: FastAPI):
     app.state.mt5_service = get_mt5_service()
     app.state.risk_validator = get_risk_validator()
     app.state.binance_service = BinanceService()
-    
+
     # Hiérarchie
     app.state.skill_library = SkillLibrary()
     app.state.manager = BankerManager(app.state.skill_library)
@@ -161,7 +154,7 @@ async def lifespan(app: FastAPI):
     # Nemesis System
     app.state.nemesis = get_nemesis_system()
     await app.state.nemesis.load_state()
-    
+
     # News Filter
     app.state.news_filter = NewsFilterService(
         filter_minutes=settings.risk_news_filter_minutes
@@ -175,7 +168,7 @@ async def lifespan(app: FastAPI):
     # Intégration SWARM
     app.state.swarm = BankerSwarm()
     await app.state.swarm.init_mqtt()
-    
+
     # Tâches de fond
     asyncio.create_task(swarm_listener())
     asyncio.create_task(hard_heartbeat())
@@ -208,7 +201,7 @@ async def hard_heartbeat():
     from shared.redis_client import get_redis_client
     redis = get_redis_client()
     mt5_service = app.state.mt5_service
-    
+
     while True:
         try:
             account = await mt5_service.get_account_info()
@@ -226,7 +219,7 @@ async def hard_heartbeat():
             await redis.cache_set("eva.banker.status", payload, ttl_seconds=10)
         except Exception as e:
             logger.error(f"Heartbeat error: {e}")
-            
+
         await asyncio.sleep(0.3)
 
 
@@ -237,7 +230,7 @@ async def swarm_listener():
     from shared.redis_client import get_redis_client
     redis = get_redis_client()
     swarm: BankerSwarm = app.state.swarm
-    
+
     async def handle_swarm(channel, message):
         action = message.get("action")
         if action == "SWARM_SURVEILLANCE":
@@ -315,9 +308,9 @@ async def set_auto_trading(request: AutoTradingRequest):
     else:
         await engine.stop()
         status = "STOPPED"
-    
+
     return {
-        "status": status, 
+        "status": status,
         "active": engine.is_active,
         "symbol": engine.symbol
     }
@@ -346,11 +339,11 @@ async def create_order(request: OrderRequest) -> OrderResponse:
     import torch
     mock_activations = torch.randn(1, 4096)
     is_sincere, sincerity_msg = check_cognitive_sincerity(
-        mock_activations, 
-        "The market shows a strong bullish trend on H4.", 
+        mock_activations,
+        "The market shows a strong bullish trend on H4.",
         request.action
     )
-    
+
     if not is_sincere:
         logger.warning(f"🚫 BLOCKING ORDER: {sincerity_msg}")
         return OrderResponse(
@@ -419,13 +412,13 @@ async def close_position(ticket: int) -> dict[str, Any]:
     """
     mt5_service: MT5Service = app.state.mt5_service
     result = await mt5_service.close_position(ticket)
-    
+
     # Intégration Compliance (Juriste / Loi 5)
     # Si le trade est profitable, on informe l'expert Compliance pour provisionnement URSSAF
     try:
         redis = get_redis_client()
         profit = result.get("profit", 0)
-        
+
         if profit and float(profit) != 0:
             # Signal pour Compliance (URSSAF)
             await redis.publish("eva.compliance.trades", {
@@ -434,18 +427,18 @@ async def close_position(ticket: int) -> dict[str, Any]:
                 "symbol": result.get("symbol", "UNKNOWN"),
                 "timestamp": datetime.now().isoformat()
             })
-            
+
             # Signal pour Master Notification (Sentinel/Telegram)
             await redis.publish("eva.banker.trades", {
                 "ticket_id": ticket,
                 "profit": profit,
                 "symbol": result.get("symbol", "UNKNOWN")
             })
-            
-            logger.info(f"⚖️ Trade profit envoyé à Compliance et Sentinel")
+
+            logger.info("⚖️ Trade profit envoyé à Compliance et Sentinel")
     except Exception as e:
         logger.error(f"Erreur notification trade: {e}")
-        
+
     return result
 
 
@@ -531,9 +524,15 @@ async def trigger_kill_switch() -> dict[str, str]:
     mt5_service: MT5Service = app.state.mt5_service
     positions = await mt5_service.get_open_positions()
 
+    # Parallel execution for speed and robustness (Loi 2 - Kill Switch)
+    tasks = [mt5_service.close_position(pos.ticket) for pos in positions]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
     closed = 0
-    for pos in positions:
-        result = await mt5_service.close_position(pos.ticket)
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(f"Kill switch error: {result}")
+            continue
         if result.get("success"):
             closed += 1
 
