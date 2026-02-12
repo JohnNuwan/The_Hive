@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -114,6 +117,7 @@ type SwarmMessage struct {
 
 // Canal 1 : DANGER — Priorité Absolue (latence <1ms visée)
 func listenDangerSignals(rdb *redis.Client) {
+	secretKey := getSecretKey()
 	for {
 		pubsub := rdb.Subscribe(ctx, "danger_signal", "eva.sentinel.alert", "eva.kernel.emergency")
 		ch := pubsub.Channel()
@@ -126,12 +130,17 @@ func listenDangerSignals(rdb *redis.Client) {
 			log.Printf("🚨 DANGER [%s]: %s — Routing to KILL_SWITCH", msg.Channel, msg.Payload)
 
 			// Standardisation du message
+			ts := time.Now().Unix()
+			target := "Kernel"
+			authInput := fmt.Sprintf("%s|%s|%s|%d", msg.Channel, target, msg.Payload, ts)
+			authHash := generateHMAC(authInput, secretKey)
+
 			swarmMsg := SwarmMessage{
 				Source:   msg.Channel,
-				Target:   "Kernel",
+				Target:   target,
 				Payload:  json.RawMessage(msg.Payload),
-				AuthHash: "INTERNAL_CORE_HASH", // TODO: Implement real HMAC
-				Ts:       time.Now().Unix(),
+				AuthHash: authHash,
+				Ts:       ts,
 			}
 			jsonMsg, _ := json.Marshal(swarmMsg)
 
@@ -152,6 +161,7 @@ func listenDangerSignals(rdb *redis.Client) {
 
 // Canal 2 : TRADING — Haute priorité (Core → Risk Check → Banker)
 func listenTradeSignals(rdb *redis.Client) {
+	secretKey := getSecretKey()
 	for {
 		pubsub := rdb.Subscribe(ctx, "trade_opportunity", "eva.core.trade_request")
 		ch := pubsub.Channel()
@@ -163,12 +173,17 @@ func listenTradeSignals(rdb *redis.Client) {
 			log.Printf("💰 TRADE [%s]: %s — Routing to Banker via Kernel validation", msg.Channel, msg.Payload)
 
 			// Standardisation
+			ts := time.Now().Unix()
+			target := "Banker/Kernel"
+			authInput := fmt.Sprintf("%s|%s|%s|%d", msg.Channel, target, msg.Payload, ts)
+			authHash := generateHMAC(authInput, secretKey)
+
 			swarmMsg := SwarmMessage{
 				Source:   msg.Channel,
-				Target:   "Banker/Kernel",
+				Target:   target,
 				Payload:  json.RawMessage(msg.Payload),
-				AuthHash: "INTERNAL_TRADE_HASH",
-				Ts:       time.Now().Unix(),
+				AuthHash: authHash,
+				Ts:       ts,
 			}
 			jsonMsg, _ := json.Marshal(swarmMsg)
 
@@ -189,6 +204,7 @@ func listenTradeSignals(rdb *redis.Client) {
 
 // Canal 3 : SWARM — Coordination inter-agents
 func listenSwarmEvents(rdb *redis.Client) {
+	secretKey := getSecretKey()
 	for {
 		pubsub := rdb.Subscribe(ctx, "eva.swarm.events", "eva.swarm.broadcast", "eva.swarm.drone_scale")
 		ch := pubsub.Channel()
@@ -200,12 +216,17 @@ func listenSwarmEvents(rdb *redis.Client) {
 			log.Printf("🐝 SWARM [%s]: %s", msg.Channel, msg.Payload)
 
 			// Standardisation
+			ts := time.Now().Unix()
+			target := "Broadcast"
+			authInput := fmt.Sprintf("%s|%s|%s|%d", msg.Channel, target, msg.Payload, ts)
+			authHash := generateHMAC(authInput, secretKey)
+
 			swarmMsg := SwarmMessage{
 				Source:   msg.Channel,
-				Target:   "Broadcast",
+				Target:   target,
 				Payload:  json.RawMessage(msg.Payload),
-				AuthHash: "INTERNAL_SWARM_HASH",
-				Ts:       time.Now().Unix(),
+				AuthHash: authHash,
+				Ts:       ts,
 			}
 			jsonMsg, _ := json.Marshal(swarmMsg)
 
@@ -358,6 +379,21 @@ func getEnv(key, fallback string) string {
 		return val
 	}
 	return fallback
+}
+
+func getSecretKey() string {
+	secret := getEnv("NERVOUS_SECRET_KEY", "")
+	if secret == "" {
+		log.Println("⚠️ WARNING: NERVOUS_SECRET_KEY not set. Using insecure dev secret.")
+		return "insecure-dev-secret-change-me"
+	}
+	return secret
+}
+
+func generateHMAC(message string, secret string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(message))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
