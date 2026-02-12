@@ -43,6 +43,9 @@ def client(mock_redis):
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
          patch("eva_core.main.get_redis_client", return_value=mock_redis), \
          patch("shared.redis_client.get_redis_client", return_value=mock_redis), \
+         patch("eva_core.memory_layer.Memory"), \
+         patch("eva_core.services.memory.MemoryService"), \
+         patch("mem0.Memory"), \
          patch("eva_core.main.get_memory_service", return_value=mock_memory_service), \
          patch("eva_core.main.get_llm_service", return_value=mock_llm_service), \
          patch("eva_core.main.IntentRouter", return_value=mock_intent_router), \
