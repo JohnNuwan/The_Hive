@@ -225,7 +225,47 @@ export async function createSession(): Promise<{ session_id: string }> {
     return safeFetch('/api/core/session', { session_id: (typeof window !== 'undefined' && window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : '00000000-0000-0000-0000-000000000000' })
 }
 
+
 // ═══ BANKER ═══
+export interface OrderRequest {
+    symbol: string
+    action: 'BUY' | 'SELL'
+    volume: number
+    stop_loss?: number
+    take_profit?: number
+}
+
+
+export interface OrderResponse {
+    success: boolean
+    ticket?: number
+    message: string
+}
+
+export async function createOrder(order: OrderRequest): Promise<OrderResponse> {
+    try {
+        const res = await fetchWithTimeout('/api/banker/orders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(order)
+        })
+        return await res.json()
+    } catch {
+        return { success: false, message: 'ORDER FAILED — CONNECTION LOST' }
+    }
+}
+
+export async function closePosition(ticket: string | number): Promise<any> {
+    try {
+        const res = await fetchWithTimeout(`/api/banker/positions/${ticket}`, {
+            method: 'DELETE'
+        })
+        return await res.json()
+    } catch {
+        return { success: false, message: 'CLOSE FAILED' }
+    }
+}
+
 export async function getBankerTelemetry(): Promise<TelemetryData | null> {
     return safeFetch('/api/banker/telemetry', null)
 }
@@ -257,6 +297,19 @@ export async function getTradingStatus(): Promise<{ account: AccountInfo; positi
         positions: [],
         risk: { daily_drawdown_percent: 0, trading_allowed: true }
     })
+}
+
+export async function toggleAutoTrading(enable: boolean): Promise<any> {
+    try {
+        const res = await fetchWithTimeout('/api/banker/trading/auto', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enable })
+        })
+        return await res.json()
+    } catch {
+        return { status: 'ERROR', active: false }
+    }
 }
 
 export async function getPropFirmAccounts(): Promise<any[]> {

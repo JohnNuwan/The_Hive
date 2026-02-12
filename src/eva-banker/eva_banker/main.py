@@ -59,51 +59,11 @@ logger = logging.getLogger(__name__)
 # ARCHITECTURE HIÉRARCHIQUE (SPlaTES)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class BankerManager:
-    """
-    NIVEAU HAUT : Le Manager (Abstract World Model).
-    Planifie les stratégies en utilisant TFT-GNN et la conscience du risque.
-    """
-    def __init__(self, library: SkillLibrary):
-        self.library = library
-        # Initialisation du modèle (dims fictives pour l'exemple)
-        self.brain = TFTGNNModel(asset_dim=5, temporal_dim=64, hidden_dim=128)
+from eva_banker.brain import BankerManager, BankerWorker, AutoTradingEngine
 
-    def plan_strategy(self, market_history: dict) -> SkilledBehavior:
-        """
-        Analyse le marché via TFT-GNN et injecte VaR/CVaR.
-        """
-        # 1. Calcul des métriques de risque adaptatives (Inhibiteur interne)
-        returns = market_history.get("returns", [])
-        var = calculate_var(returns)
-        cvar = calculate_cvar(returns)
-        
-        # 2. Préparation des données pour le modèle (Normalisées via Symlog)
-        price = symlog(market_history.get("price", 0))
-        
-        logger.info(f"Manager decision core triggered. Price: {price}, VaR: {var}, CVaR: {cvar}")
-        
-        # Si le risque (VaR) est trop élevé, on bascule en mode conservateur
-        if var < -0.02: # Perte potentielle > 2% attendue
-            logger.warning("High VaR detected. Selecting HEDGING skill.")
-            return SkilledBehavior.HEDGING
-            
-        return SkilledBehavior.SCALPING
-
-class BankerWorker:
-    """
-    NIVEAU BAS : L'Exécutant (Worker).
-    Support de GhostShield pour l'invisibilité HFT.
-    """
-    def __init__(self, mt5_service: MT5Service, ghost_shield=None):
-        self.mt5 = mt5_service
-        self.ghost = ghost_shield
-
-    async def execute_skill(self, skill: SkilledBehavior, order: TradeOrder):
-        logger.info(f"Worker executing skill: {skill}")
-        if self.ghost and skill != SkilledBehavior.HEDGING: # Le hedging doit être direct
-            return await self.ghost.execute_obfuscated_order(order)
-        return await self.mt5.execute_skill(skill, order)
+# ═══════════════════════════════════════════════════════════════════════════════
+# ARCHITECTURE HIÉRARCHIQUE (SPlaTES) - MOVED TO BRAIN.PY
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -188,6 +148,16 @@ async def lifespan(app: FastAPI):
     app.state.ghost_shield = GhostShield(app.state.mt5_service)
     app.state.worker = BankerWorker(app.state.mt5_service, app.state.ghost_shield)
 
+    # Auto-Trading Engine (Weekend Drift)
+    app.state.auto_engine = AutoTradingEngine(
+        manager=app.state.manager,
+        worker=app.state.worker,
+        mt5=app.state.mt5_service,
+        risk=app.state.risk_validator
+    )
+    # START ON LAUNCH (User Request)
+    await app.state.auto_engine.start()
+
     # Nemesis System
     app.state.nemesis = get_nemesis_system()
     await app.state.nemesis.load_state()
@@ -224,6 +194,8 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("🛑 Arrêt The Banker...")
+    if hasattr(app.state, 'auto_engine'):
+        await app.state.auto_engine.stop()
     await mt5_service.disconnect()
 
 
@@ -324,6 +296,31 @@ async def health_check() -> HealthResponse:
         mt5_connected=mt5_service.is_connected,
         paper_trading=settings.paper_trading,
     )
+
+
+class AutoTradingRequest(BaseModel):
+    enable: bool
+
+
+@app.post("/trading/auto", tags=["Trading"])
+async def set_auto_trading(request: AutoTradingRequest):
+    """
+    Active ou désactive le mode Auto-Trading (Weekend Drift).
+    Ce mode lance une boucle autonome qui analyse et trade périodiquement.
+    """
+    engine: AutoTradingEngine = app.state.auto_engine
+    if request.enable:
+        await engine.start()
+        status = "STARTED"
+    else:
+        await engine.stop()
+        status = "STOPPED"
+    
+    return {
+        "status": status, 
+        "active": engine.is_active,
+        "symbol": engine.symbol
+    }
 
 
 @app.post("/orders", response_model=OrderResponse, tags=["Trading"])

@@ -25,6 +25,19 @@ class MemoryLayer:
                         "host": os.getenv("QDRANT_HOST", "localhost"),
                         "port": int(os.getenv("QDRANT_PORT", 6333)),
                     }
+                },
+                "embedder": {
+                    "provider": "ollama",
+                    "config": {
+                        "model": "nomic-embed-text:latest"
+                    }
+                },
+                "llm": {
+                    "provider": "ollama",
+                    "config": {
+                        "model": "llama3.2",
+                        "temperature": 0
+                    }
                 }
             }
             self.memory = Memory.from_config(config)

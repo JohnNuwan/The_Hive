@@ -124,13 +124,15 @@ services:
       dockerfile: src/eva-core/Dockerfile
     container_name: hive-core
     ports: [ "8080:8080" ]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy
       qdrant:
         condition: service_healthy
-      vllm-server:
-        condition: service_started
+      # vllm-server: (Disabled for Ollama Mode)
+      #   condition: service_started
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -139,8 +141,9 @@ services:
       - REDIS_PASSWORD=devpassword
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
-      - OLLAMA_HOST=vllm-server # Pointing to vLLM container
-      - OLLAMA_PORT=8000
+      - NEO4J_URI=bolt://neo4j:7687
+      - OLLAMA_HOST=host.docker.internal
+      - OLLAMA_PORT=11434
       - USE_OLLAMA=true # Kept true for compatibility, handled in code
       - LLM_BACKEND=vllm # Explicit backend switch
       - MODEL_NAME=google/gemma-3-4b-it
@@ -287,6 +290,11 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
+      - NEO4J_URI=bolt://neo4j:7687
+      - OLLAMA_HOST=host.docker.internal
+      - OLLAMA_PORT=11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks: [ "hive-net" ]
     restart: unless-stopped
 
@@ -413,15 +421,18 @@ services:
       context: src/eva-nexus
     container_name: hive-nexus
     ports: [ "3030:80" ]
+    extra_hosts:
+      - "banker:host-gateway"
+      - "host.docker.internal:host-gateway"
     depends_on:
       - core
-      - banker
-      - sentinel
-      - compliance
-      - substrate
-      - accountant
-      - lab
-      - rwa
+      # - banker (Running Natively)
+      # - sentinel
+      # - compliance (Commented for MVP Flash Launch)
+      # - substrate
+      # - accountant
+      # - lab
+      # - rwa
     networks: [ "hive-net" ]
     restart: unless-stopped
 

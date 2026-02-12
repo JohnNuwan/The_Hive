@@ -463,7 +463,7 @@ async def trading_status() -> dict[str, Any]:
     """
     import httpx
     settings: Settings = app.state.settings
-    banker_url = f"http://localhost:{settings.banker_api_port}"
+    banker_url = f"http://{settings.banker_api_host}:{settings.banker_api_port}"
     
     async with httpx.AsyncClient(timeout=5.0) as client:
         try:

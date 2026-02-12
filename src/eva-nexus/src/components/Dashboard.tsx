@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { Activity, ShieldAlert } from 'lucide-react'
 import {
     getAllNodesHealth, getKillSwitchStatus, getNemesisStatus,
     getNewsFilter, getCoreTelemetry, getCoreCircuitBreaker,
@@ -128,17 +129,36 @@ export default function Dashboard() {
 
             {/* ═══ MIDDLE ROW: Kill-Switch / Equity / Nemesis / Circuit Breaker ═══ */}
             <div className="grid grid-cols-4 gap-3">
-                {/* Council Status */}
-                <div className="cyber-panel hud-corners p-4">
-                    <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">COUNCIL EXPERT</div>
+                {/* System Control (Kill Switch) */}
+                <div className={`cyber-panel hud-corners p-4 transition-all duration-300 ${killSwitch.is_active ? 'border-red-500/50 shadow-[0_0_30px_rgba(239,68,68,0.15)]' : ''}`}>
                     <div className="flex items-center justify-between mb-3">
-                        <span className="font-display text-xl font-bold tracking-wider neon-text-cyan">
-                            {telemetry?.active_role?.toUpperCase() || 'GENERAL'}
-                        </span>
-                        <div className="text-[10px] text-white/30 truncate max-w-[100px]">{telemetry?.active_model || 'Ollama'}</div>
+                        <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40">SYSTEM CONTROL</div>
+                        {killSwitch.is_active && <ShieldAlert size={12} className="text-red-500 animate-pulse" />}
                     </div>
-                    <div className="text-[8px] text-matrix/40 tracking-widest uppercase">
-                        Active Model Prepared
+
+                    <button
+                        onClick={handleKillSwitch}
+                        disabled={killSwitchLoading}
+                        className={`w-full h-10 rounded text-[10px] font-black uppercase tracking-[0.2em] transition-all duration-300 flex items-center justify-center gap-2 ${killSwitch.is_active
+                            ? 'bg-red-500 text-black hover:bg-red-400 shadow-[0_0_15px_#ef4444] scale-[1.02]'
+                            : 'bg-white/5 text-slate-400 hover:bg-red-500/10 hover:text-red-400 border border-white/5 hover:border-red-500/30'
+                            }`}
+                    >
+                        {killSwitchLoading ? (
+                            <span className="animate-pulse">PROCESSING...</span>
+                        ) : (
+                            <>
+                                <div className={`w-1.5 h-1.5 rounded-full ${killSwitch.is_active ? 'bg-black animate-pulse' : 'bg-red-500'}`} />
+                                {killSwitch.is_active ? 'DISENGAGE PROTOCOL' : 'KILL-SWITCH'}
+                            </>
+                        )}
+                    </button>
+
+                    <div className="text-[8px] text-center mt-2 font-mono">
+                        {killSwitch.is_active
+                            ? <span className="text-red-500 animate-pulse">⚠ TRADING HALTED • SAFETY ENGAGED</span>
+                            : <span className="text-matrix/30">SYSTEMS NOMINAL • TRADING ACTIVE</span>
+                        }
                     </div>
                 </div>
 

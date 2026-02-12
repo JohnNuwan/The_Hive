@@ -155,8 +155,8 @@ class MT5Service:
                     stop_loss=Decimal(str(pos.sl)) if pos.sl > 0 else None,
                     take_profit=Decimal(str(pos.tp)) if pos.tp > 0 else None,
                     profit=Decimal(str(pos.profit)),
-                    swap=Decimal(str(pos.swap)),
-                    commission=Decimal(str(pos.commission)),
+                    swap=Decimal(str(getattr(pos, "swap", 0.0))),
+                    commission=Decimal(str(getattr(pos, "commission", 0.0))),
                     magic_number=pos.magic,
                     open_time=datetime.fromtimestamp(pos.time),
                 )

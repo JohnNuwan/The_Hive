@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Wallet, ArrowUpCircle, ArrowDownCircle, ShieldAlert, Activity } from 'lucide-react'
-import { getStatus, getTradingStatus } from '../services/api'
+import { getStatus, getTradingStatus, createOrder, closePosition, toggleAutoTrading } from '../services/api'
 
 export default function TradingPanel() {
     const [bankerStatus, setBankerStatus] = useState<'online' | 'offline' | 'unknown'>('unknown')
@@ -33,13 +33,57 @@ export default function TradingPanel() {
     const positions = tradingData?.positions || []
     const risk = tradingData?.risk || {}
 
+
     // Calculation de P&L total latent
     const totalProfit = positions.reduce((acc: number, pos: any) => acc + parseFloat(pos.profit || 0), 0)
+
+    const [orderForm, setOrderForm] = useState({ symbol: 'XAUUSD', volume: 0.01, sl: 2000.0, tp: 2100.0 })
+    const [actionLoading, setActionLoading] = useState(false)
+    const [autoTrading, setAutoTrading] = useState(true)
+
+    const handleAutoToggle = async () => {
+        const newState = !autoTrading
+        setAutoTrading(newState)
+        await toggleAutoTrading(newState)
+    }
+
+    const handleOrder = async (action: 'BUY' | 'SELL') => {
+        setActionLoading(true)
+        await createOrder({
+            symbol: orderForm.symbol,
+            action,
+            volume: orderForm.volume,
+            stop_loss: orderForm.sl,
+            take_profit: orderForm.tp
+        })
+        setActionLoading(false)
+        // Refresh data immediately
+        const [_, tradingResp] = await Promise.all([getStatus(), getTradingStatus()])
+        setTradingData(tradingResp)
+    }
+
+    const handleClose = async (ticket: string) => {
+        if (!confirm('Close Position #' + ticket + '?')) return
+        await closePosition(ticket)
+        // Refresh
+        const [_, tradingResp] = await Promise.all([getStatus(), getTradingStatus()])
+        setTradingData(tradingResp)
+    }
+
+    const handleHold = async () => {
+        // HOLD Action = Close ALL positions for this symbol (Flatten)
+        if (!confirm(`HOLD COMMAND: Close ALL ${orderForm.symbol} positions?`)) return
+        setActionLoading(true)
+        const targetPositions = positions.filter((p: any) => p.symbol === orderForm.symbol)
+        await Promise.all(targetPositions.map((p: any) => closePosition(p.ticket)))
+        setActionLoading(false)
+    }
 
     return (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full animate-fade-in">
             {/* Portfolio Overview */}
             <div className="lg:col-span-2 flex flex-col gap-6">
+                {/* ... existing StatCards ... */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <StatCard
                         title="Equity Total"
@@ -61,6 +105,81 @@ export default function TradingPanel() {
                         trend={risk.trading_allowed ? "SECURE" : "LOCKED"}
                         glow="amber"
                     />
+                </div>
+
+                {/* MANUAL TRADING TERMINAL */}
+                <div className="glass rounded-[2rem] p-6 border border-white/5 shadow-2xl relative overflow-hidden">
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/10 blur-3xl rounded-full" />
+
+                    <div className="flex justify-between items-center mb-4 relative z-10">
+                        <h4 className="font-black text-sm text-indigo-300 uppercase tracking-[0.3em]">Manual Override Terminal</h4>
+                        <div className="flex items-center gap-3 bg-black/20 px-3 py-1.5 rounded-full border border-white/5">
+                            <span className={`text-[9px] font-black uppercase tracking-widest transition-colors ${autoTrading ? 'text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.5)]' : 'text-slate-500'}`}>
+                                {autoTrading ? 'Auto-Pilot Active' : 'Auto-Pilot Off'}
+                            </span>
+                            <button
+                                onClick={handleAutoToggle}
+                                className={`w-8 h-4 rounded-full p-0.5 transition-all duration-300 ${autoTrading ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.3)]' : 'bg-slate-700'}`}
+                            >
+                                <div className={`w-3 h-3 bg-white rounded-full shadow-md transform transition-transform duration-300 ${autoTrading ? 'translate-x-4' : 'translate-x-0'}`} />
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-end gap-4">
+                        <div>
+                            <label className="text-[9px] text-white/40 font-bold uppercase tracking-wider block mb-1">Symbol</label>
+                            <input
+                                type="text"
+                                value={orderForm.symbol}
+                                onChange={e => setOrderForm({ ...orderForm, symbol: e.target.value.toUpperCase() })}
+                                className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono font-bold w-24 focus:border-indigo-500 outline-none"
+                            />
+                        </div>
+                        <div>
+                            <label className="text-[9px] text-white/40 font-bold uppercase tracking-wider block mb-1">Volume</label>
+                            <input
+                                type="number"
+                                step="0.01"
+                                value={orderForm.volume}
+                                onChange={e => setOrderForm({ ...orderForm, volume: parseFloat(e.target.value) })}
+                                className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono font-bold w-20 focus:border-indigo-500 outline-none"
+                            />
+                        </div>
+                        <div>
+                            <label className="text-[9px] text-white/40 font-bold uppercase tracking-wider block mb-1">Stop Loss</label>
+                            <input
+                                type="number"
+                                value={orderForm.sl}
+                                onChange={e => setOrderForm({ ...orderForm, sl: parseFloat(e.target.value) })}
+                                className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono font-bold w-24 focus:border-indigo-500 outline-none"
+                            />
+                        </div>
+
+                        <div className="flex gap-2 ml-auto">
+                            <button
+                                onClick={() => handleOrder('BUY')}
+                                disabled={actionLoading}
+                                className="bg-emerald-500/10 border border-emerald-500/40 text-emerald-400 px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-emerald-500 hover:text-black transition-all shadow-[0_0_15px_rgba(16,185,129,0.2)]"
+                            >
+                                BUY
+                            </button>
+                            <button
+                                onClick={() => handleOrder('SELL')}
+                                disabled={actionLoading}
+                                className="bg-red-500/10 border border-red-500/40 text-red-400 px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-red-500 hover:text-black transition-all shadow-[0_0_15px_rgba(239,68,68,0.2)]"
+                            >
+                                SELL
+                            </button>
+                            <button
+                                onClick={handleHold}
+                                disabled={actionLoading}
+                                className="bg-amber-500/10 border border-amber-500/40 text-amber-400 px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-amber-500 hover:text-black transition-all shadow-[0_0_15px_rgba(245,158,11,0.2)]"
+                            >
+                                HOLD
+                            </button>
+                        </div>
+                    </div>
                 </div>
 
                 <div className="flex-grow glass rounded-[2.5rem] p-8 overflow-hidden flex flex-col shadow-2xl relative">
@@ -99,7 +218,7 @@ export default function TradingPanel() {
                                     <p className={`font-black text-lg tracking-tight ${parseFloat(pos.profit) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                                         {parseFloat(pos.profit) >= 0 ? '+' : ''}{pos.profit} $
                                     </p>
-                                    <button className="text-[9px] text-slate-600 hover:text-red-400 mt-2 uppercase font-black tracking-[0.2em] transition-colors">Terminer Mission</button>
+                                    <button onClick={() => handleClose(pos.ticket)} className="text-[9px] text-slate-600 hover:text-red-400 mt-2 uppercase font-black tracking-[0.2em] transition-colors cursor-pointer">Terminer Mission</button>
                                 </div>
                             </div>
                         ))}

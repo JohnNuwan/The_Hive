@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Fix pip
 RUN pip install --upgrade pip setuptools wheel
 
-# 2. Installer Ollama nativement
+# 2. Installer Ollama nativement (Cache Restore)
 RUN curl -fsSL https://ollama.com/install.sh | sh
 
 # 3. Copier les dépendances partagées
@@ -44,7 +44,7 @@ EXPOSE 8080
 EXPOSE 11434
 
 # 5. Script de démarrage double (Ollama + Uvicorn)
-RUN echo '#!/bin/bash\nollama serve & \nsleep 10\necho "--- PIP LIST ---"\npython3 -m pip list\necho "--- STARTING UVICORN ---"\nexport PYTHONPATH=$PYTHONPATH:/app/eva-core\npython3 -m uvicorn eva_core.main:app --host 0.0.0.0 --port 8080' > /app/start.sh
-RUN chmod +x /app/start.sh
+COPY src/eva-core/start.sh /app/start.sh
+RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
 
 CMD ["/app/start.sh"]

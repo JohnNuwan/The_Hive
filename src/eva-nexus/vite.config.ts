@@ -18,7 +18,7 @@ export default defineConfig({
         proxy: {
             // ═══ CORE SERVICES (Triumvirat Vital) ═══
             '/api/core': {
-                target: 'http://localhost:8000',
+                target: 'http://localhost:8080',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/api\/core/, ''),
                 configure: silentProxy,

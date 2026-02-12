@@ -119,6 +119,7 @@ class Settings(BaseSettings):
     # ═══════════════════════════════════════════════════════════════════════════
     # TRADING (Banker)
     # ═══════════════════════════════════════════════════════════════════════════
+    banker_api_host: str = "localhost"
     banker_api_port: int = 8100
     mt5_magic_number: int = 12345
     mock_mt5: bool = True  # True pour dev sans MT5 réel
