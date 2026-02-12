@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -112,8 +115,22 @@ type SwarmMessage struct {
 	Ts       int64           `json:"ts"`
 }
 
+// computeHMAC generates a SHA256 HMAC for the message contents
+func computeHMAC(source, target string, payload []byte, ts int64, secret string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(source))
+	h.Write([]byte(":"))
+	h.Write([]byte(target))
+	h.Write([]byte(":"))
+	h.Write(payload)
+	h.Write([]byte(":"))
+	h.Write([]byte(fmt.Sprintf("%d", ts)))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // Canal 1 : DANGER — Priorité Absolue (latence <1ms visée)
 func listenDangerSignals(rdb *redis.Client) {
+	secret := getEnv("SWARM_SECRET_KEY", "default-insecure-secret")
 	for {
 		pubsub := rdb.Subscribe(ctx, "danger_signal", "eva.sentinel.alert", "eva.kernel.emergency")
 		ch := pubsub.Channel()
@@ -125,13 +142,17 @@ func listenDangerSignals(rdb *redis.Client) {
 
 			log.Printf("🚨 DANGER [%s]: %s — Routing to KILL_SWITCH", msg.Channel, msg.Payload)
 
+			ts := time.Now().Unix()
+			payload := json.RawMessage(msg.Payload)
+			target := "Kernel"
+
 			// Standardisation du message
 			swarmMsg := SwarmMessage{
 				Source:   msg.Channel,
-				Target:   "Kernel",
-				Payload:  json.RawMessage(msg.Payload),
-				AuthHash: "INTERNAL_CORE_HASH", // TODO: Implement real HMAC
-				Ts:       time.Now().Unix(),
+				Target:   target,
+				Payload:  payload,
+				AuthHash: computeHMAC(msg.Channel, target, payload, ts, secret),
+				Ts:       ts,
 			}
 			jsonMsg, _ := json.Marshal(swarmMsg)
 
@@ -152,6 +173,7 @@ func listenDangerSignals(rdb *redis.Client) {
 
 // Canal 2 : TRADING — Haute priorité (Core → Risk Check → Banker)
 func listenTradeSignals(rdb *redis.Client) {
+	secret := getEnv("SWARM_SECRET_KEY", "default-insecure-secret")
 	for {
 		pubsub := rdb.Subscribe(ctx, "trade_opportunity", "eva.core.trade_request")
 		ch := pubsub.Channel()
@@ -162,13 +184,17 @@ func listenTradeSignals(rdb *redis.Client) {
 
 			log.Printf("💰 TRADE [%s]: %s — Routing to Banker via Kernel validation", msg.Channel, msg.Payload)
 
+			ts := time.Now().Unix()
+			payload := json.RawMessage(msg.Payload)
+			target := "Banker/Kernel"
+
 			// Standardisation
 			swarmMsg := SwarmMessage{
 				Source:   msg.Channel,
-				Target:   "Banker/Kernel",
-				Payload:  json.RawMessage(msg.Payload),
-				AuthHash: "INTERNAL_TRADE_HASH",
-				Ts:       time.Now().Unix(),
+				Target:   target,
+				Payload:  payload,
+				AuthHash: computeHMAC(msg.Channel, target, payload, ts, secret),
+				Ts:       ts,
 			}
 			jsonMsg, _ := json.Marshal(swarmMsg)
 
@@ -189,6 +215,7 @@ func listenTradeSignals(rdb *redis.Client) {
 
 // Canal 3 : SWARM — Coordination inter-agents
 func listenSwarmEvents(rdb *redis.Client) {
+	secret := getEnv("SWARM_SECRET_KEY", "default-insecure-secret")
 	for {
 		pubsub := rdb.Subscribe(ctx, "eva.swarm.events", "eva.swarm.broadcast", "eva.swarm.drone_scale")
 		ch := pubsub.Channel()
@@ -199,13 +226,17 @@ func listenSwarmEvents(rdb *redis.Client) {
 
 			log.Printf("🐝 SWARM [%s]: %s", msg.Channel, msg.Payload)
 
+			ts := time.Now().Unix()
+			payload := json.RawMessage(msg.Payload)
+			target := "Broadcast"
+
 			// Standardisation
 			swarmMsg := SwarmMessage{
 				Source:   msg.Channel,
-				Target:   "Broadcast",
-				Payload:  json.RawMessage(msg.Payload),
-				AuthHash: "INTERNAL_SWARM_HASH",
-				Ts:       time.Now().Unix(),
+				Target:   target,
+				Payload:  payload,
+				AuthHash: computeHMAC(msg.Channel, target, payload, ts, secret),
+				Ts:       ts,
 			}
 			jsonMsg, _ := json.Marshal(swarmMsg)
 
