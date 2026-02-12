@@ -44,6 +44,7 @@ from eva_core.services.prompt_master import PromptMaster
 from eva_core.strategy import StrategyOrchestrator
 from eva_core.self_healing import SelfHealingService
 from eva_core.services.docker_monitor import SystemMonitor
+from eva_core.identity import EVA_CORE_IDENTITY, EVA_GAMIFICATION_PROTOCOL
 
 # Configuration logging
 logging.basicConfig(level=logging.INFO)
@@ -288,7 +289,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     role=MessageRole.USER,
                     content=wrapped_message
                 )],
-                system_prompt=f"{expert_injector}\nTu es EVA, une IA assistante personnelle intelligente.",
+                system_prompt=f"{expert_injector}\n{EVA_CORE_IDENTITY}\n\n{EVA_GAMIFICATION_PROTOCOL}",
                 role=target_role,
             )
             # Créer le message de l'expert avec les pensées
