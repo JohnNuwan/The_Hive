@@ -110,8 +110,10 @@ class SystemMonitor:
                         if entries:
                             cpu_temp = entries[0].current
                             break
-            except (AttributeError, Exception):
-                pass
+            except AttributeError:
+                logger.debug("CPU temperature monitoring not supported (AttributeError).")
+            except Exception as e:
+                logger.warning(f"Failed to read CPU temperature: {e}")
 
             # Memory
             mem = psutil.virtual_memory()
@@ -133,8 +135,8 @@ class SystemMonitor:
                     ) / dt / (1024 * 1024)
                 self._last_disk_io = disk_io
                 self._last_disk_time = now
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to read disk IO metrics: {e}")
 
             # Network (with delta for speed)
             net_io = psutil.net_io_counters()
@@ -215,8 +217,10 @@ class SystemMonitor:
                         "memory_total": round(float(parts[3].strip()) / 1024, 1),
                         "temp": float(parts[4].strip()),
                     }
-        except (FileNotFoundError, Exception):
-            pass
+        except FileNotFoundError:
+            logger.debug("nvidia-smi not found (GPU monitoring skipped).")
+        except Exception as e:
+            logger.warning(f"Failed to read GPU metrics: {e}")
         return None
 
     # ═══════════════════════════════════════════════════════════════════════
