@@ -29,8 +29,11 @@ class WorldModel(nn.Module):
     World Model integrating FSQ and Symlog.
     Part of DreamerV3 architecture for stable and efficient VRAM usage.
     """
-    def __init__(self, obs_dim, action_dim, latent_dim=512, levels=[8, 5, 5, 5]):
+    def __init__(self, obs_dim, action_dim, latent_dim=4, levels=[8, 5, 5, 5]):
         super().__init__()
+        if latent_dim != len(levels):
+            raise ValueError(f"latent_dim must match len(levels). Got latent_dim={latent_dim}, levels={len(levels)}")
+
         self.encoder = nn.Sequential(
             nn.Linear(obs_dim, 256),
             nn.ELU(),
