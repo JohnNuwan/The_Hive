@@ -34,3 +34,21 @@ def test_forge_and_test_syntax_error():
     assert result["success"] is False
     assert result["error"] is not None
     assert "SyntaxError" in result["error"]
+
+def test_forge_and_test_safe_import():
+    """Test that safe imports are allowed."""
+    forge = CyberForge()
+    code = "import math; print(math.sqrt(4))"
+    result = forge.forge_and_test("test_safe_import", code)
+
+    assert result["success"] is True
+    assert "2.0" in result["output"]
+
+def test_safe_logging():
+    """Test that logger works safely."""
+    forge = CyberForge()
+    code = "logger.info('Safe log test')"
+    result = forge.forge_and_test("test_logging", code)
+    assert result["success"] is True
+    # Note: logger.info goes to system log, not stdout_capture unless configured.
+    # But execution should succeed.
