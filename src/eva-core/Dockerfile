@@ -3,10 +3,13 @@ FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
 
 WORKDIR /app
 
-# 1. Installer les dépendances système (Curl, zstd)
+# 1. Installer les dépendances système (Curl, zstd, build-essential pour compilation)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     zstd \
+    build-essential \
+    gcc \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Fix pip
