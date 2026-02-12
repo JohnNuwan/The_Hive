@@ -20,8 +20,7 @@ RUN curl -fsSL https://ollama.com/install.sh | sh
 
 # 3. Copier les dépendances partagées
 COPY src/shared /app/shared
-RUN python3 -m pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121 \
-    && python3 -m pip install --no-cache-dir /app/shared
+RUN python3 -m pip install --no-cache-dir /app/shared
 
 # 4. Copier eva-core et installer (avec dépendances explicites car pip est capricieux)
 COPY src/eva-core /app/eva-core
