@@ -334,3 +334,19 @@ export async function getSystemStatus() {
 export async function getMemoryGraph(limit = 50, similarityThreshold = 0.8) {
     return safeFetch(`/api/core/memory/graph?limit=${limit}&similarity_threshold=${similarityThreshold}`, { nodes: [], links: [] })
 }
+
+// ═══ ACCOUNTANT ═══
+export interface AccountantReport {
+    summary: {
+        gross: number
+        tax: number
+        expenses: number
+        net: number
+    }
+    expenses: any[]
+    timestamp: string
+}
+
+export async function getAccountantReport(): Promise<AccountantReport | null> {
+    return safeFetch('/api/accountant/report', null)
+}

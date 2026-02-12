@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { checkNodeHealth, type NodeHealth } from '../services/api'
+import { checkNodeHealth, type NodeHealth, getAccountantReport } from '../services/api'
 
 // ═══════════════════════════════════════════════════════
 // TYPES
@@ -290,6 +290,7 @@ function SupportAgentRow({ agent, health }: { agent: typeof SUPPORT_AGENTS[0]; h
 
 export default function FactoriesView() {
     const [agentHealth, setAgentHealth] = useState<AgentHealth>({})
+    const [revenue, setRevenue] = useState(0)
 
     const fetchHealth = useCallback(async () => {
         const allUrls = [
@@ -305,6 +306,11 @@ export default function FactoriesView() {
         const map: AgentHealth = {}
         results.forEach(r => { map[r.id] = r.health })
         setAgentHealth(map)
+
+        const report = await getAccountantReport()
+        if (report) {
+            setRevenue(report.summary.gross)
+        }
     }, [])
 
     useEffect(() => {
@@ -315,7 +321,7 @@ export default function FactoriesView() {
 
     const onlineCount = FACTORIES.filter(f => agentHealth[f.id]?.status === 'online').length
     const totalFactories = FACTORIES.length
-    const totalRevenue = '$0.00' // TODO: fetch from accountant
+    const totalRevenue = new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(revenue)
 
     return (
         <div className="h-full overflow-y-auto p-4 space-y-4 animate-fade-in">
