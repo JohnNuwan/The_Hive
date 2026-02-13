@@ -12,10 +12,9 @@ import logging
 import secrets
 import time
 from datetime import datetime
-from typing import Optional
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -45,7 +44,7 @@ def create_jwt_token(payload: dict, secret: str) -> str:
     return f"{message}.{_b64url_encode(sig)}"
 
 
-def decode_jwt_token(token: str, secret: str) -> Optional[dict]:
+def decode_jwt_token(token: str, secret: str) -> dict | None:
     """Décode et vérifie un JWT HS256. Retourne None si invalide/expiré."""
     try:
         parts = token.split(".")
@@ -232,8 +231,11 @@ class AuthService:
         users: list[UserInfo] = []
         try:
             keys = await self.redis._client.keys(f"{USERS_KEY_PREFIX}*")
-            for key in keys:
-                raw = await self.redis._client.get(key)
+            if not keys:
+                return []
+
+            raw_list = await self.redis._client.mget(keys)
+            for raw in raw_list:
                 if raw:
                     d = json.loads(raw)
                     users.append(
