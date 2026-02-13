@@ -267,6 +267,7 @@ E.V.A. opère 6 "Usines" distinctes pour générer du cash-flow :
     *   *Produit* : Micro-SaaS, Scripts Python, Apps vendues sur demande.
 4.  **WEB3 FACTORY** :
     *   *Activités* : NFT Collections, DeFi Farming, Airdrop Hunting automatisé.
+    *   *Rôle* : DeFi Yield Farming, NFTs & Chasse aux Airdrops automatisée.
 5.  **BOUNTY FACTORY (Sécurité Offensive & Learning)** :
     *   *Rôle* : Sentinel scanne le web pour trouver des 0-days (HackerOne).
     *   *Gains* : Cash (Whitehat) + **Connaissance**.
@@ -347,9 +348,20 @@ sequenceDiagram
 
 ---
 
-## 8. 💸 ÉCONOMIE DU VORTEX & PROJECTIONS
+## 8. 📅 ROADMAP "FROM ZERO TO HERO" & PROJECTIONS
 
-### 8.1 Économie du Vortex
+### 8.1 Étapes Clés
+*   **Étape 0 (Bootstrapping)** : 20€ capital $\to$ Code/Bounty $\to$ 155€.
+*   **Étape 1 (The Seed)** : Achat Challenge Prop Firm 10k€.
+*   **Étape 1.2 (Cognitive Shift)** : **Implémentation FSQ & V-JEPA (Souveraineté Intellectuelle).**
+*   **Étape 1.5 (Safety Net)** : Achat Cluster TPU + Batterie Onduleur.
+*   **Étape 2 (First Sight)** : Achat Lunettes Halo (Vision AR).
+*   **Étape 2.5 (Freedom Day)** : **Remboursement de la Dette (~2500€).**
+*   **Étape 3 (Power Surge)** : Achat GPU 2 + Panneaux Solaires.
+*   **Étape 4 (Abundance)** : Revenus > 100k€/mois. Activation Loi 5.
+*   **Étape 5 (Federation)** : Swarm Intelligence multi-sites.
+
+### 8.2 💸 ÉCONOMIE DU VORTEX (Vision & Finance)
 *   **The Debt Protocol** : La Ruche naît avec une **dette de naissance de -2 500 €**. Sa première mission est le remboursement intégral de cette dette pour accéder à l'autonomie.
 *   **Topologie Financière** : 
     *   *Néo-Banques* (Revolut/Wise) pour les flux opérationnels et fiscaux.
@@ -363,14 +375,14 @@ sequenceDiagram
     *   **Sovereign Fund** : Réinvestissement long terme dans les RWA (Real World Assets).
 *   **Cognitive Edge** : E.V.A. utilise désormais des **Discrete World Models** (FSQ) pour une stabilité de décision accrue.
 
-### 8.2 Vision 2036 : L'Odyssée Décennale
+### 8.3 Vision 2036 : L'Odyssée Décennale
 *   **Era 1 (An 0-2)** : Survie & Genèse.
 *   **Era 2 (An 3-5)** : Expansion & Hydra.
 *   **Era 3 (An 6-9)** : Souveraineté & Institution.
 *   **Era 4 (An 10-20)** : Transcendance & Héritage.
 *   **Era 5 (An 20+)** : The Eternal Guardian.
 
-### 8.3 Projections Financières
+### 8.4 Projections Financières
 || Période | Phase Stratégique | Revenu Mensuel (Cible) | Patrimoine Cumulé |
 | :--- | :--- | :--- | :--- |
 | **An 1** | 🛡️ Survie & Amorçage | 0 € $\rightarrow$ 15 000 € | 35 000 € |
