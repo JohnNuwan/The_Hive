@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from shared.redis_client import init_redis, get_redis_client
 from shared.auth_middleware import InternalAuthMiddleware
+from shared import BaseHealthResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -193,10 +194,10 @@ async def hard_heartbeat():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-@app.get("/health", tags=["Système"])
+@app.get("/health", response_model=BaseHealthResponse, tags=["Système"])
 async def health():
     """Vérifie la santé du module Accountant."""
-    return {"status": "online", "service": "accountant"}
+    return BaseHealthResponse(status="online")
 
 
 @app.get("/report", tags=["Comptabilité"])

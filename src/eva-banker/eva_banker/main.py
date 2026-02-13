@@ -39,6 +39,7 @@ from shared import (
     TradeAction,
     TradeOrder,
     get_settings,
+    BaseHealthResponse,
 )
 from shared.auth_middleware import InternalAuthMiddleware
 from shared.probes import check_cognitive_sincerity
@@ -100,12 +101,10 @@ class RiskCheckResponse(BaseModel):
     details: dict[str, Any] = {}
 
 
-class HealthResponse(BaseModel):
+class HealthResponse(BaseHealthResponse):
     """Réponse de santé"""
-    status: str
     mt5_connected: bool
     paper_trading: bool
-    timestamp: datetime = Field(default_factory=datetime.now)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -524,7 +523,7 @@ async def trigger_kill_switch() -> dict[str, str]:
     mt5_service: MT5Service = app.state.mt5_service
     positions = await mt5_service.get_open_positions()
 
-    # Parallel execution for speed and robustness (Loi 2 - Kill Switch)
+    # Exécution parallèle pour la vitesse et la robustesse (Loi 2 - Kill Switch)
     tasks = [mt5_service.close_position(pos.ticket) for pos in positions]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 

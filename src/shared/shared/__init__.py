@@ -27,6 +27,7 @@ from shared.models import (
     AuditRecord,
     SecuritySeverity,
     # Agences / Système
+    BaseHealthResponse,
     AgentStatus,
     HardwareMetrics,
     GPUMetrics,
@@ -60,6 +61,7 @@ __all__ = [
     "SecurityEvent",
     "AuditRecord",
     # Système
+    "BaseHealthResponse",
     "HardwareMetrics",
     "GPUMetrics",
     "AgentStatus",

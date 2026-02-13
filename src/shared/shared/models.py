@@ -399,6 +399,16 @@ class AuditRecord(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+class BaseHealthResponse(BaseModel):
+    """
+    Réponse de santé de base pour tous les services.
+    Permet une standardisation des health checks.
+    """
+    status: str = "ok"
+    version: str = "0.1.0"
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+
 class AgentStatus(BaseModel):
     """
     État de santé et versioning d'un agent de la Ruche.

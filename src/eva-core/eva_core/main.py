@@ -31,6 +31,7 @@ from shared import (
     MessageRole,
     Settings,
     get_settings,
+    BaseHealthResponse,
 )
 from shared.redis_client import get_redis_client, init_redis
 from shared.mqtt_client import EVAMQTTClient
@@ -72,12 +73,9 @@ class ChatResponse(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
-class HealthResponse(BaseModel):
+class HealthResponse(BaseHealthResponse):
     """Réponse de santé"""
-    status: str = "ok"
-    version: str = "0.1.0"
     environment: str
-    timestamp: datetime = Field(default_factory=datetime.now)
 
 
 class SessionResponse(BaseModel):

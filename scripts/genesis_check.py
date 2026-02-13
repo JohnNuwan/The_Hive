@@ -76,6 +76,7 @@ MODULES_TO_CHECK = [
     ("Expert B: BANKER", "eva-banker.eva_banker.main", "app"),
     ("Expert J: ADVOCATE (Compliance)", "eva-compliance.eva_compliance.main", "app"),
     ("Expert K: SOVEREIGN (RWA)", "eva-rwa.eva_rwa.main", "app"),
+    ("Expert L: GAMIFICATION", "eva-gamification.eva_gamification.main", "app"),
 
     # --- DIVISION INTELLIGENCE ---
     ("Expert C: SHADOW", "eva-shadow.eva_shadow.main", "app"),
