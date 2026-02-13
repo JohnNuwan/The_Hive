@@ -438,10 +438,12 @@ async def agents_status() -> dict[str, Any]:
         "core": {"status": "online", "version": "0.1.0", "uptime": "active"}
     }
     
-    for agent in agents:
-        # Le Banker publie sur eva.banker.heartbeat
-        # On peut aussi vérifier des clés de statut persistantes
-        heartbeat = await redis_client.cache_get(f"eva.{agent}.status")
+    # Optimisation: mget pour récupérer tous les status en un seul appel O(1)
+    agent_keys = [f"eva.{agent}.status" for agent in agents]
+    heartbeats = await redis_client.cache_mget(agent_keys)
+
+    # zip strict=False pour éviter les erreurs si la liste n'est pas alignée (ce qui ne devrait pas arriver)
+    for agent, heartbeat in zip(agents, heartbeats):
         if not heartbeat:
             # Fallback sur la vérification du channel PubSub (pour le banker spécifique à son heartbeat 300ms)
             status_report[agent] = {"status": "offline"}
