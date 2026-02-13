@@ -1,5 +1,7 @@
 FROM python:3.11-slim
 
+ENV PIP_DEFAULT_TIMEOUT=1000
+
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

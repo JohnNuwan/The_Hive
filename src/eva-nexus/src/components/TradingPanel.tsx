@@ -127,15 +127,25 @@ export default function TradingPanel() {
                     </div>
 
                     <div className="flex flex-wrap items-end gap-4">
-                        <div>
-                            <label className="text-[9px] text-white/40 font-bold uppercase tracking-wider block mb-1">Symbol</label>
-                            <input
-                                type="text"
-                                value={orderForm.symbol}
-                                onChange={e => setOrderForm({ ...orderForm, symbol: e.target.value.toUpperCase() })}
-                                className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono font-bold w-24 focus:border-indigo-500 outline-none"
-                            />
-                        </div>
+                        <label className="text-[9px] text-white/40 font-bold uppercase tracking-wider block mb-1">Symbol</label>
+                        <select
+                            value={orderForm.symbol}
+                            onChange={e => setOrderForm({ ...orderForm, symbol: e.target.value })}
+                            className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono font-bold w-24 focus:border-indigo-500 outline-none appearance-none cursor-pointer"
+                        >
+                            {tradingData?.decisions && Object.keys(tradingData.decisions).length > 0 ? (
+                                Object.keys(tradingData.decisions).map(sym => (
+                                    <option key={sym} value={sym}>{sym}</option>
+                                ))
+                            ) : (
+                                <>
+                                    <option value="XAUUSD">XAUUSD</option>
+                                    <option value="EURUSD">EURUSD</option>
+                                    <option value="BTCUSD">BTCUSD</option>
+                                    <option value="US30">US30</option>
+                                </>
+                            )}
+                        </select>
                         <div>
                             <label className="text-[9px] text-white/40 font-bold uppercase tracking-wider block mb-1">Volume</label>
                             <input
@@ -244,8 +254,22 @@ export default function TradingPanel() {
                         <SincerityGauge score={tradingData?.last_sincerity_score || 0.85} />
                     </div>
                     <div className="mt-8 space-y-6">
-                        <SentimentItem symbol="OR / XAUUSD" sentiment="Bullish" score={85} />
-                        <SentimentItem symbol="NASDAQ 100" sentiment="Neutral" score={52} />
+                        {tradingData?.decisions ? (
+                            Object.entries(tradingData.decisions).map(([symbol, data]: [string, any]) => (
+                                <SentimentItem
+                                    key={symbol}
+                                    symbol={symbol}
+                                    price={data.price}
+                                    action={data.action}
+                                    rsi={data.rsi}
+                                    comment={data.comment}
+                                />
+                            ))
+                        ) : (
+                            <div className="text-center text-xs text-slate-500 font-bold uppercase tracking-widest">
+                                En attente du Cerveau...
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>
@@ -307,23 +331,47 @@ function SincerityGauge({ score }: { score: number }) {
     )
 }
 
-function SentimentItem({ symbol, sentiment, score }: { symbol: string, sentiment: string, score: number }) {
-    const barColor = sentiment === 'Bullish' ? 'bg-gradient-to-r from-emerald-600 to-emerald-400' : sentiment === 'Bearish' ? 'bg-gradient-to-r from-red-600 to-red-400' : 'bg-gradient-to-r from-slate-600 to-slate-400'
-    const textColor = sentiment === 'Bullish' ? 'text-emerald-400' : sentiment === 'Bearish' ? 'text-red-400' : 'text-slate-400'
+function SentimentItem({ symbol, price, action, rsi, comment }: { symbol: string, price: number, action: string, rsi: number, comment: string }) {
+    const isBull = action.includes('BUY')
+    const isBear = action.includes('SELL')
+
+    const barColor = isBull ? 'bg-gradient-to-r from-emerald-600 to-emerald-400' : isBear ? 'bg-gradient-to-r from-red-600 to-red-400' : 'bg-gradient-to-r from-slate-600 to-slate-400'
+    const textColor = isBull ? 'text-emerald-400' : isBear ? 'text-red-400' : 'text-slate-400'
+    const sentimentText = isBull ? 'HAUSSIER' : isBear ? 'BAISSIER' : 'ATTENTE'
+
+    // RSI visual position (0-100)
+    const width = Math.min(Math.max(rsi, 0), 100)
 
     return (
-        <div className="space-y-3 group">
-            <div className="flex justify-between text-[10px] font-black uppercase tracking-widest">
-                <span className="text-slate-300 group-hover:text-white transition-colors">{symbol}</span>
-                <span className={`${textColor} bg-white/[0.03] px-2 py-0.5 rounded-md`}>
-                    {sentiment}
-                </span>
+        <div className="space-y-3 group p-3 rounded-2xl hover:bg-white/[0.02] transition-colors border border-transparent hover:border-white/5">
+            <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-widest">
+                <div className="flex flex-col">
+                    <span className="text-slate-300 group-hover:text-white transition-colors text-xs">{symbol}</span>
+                    <span className="text-slate-500 mt-0.5">{price.toFixed(2)} $</span>
+                </div>
+                <div className="text-right">
+                    <span className={`${textColor} bg-white/[0.03] px-2 py-1 rounded-lg border border-white/5 shadow-sm block mb-1`}>
+                        {action}
+                    </span>
+                    <span className="text-[9px] text-slate-600">{comment}</span>
+                </div>
             </div>
-            <div className="h-1.5 bg-white/[0.03] rounded-full overflow-hidden border border-white/5 shadow-inner">
-                <div
-                    className={`h-full rounded-full transition-all duration-1500 ease-out shadow-lg ${barColor}`}
-                    style={{ width: `${score}%` }}
-                />
+
+            <div className="relative pt-1">
+                <div className="flex justify-between text-[8px] font-bold text-slate-600 uppercase mb-1 px-1">
+                    <span>Oversold (30)</span>
+                    <span>RSI {rsi.toFixed(1)}</span>
+                    <span>Overbought (70)</span>
+                </div>
+                <div className="h-1.5 bg-white/[0.03] rounded-full overflow-hidden border border-white/5 shadow-inner relative">
+                    {/* Zones safe */}
+                    <div className="absolute left-[30%] right-[30%] top-0 bottom-0 bg-white/[0.02]" />
+
+                    <div
+                        className={`h-full rounded-full transition-all duration-1500 ease-out shadow-lg ${barColor}`}
+                        style={{ width: `${width}%` }}
+                    />
+                </div>
             </div>
         </div>
     )

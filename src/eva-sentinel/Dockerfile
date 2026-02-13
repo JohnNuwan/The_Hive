@@ -1,8 +1,9 @@
 # Multi-stage build for Sentinel Rust Core
-FROM rust:1.84-slim-bookworm as builder
+FROM rust:latest as builder
 
 WORKDIR /app
 COPY src/eva-sentinel /app/eva-sentinel
+RUN rm -f /app/eva-sentinel/rust-toolchain.toml
 WORKDIR /app/eva-sentinel
 
 # Build Sentinel binary

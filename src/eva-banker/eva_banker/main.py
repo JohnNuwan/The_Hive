@@ -306,7 +306,9 @@ async def set_auto_trading(request: AutoTradingRequest):
     return {
         "status": status,
         "active": engine.is_active,
-        "symbol": engine.symbol
+        "status": status, 
+        "active": engine.is_active,
+        "symbols": engine.symbols
     }
 
 
@@ -616,9 +618,17 @@ async def get_trading_status():
             "trading_allowed": risk.trading_allowed,
             "open_positions": risk.open_positions_count,
             "anti_tilt_active": risk.anti_tilt_active,
+            "anti_tilt_active": risk.anti_tilt_active,
             "news_filter_active": risk.news_filter_active,
         },
+        "decisions": app.state.auto_engine.latest_decisions
     }
+
+
+@app.get("/", tags=["Système"])
+async def root():
+    """Endpoint racine pour health check simple"""
+    return {"status": "ok", "service": "eva-banker"}
 
 
 @app.get("/telemetry", tags=["Système"])

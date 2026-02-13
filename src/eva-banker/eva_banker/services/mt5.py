@@ -163,6 +163,53 @@ class MT5Service:
             )
         return positions
 
+    async def get_recent_candles(self, symbol: str, timeframe: int = 1, count: int = 20) -> list[dict]:
+        """Récupère les dernières bougies (M1 par défaut)"""
+        # Mapping timeframe int -> MT5 constant if needed, but assuming M1=1 for now implies simple mapping logic or direct use if caller passes constant.
+        # Actually, let's just default to M1 (1 minute) if 1 is passed.
+        # MT5 constants: TIMEFRAME_M1 = 1, etc.
+        
+        if self.mock_mode:
+            # Generate fake candles
+            import random
+            candles = []
+            base_price = 2080.0
+            for i in range(count):
+                close = base_price + random.uniform(-5, 5)
+                candles.append({
+                    "time": datetime.now().timestamp() - (count - i) * 60,
+                    "open": base_price,
+                    "high": max(base_price, close) + 1,
+                    "low": min(base_price, close) - 1,
+                    "close": close,
+                    "tick_volume": 100,
+                })
+                base_price = close
+            return candles
+
+        # Real MT5
+        tf_map = {1: mt5.TIMEFRAME_M1, 5: mt5.TIMEFRAME_M5, 15: mt5.TIMEFRAME_M15}
+        mt5_tf = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
+        
+        rates = await asyncio.to_thread(mt5.copy_rates_from_pos, symbol, mt5_tf, 0, count)
+        
+        if rates is None or len(rates) == 0:
+            logger.warning(f"No rates found for {symbol}")
+            return []
+
+        # Convert to list of dicts
+        candles = []
+        for rate in rates:
+            candles.append({
+                "time": rate['time'],
+                "open": rate['open'],
+                "high": rate['high'],
+                "low": rate['low'],
+                "close": rate['close'],
+                "tick_volume": rate['tick_volume'],
+            })
+        return candles
+
     async def get_symbol_tick(self, symbol: str) -> dict[str, Any]:
         """Récupère le dernier tick pour un symbole"""
         if self.mock_mode:

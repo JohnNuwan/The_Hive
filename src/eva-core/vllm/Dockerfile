@@ -1,5 +1,5 @@
 # vLLM Service Dockerfile — EAGLE-3 Speculative Decoding
-FROM vllm/vllm-openai:latest
+FROM vllm/vllm-openai:v0.6.3
 
 # Enhance with quantization + EAGLE-3 speculative decoding support
 RUN pip install bitsandbytes accelerate

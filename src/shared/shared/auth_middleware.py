@@ -18,7 +18,7 @@ class InternalAuthMiddleware(BaseHTTPMiddleware):
     
     def __init__(self, app, exclude_paths: list[str] = None):
         super().__init__(app)
-        self.exclude_paths = exclude_paths or ["/health", "/docs", "/openapi.json"]
+        self.exclude_paths = exclude_paths or ["/health", "/docs", "/openapi.json", "/"]
 
     async def dispatch(self, request: Request, call_next):
         # Skip authentication for excluded paths

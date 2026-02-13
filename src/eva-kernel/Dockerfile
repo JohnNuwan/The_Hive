@@ -1,11 +1,12 @@
 # Build Stage
-FROM rust:1.75-slim-bookworm AS builder
+FROM rust:latest AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY src/eva-kernel /app
+RUN rm -f rust-toolchain.toml
 
 # Build the kernel
 RUN cargo build --release

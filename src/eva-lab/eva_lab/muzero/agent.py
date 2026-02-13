@@ -146,15 +146,64 @@ class MuZeroAgent:
 
     # ── Inference Only ────────────────────────────────────────
 
-    def infer_action(self, observation: np.ndarray) -> dict:
+    def process_observation(self, observation: dict) -> np.ndarray:
+        """Convert dictionary observation to 142-d numpy array."""
+        price = observation.get("price", 0.0)
+        indicators = observation.get("indicators", {})
+        
+        # Create a simplified obs vector (pad to 142 features)
+        obs_vec = np.zeros(142, dtype=np.float32)
+        
+        # 0: Normalized Price (Approx range 2000-3000)
+        obs_vec[0] = price / 3000.0  
+        
+        # 1-10: Primary Indicators
+        obs_vec[1] = indicators.get("RSI", 50.0) / 100.0
+        obs_vec[2] = indicators.get("MACD_Hist", 0.0)
+        obs_vec[3] = indicators.get("BB_Pct", 0.5)
+        obs_vec[4] = indicators.get("ATR", 0.0) / 10.0 # Normalize ATR roughly
+        obs_vec[5] = indicators.get("RVOL", 1.0) / 5.0 # Normalize RVOL (cap at 5x)
+        
+        # 11-20: Cycles & Timing
+        obs_vec[10] = indicators.get("Cycle_High", 0) / 100.0
+        obs_vec[11] = indicators.get("Cycle_Low", 0) / 100.0
+        
+        # 21-30: Fibonacci Distances (Price vs Level)
+        # We store distance % to key levels
+        levs = ["Fib_0", "Fib_236", "Fib_382", "Fib_500", "Fib_618", "Fib_100"]
+        for i, lev_name in enumerate(levs):
+            lev_val = indicators.get(lev_name, 0.0)
+            if lev_val > 0 and price > 0:
+                # Distance as percentage
+                obs_vec[21 + i] = (price - lev_val) / lev_val
+            else:
+                obs_vec[21 + i] = 0.0
+
+        # Remaining features (Generic fillers for existing raw dict items)
+        # This keeps compatibility if we add random stuff later
+        idx = 40
+        for k, v in indicators.items():
+            if k not in ["RSI", "MACD_Hist", "BB_Pct", "ATR", "RVOL", "Cycle_High", "Cycle_Low"] and k not in levs:
+                if idx < 142 and isinstance(v, (int, float)):
+                    obs_vec[idx] = float(v)
+                    idx += 1
+                    
+        return obs_vec
+
+    def infer_action(self, observation: dict) -> dict:
         """
         Select the best action given an observation (no training).
 
         Returns dict with action, policy, value, confidence.
         """
         with torch.no_grad():
+            if isinstance(observation, dict):
+                obs_vec = self.process_observation(observation)
+            else:
+                obs_vec = observation
+
             obs_tensor = (
-                torch.tensor(observation, dtype=torch.float32)
+                torch.tensor(obs_vec, dtype=torch.float32)
                 .unsqueeze(0)
                 .to(self.device)
             )
@@ -170,7 +219,7 @@ class MuZeroAgent:
                 "action": action,
                 "action_name": ACTION_NAMES[action] if action < len(ACTION_NAMES) else f"ACT_{action}",
                 "policy": policy.tolist(),
-                "value": root.value,
+                "value": float(root.value),
                 "confidence": float(policy[action]),
                 "simulations": self.config.num_simulations,
             }

@@ -86,18 +86,7 @@ class DreamerGate:
         return self.enable_training
 
     def start_training(self, data_dir: str, world_model=None) -> dict:
-        """Lance (ou simule) l'entraînement du World Model.
-
-        Si le flag est True, charge les données JSONL depuis data_dir
-        et configure le World Model pour l'entraînement.
-
-        Args:
-            data_dir: Répertoire contenant les fichiers .jsonl du Shadow Learning.
-            world_model: Instance du WorldModel (optionnel, pour injection).
-
-        Returns:
-            Status dict avec les informations de l'entraînement.
-        """
+        """Lance l'entraînement du World Model (MuZero V3.1)."""
         if not self.enable_training:
             return {
                 "status": "blocked",
@@ -105,31 +94,121 @@ class DreamerGate:
                 "advice": "Activez le flag quand la RTX 3090 sera disponible",
             }
 
-        # Compter les données disponibles
-        data_files = []
-        if os.path.exists(data_dir):
-            data_files = [f for f in os.listdir(data_dir) if f.endswith(".jsonl")]
+        if self._training_active:
+             return {"status": "already_running"}
 
-        if not data_files:
-            return {
-                "status": "no_data",
-                "reason": "Aucun fichier .jsonl trouvé dans le répertoire shadow",
-                "data_dir": data_dir,
-            }
+        # 1. Initialize Agent & Trainer
+        agent = self._get_muzero_agent()
+        if not agent:
+             return {"status": "error", "reason": "MuZero Agent failed to load"}
+        
+        from eva_lab.muzero.trainer import MuZeroTrainer
+        self.trainer = MuZeroTrainer(agent)
 
+        # 2. Load Data from Shadow Learning
+        loaded_count = self._load_shadow_data(data_dir)
+        if loaded_count == 0:
+             return {"status": "no_data", "reason": "No valid .jsonl files found"}
+
+        # 3. Start Background Loop
         self._training_active = True
-        logger.info(
-            f"🏋️ [DreamerGate] Training started on {len(data_files)} files "
-            f"from {data_dir}"
-        )
+        import asyncio
+        self._training_task = asyncio.create_task(self._training_loop())
 
+        logger.info(f"🏋️ [DreamerGate] Training STARTED on {loaded_count} games.")
+        
         return {
-            "status": "training_ready",
-            "data_files": len(data_files),
-            "data_dir": data_dir,
-            "model": "MuZero V3.1 Hunger Mode (3-Network Architecture)",
-            "gpu_required": "RTX 3090 (24GB VRAM)",
+            "status": "training_started",
+            "games_loaded": loaded_count,
+            "buffer_size": agent.replay_buffer.size,
+            "device": str(agent.device),
         }
+
+    def _load_shadow_data(self, data_dir: str) -> int:
+        """Load JSONL files into ReplayBuffer."""
+        import json
+        from eva_lab.muzero.agent import GameHistory
+        
+        if not os.path.exists(data_dir):
+            return 0
+            
+        data_files = [f for f in os.listdir(data_dir) if f.endswith(".jsonl")]
+        count = 0
+        agent = self._get_muzero_agent()
+        
+        for fname in data_files:
+            try:
+                path = os.path.join(data_dir, fname)
+                with open(path, "r", encoding="utf-8") as f:
+                    game = GameHistory()
+                    # Shadow Learning saves transitions. 
+                    # We need to reconstruct episodes or treat each line as a step?
+                    # Shadow lines are discrete transitions.
+                    # We can group them into a single "continuous" game per file?
+                    # Or just one giant game? ReplayBuffer expects GameHistory objects.
+                    # Let's assume one file = one chunk of history.
+                    
+                    for line in f:
+                        if not line.strip(): continue
+                        data = json.loads(line)
+                        
+                        # Convert data to format
+                        obs = agent.process_observation(data.get("observation", {}))
+                        
+                        # Action: stored as dict in shadow {"type": "BUY", ...}
+                        # Agent needs int index.
+                        # Mapping: HOLD=0, BUY=1, SELL=2, SPLIT=3, CLOSE=4
+                        act_map = {"HOLD":0, "BUY":1, "SELL":2, "SPLIT":3, "CLOSE":4}
+                        act_data = data.get("action", {})
+                        if isinstance(act_data, dict):
+                            act_str = act_data.get("type", "HOLD")
+                        else:
+                            act_str = str(act_data)
+                        action = act_map.get(act_str, 0)
+                        
+                        reward = float(data.get("reward", 0.0))
+                        done = data.get("done", False)
+                        
+                        # Policy/Value: we don't have them in shadow (unless recorded from inference)
+                        # Use placeholders
+                        policy = [0.2] * 5
+                        value = 0.0
+                        
+                        game.store(obs, action, reward, policy, value, done)
+                    
+                    if len(game) > 0:
+                        agent.replay_buffer.save_game(game)
+                        count += 1
+            except Exception as e:
+                logger.error(f"Failed to load {fname}: {e}")
+                
+        return count
+
+    async def _training_loop(self):
+        """Active Learning Loop."""
+        import asyncio
+        logger.info("[DreamerGate] Training Loop Active 🔄")
+        
+        while self._training_active:
+            try:
+                metrics = self.trainer.train_step()
+                
+                # Check if we actually trained
+                if metrics.get("status") == "waiting_for_data":
+                    # Slow down if waiting for data
+                    await asyncio.sleep(5.0)
+                    continue
+
+                if self.trainer.steps % 10 == 0:
+                    logger.info(f"[Dreamer] Step {self.trainer.steps} | Loss: {metrics.get('loss_total', 0):.4f}")
+                    
+                if self.trainer.steps % 100 == 0:
+                    self.trainer.agent.save()
+                    
+                await asyncio.sleep(0.01) # Yield to event loop
+            except Exception as e:
+                logger.error(f"[Dreamer] Training error: {e}")
+                await asyncio.sleep(5)
 
     def run_inference(self, observation: dict) -> dict:
         """Exécute une inférence World Model.

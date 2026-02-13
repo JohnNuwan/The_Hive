@@ -1,5 +1,7 @@
 FROM python:3.11-slim
 
+ENV PIP_DEFAULT_TIMEOUT=1000
+
 WORKDIR /app
 
 # Installation des dépendances système pour JAX (si nécessaire)

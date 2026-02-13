@@ -1,6 +1,8 @@
 # EVA Core with Integrated Ollama & CUDA support
 FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
 
+ENV PIP_DEFAULT_TIMEOUT=1000
+
 WORKDIR /app
 
 # 1. Installer les dépendances système (Curl, zstd, build-essential pour compilation)
