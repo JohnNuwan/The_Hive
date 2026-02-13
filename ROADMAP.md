@@ -29,7 +29,7 @@
 - [x] **GNN Knowledge Graph** : Visualisation interactive des neurones sémantiques.
 - [x] **Memory Explorer** : Navigation directe dans le stockage Qdrant.
 
-### ⚙️ Sprint 3.3 : Polyglot Hardening (Performance) - � EN COURS
+### ⚙️ Sprint 3.3 : Polyglot Hardening (Performance) -  EN COURS
 - [x] **Sentinel (Rust)** : Hardened P2P communication (libp2p & Redis fix).
 - [ ] **Nervous (Go)** : Migration gRPC pour routage <1ms.
 - [ ] **Quant-Lab (Julia)** : Simulations de portefeuille haute performance.
