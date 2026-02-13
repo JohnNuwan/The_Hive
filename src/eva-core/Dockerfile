@@ -3,10 +3,13 @@ FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
 
 WORKDIR /app
 
-# 1. Installer les dépendances système (Curl, zstd)
+# 1. Installer les dépendances système (Curl, zstd, build-essential pour compilation)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     zstd \
+    build-essential \
+    gcc \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Fix pip
@@ -17,8 +20,7 @@ RUN curl -fsSL https://ollama.com/install.sh | sh
 
 # 3. Copier les dépendances partagées
 COPY src/shared /app/shared
-RUN python3 -m pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121 \
-    && python3 -m pip install --no-cache-dir /app/shared
+RUN python3 -m pip install --no-cache-dir /app/shared
 
 # 4. Copier eva-core et installer (avec dépendances explicites car pip est capricieux)
 COPY src/eva-core /app/eva-core
