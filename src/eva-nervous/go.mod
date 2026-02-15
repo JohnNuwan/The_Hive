@@ -1,10 +1,11 @@
 module eva-nervous
 
-go 1.23.0
+go 1.24.0
 
 require (
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/prometheus/client_golang v1.23.2
+	google.golang.org/grpc v1.79.1
 )
 
 require (
@@ -17,6 +18,9 @@ require (
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/sys v0.35.0 // indirect
-	google.golang.org/protobuf v1.36.8 // indirect
+	golang.org/x/net v0.48.0 // indirect
+	golang.org/x/sys v0.39.0 // indirect
+	golang.org/x/text v0.32.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 )

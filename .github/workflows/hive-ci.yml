@@ -39,16 +39,6 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
-
       - uses: actions/checkout@v4
       
       - name: Set up Docker Buildx

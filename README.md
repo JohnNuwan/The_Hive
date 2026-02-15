@@ -1,6 +1,6 @@
 # 🐝 THE HIVE & E.V.A. : SPÉCIFICATIONS FONCTIONNELLES ET TECHNIQUES DÉTAILLÉES
 
-![Nervous](https://img.shields.io/badge/Messenger-Go_|_Redis-00ADD8?style=for-the-badge&logo=go)
+![Nervous](https://img.shields.io/badge/Messenger-Go_|_gRPC_|_Redis-00ADD8?style=for-the-badge&logo=go)
 ![Maths](https://img.shields.io/badge/Quant-Julia_|_JAX-9558B2?style=for-the-badge&logo=julia)
 ![Security](https://img.shields.io/badge/S%C3%A9curit%C3%A9-Rust_|_ZFS-red?style=for-the-badge&logo=rust)
 ![Finance](https://img.shields.io/badge/Financials-FTMO_|_Hydra-green?style=for-the-badge)
@@ -43,8 +43,8 @@
 | **VM 101** | **[The Council]** | VM (GPU Pass) | **Sovereign Stack V3.0** : vLLM Server + Gemma 3 (4B). |
 | **VM 102** | **[The District]** | VM (GPU Pass) | Serveur Unreal Engine 5 (Désactivé en Phase 0). |
 | **VM 200** | **[Trading Floor]** | VM (Win10) | **Hydra Protocol** : 20 instances MetaTrader 5 interconnectées. |
-| **CT 300** | **[Nervous Sys]**  | Container (Go) | Router de messages haute fréquence (Pub/Sub). |
-| **CT 301** | **[Quant Engine]** | Container (Julia)| Calculs mathématiques et probabilités de ruine. |
+| **CT 300** | **[Nervous Sys]**  | Container (Go) | Router de messages ultra-latence (gRPC + Redis Pub/Sub). |
+| **CT 301** | **[Quant Engine]** | Container (Julia)| Calculs financiers intensifs & Simulation Monte Carlo (Lab). |
 | **CT 400** | **[The Bastion]**  | LXC (TPU) | Cybersécurité Fortifiée (Wazuh, Suricata). |
 | **CT 401** | **[Visual Cortex]**| LXC (TPU) | Traitement flux vidéo temps réel (Frigate). |
 | **CT 500+**| **[The Arena]** | VLAN Isolé | Laboratoire de Hacking Éthique & Simulation (Sandboxed). |
@@ -150,8 +150,9 @@ Pour faciliter la navigation dans le code, voici la correspondance entre les **I
 | **J. ADVOCATE** | `eva-compliance`| **Python**. Gestion fiscale & Légale. |
 | **K. SOVEREIGN** | `eva-rwa` | **Rust/Python**. Actifs Réels & Souveraineté. |
 | **L. KEEPER** | `eva-substrate` | **Rust**. Gestionnaire Hardware & Énergie. |
-| **SYSTEM NERVES**| `eva-nervous` | **Go**. Système nerveux central (Bus Redis). |
-| **QUANT LOBE** | `eva-quant` | **Julia**. Calculs financiers intensifs. |
+| **SYSTEM NERVES**| `eva-nervous` | **Go**. Système nerveux central (gRPC Port 9091). |
+| **QUANT LOBE** | `eva-quant-lab` | **Julia**. Calculs financiers intensifs (Lab). |
+| **RESEARCH LAB** | `eva-lab` | **Python/JAX**. Optimisation & World-Models (MuZero). |
 
 ### Noyau Central
 *   **Expert A : E.V.A. CORE (L'Arbitre)**  
@@ -267,7 +268,6 @@ E.V.A. opère 6 "Usines" distinctes pour générer du cash-flow :
     *   *Produit* : Micro-SaaS, Scripts Python, Apps vendues sur demande.
 4.  **WEB3 FACTORY** :
     *   *Activités* : NFT Collections, DeFi Farming, Airdrop Hunting automatisé.
-    *   *Rôle* : DeFi Yield Farming, NFTs & Chasse aux Airdrops automatisée.
 5.  **BOUNTY FACTORY (Sécurité Offensive & Learning)** :
     *   *Rôle* : Sentinel scanne le web pour trouver des 0-days (HackerOne).
     *   *Gains* : Cash (Whitehat) + **Connaissance**.
@@ -348,20 +348,9 @@ sequenceDiagram
 
 ---
 
-## 8. 📅 ROADMAP "FROM ZERO TO HERO" & PROJECTIONS
+## 8. 💸 ÉCONOMIE DU VORTEX & PROJECTIONS
 
-### 8.1 Étapes Clés
-*   **Étape 0 (Bootstrapping)** : 20€ capital $\to$ Code/Bounty $\to$ 155€.
-*   **Étape 1 (The Seed)** : Achat Challenge Prop Firm 10k€.
-*   **Étape 1.2 (Cognitive Shift)** : **Implémentation FSQ & V-JEPA (Souveraineté Intellectuelle).**
-*   **Étape 1.5 (Safety Net)** : Achat Cluster TPU + Batterie Onduleur.
-*   **Étape 2 (First Sight)** : Achat Lunettes Halo (Vision AR).
-*   **Étape 2.5 (Freedom Day)** : **Remboursement de la Dette (~2500€).**
-*   **Étape 3 (Power Surge)** : Achat GPU 2 + Panneaux Solaires.
-*   **Étape 4 (Abundance)** : Revenus > 100k€/mois. Activation Loi 5.
-*   **Étape 5 (Federation)** : Swarm Intelligence multi-sites.
-
-### 8.2 💸 ÉCONOMIE DU VORTEX (Vision & Finance)
+### 8.1 Économie du Vortex
 *   **The Debt Protocol** : La Ruche naît avec une **dette de naissance de -2 500 €**. Sa première mission est le remboursement intégral de cette dette pour accéder à l'autonomie.
 *   **Topologie Financière** : 
     *   *Néo-Banques* (Revolut/Wise) pour les flux opérationnels et fiscaux.
@@ -375,14 +364,14 @@ sequenceDiagram
     *   **Sovereign Fund** : Réinvestissement long terme dans les RWA (Real World Assets).
 *   **Cognitive Edge** : E.V.A. utilise désormais des **Discrete World Models** (FSQ) pour une stabilité de décision accrue.
 
-### 8.3 Vision 2036 : L'Odyssée Décennale
+### 8.2 Vision 2036 : L'Odyssée Décennale
 *   **Era 1 (An 0-2)** : Survie & Genèse.
 *   **Era 2 (An 3-5)** : Expansion & Hydra.
 *   **Era 3 (An 6-9)** : Souveraineté & Institution.
 *   **Era 4 (An 10-20)** : Transcendance & Héritage.
 *   **Era 5 (An 20+)** : The Eternal Guardian.
 
-### 8.4 Projections Financières
+### 8.3 Projections Financières
 || Période | Phase Stratégique | Revenu Mensuel (Cible) | Patrimoine Cumulé |
 | :--- | :--- | :--- | :--- |
 | **An 1** | 🛡️ Survie & Amorçage | 0 € $\rightarrow$ 15 000 € | 35 000 € |
@@ -419,8 +408,8 @@ sequenceDiagram
 
 *   **Python** : LangGraph, LangChain, **OpenClaw** (Custom Agent Framework), **Mem0**, PyTorch, Scikit-learn, FastAPI.
 *   **Rust** : Kernel Sécurité, Trading Execution Engine, Sentinel Engine.
-*   **Go** : Halo Bridge, Messenger, Nexus, IPFS, Système Nerveux Central (Nervous System).
-*   **Julia / JAX** : Calcul Financier Haute Performance & Optimisation.
+*   **Go** : Halo Bridge, Messenger, Nexus, IPFS, Système Nerveux Central (gRPC v1.60).
+*   **Julia / JAX** : Calcul Financier Haute Performance (Quant-Lab) & Optimisation Différentiable (IA-Lab).
 *   **Web3** : Web3.py, Brownie.
 *   **Bases de Données** : **Qdrant** (Production), **Neo4j** (Graph Memory), **ChromaDB** (Local/Dev), TimescaleDB (Time-Series), Redis (Cache).
 *   **IA & Inférence** : **vLLM** (Backend), **Gemma 3 (4B)** (Modèle Principal), **Ollama** (Dev/Fallback).

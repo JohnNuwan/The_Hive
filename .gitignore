@@ -107,6 +107,3 @@ terminal64.exe
 # MuZero
 muzero_ref/
 data/muzero/
-node_modules/
-src/eva-nexus/node_modules/
-*_log.txt

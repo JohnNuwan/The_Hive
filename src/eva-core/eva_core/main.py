@@ -32,6 +32,7 @@ from shared import (
     Settings,
     get_settings,
     BaseHealthResponse,
+    SwarmGRPCClient,
 )
 from shared.redis_client import get_redis_client, init_redis
 from shared.mqtt_client import EVAMQTTClient
@@ -138,6 +139,10 @@ async def lifespan(app: FastAPI):
     
     # System Monitor (Docker + Hardware)
     app.state.system_monitor = SystemMonitor()
+    
+    # gRPC Client (High Performance Signal Routing)
+    app.state.grpc_client = SwarmGRPCClient()
+    app.state.grpc_client.connect()
     
     # Telemetry
     app.state.start_time = datetime.now()
@@ -312,21 +317,40 @@ async def chat(request: ChatRequest) -> ChatResponse:
             )
             response_text = "Activation du Swarm Mode. Tous les experts concernés travaillent en parallèle..."
         else:
-            # Routage classique vers un expert unique
+            # Routage vers expert avec préférence gRPC pour les signaux critiques
             redis_client = get_redis_client()
+            grpc_client: SwarmGRPCClient = app.state.grpc_client
+            
             payload = {
                 "session_id": str(session_id),
                 "message": request.message,
                 "entities": intent.entities,
             }
-            await redis_client.send_to_agent(
-                source="core",
-                target=intent.target_expert,
-                action=intent.intent_type.value,
-                payload=payload,
-            )
             
-            # Si l'expert est le Banker, on double l'envoi sur MQTT pour la fiabilité (Critical Path)
+            # Si le signal est critique, on tente d'abord gRPC
+            grpc_success = False
+            if intent.intent_type.value in ["DANGER", "TRADE", "ORDER", "KILL_SWITCH"]:
+                logger.info(f"⚡ tentative routage gRPC pour action critique: {intent.intent_type.value}")
+                grpc_success = grpc_client.send_signal(
+                    source="core",
+                    target=intent.target_expert,
+                    action=intent.intent_type.value,
+                    payload=payload,
+                    priority=1 # P1_CRITICAL
+                )
+                if grpc_success:
+                    logger.info(f"✅ Signal gRPC envoyé avec succès vers {intent.target_expert}")
+            
+            # Fallback Redis si non gRPC ou échec gRPC
+            if not grpc_success:
+                await redis_client.send_to_agent(
+                    source="core",
+                    target=intent.target_expert,
+                    action=intent.intent_type.value,
+                    payload=payload,
+                )
+            
+            # Miroir MQTT pour le Banker
             if intent.target_expert == "banker" and intent.intent_type.value in ["TRADE", "ORDER"]:
                 mqtt_client: EVAMQTTClient = app.state.mqtt
                 await mqtt_client.publish("eva/banker/requests/critical", payload, qos=2)

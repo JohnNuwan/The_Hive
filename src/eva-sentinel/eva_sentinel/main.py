@@ -22,7 +22,7 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from shared import Settings, get_settings
+from shared import Settings, get_settings, SwarmGRPCClient
 from shared.redis_client import init_redis
 from shared.auth_middleware import InternalAuthMiddleware
 
@@ -71,6 +71,10 @@ async def lifespan(app: FastAPI):
     
     # Security Engine
     app.state.security = SecurityEngine()
+    
+    # gRPC Client
+    app.state.grpc_client = SwarmGRPCClient()
+    app.state.grpc_client.connect()
     
     # Baseline integrity scan
     await app.state.security.check_integrity()
@@ -125,6 +129,9 @@ async def notif_listener(notifier: TelegramNotifier):
     async def handle_alert(channel, message):
         # Dispatcher les alertes selon le canal
         if channel == "danger_signal":
+            # Si on détecte un signal critique, on peut aussi le relayer ou agir
+            # Mais ici c'est un listener de broadcast.
+            # On va plutôt s'assurer que Sentinel peut émettre via gRPC si besoin.
             await notifier.notify_emergency("Nervous System", f"Signal critique détecté: {message}")
         
         elif channel == "eva.banker.trades":

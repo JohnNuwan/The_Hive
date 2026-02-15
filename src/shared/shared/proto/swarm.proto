@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package swarm;
+
+option go_package = "eva-nervous/proto";
+
+// Service de routage haute fréquence pour The Hive
+service SwarmRouter {
+  // Envoi d'un signal unitaire (P0/P1)
+  rpc SendSignal (SwarmMessage) returns (SignalResponse);
+  
+  // Stream de signaux en temps réel (pour le Dashboard/Monitoring)
+  rpc StreamSignals (StreamRequest) returns (stream SwarmMessage);
+}
+
+// Structure standardisée d'un message Swarm
+message SwarmMessage {
+  string source = 1;       // Agent émetteur (ex: core, sentinel)
+  string target = 2;       // Destination (ex: banker, kernel, broadcast)
+  string action = 3;       // Type d'action (ex: TRADE, KILL_SWITCH, HEARTBEAT)
+  bytes payload = 4;        // Données JSON sérialisées
+  string auth_hash = 5;    // HMAC signature pour sécurité interne
+  int64 ts = 6;            // Timestamp Unix
+  Priority priority = 7;   // Niveau de priorité
+}
+
+enum Priority {
+  P0_EMERGENCY = 0;
+  P1_CRITICAL = 1;
+  P2_NORMAL = 2;
+  P3_LOW = 3;
+}
+
+message SignalResponse {
+  bool accepted = 1;
+  string message = 2;
+  int64 processed_at = 3;
+}
+
+message StreamRequest {
+  string agent_id = 1;
+  repeated string filtered_actions = 2;
+}

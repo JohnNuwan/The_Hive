@@ -18,6 +18,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	pb "eva-nervous/proto"
+	"net"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -36,14 +42,14 @@ var ctx = context.Background()
 
 // Métriques globales
 type Metrics struct {
-	DangerSignals    atomic.Int64
-	TradeSignals     atomic.Int64
-	SwarmEvents      atomic.Int64
-	HeartbeatsRecv   atomic.Int64
-	MessagesRouted   atomic.Int64
-	ErrorsTotal      atomic.Int64
-	LastHeartbeatAt  sync.Map // agent_name -> time.Time
-	UptimeStart      time.Time
+	DangerSignals   atomic.Int64
+	TradeSignals    atomic.Int64
+	SwarmEvents     atomic.Int64
+	HeartbeatsRecv  atomic.Int64
+	MessagesRouted  atomic.Int64
+	ErrorsTotal     atomic.Int64
+	LastHeartbeatAt sync.Map // agent_name -> time.Time
+	UptimeStart     time.Time
 }
 
 var metrics = Metrics{
@@ -312,15 +318,15 @@ func watchdogLoop(rdb *redis.Client) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 type HealthResponse struct {
-	Status         string            `json:"status"`
-	Uptime         string            `json:"uptime"`
-	DangerSignals  int64             `json:"danger_signals"`
-	TradeSignals   int64             `json:"trade_signals"`
-	SwarmEvents    int64             `json:"swarm_events"`
-	Heartbeats     int64             `json:"heartbeats_received"`
-	TotalRouted    int64             `json:"total_messages_routed"`
-	Errors         int64             `json:"errors_total"`
-	AgentStatus    map[string]string `json:"agent_status"`
+	Status        string            `json:"status"`
+	Uptime        string            `json:"uptime"`
+	DangerSignals int64             `json:"danger_signals"`
+	TradeSignals  int64             `json:"trade_signals"`
+	SwarmEvents   int64             `json:"swarm_events"`
+	Heartbeats    int64             `json:"heartbeats_received"`
+	TotalRouted   int64             `json:"total_messages_routed"`
+	Errors        int64             `json:"errors_total"`
+	AgentStatus   map[string]string `json:"agent_status"`
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -371,6 +377,87 @@ func startHealthServer() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// GRPC ROUTER SERVER (:9091)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+type grpcServer struct {
+	pb.UnimplementedSwarmRouterServer
+	rdb       *redis.Client
+	secretKey string
+}
+
+func (s *grpcServer) SendSignal(ctx context.Context, req *pb.SwarmMessage) (*pb.SignalResponse, error) {
+	start := time.Now()
+
+	// Increment metrics
+	metrics.MessagesRouted.Add(1)
+	if req.Priority == pb.Priority_P0_EMERGENCY {
+		metrics.DangerSignals.Add(1)
+	} else if req.Priority == pb.Priority_P1_CRITICAL {
+		metrics.TradeSignals.Add(1)
+	}
+
+	log.Printf("📡 gRPC SIGNAL [%s -> %s]: %s (Priority: %v)", req.Source, req.Target, req.Action, req.Priority)
+
+	// Convert pb.SwarmMessage to internal SwarmMessage (JSON) for Redis propagation
+	swarmMsg := SwarmMessage{
+		Source:   req.Source,
+		Target:   req.Target,
+		Payload:  json.RawMessage(req.Payload),
+		AuthHash: req.AuthHash,
+		Ts:       req.Ts,
+	}
+	jsonMsg, _ := json.Marshal(swarmMsg)
+
+	// Routing logic based on priority and target
+	channel := "eva.swarm.events"
+	if req.Priority == pb.Priority_P0_EMERGENCY || req.Action == "KILL_SWITCH" {
+		channel = "kernel_action"
+	} else if req.Priority == pb.Priority_P1_CRITICAL || req.Action == "TRADE" {
+		channel = "eva.banker.requests.critical"
+		// Double dispatch for Banker
+		s.rdb.Publish(ctx, "banker_orders", jsonMsg)
+	}
+
+	err := s.rdb.Publish(ctx, channel, jsonMsg).Err()
+	if err != nil {
+		metrics.ErrorsTotal.Add(1)
+		return &pb.SignalResponse{Accepted: false, Message: err.Error()}, nil
+	}
+
+	elapsed := time.Since(start)
+	promMessagesRouted.WithLabelValues(req.Source, req.Priority.String()).Inc()
+	promRoutingLatency.WithLabelValues("grpc").Observe(elapsed.Seconds())
+
+	return &pb.SignalResponse{
+		Accepted:    true,
+		Message:     "Signal routed via gRPC",
+		ProcessedAt: time.Now().Unix(),
+	}, nil
+}
+
+func startGRPCServer(rdb *redis.Client) {
+	port := getEnv("GRPC_PORT", "9091")
+	lis, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+
+	s := grpc.NewServer()
+	pb.RegisterSwarmRouterServer(s, &grpcServer{
+		rdb:       rdb,
+		secretKey: getSecretKey(),
+	})
+
+	reflection.Register(s) // For grpcurl debugging
+
+	log.Printf("🚀 gRPC Router Server listening on 0.0.0.0:%s", port)
+	if err := s.Serve(lis); err != nil {
+		log.Fatalf("failed to serve gRPC: %v", err)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // UTILS
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -414,11 +501,14 @@ func main() {
 	// Health endpoint HTTP (monitoring Docker + Dashboard)
 	go startHealthServer()
 
+	// gRPC Server (P0/P1 high frequency)
+	go startGRPCServer(rdb)
+
 	// Canaux prioritaires (du plus critique au moins critique)
-	go listenDangerSignals(rdb)     // P0: Signaux de danger → Kill-Switch
-	go listenTradeSignals(rdb)      // P1: Opportunités trading → Banker
-	go listenSwarmEvents(rdb)       // P2: Coordination Swarm
-	go listenHeartbeats(rdb)        // Heartbeat monitoring
+	go listenDangerSignals(rdb) // P0: Signaux de danger → Kill-Switch
+	go listenTradeSignals(rdb)  // P1: Opportunités trading → Banker
+	go listenSwarmEvents(rdb)   // P2: Coordination Swarm
+	go listenHeartbeats(rdb)    // Heartbeat monitoring
 
 	// Watchdog (détection d'agents morts)
 	go watchdogLoop(rdb)
