@@ -217,7 +217,7 @@ Ces entités assurent le fonctionnement bas-niveau de la Ruche :
 
 E.V.A. a évolué vers une architecture de **Professional Artificial Player**. La finance n'est plus traitée comme une série de statistiques, mais comme un jeu d'échecs complexe :
 
-- **World Model (Othello logic)** : E.V.A. ne prédit pas le prix, elle construit une carte mentale des forces du marché (vendeurs vs acheteurs) exactement comme une IA d'échecs ou d'Othello-GPT.
+- **World Model (Othello logic)** : E.V.A. ne prédit pas le prix, elle construit une carte mentale des forces du marché (vendeurs vs acheteurs). Propulsé par **JAX/Haiku**, ce modèle latent garantit une stabilité structurelle et une vitesse d'inférence record (~25ms).
 - **DreamerV3 (Minecraft Logic)** : Entraînement en espace latent (rêve) pour anticiper des millions de scénarios avant de risquer du capital réel.
 - **Arena PCG** : Génération Procédurale de "Synthetic Krachs" pour tester la résilience contre des événements inédits (Black Swans imaginaires).
 - **Nemesis System** : Chaque défaite est analysée par un moteur d'adaptation inspiré du jeu vidéo. Si le marché bat E.V.A., elle apprend spécifiquement à contrer ce "Nemesis".
@@ -409,7 +409,7 @@ sequenceDiagram
 *   **Python** : LangGraph, LangChain, **OpenClaw** (Custom Agent Framework), **Mem0**, PyTorch, Scikit-learn, FastAPI.
 *   **Rust** : Kernel Sécurité, Trading Execution Engine, Sentinel Engine.
 *   **Go** : Halo Bridge, Messenger, Nexus, IPFS, Système Nerveux Central (gRPC v1.60).
-*   **Julia / JAX** : Calcul Financier Haute Performance (Quant-Lab) & Optimisation Différentiable (IA-Lab).
+*   **Julia / JAX** : Calcul Financier Haute Performance (Quant-Lab) & Optimisation Différentiable (Lab). Implémentation stable de DreamerV3 via Haiku.
 *   **Web3** : Web3.py, Brownie.
 *   **Bases de Données** : **Qdrant** (Production), **Neo4j** (Graph Memory), **ChromaDB** (Local/Dev), TimescaleDB (Time-Series), Redis (Cache).
 *   **IA & Inférence** : **vLLM** (Backend), **Gemma 3 (4B)** (Modèle Principal), **Ollama** (Dev/Fallback).

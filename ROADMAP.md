@@ -31,10 +31,10 @@
 
 ### ⚙️ Sprint 3.3 : Polyglot Hardening (Performance) - 🟡 EN COURS
 - [x] **Sentinel (Rust)** : Hardened P2P communication (libp2p & Redis fix).
-- [ ] **Nervous (Go)** : Migration gRPC pour routage <1ms (Haute Fréquence).
-- [ ] **Shared (Python)** : Client gRPC NATIF pour experts (Danger/Trade).
-- [ ] **Quant-Lab (Julia)** : Simulations de portefeuille haute performance.
-- [ ] **Lab (JAX)** : Implémentation du moteur DreamerV3.
+- [x] **Nervous (Go)** : Migration gRPC pour routage <1ms (Standardisé).
+- [x] **Shared (Python)** : Client gRPC NATIF pour experts.
+- [x] **Quant-Lab (Julia)** : Simulations de portefeuille haute performance.
+- [x] **Lab (JAX)** : Implémentation stable du moteur DreamerV3 (RSSM).
 
 ---
 

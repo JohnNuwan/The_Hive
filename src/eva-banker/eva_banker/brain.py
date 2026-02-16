@@ -206,7 +206,7 @@ class AutoTradingEngine:
                         try:
                             import aiohttp
                             from shared.internal_auth import InternalAuth
-                            lab_url = "http://localhost:8600/dreamer/predict"
+                            lab_url = "http://lab:8600/dreamer/predict"
                             token = InternalAuth.generate_token("banker")
                             
                             async with aiohttp.ClientSession() as session:
@@ -302,7 +302,7 @@ class AutoTradingEngine:
             import aiohttp
             from shared.internal_auth import InternalAuth
             
-            lab_url = "http://localhost:8600/shadow/record" # Port 8600 defined in config
+            lab_url = "http://lab:8600/shadow/record" # Port 8600 defined in config
             
             payload = {
                 "symbol": order.symbol,
