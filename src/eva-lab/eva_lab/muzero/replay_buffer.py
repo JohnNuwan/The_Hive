@@ -29,6 +29,9 @@ class GameHistory:
         # Initial priority is max or 1.0
         self.priorities.append(1.0)
 
+    def __len__(self):
+        return len(self.observations)
+
 class SumTree:
     """Binary tree where each node is the sum of its children."""
     def __init__(self, capacity):
