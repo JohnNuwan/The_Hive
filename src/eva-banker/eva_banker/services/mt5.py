@@ -97,6 +97,18 @@ class MT5Service:
             logger.exception(f"Erreur connexion MT5: {e}")
             return False
 
+    async def initialize_symbols(self, symbols: list[str]) -> None:
+        """S'assure que les symboles sont sélectionnés dans le Market Watch"""
+        if self.mock_mode:
+            return
+        
+        for symbol in symbols:
+            selected = await asyncio.to_thread(mt5.symbol_select, symbol, True)
+            if not selected:
+                logger.warning(f"Impossible de sélectionner le symbole {symbol}: {mt5.last_error()}")
+            else:
+                logger.info(f"Symbole {symbol} sélectionné avec succès.")
+
     async def disconnect(self) -> None:
         """Déconnexion de MT5"""
         if not self.mock_mode and MT5_AVAILABLE:

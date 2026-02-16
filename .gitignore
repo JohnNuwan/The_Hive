@@ -107,3 +107,5 @@ terminal64.exe
 # MuZero
 muzero_ref/
 data/muzero/
+data/history/
+data/checkpoints/

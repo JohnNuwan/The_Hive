@@ -51,6 +51,27 @@ async def startup_event():
     params, _ = state.trainer.init_params(sample_obs)
     state.params = params
     
+    # Load Pre-trained Checkpoint if available
+    import os, pickle
+    checkpoint_path = "data/checkpoints/dreamer_pretrained.pkl"
+    if os.path.exists(checkpoint_path):
+        try:
+            logger.info(f"💾 Loading Pre-trained Brain from {checkpoint_path}")
+            with open(checkpoint_path, "rb") as f:
+                loaded_params = pickle.load(f)
+                # Check structure
+                if "wm" in loaded_params:
+                    state.params = loaded_params["wm"]
+                    state.trainer.params = loaded_params
+                    # Reset optimizer states if needed, but we start fresh here usually
+                    # or load syntax if we saved opt_state too.
+                    # Offline trainer saved only params.
+                    logger.info("✅ Brain restored successfully.")
+                else:
+                    logger.warning("⚠️ Checkpoint structure mismatch (expected dict with 'wm'). Ignoring.")
+        except Exception as e:
+            logger.error(f"❌ Failed to load checkpoint: {e}")
+    
     # 3. Init global RSSM state
     state.rng, rng_init = jax.random.split(state.rng)
     state.rssm_state = state.transformed.apply(state.params, rng_init, 2, 1) # Mode 2: init_state
@@ -122,12 +143,19 @@ async def predict_action(request: ObservationRequest):
     # Update global state for sequence continuity
     state.rssm_state = posterior
     
-    # 3. Simple greedy policy for demo (would use Actor head in full version)
-    # Here we just check reward prediction or RSI fallback
+    # 3. Policy Inference (Actor Network)
+    # Mode 3: Actor-Critic heads
+    actor_probs, value_est = state.transformed.apply(
+        state.params, rng_step, 3, posterior
+    )
+    
+    # Greedy Policy for Deployment (Exploitation)
+    # actor_probs shape: [1, ActionDim]
+    action_idx = jnp.argmax(actor_probs, axis=-1)[0]
+    action = int(action_idx)
+    
     rsi = request.indicators.get("RSI", 50.0)
-    action = 0 # WAIT
-    if rsi < 30: action = 1 # BUY
-    elif rsi > 70: action = 2 # SELL
+    # logger.info(f"Dreamer Action: {action} (Value: {float(value_est[0,0]):.2f}) | RSI: {rsi}")
     
     elapsed = time.time() - start_time
     
@@ -212,17 +240,23 @@ async def training_loop():
                 metrics = state.trainer.train_step(batch)
                 
                 # 3. Logging & Telemetry
-                logger.info(f"Dreamer Loss: {metrics['loss_total']:.4f}")
+                logger.info(f"Dreamer Loss: {metrics.get('loss_total', 0):.4f} | Actor: {metrics.get('loss_actor', 0):.4f} | Critic: {metrics.get('loss_critic', 0):.4f}")
+                
+                payload = {
+                    "loss": float(metrics.get("loss_total", 0)),
+                    "loss_obs": float(metrics.get("loss_obs", 0)),
+                    "loss_rew": float(metrics.get("loss_rew", 0)),
+                    "loss_actor": float(metrics.get("loss_actor", 0)),
+                    "loss_critic": float(metrics.get("loss_critic", 0)),
+                    "avg_reward": float(metrics.get("avg_reward", 0)),
+                    "timestamp": time.time()
+                }
+                
                 state.grpc_client.send_signal(
                     source="lab",
                     target="nexus",
                     action="TRAINING_METRICS",
-                    payload={
-                        "loss": float(metrics["loss_total"]),
-                        "loss_obs": float(metrics["loss_obs"]),
-                        "loss_rew": float(metrics["loss_rew"]),
-                        "timestamp": time.time()
-                    },
+                    payload=payload,
                     priority=3
                 )
             

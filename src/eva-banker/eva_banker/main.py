@@ -172,6 +172,8 @@ async def lifespan(app: FastAPI):
     mt5_service: MT5Service = app.state.mt5_service
     if await mt5_service.connect():
         logger.info("✅ MT5 connecté")
+        # S'assurer que les symboles nécessaires sont sélectionnés
+        await mt5_service.initialize_symbols(app.state.auto_engine.symbols)
     else:
         logger.warning("⚠️ MT5 en mode mock")
 

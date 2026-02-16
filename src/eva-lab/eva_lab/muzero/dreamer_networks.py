@@ -81,6 +81,13 @@ def make_dreamer_networks(config):
             value = model.ac.critic(state)
             return actor_logits, value
             
+        elif mode == 4: # Decoders only (Reward & Observation)
+            state = args[0]
+            # Used during imagination to predict rewards
+            pred_reward = model.reward_decoder(state)
+            # Optional: rec_obs = model.obs_decoder(state)
+            return pred_reward
+            
         else:
             raise ValueError(f"Unknown Dreamer dispatch mode: {mode}")
 

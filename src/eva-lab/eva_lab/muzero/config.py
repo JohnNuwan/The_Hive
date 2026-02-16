@@ -21,7 +21,7 @@ class MuZeroConfigV3:
 
     def __init__(self, **overrides):
         # ═══ Network Architecture ═══
-        self.observation_shape = (142,)  # DeepTrinity(136) + V3(3) + Time(3) = 142
+        self.observation_shape = (32,)  # Adjusted for current features (Price + Vol + Indicators)
         self.action_space_size = 5       # Hold, Buy, Sell, Split, Close
         self.hidden_state_size = 64
         self.network_hidden_dims = [256, 256]

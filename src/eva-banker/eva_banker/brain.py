@@ -6,9 +6,10 @@ Contient la logique décisionnelle (Manager), l'exécution (Worker) et la boucle
 import asyncio
 import logging
 from decimal import Decimal
-from typing import Any
 from uuid import UUID
 from datetime import datetime
+import os
+import aiohttp
 
 from shared import (
     TradeAction,
@@ -204,9 +205,10 @@ class AutoTradingEngine:
                         comment = "Hold"
                         
                         try:
-                            import aiohttp
                             from shared.internal_auth import InternalAuth
-                            lab_url = "http://lab:8600/dreamer/predict"
+                            # DYNAMIC URL: Use 'localhost' for native mode, 'lab' for docker
+                            lab_host = os.getenv("LAB_HOST", "localhost")
+                            lab_url = f"http://{lab_host}:8600/dreamer/predict"
                             token = InternalAuth.generate_token("banker")
                             
                             async with aiohttp.ClientSession() as session:
@@ -302,7 +304,9 @@ class AutoTradingEngine:
             import aiohttp
             from shared.internal_auth import InternalAuth
             
-            lab_url = "http://lab:8600/shadow/record" # Port 8600 defined in config
+            # DYNAMIC URL: Use 'localhost' for native mode, 'lab' for docker
+            lab_host = os.getenv("LAB_HOST", "localhost")
+            lab_url = f"http://{lab_host}:8600/shadow/record"
             
             payload = {
                 "symbol": order.symbol,
