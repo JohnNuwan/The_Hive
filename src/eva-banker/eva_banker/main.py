@@ -21,6 +21,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -330,7 +331,6 @@ async def create_order(request: OrderRequest) -> OrderResponse:
 
     # 3. Vérification de la "Sincérité Cognitive"
     # On simule l'obtention des activations du LLM
-    import torch
     mock_activations = torch.randn(1, 4096)
     is_sincere, sincerity_msg = check_cognitive_sincerity(
         mock_activations,
