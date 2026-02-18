@@ -6,7 +6,9 @@ Provides real-time system metrics (psutil) and Docker container stats.
 import asyncio
 import logging
 import platform
+import random
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -325,7 +327,6 @@ class SystemMonitor:
                     try:
                         # Docker timestamps like "2026-02-07T15:26:38.123456Z"
                         start_ts = started_at.replace("Z", "+00:00")
-                        from datetime import datetime, timezone
 
                         start_dt = datetime.fromisoformat(start_ts)
                         delta = datetime.now(timezone.utc) - start_dt
@@ -494,8 +495,6 @@ class SystemMonitor:
         return list(containers_map.values())
 
     def _simulated_metrics(self) -> dict:
-        import random
-
         return {
             "cpu": {
                 "usage": round(random.uniform(5, 30), 1),
