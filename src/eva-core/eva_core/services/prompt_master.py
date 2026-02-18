@@ -70,8 +70,3 @@ class PromptMaster:
                 return content
                 
         return f"Tu es Expert {expert_name}. Réfléchis étape par étape."
-
-if __name__ == "__main__":
-    # Test à blanc
-    pm = PromptMaster(templates_dir="../../../Documentation/Biblio_IA")
-    print(pm.wrap_with_method("Analyse le Nasdaq", method="react"))
