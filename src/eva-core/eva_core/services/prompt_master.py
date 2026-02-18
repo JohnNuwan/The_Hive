@@ -12,7 +12,7 @@ class PromptMaster:
     et des templates spécialisés pour chaque Expert.
     """
 
-    def __init__(self, templates_dir: str = "Documentation/Biblio_IA"):
+    def __init__(self, templates_dir: str):
         self.templates_dir = templates_dir
         # Mapping logique -> Dossier réel dans Biblio_IA
         self.methods_map = {

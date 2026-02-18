@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     jwt_secret_key: SecretStr = Field(default=SecretStr("dev-secret-change-in-prod"))
     jwt_algorithm: str = "HS256"
     jwt_expiration_hours: int = 24
+    prompt_master_templates_dir: str = "Documentation/Biblio_IA"
 
     # ═══════════════════════════════════════════════════════════════════════════
     # LLM SERVER

@@ -126,7 +126,7 @@ async def lifespan(app: FastAPI):
     app.state.memory_service = get_memory_service()
     
     # Intégration Biblio_IA / PromptMaster
-    app.state.prompt_master = PromptMaster()
+    app.state.prompt_master = PromptMaster(templates_dir=settings.prompt_master_templates_dir)
 
     # Intégration MQTT
     app.state.mqtt = EVAMQTTClient("core")
