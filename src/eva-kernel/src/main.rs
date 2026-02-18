@@ -205,6 +205,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let mut msg_stream = pubsub.on_message();
                 let mut last_heartbeat = std::time::Instant::now();
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+                // The first tick completes immediately, so we consume it to start the timer properly
+                interval.tick().await;
 
                 loop {
                     tokio::select! {
@@ -218,7 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                        _ = interval.tick() => {
                             if last_heartbeat.elapsed().as_secs() > 10 {
                                 error!("🚨 WATCHDOG: BANKER HEARTBEAT LOST >10s! Alert triggered.");
                                 // En prod: déclencher kill-switch via channel Redis
