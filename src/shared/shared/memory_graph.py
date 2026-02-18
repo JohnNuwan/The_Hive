@@ -220,26 +220,38 @@ class GraphMemoryWithNeo4j:
         Creates Entity nodes and typed relationships.
         Synonyms and co-occurrences are linked for pattern completion.
         """
+        # Group triples by predicate to allow batched UNWIND operations
+        # This reduces N queries to K queries (where K is number of unique predicates)
+        triples_by_pred: Dict[str, List[Dict[str, str]]] = {}
         for subj, pred, obj in triples:
             # Sanitize predicate for Cypher (must be alphanumeric)
             safe_pred = re.sub(r"[^A-Z0-9_]", "_", pred.upper())
             if not safe_pred:
                 safe_pred = "RELATED_TO"
 
+            if safe_pred not in triples_by_pred:
+                triples_by_pred[safe_pred] = []
+
+            triples_by_pred[safe_pred].append({
+                "subj": subj.strip(),
+                "obj": obj.strip()
+            })
+
+        # Execute one batch query per unique predicate
+        for pred, batch in triples_by_pred.items():
             query = (
-                "MERGE (s:Entity {name: $subj}) "
-                "MERGE (o:Entity {name: $obj}) "
-                f"MERGE (s)-[r:{safe_pred}]->(o) "
-                "SET r.source = $source, r.count = COALESCE(r.count, 0) + 1 "
-                "RETURN s.name, type(r), o.name"
+                "UNWIND $batch AS row "
+                "MERGE (s:Entity {name: row.subj}) "
+                "MERGE (o:Entity {name: row.obj}) "
+                f"MERGE (s)-[r:{pred}]->(o) "
+                "SET r.source = $source, r.count = COALESCE(r.count, 0) + 1"
             )
             await self.execute_query(query, {
-                "subj": subj.strip(),
-                "obj": obj.strip(),
+                "batch": batch,
                 "source": source,
             })
 
-        logger.debug(f"Stored {len(triples)} triples from {source}")
+        logger.debug(f"Stored {len(triples)} triples from {source} (in {len(triples_by_pred)} queries)")
 
     async def ingest_text(self, text: str, source: str = "user", llm_client=None):
         """
