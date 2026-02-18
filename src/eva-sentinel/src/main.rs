@@ -12,6 +12,21 @@ use libp2p::{
 use std::error::Error;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use hex;
+use serde_json::value::RawValue;
+
+type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SwarmMessage {
+    source: String,
+    target: String,
+    payload: Box<RawValue>,
+    auth_hash: String,
+    ts: i64,
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct BankerHeartbeat {
@@ -127,6 +142,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     info!("✅ P2P Node Started. PeerID: {}", swarm.local_peer_id());
 
+    let secret_key = get_secret_key();
+
     // 5. Monitoring Loop
     loop {
         tokio::select! {
@@ -142,15 +159,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     message_id: _,
                     message,
                 })) => {
-                    if let Ok(hb) = serde_json::from_slice::<BankerHeartbeat>(&message.data) {
-                        let drawdown = (1.0 - (hb.equity / hb.balance)) * 100.0;
-                        if drawdown >= max_drawdown {
-                            warn!("🚨 P2P ALERT: Critical Drawdown {:.2}% from {}", drawdown, hb.expert);
-                            // Logic to kill containers (shared with Redis logic)
-                            for container in &monitored_containers {
-                                let _ = docker.stop_container(container, Some(StopContainerOptions { t: 0 })).await;
+                    if let Ok(swarm_msg) = serde_json::from_slice::<SwarmMessage>(&message.data) {
+                        if verify_signature(&swarm_msg, &secret_key) {
+                            if let Ok(hb) = serde_json::from_str::<BankerHeartbeat>(swarm_msg.payload.get()) {
+                                let drawdown = (1.0 - (hb.equity / hb.balance)) * 100.0;
+                                if drawdown >= max_drawdown {
+                                    warn!("🚨 P2P ALERT: Critical Drawdown {:.2}% from {}", drawdown, hb.expert);
+                                    // Logic to kill containers (shared with Redis logic)
+                                    for container in &monitored_containers {
+                                        let _ = docker.stop_container(container, Some(StopContainerOptions { t: 0 })).await;
+                                    }
+                                }
                             }
+                        } else {
+                            warn!("🚨 P2P WARNING: Invalid signature from peer {}", message.source.map(|p| p.to_string()).unwrap_or_default());
                         }
+                    } else {
+                        warn!("🚨 P2P WARNING: Received malformed or unsigned message");
                     }
                 },
                 SwarmEvent::NewListenAddr { address, .. } => {
@@ -175,7 +200,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 let _ = docker.stop_container(container, Some(StopContainerOptions { t: 0 })).await;
                             }
                             // Broadcast to P2P as well!
-                            let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), payload.into_bytes());
+                            let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+                            let target = "Broadcast";
+                            let source = "sentinel_bridge";
+                            let signature = generate_hmac(source, target, &payload, ts, &secret_key);
+
+                            if let Ok(raw_payload) = serde_json::value::RawValue::from_string(payload.clone()) {
+                                let swarm_msg = SwarmMessage {
+                                    source: source.to_string(),
+                                    target: target.to_string(),
+                                    payload: raw_payload,
+                                    auth_hash: signature,
+                                    ts,
+                                };
+                                if let Ok(data) = serde_json::to_vec(&swarm_msg) {
+                                    let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), data);
+                                }
+                            }
                             
                             // Publish to Kernel via Redis if connected
                              if let Some(ref mut conn) = redis_publish_conn {
@@ -198,10 +239,106 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     balance: 0.0,
                     currency: "N/A".to_string(),
                 };
-                if let Ok(data) = serde_json::to_vec(&hb) {
-                    let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), data);
+                if let Ok(hb_json) = serde_json::to_string(&hb) {
+                    let ts = now as i64;
+                    let target = "Broadcast";
+                    let source = "sentinel_rust";
+                    let signature = generate_hmac(source, target, &hb_json, ts, &secret_key);
+
+                    if let Ok(raw_payload) = serde_json::value::RawValue::from_string(hb_json) {
+                        let swarm_msg = SwarmMessage {
+                            source: source.to_string(),
+                            target: target.to_string(),
+                            payload: raw_payload,
+                            auth_hash: signature,
+                            ts,
+                        };
+                        if let Ok(data) = serde_json::to_vec(&swarm_msg) {
+                            let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), data);
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+fn get_secret_key() -> String {
+    std::env::var("NERVOUS_SECRET_KEY").expect("🚨 CRITICAL: NERVOUS_SECRET_KEY must be set!")
+}
+
+fn generate_hmac(source: &str, target: &str, payload: &str, ts: i64, secret: &str) -> String {
+    let auth_input = format!("{}|{}|{}|{}", source, target, payload, ts);
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(auth_input.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn verify_signature(msg: &SwarmMessage, secret: &str) -> bool {
+    let computed = generate_hmac(&msg.source, &msg.target, msg.payload.get(), msg.ts, secret);
+    if computed != msg.auth_hash {
+        return false;
+    }
+
+    // Check timestamp (prevent replay) - allow 60s window
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    if (now - msg.ts).abs() > 60 {
+        warn!("🚨 P2P WARNING: Message timestamp stale/future: {} (now: {})", msg.ts, now);
+        return false;
+    }
+
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hmac_signing() {
+        let secret = "test-secret";
+        let source = "test-source";
+        let target = "test-target";
+        let payload = "{\"foo\":\"bar\"}";
+        // Use current time
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+
+        let signature = generate_hmac(source, target, payload, ts, secret);
+
+        let msg_json = format!(r#"{{
+            "source": "{}",
+            "target": "{}",
+            "payload": {},
+            "auth_hash": "{}",
+            "ts": {}
+        }}"#, source, target, payload, signature, ts);
+
+        let msg: SwarmMessage = serde_json::from_str(&msg_json).expect("Failed to parse SwarmMessage");
+        assert!(verify_signature(&msg, secret));
+
+        // Test invalid signature
+        let bad_msg_json = format!(r#"{{
+            "source": "{}",
+            "target": "{}",
+            "payload": {},
+            "auth_hash": "badhash",
+            "ts": {}
+        }}"#, source, target, payload, ts);
+        let bad_msg: SwarmMessage = serde_json::from_str(&bad_msg_json).expect("Failed to parse bad SwarmMessage");
+        assert!(!verify_signature(&bad_msg, secret));
+
+        // Test stale timestamp
+        let old_ts = ts - 100;
+        let old_sig = generate_hmac(source, target, payload, old_ts, secret);
+        let old_msg_json = format!(r#"{{
+            "source": "{}",
+            "target": "{}",
+            "payload": {},
+            "auth_hash": "{}",
+            "ts": {}
+        }}"#, source, target, payload, old_sig, old_ts);
+        let old_msg: SwarmMessage = serde_json::from_str(&old_msg_json).expect("Failed to parse old SwarmMessage");
+        assert!(!verify_signature(&old_msg, secret));
     }
 }
