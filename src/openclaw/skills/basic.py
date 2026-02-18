@@ -9,12 +9,13 @@ agents OpenClaw pour lire, lister et rechercher.
 Skills disponibles :
     - fs_read        : Lecture sécurisée d'un fichier (read-only).
     - fs_list        : Listing du contenu d'un répertoire.
-    - web_search     : Recherche web (placeholder Exa/Tavily).
+    - web_search     : Recherche web (Tavily API).
     - get_public_apis: Catalogue des catégories d'APIs publiques.
 """
 
 import os
 import logging
+import httpx
 from .registry import skill
 
 logger = logging.getLogger(__name__)
@@ -81,27 +82,66 @@ def fs_list(path: str = ".") -> str:
         return f"Error listing dir: {e}"
 
 
-@skill("web_search", "Recherche sur le web (Placeholder Exa/Tavily)")
+@skill("web_search", "Recherche sur le web (Tavily API)")
 def web_search(query: str) -> str:
     """Effectue une recherche web et retourne les résultats.
 
-    Note : Actuellement un placeholder. Sera connecté à Exa.ai
-    ou Tavily API dans une version future.
+    Utilise Tavily API si la clé est présente, sinon retourne un mock.
 
     Args:
         query: La requête de recherche.
 
     Returns:
-        Résultats de recherche (mock pour l'instant).
+        Résultats de recherche formatés.
     """
-    # TODO: Intégrer Exa.ai ou Tavily API
-    logger.info(f"web_search called with query: '{query}' (MOCK)")
-    return (
-        f"[MOCK] Résultats de recherche pour '{query}':\n"
-        f"1. Résultat pertinent A\n"
-        f"2. Résultat pertinent B\n"
-        f"3. Résultat pertinent C"
-    )
+    api_key = os.getenv("TAVILY_API_KEY")
+
+    if not api_key:
+        logger.warning("TAVILY_API_KEY not found. Using MOCK results.")
+        return (
+            f"[MOCK] Résultats de recherche pour '{query}' (API Key missing):\n"
+            f"1. Résultat pertinent A\n"
+            f"2. Résultat pertinent B\n"
+            f"3. Résultat pertinent C"
+        )
+
+    try:
+        response = httpx.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": api_key,
+                "query": query,
+                "search_depth": "basic",
+                "max_results": 5
+            },
+            timeout=10.0
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        results = data.get("results", [])
+        if not results:
+            return f"No results found for '{query}'."
+
+        formatted_results = [f"Search results for '{query}':"]
+        for i, result in enumerate(results, 1):
+            title = result.get("title", "No Title")
+            url = result.get("url", "#")
+            # Truncate content specifically to keep output concise
+            content = result.get("content", "")[:200] + "..." if len(result.get("content", "")) > 200 else result.get("content", "")
+            formatted_results.append(f"{i}. {title}\n   URL: {url}\n   Content: {content}\n")
+
+        return "\n".join(formatted_results)
+
+    except httpx.RequestError as e:
+        logger.error(f"Tavily API request failed: {e}")
+        return f"Error performing web search: {e}"
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Tavily API returned error: {e.response.status_code} - {e.response.text}")
+        return f"Error: Web search API returned {e.response.status_code}."
+    except Exception as e:
+        logger.error(f"Unexpected error in web_search: {e}")
+        return f"Unexpected error during search: {e}"
 
 
 @skill("get_public_apis", "Liste des catégories d'APIs publiques disponibles")
