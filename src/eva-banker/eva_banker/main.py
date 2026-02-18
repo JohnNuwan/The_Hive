@@ -61,7 +61,16 @@ from eva_banker.brain import AutoTradingEngine, BankerManager, BankerWorker
 
 
 class OrderRequest(BaseModel):
-    """Requête d'ordre de trading"""
+    """
+    Requête d'exécution d'ordre de trading.
+
+    Attributes:
+        symbol (str): Le symbole financier (ex: XAUUSD).
+        action (TradeAction): BUY (Achat) ou SELL (Vente).
+        volume (Decimal): La taille du lot.
+        stop_loss (Decimal | None): Prix du Stop Loss (Obligatoire).
+        take_profit (Decimal | None): Prix du Take Profit (Optionnel).
+    """
     symbol: str = Field(..., description="Symbole (ex: XAUUSD)")
     action: TradeAction
     volume: Decimal = Field(..., gt=0, le=5)
@@ -71,7 +80,15 @@ class OrderRequest(BaseModel):
 
 
 class OrderResponse(BaseModel):
-    """Réponse après exécution d'ordre"""
+    """
+    Résultat de la tentative d'exécution d'un ordre.
+
+    Attributes:
+        success (bool): Indique si l'ordre a été placé avec succès.
+        ticket (int | None): Le ticket MT5 généré.
+        message (str): Message descriptif du résultat.
+        risk_check (dict): Détails de la validation des risques.
+    """
     success: bool
     ticket: int | None = None
     order_id: UUID | None = None
@@ -80,7 +97,15 @@ class OrderResponse(BaseModel):
 
 
 class RiskCheckRequest(BaseModel):
-    """Requête de vérification de risque"""
+    """
+    Paramètres pour une simulation de risque (Pre-Trade).
+
+    Attributes:
+        symbol (str): Symbole concerné.
+        action (TradeAction): Sens du trade.
+        volume (Decimal): Taille du lot.
+        stop_loss (Decimal): Niveau de stop-loss envisagé.
+    """
     symbol: str
     action: TradeAction
     volume: Decimal
@@ -89,7 +114,14 @@ class RiskCheckRequest(BaseModel):
 
 
 class RiskCheckResponse(BaseModel):
-    """Réponse de vérification de risque"""
+    """
+    Résultat de l'audit de risque.
+
+    Attributes:
+        allowed (bool): Si True, le trade respecte la Constitution (Loi 2).
+        risk_percent (Decimal): Pourcentage du capital risqué.
+        reason (str | None): Motif du refus si applicable.
+    """
     allowed: bool
     risk_percent: Decimal
     reason: str | None = None
@@ -97,7 +129,13 @@ class RiskCheckResponse(BaseModel):
 
 
 class HealthResponse(BaseHealthResponse):
-    """Réponse de santé"""
+    """
+    Réponse étendue pour le Health Check du Banker.
+
+    Attributes:
+        mt5_connected (bool): État de la connexion au terminal de trading.
+        paper_trading (bool): Si True, les ordres ne sont pas exécutés réellement.
+    """
     mt5_connected: bool
     paper_trading: bool
 
@@ -111,8 +149,14 @@ class HealthResponse(BaseHealthResponse):
 async def lifespan(app: FastAPI):
     """
     Gestion du cycle de vie de l'application Banker.
+
+    Args:
+        app (FastAPI): Instance de l'application.
+
+    Yields:
+        None: Rend le contrôle après initialisation.
     """
-    logger.info("🏦 Démarrage The Banker (Hierarchical Architecture)...")
+    logger.info("🏦 Démarrage The Banker (Architecture Hiérarchique)...")
     settings = get_settings()
 
     # Redis
@@ -135,21 +179,21 @@ async def lifespan(app: FastAPI):
     app.state.ghost_shield = GhostShield(app.state.mt5_service)
     app.state.worker = BankerWorker(app.state.mt5_service, app.state.ghost_shield)
 
-    # Auto-Trading Engine (Weekend Drift)
+    # Auto-Trading Engine (Weekend Drift -> Dérive de Week-end)
     app.state.auto_engine = AutoTradingEngine(
         manager=app.state.manager,
         worker=app.state.worker,
         mt5=app.state.mt5_service,
         risk=app.state.risk_validator
     )
-    # START ON LAUNCH (User Request)
+    # DÉMARRAGE AU LANCEMENT (Demande utilisateur)
     await app.state.auto_engine.start()
 
-    # Nemesis System
+    # Système Nemesis
     app.state.nemesis = get_nemesis_system()
     await app.state.nemesis.load_state()
 
-    # News Filter
+    # Filtre de Nouvelles (News Filter)
     app.state.news_filter = NewsFilterService(
         filter_minutes=settings.risk_news_filter_minutes
     )
@@ -159,7 +203,7 @@ async def lifespan(app: FastAPI):
     app.state.request_count = 0
     app.state.error_count = 0
 
-    # Intégration SWARM
+    # Intégration SWARM (Essaim)
     app.state.swarm = BankerSwarm()
     await app.state.swarm.init_mqtt()
 
@@ -181,7 +225,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Arrêt (Shutdown)
     logger.info("🛑 Arrêt The Banker...")
     if hasattr(app.state, 'auto_engine'):
         await app.state.auto_engine.stop()
@@ -191,6 +235,7 @@ async def lifespan(app: FastAPI):
 async def hard_heartbeat():
     """
     Signal haute fréquence pour le Watchdog Rust (Loi 0) et l'Orchestrateur Core.
+
     Persiste l'état dans Redis pour la découverte des agents.
     Inclut désormais l'équité pour le Kill-Switch financier.
     """
@@ -222,6 +267,9 @@ async def hard_heartbeat():
 async def swarm_listener():
     """
     Écoute les commandes broadcast de l'essaim.
+
+    Cette tâche de fond permet au Banker de réagir aux ordres globaux
+    ou de déployer des drones de surveillance.
     """
     from shared.redis_client import get_redis_client
     redis = get_redis_client()
@@ -288,14 +336,27 @@ async def health_check() -> HealthResponse:
 
 
 class AutoTradingRequest(BaseModel):
+    """
+    Modèle pour activer/désactiver le trading automatique.
+
+    Attributes:
+        enable (bool): True pour démarrer, False pour arrêter.
+    """
     enable: bool
 
 
 @app.post("/trading/auto", tags=["Trading"])
 async def set_auto_trading(request: AutoTradingRequest):
     """
-    Active ou désactive le mode Auto-Trading (Weekend Drift).
+    Active ou désactive le mode Auto-Trading (Dérive de Week-end).
+
     Ce mode lance une boucle autonome qui analyse et trade périodiquement.
+
+    Args:
+        request (AutoTradingRequest): État désiré (enable=True/False).
+
+    Returns:
+        dict: Nouvel état du moteur de trading.
     """
     engine: AutoTradingEngine = app.state.auto_engine
     if request.enable:
@@ -318,6 +379,15 @@ async def set_auto_trading(request: AutoTradingRequest):
 async def create_order(request: OrderRequest) -> OrderResponse:
     """
     Traite une demande d'ordre de trading via l'architecture hiérarchique.
+
+    Args:
+        request (OrderRequest): Détails de l'ordre (symbole, volume, SL...).
+
+    Returns:
+        OrderResponse: Résultat de l'exécution (succès/échec, ticket).
+
+    Raises:
+        HTTPException: Si le Stop Loss est manquant (Règle ROE).
     """
     # 1. Vérification Stop Loss obligatoire
     if request.stop_loss is None:
@@ -454,7 +524,15 @@ async def get_account_balance() -> AccountBalance:
 
 @app.get("/ticks/{symbol}", tags=["Trading"])
 async def get_tick(symbol: str):
-    """Récupère le dernier prix (tick) pour un symbole"""
+    """
+    Récupère le dernier prix (tick) pour un symbole.
+
+    Args:
+        symbol (str): Le symbole financier (ex: EURUSD).
+
+    Returns:
+        dict: Dernier tick (bid, ask, time).
+    """
     mt5_service: MT5Service = app.state.mt5_service
     return await mt5_service.get_symbol_tick(symbol.upper())
 
@@ -544,7 +622,12 @@ async def trigger_kill_switch() -> dict[str, str]:
 
 @app.get("/status/crypto", tags=["Compte"])
 async def get_crypto_status():
-    """Récupère l'état des comptes Crypto (Binance)"""
+    """
+    Récupère l'état des comptes Crypto (Binance).
+
+    Returns:
+        dict: Soldes par actif.
+    """
     from eva_banker.services.binance_service import BinanceService
     binance: BinanceService = app.state.binance_service
     balances = await binance.get_account_balances()
@@ -558,14 +641,24 @@ async def get_crypto_status():
 
 @app.get("/nemesis/status", tags=["Nemesis"])
 async def get_nemesis_status():
-    """Retourne l'état du Nemesis System (mémoire des défaites)"""
+    """
+    Retourne l'état du Nemesis System (mémoire des défaites).
+
+    Returns:
+        dict: Statistiques du système Nemesis.
+    """
     nemesis: NemesisSystem = app.state.nemesis
     return nemesis.get_status()
 
 
 @app.get("/news/filter", tags=["News"])
 async def get_news_filter():
-    """Retourne l'état du filtre de nouvelles économiques"""
+    """
+    Retourne l'état du filtre de nouvelles économiques.
+
+    Returns:
+        dict: État actif/inactif et prochains événements majeurs.
+    """
     news: NewsFilterService = app.state.news_filter
     status = news.get_status()
     # Reformatter pour le frontend
@@ -586,7 +679,12 @@ async def get_news_filter():
 
 @app.get("/trading/status", tags=["Trading"])
 async def get_trading_status():
-    """Agrège les données de trading pour le frontend"""
+    """
+    Agrège les données de trading pour le frontend.
+
+    Returns:
+        dict: Vue globale (Compte, Positions, Risque).
+    """
     mt5_service: MT5Service = app.state.mt5_service
     risk_validator: RiskValidator = app.state.risk_validator
 
@@ -629,13 +727,23 @@ async def get_trading_status():
 
 @app.get("/", tags=["Système"])
 async def root():
-    """Endpoint racine pour health check simple"""
+    """
+    Endpoint racine pour health check simple.
+
+    Returns:
+        dict: Statut de base du service.
+    """
     return {"status": "ok", "service": "eva-banker"}
 
 
 @app.get("/telemetry", tags=["Système"])
 async def get_telemetry():
-    """Retourne les métriques de télémétrie du Banker"""
+    """
+    Retourne les métriques de télémétrie du Banker.
+
+    Returns:
+        dict: Uptime et compteurs de requêtes.
+    """
     start_time: datetime = app.state.start_time
     uptime = (datetime.now() - start_time).total_seconds()
     return {
@@ -649,7 +757,14 @@ async def get_telemetry():
 
 @app.get("/circuit-breaker/status", tags=["Système"])
 async def get_circuit_breaker():
-    """Retourne l'état du circuit-breaker du Banker"""
+    """
+    Retourne l'état du circuit-breaker du Banker.
+
+    Le circuit est ouvert si le Nemesis System ou le filtre de news bloque le trading.
+
+    Returns:
+        dict: État OPEN/CLOSED et compteurs.
+    """
     nemesis: NemesisSystem = app.state.nemesis
     news: NewsFilterService = app.state.news_filter
 
@@ -673,7 +788,12 @@ async def get_circuit_breaker():
 
 @app.get("/accounts/propfirm", tags=["Compte"])
 async def get_propfirm_accounts():
-    """Retourne les comptes Prop Firm (Hydra Protocol)"""
+    """
+    Retourne les comptes Prop Firm (Hydra Protocol).
+
+    Returns:
+        list[dict]: Liste des comptes financés.
+    """
     mt5_service: MT5Service = app.state.mt5_service
     account = await mt5_service.get_account_info()
 

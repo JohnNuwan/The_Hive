@@ -34,7 +34,15 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class BacktestRequest(BaseModel):
-    """Requête de backtest"""
+    """
+    Paramètres pour lancer une simulation de backtesting.
+
+    Attributes:
+        strategy_name (str): Nom de la stratégie à tester.
+        symbol (str): Actif financier (ex: XAUUSD).
+        period_months (int): Durée de l'historique en mois.
+        initial_balance (float): Capital de départ simulé.
+    """
     strategy_name: str = Field(..., min_length=1)
     symbol: str = Field(default="XAUUSD")
     period_months: int = Field(default=6, ge=1, le=36)
@@ -42,13 +50,29 @@ class BacktestRequest(BaseModel):
 
 
 class ArenaRequest(BaseModel):
-    """Requête de combat dans l'Arena"""
+    """
+    Requête de duel algorithmique dans l'Arena.
+
+    Attributes:
+        challenger_id (str): ID de la stratégie défiante.
+        champion_id (str): ID de la stratégie en place (défaut: PROD).
+    """
     challenger_id: str
     champion_id: str = "CURRENT_PROD"
 
 
 class TradeRecordRequest(BaseModel):
-    """Requête d'enregistrement d'un trade pour le Shadow Learning"""
+    """
+    Requête d'enregistrement d'un trade réel ou simulé.
+
+    Utilisé pour le Shadow Learning (entraînement passif).
+
+    Attributes:
+        symbol (str): Actif concerné.
+        action (str): BUY ou SELL.
+        pnl (float): Profit ou perte réalisé.
+        done (bool): Si le trade clôture une séquence (épisode).
+    """
     symbol: str = "XAUUSD"
     action: str = "BUY"
     price: float = 0.0
@@ -64,7 +88,15 @@ class TradeRecordRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Cycle de vie Lab — avec Feature Flags Sprint 5"""
+    """
+    Cycle de vie du Lab — avec Indicateurs de Fonctionnalité (Feature Flags).
+
+    Args:
+        app (FastAPI): Instance de l'application.
+
+    Yields:
+        None: Rend le contrôle après initialisation.
+    """
     settings = get_settings()
     logger.info("🧪 Démarrage EVA Lab (Le Colisée)...")
 
@@ -85,7 +117,7 @@ async def lifespan(app: FastAPI):
         enable_training=settings.enable_dreamer_training,
     )
 
-    # ─── Sprint 5 : Shadow Learning ───
+    # ─── Sprint 5 : Shadow Learning (Apprentissage Fantôme) ───
     if settings.enable_shadow_learning:
         app.state.shadow = ShadowLearningService(
             data_dir="data/shadow_learning",
@@ -111,13 +143,15 @@ async def lifespan(app: FastAPI):
     # Flush final avant arrêt
     if app.state.shadow:
         count = app.state.shadow.manual_flush()
-        logger.info(f"💾 Shadow Learning: {count} transitions saved on shutdown")
+        logger.info(f"💾 Shadow Learning: {count} transitions saved sur arrêt")
     
     logger.info("🛑 Arrêt EVA Lab")
 
 
 async def hard_heartbeat():
-    """Signal de présence"""
+    """
+    Envoie un signal de vie périodique (Heartbeat) à Redis.
+    """
     redis = get_redis_client()
     while True:
         try:
@@ -154,12 +188,26 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
+    """
+    Endpoint de santé basique.
+
+    Returns:
+        dict: Statut online.
+    """
     return {"status": "online", "service": "lab"}
 
 
 @app.post("/backtest")
 async def run_backtest(request: BacktestRequest):
-    """Lance un backtest sur données historiques"""
+    """
+    Lance un backtest complet sur des données historiques.
+
+    Args:
+        request (BacktestRequest): Configuration du backtest.
+
+    Returns:
+        dict: Résultats détaillés (P&L, Drawdown, Trades).
+    """
     backtester: Backtester = app.state.backtester
     result = await backtester.run_backtest(
         strategy_name=request.strategy_name,
@@ -172,35 +220,63 @@ async def run_backtest(request: BacktestRequest):
 
 @app.get("/backtest/history")
 async def get_backtest_history():
-    """Historique des backtests exécutés"""
+    """
+    Récupère l'historique des backtests exécutés.
+
+    Returns:
+        dict: Liste des résultats passés.
+    """
     backtester: Backtester = app.state.backtester
     return {"backtests": backtester.get_history()}
 
 
 @app.post("/arena/battle")
 async def arena_battle(request: ArenaRequest):
-    """Lance un combat de stratégies dans l'Arena"""
+    """
+    Lance un combat de stratégies (Genetic Algorithm).
+
+    Args:
+        request (ArenaRequest): IDs des combattants.
+
+    Returns:
+        dict: Résultat du combat et nouveau score ELO.
+    """
     arena: Arena = app.state.arena
     return arena.battle(request.challenger_id, request.champion_id)
 
 
 @app.get("/arena/history")
 async def arena_history():
-    """Historique des combats de l'Arena"""
+    """
+    Historique des combats de l'Arena.
+
+    Returns:
+        dict: Liste des duels passés.
+    """
     arena: Arena = app.state.arena
     return {"battles": arena.history}
 
 
 @app.get("/insights")
 async def get_insights():
-    """Prédictions du World Model (DreamerV3)"""
+    """
+    Obtient des prédictions de marché via le World Model (DreamerV3).
+
+    Returns:
+        dict: Prédictions probabilistes (Haiku/JAX).
+    """
     dreamer: DreamerModel = app.state.dreamer
     return dreamer.predict_future_market()
 
 
 @app.post("/evolve")
 async def trigger_evolution():
-    """Déclenche la boucle génétique d'amélioration"""
+    """
+    Déclenche manuellement la boucle d'évolution génétique.
+
+    Returns:
+        dict: Statut de la mise à jour (si une meilleure stratégie a été trouvée).
+    """
     genetic: GeneticUpdater = app.state.genetic
     return genetic.check_for_updates()
 
@@ -211,10 +287,16 @@ async def trigger_evolution():
 
 @app.post("/shadow/record")
 async def record_trade(request: TradeRecordRequest):
-    """Enregistre un trade dans le Shadow Learning buffer.
+    """
+    Enregistre un trade dans le buffer d'apprentissage (Shadow Learning).
 
-    Les données collectées seront utilisées pour entraîner DreamerV3
-    quand ENABLE_DREAMER_TRAINING=True.
+    Ces données servent à entraîner DreamerV3 si l'indicateur est actif.
+
+    Args:
+        request (TradeRecordRequest): Détails du trade.
+
+    Returns:
+        dict: Statut de l'enregistrement et taille du buffer.
     """
     shadow: ShadowLearningService = app.state.shadow
     if not shadow:
@@ -234,7 +316,12 @@ async def record_trade(request: TradeRecordRequest):
 
 @app.post("/shadow/flush")
 async def flush_shadow():
-    """Force un flush immédiat du buffer Shadow Learning sur disque."""
+    """
+    Force l'écriture immédiate du buffer Shadow Learning sur le disque.
+
+    Returns:
+        dict: Nombre de transitions sauvegardées.
+    """
     shadow: ShadowLearningService = app.state.shadow
     if not shadow:
         return {"status": "disabled"}
@@ -244,7 +331,12 @@ async def flush_shadow():
 
 @app.get("/shadow/stats")
 async def shadow_stats():
-    """Statistiques du Shadow Learning."""
+    """
+    Récupère les statistiques du module Shadow Learning.
+
+    Returns:
+        dict: Métriques de collecte de données.
+    """
     shadow: ShadowLearningService = app.state.shadow
     if not shadow:
         return {"status": "disabled"}
@@ -253,21 +345,41 @@ async def shadow_stats():
 
 @app.get("/dreamer/status")
 async def dreamer_status():
-    """Statut du DreamerV3 Gate (Feature Flag)."""
+    """
+    Vérifie l'état de la porte logique DreamerV3 (Feature Flag).
+
+    Returns:
+        dict: État (enabled/disabled) et configuration.
+    """
     gate: DreamerGate = app.state.dreamer_gate
     return gate.get_status()
 
 
 @app.post("/dreamer/predict")
 async def dreamer_predict(observation: dict):
-    """Exécute une prédiction via le World Model (inference-only ou training)."""
+    """
+    Exécute une inférence via le World Model.
+
+    Args:
+        observation (dict): État actuel du marché.
+
+    Returns:
+        dict: Prédiction de l'état futur et reward attendu.
+    """
     gate: DreamerGate = app.state.dreamer_gate
     return gate.run_inference(observation)
 
 
 @app.post("/dreamer/train")
 async def dreamer_train():
-    """Tente de lancer l'entraînement DreamerV3 (bloqué si Flag=False)."""
+    """
+    Tente de lancer l'entraînement du modèle DreamerV3.
+
+    Bloqué si ENABLE_DREAMER_TRAINING est False.
+
+    Returns:
+        dict: Statut du lancement du job d'entraînement.
+    """
     gate: DreamerGate = app.state.dreamer_gate
     return gate.start_training(data_dir="data/shadow_learning")
 
@@ -278,7 +390,12 @@ async def dreamer_train():
 
 @app.get("/stats")
 async def get_lab_stats():
-    """Statistiques globales du Lab (incluant Sprint 5)"""
+    """
+    Agrège les statistiques globales du Lab (incluant Sprint 5).
+
+    Returns:
+        dict: Vue d'ensemble des expériences et entraînements.
+    """
     backtester: Backtester = app.state.backtester
     arena: Arena = app.state.arena
     gate: DreamerGate = app.state.dreamer_gate

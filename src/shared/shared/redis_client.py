@@ -40,14 +40,23 @@ class RedisClient:
         self._subscribers: dict[str, list[Callable]] = {}
 
     async def connect(self) -> None:
-        """Connexion à Redis"""
+        """
+        Établit la connexion au serveur Redis.
+
+        Initialise le client s'il n'existe pas encore et vérifie la connectivité (Ping).
+
+        Raises:
+            ConnectionError: Si le serveur Redis est inaccessible.
+        """
         if self._client is None:
             self._client = redis.from_url(self.url, decode_responses=True)
             await self._client.ping()
             logger.info(f"Connecté à Redis: {self.url}")
 
     async def disconnect(self) -> None:
-        """Déconnexion de Redis"""
+        """
+        Ferme proprement la connexion Redis et les abonnements PubSub.
+        """
         if self._pubsub:
             await self._pubsub.close()
         if self._client:
@@ -55,7 +64,16 @@ class RedisClient:
             logger.info("Déconnecté de Redis")
 
     async def publish(self, channel: str, message: AgentMessage | dict) -> int:
-        """Publie un message sur un channel"""
+        """
+        Publie un message sur un canal Redis spécifique.
+
+        Args:
+            channel (str): Le nom du canal (topic).
+            message (AgentMessage | dict): L'objet ou dictionnaire à sérialiser.
+
+        Returns:
+            int: Le nombre de clients ayant reçu le message.
+        """
         await self.connect()
         if isinstance(message, BaseModel):
             data = message.model_dump()
@@ -76,7 +94,20 @@ class RedisClient:
         msg_type: AgentMessageType = AgentMessageType.REQUEST,
         correlation_id: UUID | None = None,
     ) -> AgentMessage:
-        """Envoie un message à un agent spécifique"""
+        """
+        Envoie un message structuré à un agent spécifique via le bus Redis.
+
+        Args:
+            source (str): L'ID de l'agent émetteur (ex: 'core').
+            target (str): L'ID de l'agent destinataire (ex: 'banker').
+            action (str): L'action demandée ou notifiée (ex: 'EXECUTE_ORDER').
+            payload (dict | None): Les données associées au message.
+            msg_type (AgentMessageType): Le type de message (Request, Alert...).
+            correlation_id (UUID | None): ID de corrélation pour le tracking.
+
+        Returns:
+            AgentMessage: L'objet message complet qui a été envoyé.
+        """
         message = AgentMessage(
             type=msg_type,
             source_agent=source,
@@ -95,7 +126,19 @@ class RedisClient:
         action: str,
         payload: dict[str, Any] | None = None,
     ) -> AgentMessage:
-        """Diffuse un message à tous les agents (Swarm Mode)"""
+        """
+        Diffuse un message à tous les agents connectés (Swarm Mode).
+
+        Utilise le target spécial 'all' pour le broadcast.
+
+        Args:
+            source (str): L'agent émetteur.
+            action (str): La commande ou l'événement broadcasté.
+            payload (dict | None): Données contextuelles.
+
+        Returns:
+            AgentMessage: Le message broadcasté.
+        """
         return await self.send_to_agent(
             source=source,
             target="all",
@@ -109,7 +152,14 @@ class RedisClient:
         channels: list[str],
         callback: Callable[[str, dict], Any],
     ) -> None:
-        """S'abonne à des channels avec callback"""
+        """
+        S'abonne à une liste de canaux et enregistre un callback pour le traitement.
+
+        Args:
+            channels (list[str]): Liste des topics Redis à écouter.
+            callback (Callable): Fonction async à appeler à chaque message reçu.
+                       Signature: `async def cb(channel: str, data: dict): ...`
+        """
         await self.connect()
 
         if self._pubsub is None:
@@ -124,7 +174,15 @@ class RedisClient:
         logger.info(f"Abonné aux channels: {channels}")
 
     async def listen(self) -> None:
-        """Écoute les messages en continu"""
+        """
+        Boucle d'écoute infinie pour traiter les messages entrants.
+
+        Cette méthode est bloquante et doit être lancée dans une tâche asyncio (background).
+        Elle dispatch les messages vers les callbacks enregistrés.
+
+        Raises:
+            RuntimeError: Si aucun abonnement n'a été configuré avant l'appel.
+        """
         if self._pubsub is None:
             raise RuntimeError("Pas d'abonnement actif")
 
@@ -141,7 +199,15 @@ class RedisClient:
                     logger.exception(f"Erreur callback sur {channel}: {e}")
 
     async def get(self, key: str) -> str | None:
-        """Récupère une valeur Redis"""
+        """
+        Récupère une valeur brute (string) depuis Redis.
+
+        Args:
+            key (str): La clé à interroger.
+
+        Returns:
+            str | None: La valeur si elle existe, sinon None.
+        """
         await self.connect()
         return await self._client.get(key)
 
@@ -151,14 +217,32 @@ class RedisClient:
         value: str | dict,
         ex: int | None = None,
     ) -> bool:
-        """Définit une valeur Redis"""
+        """
+        Définit une valeur dans Redis (String ou JSON).
+
+        Args:
+            key (str): La clé de stockage.
+            value (str | dict): La valeur (automatiquement sérialisée si dict).
+            ex (int | None): Durée de vie en secondes (TTL).
+
+        Returns:
+            bool: True si l'opération a réussi.
+        """
         await self.connect()
         if isinstance(value, dict):
             value = json.dumps(value, cls=UUIDEncoder)
         return await self._client.set(key, value, ex=ex)
 
     async def cache_get(self, key: str) -> dict | None:
-        """Récupère une valeur JSON du cache"""
+        """
+        Récupère et désérialise un objet JSON depuis le cache.
+
+        Args:
+            key (str): La clé du cache.
+
+        Returns:
+            dict | None: L'objet désérialisé ou None.
+        """
         data = await self.get(key)
         if data:
             return json.loads(data)
@@ -170,7 +254,17 @@ class RedisClient:
         value: dict,
         ttl_seconds: int = 300,
     ) -> bool:
-        """Met en cache une valeur JSON"""
+        """
+        Stocke un dictionnaire en tant que JSON avec une expiration.
+
+        Args:
+            key (str): La clé de cache.
+            value (dict): L'objet à stocker.
+            ttl_seconds (int): Durée de vie en secondes (défaut 300s).
+
+        Returns:
+            bool: True si succès.
+        """
         return await self.set(key, value, ex=ttl_seconds)
 
 
@@ -179,7 +273,14 @@ _redis_client: RedisClient | None = None
 
 
 def get_redis_client() -> RedisClient:
-    """Retourne l'instance Redis globale"""
+    """
+    Retourne l'instance Singleton du client Redis.
+
+    Crée l'instance si elle n'existe pas encore.
+
+    Returns:
+        RedisClient: L'instance partagée.
+    """
     global _redis_client
     if _redis_client is None:
         _redis_client = RedisClient()
@@ -187,7 +288,12 @@ def get_redis_client() -> RedisClient:
 
 
 async def init_redis() -> RedisClient:
-    """Initialise la connexion Redis"""
+    """
+    Initialise la connexion du singleton Redis au démarrage de l'app.
+
+    Returns:
+        RedisClient: Le client connecté et prêt.
+    """
     client = get_redis_client()
     await client.connect()
     return client

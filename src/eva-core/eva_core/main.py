@@ -48,7 +48,7 @@ from eva_core.self_healing import SelfHealingService
 from eva_core.services.docker_monitor import SystemMonitor
 from eva_core.identity import EVA_CORE_IDENTITY, EVA_GAMIFICATION_PROTOCOL
 
-# Configuration logging
+# Configuration du logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -59,13 +59,28 @@ logger = logging.getLogger(__name__)
 
 
 class ChatRequest(BaseModel):
-    """Requête de chat"""
+    """
+    Modèle de requête pour l'endpoint de chat.
+
+    Attributes:
+        message (str): Le contenu textuel du message utilisateur.
+        session_id (UUID | None): L'identifiant de la session (facultatif si nouvelle session).
+    """
     message: str = Field(..., min_length=1, max_length=4000)
     session_id: UUID | None = None
 
 
 class ChatResponse(BaseModel):
-    """Réponse de chat"""
+    """
+    Modèle de réponse standard pour le chat.
+
+    Attributes:
+        message (str): La réponse textuelle générée par l'IA ou le système.
+        session_id (UUID): L'ID de session confirmé.
+        intent (Intent | None): L'intention détectée (si disponible).
+        thoughts (str | None): Le raisonnement interne (Chain of Thought).
+        metadata (dict): Métadonnées additionnelles (score de confiance, expert, etc.).
+    """
     message: str
     session_id: UUID
     intent: Intent | None = None
@@ -75,12 +90,23 @@ class ChatResponse(BaseModel):
 
 
 class HealthResponse(BaseHealthResponse):
-    """Réponse de santé"""
+    """
+    Réponse étendue pour le Health Check.
+
+    Attributes:
+        environment (str): L'environnement d'exécution (dev, prod, staging).
+    """
     environment: str
 
 
 class SessionResponse(BaseModel):
-    """Réponse création session"""
+    """
+    Réponse à une demande de création de session.
+
+    Attributes:
+        session_id (UUID): Le nouvel identifiant unique généré.
+        created_at (datetime): Date de création.
+    """
     session_id: UUID
     created_at: datetime = Field(default_factory=datetime.now)
 
@@ -108,7 +134,7 @@ async def lifespan(app: FastAPI):
     Yields:
         None: Rend la main à l'application une fois l'initialisation terminée.
     """
-    # Startup
+    # Démarrage
     logger.info("🚀 Démarrage EVA Core...")
     settings = get_settings()
     logger.info(f"Environnement: {settings.environment}")
@@ -156,7 +182,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Arrêt (Shutdown)
     logger.info("🛑 Arrêt EVA Core...")
     redis_client = get_redis_client()
     await redis_client.disconnect()
@@ -277,7 +303,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             wrapped_message = prompt_master.wrap_with_method(request.message, method=method)
             expert_injector = prompt_master.get_expert_injector("core")
             
-            # Map expert to model role
+            # Mappage de l'expert vers le rôle du modèle (Prompt Engineering)
             role_map = {
                 "banker": "banker",
                 "researcher": "research",
@@ -336,12 +362,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     target=intent.target_expert,
                     action=intent.intent_type.value,
                     payload=payload,
-                    priority=1 # P1_CRITICAL
+                    priority=1 # P1_CRITIQUE
                 )
                 if grpc_success:
                     logger.info(f"✅ Signal gRPC envoyé avec succès vers {intent.target_expert}")
             
-            # Fallback Redis si non gRPC ou échec gRPC
+            # Repli sur Redis si gRPC échoue ou n'est pas utilisé
             if not grpc_success:
                 await redis_client.send_to_agent(
                     source="core",
@@ -381,7 +407,10 @@ async def chat(request: ChatRequest) -> ChatResponse:
 @app.get("/swarm/drones", tags=["Swarm"])
 async def get_active_drones() -> list[dict]:
     """
-    Récupère la liste des drones autonomes actifs dans la ruche.
+    Récupère la liste des drones autonomes actifs dans la ruche (Swarm Mode).
+
+    Returns:
+        list[dict]: Liste des drones actifs avec leur statut et mission.
     """
     redis_client = get_redis_client()
     keys = await redis_client._client.keys("swarm:drone:*")
@@ -393,13 +422,19 @@ async def get_active_drones() -> list[dict]:
     return drones
 
 
-# Note: The old self_healing_orchestrator is replaced by SelfHealingService
+# Note : L'ancien orchestrateur de self-healing est remplacé par SelfHealingService
 
 
 @app.get("/memory/fragments", tags=["Mémoire"])
 async def get_memory_fragments(limit: int = 50) -> list[dict[str, Any]]:
     """
-    Récupère les derniers fragments de mémoire stockés.
+    Récupère les derniers fragments de mémoire stockés (historique récent).
+
+    Args:
+        limit (int): Nombre maximum de fragments à récupérer.
+
+    Returns:
+        list[dict[str, Any]]: Liste des messages ou fragments de mémoire.
     """
     memory_service: MemoryService = app.state.memory_service
     # Réutiliser une version simplifiée de scroll
@@ -413,7 +448,14 @@ async def get_memory_graph(
     similarity_threshold: float = 0.8,
 ) -> dict[str, Any]:
     """
-    Retourne les données du graphe de connaissances (nodes & links).
+    Retourne les données du graphe de connaissances (noeuds et relations).
+
+    Args:
+        limit (int): Nombre maximum de noeuds à retourner.
+        similarity_threshold (float): Seuil de similarité pour les liens.
+
+    Returns:
+        dict[str, Any]: Structure JSON compatible avec les bibliothèques de graphe (d3.js).
     """
     memory_service: MemoryService = app.state.memory_service
     return await memory_service.get_graph_data(limit=limit, similarity_threshold=similarity_threshold)
@@ -452,6 +494,9 @@ async def search_memory(
 async def agents_status() -> dict[str, Any]:
     """
     Récupère l'état de connexion de tous les Experts du Conseil via Redis.
+
+    Returns:
+        dict[str, Any]: Dictionnaire {agent_id: status_info}.
     """
     redis_client = get_redis_client()
     now = datetime.now().timestamp()
@@ -485,6 +530,11 @@ async def agents_status() -> dict[str, Any]:
 async def trading_status() -> dict[str, Any]:
     """
     Agrège les données de trading provenant de l'expert Banker.
+
+    Récupère en parallèle les comptes, positions et risques depuis l'API Banker.
+
+    Returns:
+        dict[str, Any]: Vue unifiée du trading {account, positions, risk}.
     """
     import httpx
     settings: Settings = app.state.settings
@@ -526,6 +576,11 @@ async def trading_status() -> dict[str, Any]:
 async def system_status() -> dict[str, Any]:
     """
     Agrège les données de santé hardware provenant de l'expert Sentinel.
+
+    Agit comme un proxy pour éviter au frontend d'interroger Sentinel directement.
+
+    Returns:
+        dict[str, Any]: Métriques système et état de santé global.
     """
     import httpx
     settings: Settings = app.state.settings
@@ -565,7 +620,11 @@ async def system_status() -> dict[str, Any]:
 async def get_system_metrics_direct() -> dict[str, Any]:
     """
     Retourne les métriques système directement via psutil/nvidia-smi.
-    Utilisé par le frontend MonitoringView quand Sentinel est offline.
+
+    Utilisé par le frontend MonitoringView quand Sentinel est offline ou pour vérification.
+
+    Returns:
+        dict[str, Any]: CPU, RAM, Disque, GPU.
     """
     monitor: SystemMonitor = app.state.system_monitor
     return await monitor.get_system_metrics()
@@ -575,14 +634,22 @@ async def get_system_metrics_direct() -> dict[str, Any]:
 async def get_docker_containers() -> list[dict[str, Any]]:
     """
     Retourne la liste des conteneurs Docker et leurs stats en temps réel.
+
+    Returns:
+        list[dict[str, Any]]: Liste des conteneurs actifs avec stats CPU/RAM.
     """
     monitor: SystemMonitor = app.state.system_monitor
     return await monitor.get_docker_containers()
 
 
 @app.get("/telemetry", tags=["Système"])
-async def get_telemetry():
-    """Retourne les métriques de télémétrie du Core"""
+async def get_telemetry() -> dict[str, Any]:
+    """
+    Retourne les métriques de télémétrie internes du Core.
+
+    Returns:
+        dict[str, Any]: Uptime, compteurs de requêtes/erreurs, modèle actif.
+    """
     start_time: datetime = app.state.start_time
     uptime = (datetime.now() - start_time).total_seconds()
     llm_service = get_llm_service()
@@ -598,14 +665,19 @@ async def get_telemetry():
 
 
 @app.get("/circuit-breaker/status", tags=["Système"])
-async def get_circuit_breaker_status():
-    """Retourne l'état du circuit-breaker du Core"""
+async def get_circuit_breaker_status() -> dict[str, Any]:
+    """
+    Retourne l'état du circuit-breaker du Core (Self-Healing).
+
+    Returns:
+        dict[str, Any]: État (OPEN/CLOSED), échecs consécutifs.
+    """
     # Vérifie si un circuit-breaker est attaché au self-healing service
     self_healing: SelfHealingService = app.state.self_healing
     if hasattr(self_healing, 'circuit_breaker') and self_healing.circuit_breaker:
         return self_healing.circuit_breaker.get_status()
     
-    # Fallback : état nominal
+    # Repli : état nominal
     return {
         "name": "core_circuit_breaker",
         "state": "CLOSED",

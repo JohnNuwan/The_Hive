@@ -39,7 +39,15 @@ class TradeAction(str, Enum):
 
 
 class OrderType(str, Enum):
-    """Type d'ordre"""
+    """
+    Type d'exécution pour un ordre de bourse.
+
+    Values:
+        MARKET: Exécution immédiate au prix du marché.
+        LIMIT: Exécution à un prix spécifique ou meilleur.
+        STOP: Exécution lorsque le prix atteint un seuil spécifique.
+        STOP_LIMIT: Combinaison d'un ordre Stop et Limit.
+    """
     MARKET = "MARKET"
     LIMIT = "LIMIT"
     STOP = "STOP"
@@ -93,14 +101,29 @@ class IntentType(str, Enum):
 
 
 class MessageRole(str, Enum):
-    """Rôle du message dans la conversation"""
+    """
+    Rôle de l'interlocuteur dans une conversation.
+
+    Values:
+        USER: L'utilisateur humain.
+        ASSISTANT: L'IA ou l'expert.
+        SYSTEM: Instructions système ou contexte.
+    """
     USER = "user"
     ASSISTANT = "assistant"
     SYSTEM = "system"
 
 
 class SecuritySeverity(str, Enum):
-    """Niveau de sévérité sécurité"""
+    """
+    Niveau de criticité d'un événement de sécurité.
+
+    Values:
+        LOW: Information ou événement mineur.
+        MEDIUM: Avertissement nécessitant une attention.
+        HIGH: Incident sérieux, intervention requise.
+        CRITICAL: Danger immédiat pour le système ou le capital (Loi 0/2).
+    """
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -108,7 +131,17 @@ class SecuritySeverity(str, Enum):
 
 
 class AgentMessageType(str, Enum):
-    """Type de message inter-agents"""
+    """
+    Type sémantique d'un message échangé entre agents via Redis.
+
+    Values:
+        REQUEST: Demande d'action ou d'information (attend une réponse).
+        RESPONSE: Réponse à une requête précédente.
+        EVENT: Notification d'un changement d'état (Fire-and-forget).
+        ALERT: Signalement d'une anomalie ou danger.
+        HEARTBEAT: Signal de vie périodique.
+        SWARM_COMMAND: Ordre de coordination pour l'essaim.
+    """
     REQUEST = "request"
     RESPONSE = "response"
     EVENT = "event"
@@ -155,7 +188,18 @@ class TradeOrder(BaseModel):
 
 
 class Position(BaseModel):
-    """Position ouverte MT5"""
+    """
+    Représente une position de trading actuellement ouverte sur le marché.
+
+    Attributes:
+        ticket (int): Identifiant unique de la position (MT5).
+        symbol (str): L'actif tradé (ex: EURUSD).
+        action (TradeAction): BUY ou SELL.
+        volume (Decimal): Taille de la position en lots.
+        open_price (Decimal): Prix d'ouverture.
+        current_price (Decimal): Prix actuel du marché.
+        profit (Decimal): Profit ou perte latent (Floating P&L).
+    """
     ticket: int
     symbol: str
     action: TradeAction
@@ -172,7 +216,12 @@ class Position(BaseModel):
 
     @property
     def pnl_pips(self) -> float:
-        """Calcul P&L en pips (approximatif)"""
+        """
+        Calcule le profit ou la perte approximative en pips.
+
+        Returns:
+            float: La différence en pips (positif pour un gain, négatif pour une perte).
+        """
         diff = float(self.current_price - self.open_price)
         if self.action == TradeAction.SELL:
             diff = -diff
@@ -235,7 +284,16 @@ class RiskStatus(BaseModel):
 
 
 class AccountBalance(BaseModel):
-    """Solde du compte MT5"""
+    """
+    État financier d'un compte de trading à un instant T.
+
+    Attributes:
+        login (int): Numéro de compte.
+        balance (Decimal): Solde clôturé (sans le flottant).
+        equity (Decimal): Solde avec flottant (Balance + P&L latent).
+        margin (Decimal): Marge utilisée pour les positions ouvertes.
+        free_margin (Decimal): Marge disponible pour de nouveaux trades.
+    """
     login: int
     server: str
     balance: Decimal
@@ -249,7 +307,17 @@ class AccountBalance(BaseModel):
 
 
 class PropFirmAccount(BaseModel):
-    """Compte Prop Firm (FTMO, FundedNext, etc.)"""
+    """
+    Représentation d'un compte financé par une Prop Firm (ex: FTMO).
+
+    Ces comptes ont des règles spécifiques de drawdown et de cibles de profit.
+
+    Attributes:
+        id (UUID): Identifiant unique interne.
+        phase (str): Phase du challenge (challenge, verification, funded).
+        max_daily_loss_percent (Decimal): Limite de perte journalière (ex: 4.0).
+        max_total_loss_percent (Decimal): Limite de perte totale (ex: 8.0).
+    """
     id: UUID = Field(default_factory=uuid4)
     name: str
     login: int
@@ -272,7 +340,16 @@ class PropFirmAccount(BaseModel):
 
 
 class AgentMessage(BaseModel):
-    """Message inter-agents via Redis Pub/Sub"""
+    """
+    Enveloppe standardisée pour les messages asynchrones inter-agents.
+
+    Attributes:
+        type (AgentMessageType): Nature du message (Request, Alert...).
+        source_agent (str): L'expéditeur (ex: core).
+        target_agent (str): Le destinataire (ex: banker ou all).
+        payload (dict): Le contenu utile du message.
+        correlation_id (UUID): Pour lier une requête à sa réponse.
+    """
     id: UUID = Field(default_factory=uuid4)
     type: AgentMessageType
     source_agent: str
@@ -285,17 +362,29 @@ class AgentMessage(BaseModel):
 
     def to_redis_channel(self) -> str:
         """
-        Génère le topic Redis Pub/Sub pour ce message.
-        Format: eva.{target_agent}.{type}s
-        Support du broadcast via target_agent='all'.
+        Génère le topic Redis Pub/Sub canonique pour ce message.
+
+        Le format standard est `eva.{target_agent}.{type}s`.
+        Permet le routage et le broadcast (si target='all').
+
+        Returns:
+            str: Le nom du canal Redis (ex: "eva.banker.requests").
         """
         return f"eva.{self.target_agent}.{self.type.value}s"
 
 
 class SwarmDrone(BaseModel):
     """
-    Représente un Agent Autonome (Drone) lancé en tâche de fond.
-    Permet la parallélisation Swarm.
+    Représente un Agent Autonome (Drone) exécutant une tâche de fond persistante.
+
+    Utilisé pour les missions de surveillance continue ou de calcul distribué
+    (Mode Swarm).
+
+    Attributes:
+        name (str): Identifiant lisible du drone.
+        parent_agent (str): L'expert responsable de ce drone.
+        mission (str): Description textuelle de l'objectif.
+        status (str): État actuel (active, idle, terminated).
     """
     id: UUID = Field(default_factory=uuid4)
     name: str = Field(..., description="Nom du drone (ex: GoldSurveillance)")
@@ -308,7 +397,15 @@ class SwarmDrone(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    """Message de conversation"""
+    """
+    Message individuel au sein d'une session de chat.
+
+    Attributes:
+        session_id (UUID): L'identifiant de la conversation.
+        role (MessageRole): Qui parle (User, Assistant, System).
+        content (str): Le texte du message.
+        thoughts (str | None): Le raisonnement interne (CoT) si disponible.
+    """
     id: UUID = Field(default_factory=uuid4)
     session_id: UUID
     role: MessageRole
@@ -319,7 +416,15 @@ class ChatMessage(BaseModel):
 
 
 class Intent(BaseModel):
-    """Intent classifié par le routeur"""
+    """
+    Résultat de la classification sémantique d'une requête utilisateur.
+
+    Attributes:
+        intent_type (IntentType): La catégorie d'action détectée.
+        confidence (float): Score de confiance (0.0 à 1.0).
+        entities (dict): Entités nommées extraites (ex: symbol=XAUUSD).
+        target_expert (str): L'agent le plus qualifié pour répondre.
+    """
     intent_type: IntentType
     confidence: float = Field(..., ge=0.0, le=1.0)
     entities: dict[str, Any] = {}
@@ -333,7 +438,15 @@ class Intent(BaseModel):
 
 
 class SecurityEvent(BaseModel):
-    """Événement de sécurité"""
+    """
+    Représente un événement lié à la sécurité du système (Wazuh, Sentinel).
+
+    Attributes:
+        event_type (str): Type d'incident (ex: 'ssh_login_failed').
+        severity (SecuritySeverity): Niveau de risque estimé.
+        source_ip (str | None): Adresse IP de l'attaquant potentiel.
+        action_taken (str | None): Réponse automatique du système (ex: 'blocked').
+    """
     id: UUID = Field(default_factory=uuid4)
     timestamp: datetime = Field(default_factory=datetime.now)
     event_type: str
@@ -354,6 +467,8 @@ class AuditRecord(BaseModel):
     hashé et chaîné au précédent pour former une blockchain locale infalsifiable.
 
     Attributes:
+        agent (str): L'agent responsable de l'action.
+        action (str): L'action effectuée.
         previous_hash (str): Hash de l'enregistrement précédent (Chaînage).
         record_hash (str): Hash de l'enregistrement courant.
     """
@@ -401,8 +516,11 @@ class AuditRecord(BaseModel):
 
 class BaseHealthResponse(BaseModel):
     """
-    Réponse de santé de base pour tous les services.
-    Permet une standardisation des health checks.
+    Réponse de santé de base pour tous les services (Health Check).
+
+    Attributes:
+        status (str): État global (ok, error, degraded).
+        version (str): Version sémantique du service.
     """
     status: str = "ok"
     version: str = "0.1.0"
@@ -459,7 +577,15 @@ class GPUMetrics(BaseModel):
 
 
 class HardwareMetrics(BaseModel):
-    """Métriques hardware système"""
+    """
+    Métriques de performance du système hôte (Proxmox/Linux).
+
+    Attributes:
+        cpu_percent (float): Utilisation CPU globale.
+        ram_used_gb (float): Mémoire vive utilisée en Go.
+        disk_used_percent (float): Espace disque utilisé (%).
+        gpu (GPUMetrics | None): Métriques GPU si disponible.
+    """
     timestamp: datetime = Field(default_factory=datetime.now)
     cpu_percent: float
     cpu_freq_mhz: float = 0.0
@@ -476,7 +602,17 @@ class HardwareMetrics(BaseModel):
 
 
 class HiveError(BaseModel):
-    """Erreur standardisée THE HIVE"""
+    """
+    Structure d'erreur standardisée pour THE HIVE.
+
+    Permet une gestion uniforme des exceptions à travers tous les micro-services.
+
+    Attributes:
+        code (str): Code d'erreur unique (ex: 'AUTH_FAILED').
+        message (str): Description lisible de l'erreur en Français.
+        severity (SecuritySeverity): Niveau de gravité.
+        recoverable (bool): Indique si le client peut réessayer.
+    """
     code: str
     message: str
     severity: SecuritySeverity = SecuritySeverity.MEDIUM
