@@ -505,7 +505,7 @@ async def system_status() -> dict[str, Any]:
     """
     import httpx
     settings: Settings = app.state.settings
-    sentinel_url = f"http://localhost:{settings.sentinel_api_port}"
+    sentinel_url = f"http://{settings.sentinel_api_host}:{settings.sentinel_api_port}"
     
     async with httpx.AsyncClient(timeout=3.0) as client:
         try:
