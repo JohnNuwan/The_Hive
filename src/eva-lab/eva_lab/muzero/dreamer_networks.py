@@ -88,6 +88,17 @@ def make_dreamer_networks(config):
             # Optional: rec_obs = model.obs_decoder(state)
             return pred_reward
             
+        elif mode == 5: # Init All (Touch all modules)
+            # Args: obs, prev_action, prev_state
+            obs, prev_action, prev_state = args
+            # 1. Observe (Encoder, RSSM, Decoders)
+            model(obs, prev_action, prev_state)
+            # 2. Logic (Actor, Critic)
+            # We use prev_state as dummy state
+            model.ac.actor(prev_state)
+            model.ac.critic(prev_state)
+            return jnp.zeros(1)
+            
         else:
             raise ValueError(f"Unknown Dreamer dispatch mode: {mode}")
 

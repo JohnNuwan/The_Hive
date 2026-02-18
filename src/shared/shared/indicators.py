@@ -1,200 +1,150 @@
 import math
-from typing import List, Dict, Tuple
+import pandas as pd
+import numpy as np
+from typing import List, Dict, Tuple, Union
 
 class IndicatorFactory:
     """
     Math Kernel for Technical Indicators.
-    Pure Python/Math implementation (no heavy deps if possible, but numpy is standard).
-    Target: High performance, low latency for HFT-like decisions.
+    Optimized for Pandas/Numpy vectorization.
+    Target: High performance on large datasets.
     """
 
     @staticmethod
-    def sma(data: List[float], period: int) -> float:
-        if len(data) < period: return 0.0
-        return sum(data[-period:]) / period
+    def sma(data: Union[List[float], pd.Series], period: int) -> pd.Series:
+        if isinstance(data, list): data = pd.Series(data)
+        return data.rolling(window=period).mean()
 
     @staticmethod
-    def ema(data: List[float], period: int, smoothing: int = 2) -> List[float]:
-        """Calculates EMA series. Returns the full series to allow further calcs."""
-        if len(data) < period: return []
-        
-        multiplier = smoothing / (1 + period)
-        ema_result = [sum(data[:period]) / period] # Start with SMA
-        
-        for price in data[period:]:
-            ema_val = (price - ema_result[-1]) * multiplier + ema_result[-1]
-            ema_result.append(ema_val)
-            
-        return ema_result
+    def ema(data: Union[List[float], pd.Series], period: int) -> pd.Series:
+        """Calculates EMA series using Pandas ewm."""
+        if isinstance(data, list): data = pd.Series(data)
+        # span=period is standard EMA
+        return data.ewm(span=period, adjust=False).mean()
 
     @staticmethod
-    def rsi(prices: List[float], period: int = 14) -> float:
-        if len(prices) < period + 1: return 50.0
+    def rsi(prices: Union[List[float], pd.Series], period: int = 14) -> pd.Series:
+        if isinstance(prices, list): prices = pd.Series(prices)
         
-        gains = []
-        losses = []
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0))
+        loss = (-delta.where(delta < 0, 0))
+
+        avg_gain = gain.rolling(window=period).mean()
+        avg_loss = loss.rolling(window=period).mean()
         
-        for i in range(1, len(prices)):
-            change = prices[i] - prices[i-1]
-            if change > 0:
-                gains.append(change)
-                losses.append(0.0)
-            else:
-                gains.append(0.0)
-                losses.append(abs(change))
-                
-        # First Avg Gain/Loss
-        avg_gain = sum(gains[:period]) / period
-        avg_loss = sum(losses[:period]) / period
-        
-        # Smoothed
-        for i in range(period, len(prices) - 1):
-            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-            
-        if avg_loss == 0: return 100.0
+        # Smoothed Wilder's Moving Average (classic RSI)
+        # But for speed, standard rolling is often close enough. 
+        # Making it exact Wilder's:
+        avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+
         rs = avg_gain / avg_loss
-        return 100.0 - (100.0 / (1.0 + rs))
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.fillna(50.0)
 
     @staticmethod
-    def macd(prices: List[float], fast: int = 12, slow: int = 26, signal: int = 9) -> Dict[str, float]:
-        if len(prices) < slow + signal: 
-            return {"macd": 0.0, "signal": 0.0, "histogram": 0.0}
-            
-        ema_fast = IndicatorFactory.ema(prices, fast)
-        ema_slow = IndicatorFactory.ema(prices, slow)
+    def macd(prices: Union[List[float], pd.Series], fast: int = 12, slow: int = 26, signal: int = 9) -> Dict[str, pd.Series]:
+        if isinstance(prices, list): prices = pd.Series(prices)
         
-        # Trim to match lengths (ema_slow is shorter)
-        # We need the last N values where N is length of ema_slow
-        # Actually logic is: EMA calculation returns list starting from index 'period'.
-        # So ema_fast starts at index 'fast', ema_slow at index 'slow'.
-        # We need to align them by the original price index.
+        ema_fast = prices.ewm(span=fast, adjust=False).mean()
+        ema_slow = prices.ewm(span=slow, adjust=False).mean()
         
-        # Simplification for realtime: Just calculate last value? No, MACD needs history for Signal line.
-        # Re-implementation for correct series alignment:
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        histogram = macd_line - signal_line
         
-        # Full Series calc is better
-        # Let's use a simpler iterative approach if we just need the LATEST values
-        # But for Signal Line (EMA of MACD), we need history of MACD.
-        
-        # Let's align lists from the end
-        min_len = min(len(ema_fast), len(ema_slow))
-        if min_len == 0: return {"macd": 0.0, "signal": 0.0, "histogram": 0.0}
-        
-        macd_line = []
-        # ema_fast[-min_len:] corresponds to ema_slow[-min_len:] time-wise
-        f_series = ema_fast[-min_len:]
-        s_series = ema_slow[-min_len:]
-        
-        for f, s in zip(f_series, s_series):
-            macd_line.append(f - s)
-            
-        # Signal Line = EMA of MACD Line
-        signal_line_series = IndicatorFactory.ema(macd_line, signal)
-        
-        if not signal_line_series: 
-            return {"macd": macd_line[-1], "signal": 0.0, "histogram": 0.0}
-            
         return {
-            "macd": macd_line[-1],
-            "signal": signal_line_series[-1],
-            "histogram": macd_line[-1] - signal_line_series[-1]
+            "macd": macd_line,
+            "signal": signal_line,
+            "histogram": histogram
         }
 
     @staticmethod
-    def bollinger_bands(prices: List[float], period: int = 20, std_dev: float = 2.0) -> Dict[str, float]:
-        if len(prices) < period: return {"upper": 0.0, "middle": 0.0, "lower": 0.0, "width": 0.0}
+    def bollinger_bands(prices: Union[List[float], pd.Series], period: int = 20, std_dev: float = 2.0) -> Dict[str, pd.Series]:
+        if isinstance(prices, list): prices = pd.Series(prices)
         
-        basis = IndicatorFactory.sma(prices, period)
+        basis = prices.rolling(window=period).mean()
+        std = prices.rolling(window=period).std()
         
-        # Std Dev
-        slice_data = prices[-period:]
-        variance = sum([pow(x - basis, 2) for x in slice_data]) / period
-        std = math.sqrt(variance)
+        upper = basis + (std * std_dev)
+        lower = basis - (std * std_dev)
         
         return {
-            "upper": basis + (std_dev * std),
+            "upper": upper,
             "middle": basis,
-            "lower": basis - (std_dev * std),
-            "width": (basis + (std_dev * std)) - (basis - (std_dev * std)),
-            "pct_b": (prices[-1] - (basis - std_dev * std)) / ((basis + std_dev * std) - (basis - std_dev * std)) if std > 0 else 0.5
+            "lower": lower,
+            "width": upper - lower,
+            "pct_b": (prices - lower) / (upper - lower)
         }
 
     @staticmethod
-    def atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
-        if len(closes) < period + 1: return 0.0
+    def atr(highs: Union[List[float], pd.Series], lows: Union[List[float], pd.Series], closes: Union[List[float], pd.Series], period: int = 14) -> pd.Series:
+        if isinstance(highs, list): highs = pd.Series(highs)
+        if isinstance(lows, list): lows = pd.Series(lows)
+        if isinstance(closes, list): closes = pd.Series(closes)
         
-        tr_list = []
-        for i in range(1, len(closes)):
-            hl = highs[i] - lows[i]
-            hc = abs(highs[i] - closes[i-1])
-            lc = abs(lows[i] - closes[i-1])
-            tr_list.append(max(hl, hc, lc))
-            
-        # First ATR is simple average
-        curr_atr = sum(tr_list[:period]) / period
+        h_l = highs - lows
+        h_pc = (highs - closes.shift(1)).abs()
+        l_pc = (lows - closes.shift(1)).abs()
         
-        # Smoothed
-        for i in range(period, len(tr_list)):
-            curr_atr = (curr_atr * (period - 1) + tr_list[i]) / period
-            
-        return curr_atr
+        tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1/period, adjust=False).mean()
+        return atr
 
     @staticmethod
-    def get_fibonacci_levels(highs: List[float], lows: List[float], depth: int = 100) -> Dict[str, float]:
-        """Finds recent High/Low in depth and calculates Retracements."""
-        if not highs or not lows: return {}
+    def relative_volume(volumes: Union[List[float], pd.Series], period: int = 20) -> pd.Series:
+        if isinstance(volumes, list): volumes = pd.Series(volumes)
         
-        # Lookback depth
-        recent_high = max(highs[-depth:]) if len(highs) >= depth else max(highs)
-        recent_low = min(lows[-depth:]) if len(lows) >= depth else min(lows)
+        # Shift 1 to define previous period avg (usually we compare current to past avg)
+        # But often rvol includes current. Let's do simple rolling avg.
+        avg_vol = volumes.rolling(window=period).mean()
+        rvol = volumes / avg_vol
+        return rvol.fillna(1.0)
+
+    @staticmethod
+    def get_fibonacci_levels(highs: Union[List[float], pd.Series], lows: Union[List[float], pd.Series], period: int = 100) -> Dict[str, float]:
+        """Calculates Fibonacci Retracement Levels based on recent High/Low."""
+        if isinstance(highs, list): highs = pd.Series(highs)
+        if isinstance(lows, list): lows = pd.Series(lows)
+        
+        # Lookback period
+        recent_high = highs.rolling(window=period).max().iloc[-1]
+        recent_low = lows.rolling(window=period).min().iloc[-1]
         
         diff = recent_high - recent_low
         
         return {
-            "fib_high": recent_high,
-            "fib_low": recent_low,
             "fib_0": recent_low,
             "fib_236": recent_low + diff * 0.236,
             "fib_382": recent_low + diff * 0.382,
-            "fib_500": recent_low + diff * 0.500,
+            "fib_500": recent_low + diff * 0.5,
             "fib_618": recent_low + diff * 0.618,
             "fib_100": recent_high
         }
 
     @staticmethod
-    def relative_volume(volumes: List[float], period: int = 20) -> float:
-        if len(volumes) < period + 1: return 1.0
-        current = volumes[-1]
-        avg = sum(volumes[-(period+1):-1]) / period 
-        if avg == 0: return 1.0
-        return current / avg
-
-    @staticmethod
-    def detect_cycles(closes: List[float], depth: int = 50) -> Dict[str, int]:
-        """Detects simple pivot points to estimate time since last Low/High."""
-        if len(closes) < 5: return {"bars_since_low": 0, "bars_since_high": 0}
+    def detect_cycles(closes: Union[List[float], pd.Series]) -> Dict[str, int]:
+        """
+        Simple cycle detection: counts bars since last significant High/Low.
+        """
+        if isinstance(closes, list): closes = pd.Series(closes)
         
-        # Simple Pivot: Higher than neighbours
-        #   X
-        # X   X
+        # 20-period Donchian Channel effectively
+        period = 20
+        rolling_high = closes.rolling(window=period).max()
+        rolling_low = closes.rolling(window=period).min()
         
-        last_high_idx = 0
-        last_low_idx = 0
+        # Find index of last high/low
+        last_high_idx = closes[closes == rolling_high].last_valid_index()
+        last_low_idx = closes[closes == rolling_low].last_valid_index()
         
-        for i in range(2, len(closes) - 2):
-            # High pivot
-            if closes[i] > closes[i-1] and closes[i] > closes[i-2] and \
-               closes[i] > closes[i+1] and closes[i] > closes[i+2]:
-                last_high_idx = i
-                
-            # Low pivot
-            if closes[i] < closes[i-1] and closes[i] < closes[i-2] and \
-               closes[i] < closes[i+1] and closes[i] < closes[i+2]:
-                last_low_idx = i
-                
-        current_idx = len(closes) - 1
+        current_idx = closes.index[-1]
+        
+        bars_since_high = (current_idx - last_high_idx) if last_high_idx is not None else period
+        bars_since_low = (current_idx - last_low_idx) if last_low_idx is not None else period
+        
         return {
-            "bars_since_high": current_idx - last_high_idx,
-            "bars_since_low": current_idx - last_low_idx
+            "bars_since_high": int(bars_since_high),
+            "bars_since_low": int(bars_since_low)
         }

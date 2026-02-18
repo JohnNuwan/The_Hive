@@ -22,6 +22,7 @@ from eva_banker.services.mt5 import MT5Service
 from eva_banker.skill_library import SkillLibrary, SkilledBehavior
 from eva_banker.models.gnn_model import TFTGNNModel
 from eva_banker.services.risk import RiskValidator  # Type hinting only if needed at runtime
+from eva_banker.strategist import Strategist
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class BankerManager:
         # 2. Préparation des données pour le modèle (Normalisées via Symlog)
         price = symlog(market_history.get("price", 0))
         
-        logger.info(f"Manager decision core triggered. Price: {price}, VaR: {var}, CVaR: {cvar}")
+        # logger.info(f"Manager decision core triggered. Price: {price}, VaR: {var}, CVaR: {cvar}")
         
         # Si le risque (VaR) est trop élevé, on bascule en mode conservateur
         if var < -0.02: # Perte potentielle > 2% attendue
@@ -99,8 +100,15 @@ class AutoTradingEngine:
         self.is_active = False
         self._loop_task = None
         # The Hive Mind: Multi-Asset Symbols
-        self.symbols = ["XAUUSD", "EURUSD", "BTCUSD", "US30"]
+        self.symbols = ["XAUUSD", "EURUSD", "BTCUSD", "US30.cash"]
         self.latest_decisions = {} # Stores latest analysis per symbol
+        
+        # Sprint 7: The Cortex
+        self.cortex = Strategist(mt5_service=mt5)
+        
+        # Sprint 8.5: Telegram Notification
+        from shared.telegram_client import TelegramClient
+        self.telegram = TelegramClient()
 
     async def start(self):
         """Démarre le pilote automatique"""
@@ -109,6 +117,7 @@ class AutoTradingEngine:
         self.is_active = True
         self._loop_task = asyncio.create_task(self._drift_loop())
         logger.info(f"🚀 AUTO-TRADING ENGINE STARTED on {self.symbols}")
+        self.telegram.send_sync(f"🐝 **THE HIVE IS AWAKE**\nMonitoring: {self.symbols}\nRisk: {self.risk.max_risk_per_trade * 100}%")
 
     async def stop(self):
         """Arrête le pilote automatique"""
@@ -136,7 +145,64 @@ class AutoTradingEngine:
                     continue
 
                 # 2. Vérifier positions ouvertes (Global Limit)
+                # 2. Vérifier positions ouvertes (Global Limit)
                 positions = await self.mt5.get_open_positions()
+                
+                # THE SHEPHERD (MANAGEMENT) 🐑
+                # Loop through open positions to secure profits (Break-Even & Trailing)
+                for pos in positions:
+                    try:
+                        # Skip if already secured/managed or recently opened (avoid noise)
+                        if (datetime.now() - pos.open_time).total_seconds() < 60: continue
+                        
+                        current_price = float(pos.current_price)
+                        open_price = float(pos.open_price)
+                        sl = float(pos.stop_loss) if pos.stop_loss else 0.0
+                        
+                        # Calculate profit in points
+                        if pos.action == TradeAction.BUY:
+                            profit_points = current_price - open_price
+                            # Break-Even Logic (Secure after ~150 points / 15 pips)
+                            if profit_points > 1.5 and (sl == 0.0 or sl < open_price):
+                                new_sl = open_price + 0.1 # Secure small profit
+                                await self.mt5.modify_position(pos.ticket, sl=new_sl, tp=0.0)
+                                msg = f"🛡️ **Shepherd**: Secured BUY {pos.symbol} at Break-Even ({new_sl})"
+                                logger.info(msg)
+                                self.telegram.send_sync(msg)
+                            
+                            # Trailing Stop (Follow if Profit > 300 points)
+                            elif profit_points > 3.0:
+                                trailing_sl = current_price - 1.0 # Trail by 1.0 (approx 10 pips)
+                                if trailing_sl > sl:
+                                    await self.mt5.modify_position(pos.ticket, sl=trailing_sl, tp=0.0)
+                                    msg = f"🐑 **Shepherd**: Trailing BUY {pos.symbol} to {trailing_sl}"
+                                    logger.debug(msg)
+                                    if profit_points % 5.0 < 0.5: # Notify occasionally to avoid spam
+                                        self.telegram.send_sync(msg)
+
+                        elif pos.action == TradeAction.SELL:
+                            profit_points = open_price - current_price
+                            # Break-Even
+                            if profit_points > 1.5 and (sl == 0.0 or sl > open_price):
+                                new_sl = open_price - 0.1
+                                await self.mt5.modify_position(pos.ticket, sl=new_sl, tp=0.0)
+                                msg = f"🛡️ **Shepherd**: Secured SELL {pos.symbol} at Break-Even ({new_sl})"
+                                logger.info(msg)
+                                self.telegram.send_sync(msg)
+                                
+                            # Trailing
+                            elif profit_points > 3.0:
+                                trailing_sl = current_price + 1.0
+                                if sl == 0.0 or trailing_sl < sl:
+                                    await self.mt5.modify_position(pos.ticket, sl=trailing_sl, tp=0.0)
+                                    msg = f"🐑 **Shepherd**: Trailing SELL {pos.symbol} to {trailing_sl}"
+                                    logger.debug(msg)
+                                    if profit_points % 5.0 < 0.5:
+                                        self.telegram.send_sync(msg)
+
+                    except Exception as e_shepherd:
+                        logger.error(f"Shepherd Error on {pos.ticket}: {e_shepherd}")
+
                 if len(positions) >= 5: # Increased global limit for multi-asset
                     logger.info("Max global positions reached (5). Waiting...")
                     await asyncio.sleep(60)
@@ -147,6 +213,26 @@ class AutoTradingEngine:
                     if not self.is_active: break
                     
                     try:
+                        # 0. CORTEX STRATEGY (Macro) - The Conscious Mind
+                        # Refresh strategy every 15 minutes (900s)
+                        last_strat = self.cortex.latest_strategy.get(symbol, {})
+                        last_time = last_strat.get("timestamp")
+                        
+                        bias = "NEUTRAL"
+                        should_refresh = not last_time or (datetime.now() - datetime.fromisoformat(last_time)).total_seconds() > 900
+                        
+                        if should_refresh:
+                            # Non-blocking async call? No, we need the bias.
+                            # But we don't want to block other symbols too long.
+                            # For now, we await. It takes ~5-10s per symbol every 15m. Acceptable.
+                            try:
+                                strategy = await self.cortex.analyze_market_context(symbol)
+                                bias = strategy.get("bias", "NEUTRAL")
+                            except Exception as e_cortex:
+                                logger.error(f"🧠 Cortex Error: {e_cortex}")
+                        else:
+                            bias = last_strat.get("bias", "NEUTRAL")
+
                         # A. Market Data
                         tick = await self.mt5.get_symbol_tick(symbol)
                         if not tick or (isinstance(tick, dict) and "bid" not in tick):
@@ -169,23 +255,24 @@ class AutoTradingEngine:
                             lows = [c["low"] for c in candles]
                             volumes = [c["tick_volume"] for c in candles]
                             
-                            rsi_val = IndicatorFactory.rsi(closes, 14)
+                            
+                            rsi_val = IndicatorFactory.rsi(closes, 14).iloc[-1]
                             macd_data = IndicatorFactory.macd(closes)
                             bb_data = IndicatorFactory.bollinger_bands(closes)
-                            atr_val = IndicatorFactory.atr(highs, lows, closes, 14)
+                            atr_val = IndicatorFactory.atr(highs, lows, closes, 14).iloc[-1]
                             fib_levels = IndicatorFactory.get_fibonacci_levels(highs, lows, 100)
-                            rvol = IndicatorFactory.relative_volume(volumes, 20)
+                            rvol = IndicatorFactory.relative_volume(volumes, 20).iloc[-1]
                             cycles = IndicatorFactory.detect_cycles(closes)
                             
                             features = {
                                 "RSI": rsi_val,
-                                "MACD_Hist": macd_data["histogram"],
-                                "BB_Pct": bb_data["pct_b"],
+                                "MACD_Hist": macd_data["histogram"].iloc[-1],
+                                "BB_Pct": bb_data["pct_b"].iloc[-1],
                                 "ATR": atr_val,
                                 "RVOL": rvol,
                                 "Cycle_High": cycles["bars_since_high"],
                                 "Cycle_Low": cycles["bars_since_low"],
-                                "Fib_0": fib_levels.get("fib_0", 0),
+                                "Fib_0": fib_levels.get("fib_0", 0.0),
                             }
                             # Add full fib levels for vector mapping
                             for k, v in fib_levels.items():
@@ -236,6 +323,25 @@ class AutoTradingEngine:
                             elif rsi_val > 70: action = TradeAction.SELL
                             comment = "Fallback (Error)"
 
+                            comment = "Fallback (Error)"
+
+                        # CORTEX FILTER (The Conscious Check)
+                        if action == TradeAction.BUY and bias == "BEARISH":
+                            msg = f"🙅 Cortex VETO: Blocking BUY on {symbol} (Trend is BEARISH)"
+                            logger.info(msg)
+                            self.telegram.send_sync(msg)
+                            action = None
+                            comment = "Blocked by Cortex (Bearish Trend)"
+                        elif action == TradeAction.SELL and bias == "BULLISH":
+                            msg = f"🙅 Cortex VETO: Blocking SELL on {symbol} (Trend is BULLISH)"
+                            logger.info(msg)
+                            self.telegram.send_sync(msg)
+                            action = None
+                            comment = "Blocked by Cortex (Bullish Trend)"
+
+                        # FORCE LOGGING for user visibility
+                        logger.info(f"🧠 Analysis {symbol}: Price={current_price:.2f} RSI={rsi_val:.1f} -> Action={action} ({comment}) [Bias: {bias}]")
+
                         # Store Decision State
                         self.latest_decisions[symbol] = {
                             "price": float(current_price),
@@ -255,15 +361,15 @@ class AutoTradingEngine:
                         atr = features.get("ATR", 0.0)
                         if atr > 0:
                             sl_dist = Decimal(str(atr * 1.5))
-                            tp_dist = Decimal(str(atr * 3.0))
+                            tp_dist = Decimal("0.0") # Let profits run (Shepherd Mode)
                         else:
                             sl_dist = Decimal("10.0") if "USD" in symbol else Decimal("0.0050")
-                            tp_dist = Decimal("20.0") if "USD" in symbol else Decimal("0.0100")
+                            tp_dist = Decimal("0.0") # Let profits run (Shepherd Mode)
                             
                         entry_price = Decimal(str(current_price))
                         sl_price = entry_price - sl_dist if action == TradeAction.BUY else entry_price + sl_dist
-                        tp_price = entry_price + tp_dist if action == TradeAction.BUY else entry_price - tp_dist
-
+                        tp_price = Decimal("0.0") # No TP
+                        
                         order = TradeOrder(
                             symbol=symbol,
                             action=action,
@@ -278,9 +384,12 @@ class AutoTradingEngine:
                             logger.info(f"🤖 EXEC {symbol}: {action} | {comment}")
                             result = await self.worker.execute_skill(skill, order)
                             if result.get("success"):
+                                # Notify Telegram
+                                self.telegram.send_sync(f"🚀 **OPEN EXECUTION**\n{symbol} {action.value} @ {entry_price}\nSL: {sl_price}\nMethod: {comment}")
                                 asyncio.create_task(self._record_learning_experience(order, result))
                         else:
                             logger.warning(f"Rejected {symbol}: {validation['reason']}")
+                            self.telegram.send_sync(f"⚠️ **REJECTED** {symbol}: {validation['reason']}")
                             
                         # Small delay between symbols
                         await asyncio.sleep(1.0)

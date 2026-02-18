@@ -203,7 +203,14 @@ class MT5Service:
         tf_map = {1: mt5.TIMEFRAME_M1, 5: mt5.TIMEFRAME_M5, 15: mt5.TIMEFRAME_M15}
         mt5_tf = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
         
-        rates = await asyncio.to_thread(mt5.copy_rates_from_pos, symbol, mt5_tf, 0, count)
+        rates = None
+        for attempt in range(3):
+            rates = await asyncio.to_thread(mt5.copy_rates_from_pos, symbol, mt5_tf, 0, count)
+            if rates is not None and len(rates) > 0:
+                break
+            # Trigger download and wait
+            logger.debug(f"MT5: Waiting for data {symbol} (Attempt {attempt+1}/3)...")
+            await asyncio.sleep(0.5)
         
         if rates is None or len(rates) == 0:
             logger.warning(f"No rates found for {symbol}")
@@ -349,6 +356,29 @@ class MT5Service:
             "profit": pos.profit,
             "symbol": pos.symbol
         }
+
+    async def modify_position(self, ticket: int, sl: float = 0.0, tp: float = 0.0) -> dict[str, Any]:
+        """Modifie le SL/TP d'une position"""
+        if self.mock_mode:
+            pos = next((p for p in self._mock_positions if p.ticket == ticket), None)
+            if pos:
+                if sl > 0: pos.stop_loss = Decimal(str(sl))
+                if tp > 0: pos.take_profit = Decimal(str(tp))
+                return {"success": True, "message": f"Position {ticket} modified (mock)"}
+            return {"success": False, "message": "Position not found"}
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "sl": float(sl),
+            "tp": float(tp),
+        }
+        
+        result = await asyncio.to_thread(mt5.order_send, request)
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            return {"success": False, "message": f"Erreur modification: {result.comment}"}
+            
+        return {"success": True, "message": f"Position {ticket} modified SL={sl} TP={tp}"}
 
     async def _execute_mock_order(self, order: TradeOrder) -> dict[str, Any]:
         """Exécute un ordre en mode mock"""

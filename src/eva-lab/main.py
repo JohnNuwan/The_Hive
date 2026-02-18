@@ -3,6 +3,7 @@ import time
 import asyncio
 import jax
 import jax.numpy as jnp
+import numpy as np
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any

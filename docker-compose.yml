@@ -211,7 +211,7 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
-      - MOCK_MT5=true
+      - MOCK_MT5=false
     volumes:
       - ./data/tablet:/mnt/tablet:ro
     networks: [ "hive-net" ]
@@ -301,6 +301,8 @@ services:
             - driver: nvidia
               count: all
               capabilities: [ gpu ]
+    volumes:
+      - ./data:/app/eva-lab/data
     restart: unless-stopped
 
   quant-lab:

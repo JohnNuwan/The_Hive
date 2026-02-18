@@ -27,23 +27,17 @@ def calculate_lambda_returns(rewards, values, discount, lambda_):
     inputs = rewards + discount * next_values * (1 - lambda_)
     
     # Backward pass
-    def scan_fn(g_next, inputs):
-        r_plus_v, disc_val = inputs
-        g_current = r_plus_v + disc_val * g_next
+    factor = discount * lambda_
+    
+    def scan_fn(g_next, r_plus_v):
+        # We use factor from closure (it's constant)
+        g_current = r_plus_v + factor * g_next
         return g_current, g_current
 
-    # We need to pass (rewards_part, discount * lambda_)
-    # Actually, simpler recursion:
-    # G_t = r_t + gamma * ( (1-lambda)v_{t+1} + lambda * G_{t+1} )
-    # Let inputs = r_t + gamma * (1-lambda) v_{t+1}
-    # Let factor = gamma * lambda
-    # G_t = inputs + factor * G_{t+1}
-    
-    factor = discount * lambda_
     _, returns = jax.lax.scan(
         scan_fn,
         values[-1], # Bootstrap with last value
-        (inputs, factor),
+        inputs,     # Scan over inputs only
         reverse=True
     )
     # returns is [T, B, 1]
@@ -74,10 +68,30 @@ class DreamerTrainerJAX:
         """
         # Pour Dreamer, on a besoin de séquences de longueur T (ex: 50)
         # On suppose que samples est une liste de segments [T, Obs/Act/Rew]
-        obs = jnp.array([s.observations for s in samples]) # [B, T, Obs]
-        actions = jnp.array([s.actions for s in samples]) # [B, T, Act]
-        rewards = jnp.array([s.rewards for s in samples]).reshape(len(samples), -1, 1) # [B, T, 1]
+        import numpy as np
         
+        # Debug: Check first sample
+        if len(samples) > 0:
+            first = samples[0]
+            # print(f"Sample 0 obs len: {len(first.observations)}, shape: {np.array(first.observations[0]).shape}")
+
+        try:
+            # Use np.stack to ensure consistent shape before JAX
+            obs_list = [np.stack(s.observations) for s in samples]
+            obs = jnp.array(np.stack(obs_list)) # [B, T, Obs]
+            
+            act_list = [np.stack(s.actions) for s in samples]
+            actions = jnp.array(np.stack(act_list)) # [B, T, Act]
+            
+            rew_list = [np.stack(s.rewards) for s in samples]
+            rewards = jnp.array(np.stack(rew_list)).reshape(len(samples), -1, 1) # [B, T, 1]
+        except Exception as e:
+            print(f"Error packing batch: {e}")
+            # Fallback debug print
+            for i, s in enumerate(samples):
+                print(f"Sample {i}: obs_len={len(s.observations)}")
+            raise e
+
         # is_first: 1.0 au début de chaque séquence
         is_first = jnp.zeros_like(rewards)
         is_first = is_first.at[:, 0, 0].set(1.0)
@@ -117,9 +131,15 @@ class DreamerTrainerJAX:
         loss_rew = jnp.mean(optax.l2_loss(pred_rews, batch.rewards))
         
         # 2. KL Divergence
+        # 2. KL Divergence
         deterministic_size = self.config.hidden_state_size * 8
-        _, _, p_logits = unpack_state(priors, deterministic_size, 32, 32)
-        _, _, q_logits = unpack_state(posteriors, deterministic_size, 32, 32)
+        
+        # Flatten [B, T, State] -> [B*T, State] for unpacking
+        priors_flat = priors.reshape(-1, priors.shape[-1])
+        posteriors_flat = posteriors.reshape(-1, posteriors.shape[-1])
+        
+        _, _, p_logits = unpack_state(priors_flat, deterministic_size, 32, 32)
+        _, _, q_logits = unpack_state(posteriors_flat, deterministic_size, 32, 32)
         
         def kl_loss(p_logits, q_logits):
             p_probs = jax.nn.softmax(p_logits)
@@ -218,7 +238,8 @@ class DreamerTrainerJAX:
         # Losses
         # Actor Loss: Reinforce
         # Advantage = Returns - Value
-        advantage = jax.lax.stop_gradient(lambda_returns - values)
+        # advantage: [H, B, 1] -> squeeze to [H, B]
+        advantage = jax.lax.stop_gradient(lambda_returns - values).squeeze(-1)
         loss_policy = -jnp.mean(log_probs * advantage)
         loss_entropy = -jnp.mean(entropies) * 1e-4 # Entropy regularization
         loss_actor = loss_policy + loss_entropy
@@ -315,8 +336,34 @@ class DreamerTrainerJAX:
         dummy_action = jnp.zeros((batch_size, self.config.action_space_size))
         dummy_state = jnp.zeros((batch_size, 2560))
         
-        # Init through dispatcher (mode 0)
-        params = self.model.init(rng_init, 0, sample_obs, dummy_action, dummy_state)
+        
+        # Init through dispatcher (mode 5: Init All - Observe & ActorCritic)
+        # We need to pass valid shapes for observe(obs, action, state)
+        # sample_obs is [B, Obs]
+        # dummy_action is [B, Act]
+        # dummy_state is [B, State (flat)] or unpacked?
+        # RSSM initial_state returns FLAT state.
+        # But observe expects FLAT state.
+        
+        # Wait: mode 5 expects (obs, prev_action, prev_state).
+        # We need to pass them.
+        
+        # Use mode 2 to get a valid initial state first
+        # ensure args are correctly passed to mode 2
+        # mode 2 args: (batch_size,)
+        init_state = self.model.apply(self.model.init(rng_init, 2, batch_size), rng_init, 2, batch_size)
+        
+        # Wait, model.apply needs params. we don't have params yet!
+        # But mode 2 (initial_state) is param-less in RSSM (just zeros).
+        # We can pass empty dict {} or None? Haiku might check.
+        # Actually, since we are inside init_params, checking structure is tricky.
+        # EASIER: Just creates zeros manually as I planned before!
+        # RSSM state size is deterministic + (stoch * discrete) * 2
+        # 512 + (32 * 32) * 2 = 2560.
+        init_state = jnp.zeros((batch_size, 2560))
+        
+        # Now init all params using mode 5
+        params = self.model.init(rng_init, 5, sample_obs, dummy_action, init_state)
         
         self.params["wm"] = params
         self.opt_states["wm"] = self.wm_opt.init(params)

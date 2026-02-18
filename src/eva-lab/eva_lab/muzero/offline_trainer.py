@@ -48,27 +48,37 @@ class OfflineTrainer:
             lows = df['low'].tolist()
             volumes = df['tick_volume'].tolist()
             
-            # Batch computation if possible, or iterative?
-            # efficient_indicators expects lists.
-            # We need to replicate brain.py logic but efficiently.
+            # Batch computation if possible
+            # New Vectorized IndicatorFactory expects Pandas Series
             
-            # For simplicity and speed in this "Education" prototype, 
-            # we will compute indicators on the full series using IndicatorFactory
-            # assuming it handles lists efficiently. 
-            # Note: brain.py computes on window=100.
-            
-            # Pre-compute columns
-            df['rsi'] = IndicatorFactory.rsi(closes, 14)
-            # MACD returns dict, need to extract
-            macd_res = IndicatorFactory.macd_series(closes) if hasattr(IndicatorFactory, 'macd_series') else [IndicatorFactory.macd(closes[:i+1]) for i in range(len(closes))]
-            # WAIT: iterating 50k times calling macd is SLOW.
-            # brain.py calls it once per drift loop on small window.
-            # Ideally IndicatorFactory has vector support.
-            # If not, we might skipped complex indicators for Offline Trainer V1 or use pandas_ta.
-            
-            # Let's check IndicatorFactory source strictly.
-            # If it's pure python list loops, it's slow.
-            # For now, let's just use Price + RSI (easy to vectorize) + Log Volume.
+            # Pre-compute columns (Vectorized = Instant)
+            try:
+                # RSI
+                df['rsi'] = IndicatorFactory.rsi(df['close'], 14)
+                
+                # MACD
+                macd_res = IndicatorFactory.macd(df['close'])
+                df['macd'] = macd_res['macd']
+                df['macd_signal'] = macd_res['signal']
+                df['macd_hist'] = macd_res['histogram']
+                
+                # ATR
+                df['atr'] = IndicatorFactory.atr(df['high'], df['low'], df['close'], 14)
+                
+                # Bollinger
+                bb_res = IndicatorFactory.bollinger_bands(df['close'])
+                df['bb_width'] = bb_res['width']
+                df['bb_pct'] = bb_res['pct_b']
+                
+                # Rel Vol
+                df['rvol'] = IndicatorFactory.relative_volume(df['tick_volume'])
+                
+                # Fill NaN from rolling windows (start of file)
+                df = df.fillna(method='bfill').fillna(0.0)
+                
+            except Exception as e:
+                logger.error(f"Error computing indicators for {file}: {e}")
+                continue
             
             # Simulating episodes with Synthetic Actions/Rewards
             segment_length = 200 # 200 steps per game
@@ -88,6 +98,7 @@ class OfflineTrainer:
                 
                 # Generate random actions for the whole segment to teach the model
                 # about consequences of actions.
+                # We want balanced classes: 40% Hold, 30% Buy, 30% Sell
                 # We want balanced classes: 40% Hold, 30% Buy, 30% Sell
                 actions = np.random.choice([0, 1, 2], size=segment_length, p=[0.4, 0.3, 0.3])
                 
@@ -152,7 +163,9 @@ class OfflineTrainer:
             
             for _ in range(updates_per_epoch):
                 samples = self.replay_buffer.sample(self.config.batch_size)
-                batch = self.trainer.prepare_batch(samples)
+                # Unpack (game, start_idx, idx) -> game
+                games = [s[0] for s in samples]
+                batch = self.trainer.prepare_batch(games)
                 
                 metrics = self.trainer.train_step(batch)
                 loss_sum += metrics["loss_total"]
