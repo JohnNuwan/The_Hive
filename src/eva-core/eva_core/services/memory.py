@@ -3,13 +3,24 @@ Service Mémoire - Client Qdrant pour RAG
 Gère le stockage et la recherche vectorielle des conversations
 """
 
+import hashlib
 import logging
+import struct
 from functools import lru_cache
 from typing import Any
 from uuid import UUID
 
+import numpy as np
+from langchain_ollama import OllamaEmbeddings
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 from shared import ChatMessage, get_settings
 
@@ -80,9 +91,6 @@ class MemoryService:
         """
         Génère un embedding réel pour le texte via Ollama/nomic-embed-text.
         """
-        from langchain_ollama import OllamaEmbeddings
-        from shared import get_settings
-        
         settings = get_settings()
         
         try:
@@ -95,8 +103,6 @@ class MemoryService:
         except Exception as e:
             logger.error(f"Embedding error: {e}. Fallback sur hash (danger).")
             # Fallback dégradé pour éviter de bloquer tout le système
-            import hashlib
-            import struct
             hash_bytes = hashlib.sha384(text.encode()).digest()
             floats = []
             for i in range(0, len(hash_bytes), 4):
@@ -162,8 +168,6 @@ class MemoryService:
             # Construire le filtre
             query_filter = None
             if session_id:
-                from qdrant_client.models import FieldCondition, Filter, MatchValue
-
                 query_filter = Filter(
                     must=[
                         FieldCondition(
@@ -204,7 +208,6 @@ class MemoryService:
         """Récupère l'historique d'une session ou toute la mémoire si session_id est None"""
         try:
             client = await self._get_client()
-            from qdrant_client.models import FieldCondition, Filter, MatchValue
 
             scroll_filter = None
             if session_id:
@@ -272,7 +275,6 @@ class MemoryService:
             
             # 2. Calculer les liens basés sur la similarité (Simplifié)
             links = []
-            import numpy as np
             
             if len(vectors) > 1:
                 vec_arr = np.array(vectors)
