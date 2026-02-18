@@ -4,8 +4,9 @@ Deep logic for Mixture of Experts (MoE) routing and intention analysis.
 """
 
 import logging
+import uuid
 from typing import Any
-from shared import Intent, IntentType
+from shared import Intent, IntentType, ChatMessage, MessageRole
 from eva_core.services.llm import get_llm_service
 
 logger = logging.getLogger(__name__)
@@ -44,9 +45,20 @@ class StrategyOrchestrator:
         {self._format_manifest()}
 
         Classify the user intent and choose the target expert.
+
+        Intent Types:
+        - TRADING_ORDER: Buying/selling assets.
+        - POSITION_STATUS: Checking positions.
+        - RISK_INQUIRY: Risk management questions.
+        - GENERAL_CHAT: General conversation.
+        - MEMORY_RECALL: Asking about past events.
+        - OSINT_REQUEST: Information gathering.
+        - SYSTEM_COMMAND: System control.
+        - SECURITY_ALERT: Security issues.
+
         Return your decision in JSON format:
         {{
-            "intent_type": "TRADE|INTEL|RESEARCH|MANAGEMENT|CHAT",
+            "intent_type": "TRADING_ORDER|GENERAL_CHAT|...",
             "target_expert": "expert_name",
             "confidence": 0.0-1.0,
             "entities": {{"key": "value"}}
@@ -54,19 +66,43 @@ class StrategyOrchestrator:
         """
 
         try:
+            # Construct messages properly
+            messages = [
+                ChatMessage(
+                    session_id=uuid.uuid4(),
+                    role=MessageRole.USER,
+                    content=message
+                )
+            ]
+
             # We use the LLM to perform the high-level semantic routing
             # This is much more 'divine' than simple keyword matching
-            response = await self.llm.generate_response(
-                messages=[{"role": "user", "content": message}],
+            response_tuple = await self.llm.generate_response(
+                messages=messages,
                 system_prompt=system_prompt,
-                json_mode=True
             )
             
+            # Unpack response (response_text, thoughts)
+            response_text = response_tuple[0] if isinstance(response_tuple, tuple) else response_tuple
+
+            # Clean markdown code blocks if present
+            clean_response = response_text.strip()
+            if "```json" in clean_response:
+                clean_response = clean_response.split("```json")[1].split("```")[0].strip()
+            elif "```" in clean_response:
+                clean_response = clean_response.split("```")[1].split("```")[0].strip()
+
             import json
-            data = json.loads(response)
+            data = json.loads(clean_response)
+
+            intent_val = data.get("intent_type", "GENERAL_CHAT")
+            try:
+                intent_type = IntentType(intent_val)
+            except ValueError:
+                intent_type = IntentType.GENERAL_CHAT
             
             return Intent(
-                intent_type=IntentType(data.get("intent_type", "CHAT")),
+                intent_type=intent_type,
                 target_expert=data.get("target_expert", "core"),
                 confidence=float(data.get("confidence", 0.5)),
                 entities=data.get("entities", {})
@@ -74,7 +110,7 @@ class StrategyOrchestrator:
             
         except Exception as e:
             logger.error(f"Strategy Orchestration failed: {e}. Falling back to default routing.")
-            return Intent(intent_type=IntentType.CHAT, target_expert="core", confidence=0.1)
+            return Intent(intent_type=IntentType.GENERAL_CHAT, target_expert="core", confidence=0.1)
 
     def _format_manifest(self) -> str:
         return "\n".join([f"- {name}: {desc}" for name, desc in self.experts_manifest.items()])
