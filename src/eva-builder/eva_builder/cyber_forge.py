@@ -38,6 +38,8 @@ DANGEROUS_ATTRS = {
     "func_code",
     "func_closure",
     "__import__",
+    "format",
+    "format_map",
 }
 
 class SecurityScanner(ast.NodeVisitor):
@@ -95,7 +97,6 @@ SAFE_BUILTINS = {
     "enumerate": enumerate,
     "filter": filter,
     "float": float,
-    "format": format,
     "frozenset": frozenset,
     "hasattr": hasattr,
     "hash": hash,
