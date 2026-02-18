@@ -80,11 +80,6 @@ def client(mock_redis):
         with TestClient(app) as c:
             yield c
 
-@pytest.fixture
-def auth_headers():
-    token = InternalAuth.generate_token("test-core")
-    return {"X-Hive-Internal-Token": token}
-
 def test_health_endpoint(client):
     """Vérifie que l'endpoint /health répond"""
     # /health est exclu de l'auth par défaut

@@ -33,17 +33,34 @@ if "neo4j" not in sys.modules:
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, patch
+from shared.internal_auth import InternalAuth
+
+@pytest.fixture
+def auth_headers():
+    token = InternalAuth.generate_token("test-service")
+    return {"X-Hive-Internal-Token": token}
 
 @pytest.fixture
 def client():
     # Patch dependencies in lifespan or global scope
+    # Note: We need to configure the mock instance for EVAMQTTClient because lifespan calls await connect()
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
-         patch("eva_core.main.get_redis_client", new_callable=MagicMock), \
-         patch("eva_core.main.EVAMQTTClient", new_callable=MagicMock), \
+         patch("eva_core.main.get_redis_client") as mock_get_redis, \
+         patch("eva_core.main.EVAMQTTClient") as mock_mqtt_cls, \
          patch("eva_core.main.StrategyOrchestrator", new_callable=MagicMock), \
-         patch("eva_core.main.SelfHealingService", new_callable=MagicMock), \
+         patch("eva_core.main.SelfHealingService") as mock_self_healing_cls, \
          patch("eva_core.services.llm.LLMService", new_callable=MagicMock), \
          patch("eva_core.services.memory.MemoryService", new_callable=MagicMock):
+
+        # Configure the mock instances
+        mock_mqtt_instance = mock_mqtt_cls.return_value
+        mock_mqtt_instance.connect = AsyncMock()
+
+        mock_self_healing_instance = mock_self_healing_cls.return_value
+        mock_self_healing_instance.start_monitoring = AsyncMock()
+
+        mock_redis_client = mock_get_redis.return_value
+        mock_redis_client.disconnect = AsyncMock()
 
         from eva_core.main import app
         # Mock state objects
@@ -51,9 +68,9 @@ def client():
         app.state.intent_router = MagicMock()
         app.state.llm_service = MagicMock()
         app.state.memory_service = MagicMock()
-        app.state.mqtt = AsyncMock()
+        app.state.mqtt = mock_mqtt_instance
         app.state.strategy_orchestrator = AsyncMock()
-        app.state.self_healing = AsyncMock()
+        app.state.self_healing = mock_self_healing_instance
         app.state.system_monitor = MagicMock()
 
         with TestClient(app) as c:
