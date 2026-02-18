@@ -33,17 +33,33 @@ if "neo4j" not in sys.modules:
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, patch
+from shared.internal_auth import InternalAuth
+
+@pytest.fixture
+def auth_headers():
+    token = InternalAuth.generate_token("test-core")
+    return {"X-Hive-Internal-Token": token}
 
 @pytest.fixture
 def client():
     # Patch dependencies in lifespan or global scope
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
-         patch("eva_core.main.get_redis_client", new_callable=MagicMock), \
-         patch("eva_core.main.EVAMQTTClient", new_callable=MagicMock), \
+         patch("eva_core.main.get_redis_client") as MockRedis, \
+         patch("eva_core.main.EVAMQTTClient") as MockMQTT, \
          patch("eva_core.main.StrategyOrchestrator", new_callable=MagicMock), \
-         patch("eva_core.main.SelfHealingService", new_callable=MagicMock), \
+         patch("eva_core.main.SelfHealingService") as MockHealing, \
          patch("eva_core.services.llm.LLMService", new_callable=MagicMock), \
          patch("eva_core.services.memory.MemoryService", new_callable=MagicMock):
+
+        # Configure AsyncMocks
+        mock_redis_instance = MockRedis.return_value
+        mock_redis_instance.disconnect = AsyncMock()
+
+        mock_mqtt_instance = MockMQTT.return_value
+        mock_mqtt_instance.connect = AsyncMock()
+
+        mock_healing_instance = MockHealing.return_value
+        mock_healing_instance.start_monitoring = AsyncMock()
 
         from eva_core.main import app
         # Mock state objects
@@ -51,9 +67,9 @@ def client():
         app.state.intent_router = MagicMock()
         app.state.llm_service = MagicMock()
         app.state.memory_service = MagicMock()
-        app.state.mqtt = AsyncMock()
-        app.state.strategy_orchestrator = AsyncMock()
-        app.state.self_healing = AsyncMock()
+        app.state.mqtt = mock_mqtt_instance
+        app.state.strategy_orchestrator = MagicMock()
+        app.state.self_healing = mock_healing_instance
         app.state.system_monitor = MagicMock()
 
         with TestClient(app) as c:
