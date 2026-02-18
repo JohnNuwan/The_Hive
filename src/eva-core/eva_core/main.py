@@ -369,9 +369,6 @@ async def get_active_drones() -> list[dict]:
     return drones
 
 
-# Note: The old self_healing_orchestrator is replaced by SelfHealingService
-
-
 @app.get("/memory/fragments", tags=["Mémoire"])
 async def get_memory_fragments(limit: int = 50) -> list[dict[str, Any]]:
     """
