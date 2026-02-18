@@ -35,9 +35,10 @@ from shared import (
 )
 from shared.redis_client import get_redis_client, init_redis
 from shared.mqtt_client import EVAMQTTClient
-from shared.auth_middleware import InternalAuthMiddleware
 from shared.internal_auth import get_internal_headers
 
+from eva_core.security.middleware import CoreAuthMiddleware
+from eva_core.services.auth import AuthService, set_auth_service, get_auth_service, TokenResponse, UserLogin
 from eva_core.router.intent import IntentRouter
 from eva_core.services.llm import LLMService, get_llm_service
 from eva_core.services.memory import MemoryService, get_memory_service
@@ -119,6 +120,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ Redis non disponible: {e}")
 
+    # Initialiser AuthService
+    try:
+        redis_client = get_redis_client()
+        auth_service = AuthService(redis_client, settings.jwt_secret_key.get_secret_value())
+        set_auth_service(auth_service)
+        await auth_service.init_default_admin()
+        logger.info("✅ AuthService initialisé")
+    except Exception as e:
+        logger.error(f"❌ Erreur init AuthService: {e}")
+
     # Initialiser les services
     app.state.settings = settings
     app.state.intent_router = IntentRouter(use_llm=settings.use_ollama)
@@ -178,13 +189,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Internal Security Middleware
-app.add_middleware(InternalAuthMiddleware)
+# Core Security Middleware (Internal + User)
+app.add_middleware(CoreAuthMiddleware)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.post("/auth/login", response_model=TokenResponse, tags=["Auth"])
+async def login(credentials: UserLogin) -> TokenResponse:
+    """
+    Authentifie un utilisateur et retourne un token JWT.
+    """
+    auth_service = get_auth_service()
+    token = await auth_service.login(credentials.username, credentials.password)
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return token
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Système"])

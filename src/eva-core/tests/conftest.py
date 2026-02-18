@@ -36,12 +36,23 @@ from unittest.mock import AsyncMock, patch
 
 @pytest.fixture
 def client():
+    # Setup mocks ensuring async compatibility
+    mock_redis_client = AsyncMock()
+    mock_redis_client.get = AsyncMock(return_value=None)
+    mock_redis_client.set = AsyncMock(return_value=True)
+
+    mock_mqtt_instance = MagicMock()
+    mock_mqtt_instance.connect = AsyncMock()
+
+    mock_self_healing_instance = MagicMock()
+    mock_self_healing_instance.start_monitoring = AsyncMock()
+
     # Patch dependencies in lifespan or global scope
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
-         patch("eva_core.main.get_redis_client", new_callable=MagicMock), \
-         patch("eva_core.main.EVAMQTTClient", new_callable=MagicMock), \
+         patch("eva_core.main.get_redis_client", return_value=mock_redis_client), \
+         patch("eva_core.main.EVAMQTTClient", return_value=mock_mqtt_instance), \
          patch("eva_core.main.StrategyOrchestrator", new_callable=MagicMock), \
-         patch("eva_core.main.SelfHealingService", new_callable=MagicMock), \
+         patch("eva_core.main.SelfHealingService", return_value=mock_self_healing_instance), \
          patch("eva_core.services.llm.LLMService", new_callable=MagicMock), \
          patch("eva_core.services.memory.MemoryService", new_callable=MagicMock):
 
