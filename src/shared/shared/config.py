@@ -141,6 +141,7 @@ class Settings(BaseSettings):
     # ═══════════════════════════════════════════════════════════════════════════
     # SECURITY & SUPPORT SERVICES
     # ═══════════════════════════════════════════════════════════════════════════
+    sentinel_api_host: str = "localhost"
     sentinel_api_port: int = 8200
     compliance_api_port: int = 8300
     substrate_api_port: int = 8400
