@@ -1,6 +1,12 @@
 import pytest
 from unittest.mock import MagicMock
 from eva_core.main import app
+from shared.internal_auth import InternalAuth
+
+@pytest.fixture
+def auth_headers():
+    token = InternalAuth.generate_token("test-service")
+    return {"X-Hive-Internal-Token": token}
 
 def test_circuit_breaker_status_nominal(client, auth_headers):
     """
@@ -9,7 +15,8 @@ def test_circuit_breaker_status_nominal(client, auth_headers):
     """
     # Ensure self_healing.circuit_breaker is None
     # app.state.self_healing is a MagicMock from conftest.py
-    app.state.self_healing.circuit_breaker = None
+    # Use client.app because the TestClient wraps the app and lifespan runs on it
+    client.app.state.self_healing.circuit_breaker = None
 
     response = client.get("/circuit-breaker/status", headers=auth_headers)
     assert response.status_code == 200
@@ -35,7 +42,7 @@ def test_circuit_breaker_status_active(client, auth_headers):
         "last_failure": "Timeout"
     }
 
-    app.state.self_healing.circuit_breaker = mock_cb
+    client.app.state.self_healing.circuit_breaker = mock_cb
 
     response = client.get("/circuit-breaker/status", headers=auth_headers)
     assert response.status_code == 200

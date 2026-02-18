@@ -38,23 +38,35 @@ from unittest.mock import AsyncMock, patch
 def client():
     # Patch dependencies in lifespan or global scope
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
-         patch("eva_core.main.get_redis_client", new_callable=MagicMock), \
-         patch("eva_core.main.EVAMQTTClient", new_callable=MagicMock), \
+         patch("eva_core.main.get_redis_client", new_callable=MagicMock) as MockGetRedis, \
+         patch("eva_core.main.EVAMQTTClient", new_callable=MagicMock) as MockMQTT, \
          patch("eva_core.main.StrategyOrchestrator", new_callable=MagicMock), \
-         patch("eva_core.main.SelfHealingService", new_callable=MagicMock), \
+         patch("eva_core.main.SelfHealingService", new_callable=MagicMock) as MockSelfHealing, \
          patch("eva_core.services.llm.LLMService", new_callable=MagicMock), \
          patch("eva_core.services.memory.MemoryService", new_callable=MagicMock):
 
+        # Configure MockMQTT instance to have async connect
+        mock_mqtt_instance = MockMQTT.return_value
+        mock_mqtt_instance.connect = AsyncMock()
+
+        # Configure MockSelfHealing instance to have async start_monitoring
+        mock_self_healing_instance = MockSelfHealing.return_value
+        mock_self_healing_instance.start_monitoring = AsyncMock()
+
+        # Configure Redis Client to have async disconnect
+        mock_redis_client = MockGetRedis.return_value
+        mock_redis_client.disconnect = AsyncMock()
+
         from eva_core.main import app
-        # Mock state objects
-        app.state.settings = MagicMock()
-        app.state.intent_router = MagicMock()
-        app.state.llm_service = MagicMock()
-        app.state.memory_service = MagicMock()
-        app.state.mqtt = AsyncMock()
-        app.state.strategy_orchestrator = AsyncMock()
-        app.state.self_healing = AsyncMock()
-        app.state.system_monitor = MagicMock()
 
         with TestClient(app) as c:
+            # Re-apply mocks to app.state
+            c.app.state.settings = MagicMock()
+            c.app.state.intent_router = MagicMock()
+            c.app.state.llm_service = MagicMock()
+            c.app.state.memory_service = MagicMock()
+            c.app.state.strategy_orchestrator = AsyncMock()
+            c.app.state.self_healing = mock_self_healing_instance
+            c.app.state.system_monitor = MagicMock()
+
             yield c
