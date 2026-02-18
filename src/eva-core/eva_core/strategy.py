@@ -3,9 +3,11 @@ Strategy Orchestrator — THE HIVE
 Deep logic for Mixture of Experts (MoE) routing and intention analysis.
 """
 
+import json
 import logging
+from uuid import uuid4
 from typing import Any
-from shared import Intent, IntentType
+from shared import Intent, IntentType, ChatMessage, MessageRole
 from eva_core.services.llm import get_llm_service
 
 logger = logging.getLogger(__name__)
@@ -56,13 +58,17 @@ class StrategyOrchestrator:
         try:
             # We use the LLM to perform the high-level semantic routing
             # This is much more 'divine' than simple keyword matching
-            response = await self.llm.generate_response(
-                messages=[{"role": "user", "content": message}],
-                system_prompt=system_prompt,
-                json_mode=True
+            user_msg = ChatMessage(
+                session_id=uuid4(),
+                role=MessageRole.USER,
+                content=message
+            )
+
+            response, _ = await self.llm.generate_response(
+                messages=[user_msg],
+                system_prompt=system_prompt
             )
             
-            import json
             data = json.loads(response)
             
             return Intent(
