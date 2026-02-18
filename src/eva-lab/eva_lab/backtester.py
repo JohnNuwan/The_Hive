@@ -3,7 +3,9 @@ Backtester - Moteur de simulation historique
 Utilise les données MT5 ou Yahoo Finance pour tester les stratégies.
 """
 
+import asyncio
 import logging
+import random
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -73,24 +75,18 @@ class Backtester:
     def __init__(self):
         self.results_history: list[BacktestResult] = []
 
-    async def run_backtest(
+    def _run_simulation_sync(
         self,
         strategy_name: str,
-        symbol: str = "XAUUSD",
-        period_months: int = 6,
-        initial_balance: float = 10000.0
+        symbol: str,
+        period_months: int,
+        initial_balance: float
     ) -> BacktestResult:
         """
-        Exécute un backtest sur données historiques simulées.
-        
-        En production, remplacer _generate_mock_data par des données MT5 réelles :
-            import MetaTrader5 as mt5
-            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, count)
+        Exécute la simulation de backtest de manière synchrone.
+        Utilise une instance locale de Random pour garantir la thread-safety.
         """
-        import random
-        random.seed(42)  # Reproductibilité
-
-        logger.info(f"Backtesting '{strategy_name}' sur {symbol} ({period_months} mois)")
+        rng = random.Random(42)  # Reproductibilité thread-safe
 
         # Paramètres
         end_date = datetime.now()
@@ -104,29 +100,29 @@ class Backtester:
         peak_balance = balance
 
         # Simulation simple : Moving Average Crossover
-        for i in range(0, num_candles, random.randint(12, 48)):
+        for i in range(0, num_candles, rng.randint(12, 48)):
             # Signal aléatoire pondéré (simule une stratégie)
-            signal = random.random()
+            signal = rng.random()
 
             if signal > 0.55:  # Seuil d'entrée
-                direction = "BUY" if random.random() > 0.45 else "SELL"
-                entry_price = 2000 + random.uniform(-100, 100)
-                sl_distance = random.uniform(5, 20)
-                tp_distance = sl_distance * random.uniform(1.5, 3.0)
+                direction = "BUY" if rng.random() > 0.45 else "SELL"
+                entry_price = 2000 + rng.uniform(-100, 100)
+                sl_distance = rng.uniform(5, 20)
+                tp_distance = sl_distance * rng.uniform(1.5, 3.0)
 
                 # Simulation du résultat (Win rate ~55%)
-                is_win = random.random() < 0.55
+                is_win = rng.random() < 0.55
                 if is_win:
-                    profit = tp_distance * 0.01 * random.uniform(0.8, 1.2)
+                    profit = tp_distance * 0.01 * rng.uniform(0.8, 1.2)
                 else:
-                    profit = -sl_distance * 0.01 * random.uniform(0.8, 1.0)
+                    profit = -sl_distance * 0.01 * rng.uniform(0.8, 1.0)
 
                 balance += profit
                 equity_curve.append(balance)
 
                 trade = BacktestTrade(
                     entry_time=start_date + timedelta(hours=i),
-                    exit_time=start_date + timedelta(hours=i + random.randint(1, 24)),
+                    exit_time=start_date + timedelta(hours=i + rng.randint(1, 24)),
                     symbol=symbol,
                     direction=direction,
                     entry_price=entry_price,
@@ -162,8 +158,34 @@ class Backtester:
             profit_factor=round(gross_profit / gross_loss, 2) if gross_loss > 0 else 0,
             total_profit=round(total_profit, 2),
             max_drawdown=round(max_dd, 2),
-            sharpe_ratio=round(random.uniform(0.5, 2.5), 2),
+            sharpe_ratio=round(rng.uniform(0.5, 2.5), 2),
             equity_curve=equity_curve,
+        )
+        return result
+
+    async def run_backtest(
+        self,
+        strategy_name: str,
+        symbol: str = "XAUUSD",
+        period_months: int = 6,
+        initial_balance: float = 10000.0
+    ) -> BacktestResult:
+        """
+        Exécute un backtest sur données historiques simulées.
+
+        En production, remplacer _generate_mock_data par des données MT5 réelles :
+            import MetaTrader5 as mt5
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, count)
+        """
+        logger.info(f"Backtesting '{strategy_name}' sur {symbol} ({period_months} mois)")
+
+        # Exécuter la simulation lourde dans un thread séparé pour ne pas bloquer l'event loop
+        result = await asyncio.to_thread(
+            self._run_simulation_sync,
+            strategy_name=strategy_name,
+            symbol=symbol,
+            period_months=period_months,
+            initial_balance=initial_balance
         )
 
         self.results_history.append(result)
