@@ -33,15 +33,21 @@ if "neo4j" not in sys.modules:
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, patch
+from shared.internal_auth import InternalAuth
+
+@pytest.fixture
+def auth_headers():
+    token = InternalAuth.generate_token("test-id")
+    return {"X-Hive-Internal-Token": token}
 
 @pytest.fixture
 def client():
     # Patch dependencies in lifespan or global scope
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
-         patch("eva_core.main.get_redis_client", new_callable=MagicMock), \
-         patch("eva_core.main.EVAMQTTClient", new_callable=MagicMock), \
+         patch("eva_core.main.get_redis_client") as MockGetRedis, \
+         patch("eva_core.main.EVAMQTTClient") as MockMQTT, \
          patch("eva_core.main.StrategyOrchestrator", new_callable=MagicMock), \
-         patch("eva_core.main.SelfHealingService", new_callable=MagicMock), \
+         patch("eva_core.main.SelfHealingService") as MockSelfHealing, \
          patch("eva_core.services.llm.LLMService", new_callable=MagicMock), \
          patch("eva_core.services.memory.MemoryService", new_callable=MagicMock):
 
@@ -51,9 +57,18 @@ def client():
         app.state.intent_router = MagicMock()
         app.state.llm_service = MagicMock()
         app.state.memory_service = MagicMock()
-        app.state.mqtt = AsyncMock()
+        # Ensure Redis client returns an AsyncMock for disconnect
+        MockGetRedis.return_value.disconnect = AsyncMock()
+
+        # Ensure MQTT client returns an AsyncMock when instantiated in lifespan
+        MockMQTT.return_value = AsyncMock()
+        app.state.mqtt = MockMQTT.return_value
+
+        # Ensure SelfHealingService returns an AsyncMock for start_monitoring
+        MockSelfHealing.return_value.start_monitoring = AsyncMock()
+        app.state.self_healing = MockSelfHealing.return_value
+
         app.state.strategy_orchestrator = AsyncMock()
-        app.state.self_healing = AsyncMock()
         app.state.system_monitor = MagicMock()
 
         with TestClient(app) as c:
