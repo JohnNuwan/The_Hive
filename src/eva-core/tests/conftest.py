@@ -37,13 +37,31 @@ from unittest.mock import AsyncMock, patch
 @pytest.fixture
 def client():
     # Patch dependencies in lifespan or global scope
+    # Use AsyncMock for classes that have async methods called during lifespan
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
-         patch("eva_core.main.get_redis_client", new_callable=MagicMock), \
-         patch("eva_core.main.EVAMQTTClient", new_callable=MagicMock), \
+         patch("eva_core.main.get_redis_client", new_callable=MagicMock) as MockGetRedis, \
+         patch("eva_core.main.EVAMQTTClient", new_callable=MagicMock) as MockMQTTClient, \
          patch("eva_core.main.StrategyOrchestrator", new_callable=MagicMock), \
-         patch("eva_core.main.SelfHealingService", new_callable=MagicMock), \
+         patch("eva_core.main.SelfHealingService", new_callable=MagicMock) as MockSelfHealing, \
          patch("eva_core.services.llm.LLMService", new_callable=MagicMock), \
-         patch("eva_core.services.memory.MemoryService", new_callable=MagicMock):
+         patch("eva_core.services.memory.MemoryService", new_callable=MagicMock), \
+         patch("shared.internal_auth.InternalAuth.verify_token") as MockVerifyToken:
+
+        # Configure auth token verification
+        MockVerifyToken.return_value = {
+            "iss": "hive-core",
+            "sub": "internal-swarm-request",
+            "src": "core"
+        }
+
+        # Configure the class mocks to return AsyncMock instances
+        MockMQTTClient.return_value = AsyncMock()
+        MockSelfHealing.return_value = AsyncMock()
+
+        # Configure redis client mock to have async disconnect
+        mock_redis_client = MagicMock()
+        mock_redis_client.disconnect = AsyncMock()
+        MockGetRedis.return_value = mock_redis_client
 
         from eva_core.main import app
         # Mock state objects
@@ -51,10 +69,26 @@ def client():
         app.state.intent_router = MagicMock()
         app.state.llm_service = MagicMock()
         app.state.memory_service = MagicMock()
-        app.state.mqtt = AsyncMock()
+
+        # Ensure state objects are AsyncMock where necessary
+        # Note: These are set by lifespan, but we pre-set them here for safety or consistency in tests
+        # that might bypass lifespan. However, since TestClient triggers lifespan, the patched classes above
+        # (MockMQTTClient, MockSelfHealing) are critical.
+        app.state.mqtt = MockMQTTClient.return_value
         app.state.strategy_orchestrator = AsyncMock()
-        app.state.self_healing = AsyncMock()
+        app.state.self_healing = MockSelfHealing.return_value
         app.state.system_monitor = MagicMock()
 
         with TestClient(app) as c:
             yield c
+
+@pytest.fixture
+def auth_headers():
+    # Return valid internal headers for testing protected endpoints
+    # Use a dummy token for tests, as middleware is mocked or handles it
+    token = "test-token"
+    return {
+        "Authorization": f"Bearer {token}",
+        "X-Internal-Source": "core",
+        "X-Hive-Internal-Token": token  # Required by InternalAuthMiddleware
+    }

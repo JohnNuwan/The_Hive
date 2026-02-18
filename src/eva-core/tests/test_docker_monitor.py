@@ -5,16 +5,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Mock heavy dependencies to avoid ImportError
-sys.modules["numpy"] = MagicMock()
-sys.modules["torch"] = MagicMock()
-# We need to mock shared package carefully if it's imported
-sys.modules["shared"] = MagicMock()
-sys.modules["shared.math_ops"] = MagicMock()
+# We should use patch.dict instead of direct assignment to avoid side effects
+# But since this file is imported by pytest collection, we must be careful.
+# Ideally, we should not mock sys.modules at module level.
+# However, SystemMonitor does not import eva_core.main, so we can remove that mock.
 
-# Mock eva_core.main to prevent app startup and heavy imports from there
-sys.modules["eva_core.main"] = MagicMock()
+if "numpy" not in sys.modules:
+    sys.modules["numpy"] = MagicMock()
+if "torch" not in sys.modules:
+    sys.modules["torch"] = MagicMock()
 
-# Now import the module under test
+# Note: shared is NOT imported by SystemMonitor, so no need to mock it globally here
+# If it were, we should use patch.dict in fixtures.
+
 from eva_core.services.docker_monitor import SystemMonitor  # noqa: E402
 
 
