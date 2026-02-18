@@ -404,15 +404,23 @@ class GraphMemoryWithNeo4j:
 
         # Step 4: Enrich results with associated facts
         enriched = []
+        entity_names = [r.get("name") for r in ppr_results if r.get("name")]
+        facts_map = {}
+
+        if entity_names:
+            # Optimized: Fetch all facts in a single query
+            fact_query = (
+                "UNWIND $names AS name "
+                "MATCH (e:Entity {name: name})-[:EXTRACTED_FROM]->(f:Fact) "
+                "WITH name, f "
+                "RETURN name, collect(f.full_text)[0..3] AS facts"
+            )
+            fact_results = await self.execute_query(fact_query, {"names": entity_names})
+            facts_map = {r["name"]: r["facts"] for r in fact_results}
+
         for result in ppr_results:
             name = result.get("name", "")
-            # Find facts connected to this entity
-            fact_query = (
-                "MATCH (e:Entity {name: $name})-[:EXTRACTED_FROM]->(f:Fact) "
-                "RETURN f.full_text AS fact LIMIT 3"
-            )
-            facts = await self.execute_query(fact_query, {"name": name})
-            result["associated_facts"] = [f["fact"] for f in facts if f.get("fact")]
+            result["associated_facts"] = facts_map.get(name, [])
             enriched.append(result)
 
         logger.info(
