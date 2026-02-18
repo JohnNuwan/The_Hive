@@ -13,7 +13,7 @@ def test_circuit_breaker_status_nominal(client):
     headers = {"X-Hive-Internal-Token": token}
 
     # Ensure self_healing.circuit_breaker is None
-    # app.state.self_healing is a MagicMock from conftest.py
+    # Access via app.state as it is set during lifespan
     app.state.self_healing.circuit_breaker = None
 
     response = client.get("/circuit-breaker/status", headers=headers)

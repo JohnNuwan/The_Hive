@@ -36,38 +36,40 @@ from unittest.mock import AsyncMock, patch
 
 @pytest.fixture
 def client():
+    # Setup mocks similar to test_api.py which is known to work
+
+    # Redis Client: AsyncMock ensures all methods (disconnect, cache_get) are awaitable
+    mock_redis_client_instance = AsyncMock()
+
+    # MQTT Client: AsyncMock ensures connect() is awaitable
+    mock_mqtt_instance = AsyncMock()
+    mock_mqtt_instance.connect = AsyncMock()
+
+    # SelfHealingService: start_monitoring is awaited/tasked
+    mock_self_healing_instance = MagicMock()
+    mock_self_healing_instance.start_monitoring = AsyncMock()
+
     # Patch dependencies in lifespan or global scope
-    # Use AsyncMock for MQTTClient to ensure async methods like connect() are awaitable
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
-         patch("eva_core.main.get_redis_client", new_callable=MagicMock) as MockRedisClient, \
-         patch("eva_core.main.EVAMQTTClient", new_callable=MagicMock) as MockMQTT, \
+         patch("eva_core.main.get_redis_client", return_value=mock_redis_client_instance), \
+         patch("eva_core.main.EVAMQTTClient", return_value=mock_mqtt_instance), \
          patch("eva_core.main.StrategyOrchestrator", new_callable=MagicMock), \
-         patch("eva_core.main.SelfHealingService", new_callable=MagicMock) as MockSelfHealing, \
+         patch("eva_core.main.SelfHealingService", return_value=mock_self_healing_instance), \
          patch("eva_core.services.llm.LLMService", new_callable=MagicMock), \
          patch("eva_core.services.memory.MemoryService", new_callable=MagicMock):
 
         from eva_core.main import app
 
-        # Configure the MockMQTT instance to be async-compatible
-        mock_mqtt_instance = MockMQTT.return_value
-        # Important: connect() must be awaitable
-        mock_mqtt_instance.connect = AsyncMock()
+        # Mock state objects
+        app.state.settings = MagicMock()
+        app.state.intent_router = MagicMock()
+        app.state.llm_service = MagicMock()
+        app.state.memory_service = MagicMock()
+        app.state.strategy_orchestrator = AsyncMock()
+        app.state.system_monitor = MagicMock()
 
-        # Configure SelfHealingService instance
-        mock_self_healing_instance = MockSelfHealing.return_value
-        # start_monitoring is started as a task, so it must be awaitable
-        mock_self_healing_instance.start_monitoring = AsyncMock()
-
-        # Configure Redis Client disconnect method which is awaited during shutdown
-        mock_redis_instance = MockRedisClient.return_value
-        mock_redis_instance.disconnect = AsyncMock()
-
-        # Patch app.state.mqtt before entering context just in case (though lifespan overwrites)
-        app.state.mqtt = mock_mqtt_instance
-        app.state.self_healing = mock_self_healing_instance
-
-        # Ensure strategy_orchestrator matches the mock if used
-        app.state.strategy_orchestrator = MagicMock()
+        # The lifespan will overwrite app.state.mqtt and app.state.self_healing
+        # with our pre-configured mocks
 
         with TestClient(app) as c:
             yield c
