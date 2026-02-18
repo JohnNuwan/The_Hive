@@ -110,7 +110,7 @@ async def lifespan(app: FastAPI):
     
     # Flush final avant arrêt
     if app.state.shadow:
-        count = app.state.shadow.manual_flush()
+        count = await app.state.shadow.manual_flush()
         logger.info(f"💾 Shadow Learning: {count} transitions saved on shutdown")
     
     logger.info("🛑 Arrêt EVA Lab")
@@ -238,7 +238,7 @@ async def flush_shadow():
     shadow: ShadowLearningService = app.state.shadow
     if not shadow:
         return {"status": "disabled"}
-    count = shadow.manual_flush()
+    count = await shadow.manual_flush()
     return {"status": "flushed", "transitions_written": count}
 
 

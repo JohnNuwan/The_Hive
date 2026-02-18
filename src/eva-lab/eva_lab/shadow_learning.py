@@ -27,6 +27,7 @@ import logging
 import asyncio
 import json
 import os
+import time
 from collections import deque
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional, Dict, Any
@@ -133,10 +134,11 @@ class ShadowBuffer:
             done=done,
         ))
 
-    def flush_to_disk(self, output_dir: str) -> int:
-        """Écrit toutes les transitions du buffer sur disque en format JSONL.
+    async def flush_to_disk(self, output_dir: str) -> int:
+        """Écrit toutes les transitions du buffer sur disque en format JSONL (Asynchrone).
 
-        Chaque flush crée un fichier horodaté. Le buffer est vidé après.
+        Chaque flush crée un fichier horodaté. Le buffer est vidé après la copie des données.
+        L'écriture disque est déportée dans un thread pour ne pas bloquer l'event loop.
 
         Args:
             output_dir: Répertoire de sortie pour les fichiers .jsonl.
@@ -147,6 +149,18 @@ class ShadowBuffer:
         if not self._buffer:
             return 0
 
+        # Atomic swap (O(1)) - remplace le buffer par un nouveau
+        transitions = self._buffer
+        self._buffer = deque(maxlen=self.max_size)
+
+        # Écriture disque (longue, dans un thread worker)
+        count = await asyncio.to_thread(self._flush_to_disk_sync, output_dir, transitions)
+
+        self._total_flushed += count
+        return count
+
+    def _flush_to_disk_sync(self, output_dir: str, transitions: deque) -> int:
+        """Méthode interne synchrone pour l'écriture disque."""
         os.makedirs(output_dir, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -156,13 +170,15 @@ class ShadowBuffer:
         count = 0
         try:
             with open(filepath, "w", encoding="utf-8") as f:
-                for transition in self._buffer:
+                for i, transition in enumerate(transitions):
                     json.dump(asdict(transition), f, ensure_ascii=False)
                     f.write("\n")
                     count += 1
 
-            self._total_flushed += count
-            self._buffer.clear()
+                    # Yield GIL periodically to avoid starving the event loop
+                    if i % 5000 == 0:
+                        time.sleep(0.001)
+
             logger.info(
                 f"[ShadowLearning] Flushed {count} transitions → {filepath}"
             )
@@ -336,17 +352,17 @@ class ShadowLearningService:
         )
         while True:
             await asyncio.sleep(interval_seconds)
-            count = self.buffer.flush_to_disk(self.data_dir)
+            count = await self.buffer.flush_to_disk(self.data_dir)
             if count > 0:
                 logger.info(f"[ShadowLearning] Auto-flush: {count} transitions saved")
 
-    def manual_flush(self) -> int:
-        """Force un flush immédiat du buffer.
+    async def manual_flush(self) -> int:
+        """Force un flush immédiat du buffer (Asynchrone).
 
         Returns:
             Nombre de transitions écrites.
         """
-        return self.buffer.flush_to_disk(self.data_dir)
+        return await self.buffer.flush_to_disk(self.data_dir)
 
     def get_stats(self) -> dict:
         """Retourne les statistiques du Shadow Learning.
