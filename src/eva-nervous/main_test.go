@@ -73,11 +73,13 @@ func TestGetSecretKey_Default(t *testing.T) {
 	// Ensure no env var set
 	t.Setenv("NERVOUS_SECRET_KEY", "")
 
-	key := getSecretKey()
-	expected := "insecure-dev-secret-change-me"
+	key, err := getSecretKey()
 
-	if key != expected {
-		t.Errorf("getSecretKey() default = %v, want %v", key, expected)
+	if err == nil {
+		t.Error("getSecretKey() should return error when NERVOUS_SECRET_KEY is not set")
+	}
+	if key != "" {
+		t.Errorf("getSecretKey() should return empty string on error, got %v", key)
 	}
 }
 
@@ -85,7 +87,11 @@ func TestGetSecretKey_EnvSet(t *testing.T) {
 	expected := "env-secret-key"
 	t.Setenv("NERVOUS_SECRET_KEY", expected)
 
-	key := getSecretKey()
+	key, err := getSecretKey()
+
+	if err != nil {
+		t.Errorf("getSecretKey() returned unexpected error: %v", err)
+	}
 
 	if key != expected {
 		t.Errorf("getSecretKey() with env set = %v, want %v", key, expected)

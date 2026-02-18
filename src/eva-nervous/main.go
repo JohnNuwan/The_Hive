@@ -116,8 +116,7 @@ type SwarmMessage struct {
 }
 
 // Canal 1 : DANGER — Priorité Absolue (latence <1ms visée)
-func listenDangerSignals(rdb *redis.Client) {
-	secretKey := getSecretKey()
+func listenDangerSignals(rdb *redis.Client, secretKey string) {
 	for {
 		pubsub := rdb.Subscribe(ctx, "danger_signal", "eva.sentinel.alert", "eva.kernel.emergency")
 		ch := pubsub.Channel()
@@ -160,8 +159,7 @@ func listenDangerSignals(rdb *redis.Client) {
 }
 
 // Canal 2 : TRADING — Haute priorité (Core → Risk Check → Banker)
-func listenTradeSignals(rdb *redis.Client) {
-	secretKey := getSecretKey()
+func listenTradeSignals(rdb *redis.Client, secretKey string) {
 	for {
 		pubsub := rdb.Subscribe(ctx, "trade_opportunity", "eva.core.trade_request")
 		ch := pubsub.Channel()
@@ -203,8 +201,7 @@ func listenTradeSignals(rdb *redis.Client) {
 }
 
 // Canal 3 : SWARM — Coordination inter-agents
-func listenSwarmEvents(rdb *redis.Client) {
-	secretKey := getSecretKey()
+func listenSwarmEvents(rdb *redis.Client, secretKey string) {
 	for {
 		pubsub := rdb.Subscribe(ctx, "eva.swarm.events", "eva.swarm.broadcast", "eva.swarm.drone_scale")
 		ch := pubsub.Channel()
@@ -381,13 +378,12 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-func getSecretKey() string {
+func getSecretKey() (string, error) {
 	secret := getEnv("NERVOUS_SECRET_KEY", "")
 	if secret == "" {
-		log.Println("⚠️ WARNING: NERVOUS_SECRET_KEY not set. Using insecure dev secret.")
-		return "insecure-dev-secret-change-me"
+		return "", fmt.Errorf("NERVOUS_SECRET_KEY not set")
 	}
-	return secret
+	return secret, nil
 }
 
 func generateHMAC(message string, secret string) string {
@@ -408,6 +404,11 @@ func main() {
 	fmt.Println("║  Router Haute Fréquence — THE HIVE       ║")
 	fmt.Println("╚══════════════════════════════════════════╝")
 
+	secretKey, err := getSecretKey()
+	if err != nil {
+		log.Fatalf("🚨 CRITICAL: %v. Cannot start Nervous System safely.", err)
+	}
+
 	rdb := createRedisClient()
 	waitForRedis(rdb)
 
@@ -415,10 +416,10 @@ func main() {
 	go startHealthServer()
 
 	// Canaux prioritaires (du plus critique au moins critique)
-	go listenDangerSignals(rdb)     // P0: Signaux de danger → Kill-Switch
-	go listenTradeSignals(rdb)      // P1: Opportunités trading → Banker
-	go listenSwarmEvents(rdb)       // P2: Coordination Swarm
-	go listenHeartbeats(rdb)        // Heartbeat monitoring
+	go listenDangerSignals(rdb, secretKey) // P0: Signaux de danger → Kill-Switch
+	go listenTradeSignals(rdb, secretKey)  // P1: Opportunités trading → Banker
+	go listenSwarmEvents(rdb, secretKey)   // P2: Coordination Swarm
+	go listenHeartbeats(rdb)               // Heartbeat monitoring
 
 	// Watchdog (détection d'agents morts)
 	go watchdogLoop(rdb)
