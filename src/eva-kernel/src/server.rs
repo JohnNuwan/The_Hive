@@ -8,9 +8,10 @@
 //! - Audit Trail (Black Box)
 
 use axum::{
-    extract::{Json, State},
-    http::StatusCode,
-    response::IntoResponse,
+    extract::{Json, Request, State},
+    http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
@@ -36,6 +37,7 @@ pub struct AppState {
     pub kill_switch: Arc<Mutex<KillSwitch>>,
     pub constitution: Arc<Mutex<Constitution>>,
     pub audit_trail: Arc<Mutex<AuditTrail>>,
+    pub kernel_secret_key: String,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -67,6 +69,22 @@ pub struct KillSwitchResponse {
 // ═══════════════════════════════════════════════════════════════════════════════
 // HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/// Middleware d'authentification par API Key
+async fn auth_middleware(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if let Some(key) = headers.get("X-EVA-KERNEL-KEY") {
+        if key == state.kernel_secret_key.as_str() {
+            return Ok(next.run(request).await);
+        }
+    }
+
+    Err(StatusCode::UNAUTHORIZED)
+}
 
 /// GET /health — Vérifie l'état opérationnel du Kernel
 pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -222,6 +240,22 @@ pub async fn get_audit_trail(State(state): State<AppState>) -> impl IntoResponse
 // LANCEMENT DU SERVEUR
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Crée le routeur Axum avec la configuration de sécurité
+pub fn create_router(state: AppState) -> Router {
+    let middleware = middleware::from_fn_with_state(state.clone(), auth_middleware);
+
+    Router::new()
+        // Routes protégées par authentification
+        .route("/validate", post(validate_trade))
+        .route("/kill-switch", get(get_kill_switch_status).post(manage_kill_switch))
+        .route("/constitution", get(get_constitution))
+        .route("/audit", get(get_audit_trail))
+        .route_layer(middleware)
+        // Routes publiques (Doivent être ajoutées APRES le layer pour ne pas être affectées)
+        .route("/health", get(health_check))
+        .with_state(state)
+}
+
 /// Démarre le serveur Axum du Kernel sur le port 8080
 pub async fn start_kernel_server(
     validator: Arc<Mutex<TradeValidator>>,
@@ -229,20 +263,18 @@ pub async fn start_kernel_server(
     constitution: Arc<Mutex<Constitution>>,
     audit_trail: Arc<Mutex<AuditTrail>>,
 ) {
+    let kernel_secret_key = std::env::var("EVA_KERNEL_SECRET_KEY")
+        .expect("CRITICAL: EVA_KERNEL_SECRET_KEY must be set");
+
     let state = AppState {
         validator,
         kill_switch,
         constitution,
         audit_trail,
+        kernel_secret_key,
     };
 
-    let app = Router::new()
-        .route("/health", get(health_check))
-        .route("/validate", post(validate_trade))
-        .route("/kill-switch", get(get_kill_switch_status).post(manage_kill_switch))
-        .route("/constitution", get(get_constitution))
-        .route("/audit", get(get_audit_trail))
-        .with_state(state);
+    let app = create_router(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
     info!("🛡️ EVA Kernel HTTP (Axum) listening on {}", addr);
@@ -254,4 +286,102 @@ pub async fn start_kernel_server(
     axum::serve(listener, app)
         .await
         .expect("Kernel HTTP server crashed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt; // for oneshot
+
+    #[tokio::test]
+    async fn test_health_check_public() {
+        let state = AppState {
+            validator: Arc::new(Mutex::new(TradeValidator::new(Constitution::default()))),
+            kill_switch: Arc::new(Mutex::new(KillSwitch::new(5.0))),
+            constitution: Arc::new(Mutex::new(Constitution::default())),
+            audit_trail: Arc::new(Mutex::new(AuditTrail::new(100))),
+            kernel_secret_key: "test_key".to_string(),
+        };
+
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_validate_trade_unauthorized() {
+        let state = AppState {
+            validator: Arc::new(Mutex::new(TradeValidator::new(Constitution::default()))),
+            kill_switch: Arc::new(Mutex::new(KillSwitch::new(5.0))),
+            constitution: Arc::new(Mutex::new(Constitution::default())),
+            audit_trail: Arc::new(Mutex::new(AuditTrail::new(100))),
+            kernel_secret_key: "test_key".to_string(),
+        };
+
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}")) // Body doesn't matter for auth check
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_trade_authorized() {
+        let state = AppState {
+            validator: Arc::new(Mutex::new(TradeValidator::new(Constitution::default()))),
+            kill_switch: Arc::new(Mutex::new(KillSwitch::new(5.0))),
+            constitution: Arc::new(Mutex::new(Constitution::default())),
+            audit_trail: Arc::new(Mutex::new(AuditTrail::new(100))),
+            kernel_secret_key: "test_secret_123".to_string(),
+        };
+
+        let app = create_router(state);
+
+        let request_body = serde_json::to_string(&TradeValidationRequest {
+            id: uuid::Uuid::new_v4(),
+            symbol: "BTCUSD".to_string(),
+            action: "BUY".to_string(),
+            volume: 0.1,
+            stop_loss: Some(49000.0),
+            take_profit: Some(51000.0),
+            current_price: 50000.0,
+            account_balance: 100000.0,
+            open_positions_count: 0,
+            daily_drawdown_percent: 0.0,
+        }).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/validate")
+                    .header("content-type", "application/json")
+                    .header("X-EVA-KERNEL-KEY", "test_secret_123")
+                    .body(Body::from(request_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 }
