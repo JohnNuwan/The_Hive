@@ -269,10 +269,11 @@ class WarRoomSession:
         context = "\n".join(context_parts)
 
         # Import local pour éviter les dépendances circulaires
-        from shared import ChatMessage, Role as MsgRole
+        from shared import ChatMessage, MessageRole as MsgRole
 
         messages = [
             ChatMessage(
+                session_id=self.session_id,
                 role=MsgRole.USER,
                 content=(
                     f"Contexte du débat (Tour {round_number}):\n{context}\n\n"
@@ -313,10 +314,11 @@ class WarRoomSession:
             for e in self.transcript
         )
 
-        from shared import ChatMessage, Role as MsgRole
+        from shared import ChatMessage, MessageRole as MsgRole
 
         messages = [
             ChatMessage(
+                session_id=self.session_id,
                 role=MsgRole.USER,
                 content=(
                     f"TRANSCRIPT DU DÉBAT:\n{transcript_text}\n\n"

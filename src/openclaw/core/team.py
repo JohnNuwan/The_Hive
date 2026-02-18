@@ -24,7 +24,8 @@ from typing import List, Dict, Any, Optional
 from .agent import OpenClawAgent
 from .war_room import WarRoomSession, WarRoomVerdict
 from .war_room_prompts import WarRoomType
-from shared import ChatMessage, Role
+from shared import ChatMessage, MessageRole as Role
+from openclaw.skills.registry import SKILL_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class AgentTeam:
             name="Executor",
             role="coder",
             goal="Exécuter chaque étape avec précision en utilisant les Skills.",
+            tools=list(SKILL_REGISTRY.keys()),
         )
 
     async def run(self, user_request: str) -> str:
