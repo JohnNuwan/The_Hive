@@ -16,6 +16,7 @@ Architecture :
 
 import asyncio
 import logging
+import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
@@ -462,7 +463,6 @@ async def trading_status() -> dict[str, Any]:
     """
     Agrège les données de trading provenant de l'expert Banker.
     """
-    import httpx
     settings: Settings = app.state.settings
     banker_url = f"http://{settings.banker_api_host}:{settings.banker_api_port}"
     
@@ -503,7 +503,6 @@ async def system_status() -> dict[str, Any]:
     """
     Agrège les données de santé hardware provenant de l'expert Sentinel.
     """
-    import httpx
     settings: Settings = app.state.settings
     sentinel_url = f"http://localhost:{settings.sentinel_api_port}"
     
