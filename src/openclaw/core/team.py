@@ -52,6 +52,13 @@ class AgentTeam:
             name="Executor",
             role="coder",
             goal="Exécuter chaque étape avec précision en utilisant les Skills.",
+            tools=[
+                "fs_read",
+                "fs_list",
+                "web_search",
+                "get_public_apis",
+                "discover_public_apis"
+            ]
         )
 
     async def run(self, user_request: str) -> str:
