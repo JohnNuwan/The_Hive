@@ -42,12 +42,6 @@ export default defineConfig({
                 configure: silentProxy,
             },
             // ═══ SECURITY & INTELLIGENCE ═══
-            '/api/sentinel': {
-                target: 'http://localhost:8200',
-                changeOrigin: true,
-                rewrite: (path) => path.replace(/^\/api\/sentinel/, ''),
-                configure: silentProxy,
-            },
             '/api/shadow': {
                 target: 'http://localhost:8900',
                 changeOrigin: true,
