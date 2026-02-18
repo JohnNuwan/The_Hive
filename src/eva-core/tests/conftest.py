@@ -43,29 +43,25 @@ def auth_headers():
 
 @pytest.fixture
 def client():
-    # Patch dependencies in lifespan or global scope
+    # Prepare explicit mock instances
+    mock_redis_client = MagicMock()
+    mock_redis_client.disconnect = AsyncMock()
+
+    mock_mqtt_client = MagicMock()
+    mock_mqtt_client.connect = AsyncMock()
+
+    mock_self_healing = MagicMock()
+    mock_self_healing.start_monitoring = AsyncMock()
+
+    # Patch dependencies using return_value for consistency
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
-         patch("eva_core.main.get_redis_client", new_callable=MagicMock) as MockRedis, \
-         patch("eva_core.main.EVAMQTTClient", new_callable=MagicMock) as MockMQTT, \
+         patch("eva_core.main.get_redis_client", return_value=mock_redis_client), \
+         patch("eva_core.main.EVAMQTTClient", return_value=mock_mqtt_client), \
          patch("eva_core.main.StrategyOrchestrator", new_callable=MagicMock), \
-         patch("eva_core.main.SelfHealingService", new_callable=MagicMock) as MockSelfHealing, \
+         patch("eva_core.main.SelfHealingService", return_value=mock_self_healing), \
          patch("eva_core.services.llm.LLMService", new_callable=MagicMock), \
          patch("eva_core.services.memory.MemoryService", new_callable=MagicMock), \
-         patch("shared.internal_auth.InternalAuth.verify_token", return_value={"src": "test_agent"}): # Mock token verification
-
-        # Configure mocks to return AsyncMock for async methods
-
-        # Redis Client setup
-        redis_instance = MockRedis.return_value
-        redis_instance.disconnect = AsyncMock()
-
-        # MQTT Client setup
-        mqtt_instance = MockMQTT.return_value
-        mqtt_instance.connect = AsyncMock()
-
-        # Self Healing Service setup (for asyncio.create_task)
-        self_healing_instance = MockSelfHealing.return_value
-        self_healing_instance.start_monitoring = AsyncMock()
+         patch("shared.internal_auth.InternalAuth.verify_token", return_value={"src": "test_agent"}):
 
         from eva_core.main import app
         # Mock state objects
@@ -73,9 +69,9 @@ def client():
         app.state.intent_router = MagicMock()
         app.state.llm_service = MagicMock()
         app.state.memory_service = MagicMock()
-        app.state.mqtt = mqtt_instance
+        app.state.mqtt = mock_mqtt_client
         app.state.strategy_orchestrator = AsyncMock()
-        app.state.self_healing = self_healing_instance
+        app.state.self_healing = mock_self_healing
         app.state.system_monitor = MagicMock()
 
         with TestClient(app) as c:
