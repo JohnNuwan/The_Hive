@@ -1,6 +1,12 @@
 import pytest
 from unittest.mock import MagicMock
 from eva_core.main import app
+from shared.internal_auth import InternalAuth
+
+@pytest.fixture
+def auth_headers():
+    token = InternalAuth.generate_token("test-core")
+    return {"X-Hive-Internal-Token": token}
 
 def test_circuit_breaker_status_nominal(client, auth_headers):
     """
@@ -9,6 +15,10 @@ def test_circuit_breaker_status_nominal(client, auth_headers):
     """
     # Ensure self_healing.circuit_breaker is None
     # app.state.self_healing is a MagicMock from conftest.py
+    # We need to set it on the mock instance that is actually used by the app
+    # In conftest, app.state.self_healing is set to mock_healing_instance
+
+    # We can access it via app.state.self_healing
     app.state.self_healing.circuit_breaker = None
 
     response = client.get("/circuit-breaker/status", headers=auth_headers)
