@@ -33,17 +33,33 @@ if "neo4j" not in sys.modules:
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, patch
+from shared.internal_auth import InternalAuth
+
+@pytest.fixture
+def auth_headers():
+    token = InternalAuth.generate_token("test-core")
+    return {"X-Hive-Internal-Token": token}
 
 @pytest.fixture
 def client():
     # Patch dependencies in lifespan or global scope
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
-         patch("eva_core.main.get_redis_client", new_callable=MagicMock), \
-         patch("eva_core.main.EVAMQTTClient", new_callable=MagicMock), \
+         patch("eva_core.main.get_redis_client", new_callable=MagicMock) as MockGetRedis, \
+         patch("eva_core.main.EVAMQTTClient") as MockMQTTClient, \
          patch("eva_core.main.StrategyOrchestrator", new_callable=MagicMock), \
-         patch("eva_core.main.SelfHealingService", new_callable=MagicMock), \
+         patch("eva_core.main.SelfHealingService", new_callable=MagicMock) as MockSelfHealing, \
          patch("eva_core.services.llm.LLMService", new_callable=MagicMock), \
-         patch("eva_core.services.memory.MemoryService", new_callable=MagicMock):
+         patch("eva_core.services.memory.MemoryService", new_callable=MagicMock), \
+         patch("eva_core.main.SystemMonitor", new_callable=MagicMock):
+
+        # Make Redis disconnect awaitable
+        MockGetRedis.return_value.disconnect = AsyncMock()
+
+        # Make MQTT connect awaitable
+        MockMQTTClient.return_value.connect = AsyncMock()
+
+        # Make SelfHealingService start_monitoring awaitable
+        MockSelfHealing.return_value.start_monitoring = AsyncMock()
 
         from eva_core.main import app
         # Mock state objects
