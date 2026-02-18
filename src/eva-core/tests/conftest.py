@@ -35,15 +35,27 @@ from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, patch
 
 @pytest.fixture
+def auth_headers():
+    return {"X-Hive-Internal-Token": "valid-test-token"}
+
+@pytest.fixture
 def client():
     # Patch dependencies in lifespan or global scope
     with patch("eva_core.main.init_redis", new_callable=AsyncMock), \
-         patch("eva_core.main.get_redis_client", new_callable=MagicMock), \
-         patch("eva_core.main.EVAMQTTClient", new_callable=MagicMock), \
+         patch("eva_core.main.get_redis_client", new_callable=MagicMock) as MockGetRedis, \
+         patch("eva_core.main.EVAMQTTClient") as MockMQTT, \
          patch("eva_core.main.StrategyOrchestrator", new_callable=MagicMock), \
-         patch("eva_core.main.SelfHealingService", new_callable=MagicMock), \
+         patch("eva_core.main.SelfHealingService") as MockHealing, \
          patch("eva_core.services.llm.LLMService", new_callable=MagicMock), \
-         patch("eva_core.services.memory.MemoryService", new_callable=MagicMock):
+         patch("eva_core.services.memory.MemoryService", new_callable=MagicMock), \
+         patch("shared.internal_auth.InternalAuth.verify_token", return_value={"agent_id": "test-agent", "role": "admin"}):
+
+        # Configure instance mocks for async methods
+        MockMQTT.return_value.connect = AsyncMock()
+        MockHealing.return_value.start_monitoring = AsyncMock()
+
+        # Configure redis_client.disconnect to be async
+        MockGetRedis.return_value.disconnect = AsyncMock()
 
         from eva_core.main import app
         # Mock state objects
@@ -51,9 +63,9 @@ def client():
         app.state.intent_router = MagicMock()
         app.state.llm_service = MagicMock()
         app.state.memory_service = MagicMock()
-        app.state.mqtt = AsyncMock()
-        app.state.strategy_orchestrator = AsyncMock()
-        app.state.self_healing = AsyncMock()
+        app.state.mqtt = MockMQTT.return_value
+        app.state.strategy_orchestrator = MagicMock()
+        app.state.self_healing = MockHealing.return_value
         app.state.system_monitor = MagicMock()
 
         with TestClient(app) as c:
