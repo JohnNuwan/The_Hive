@@ -7,12 +7,12 @@ from unittest.mock import MagicMock, AsyncMock, patch
 # Define Mocks
 mock_shared = MagicMock()
 
-# Mock IntentType as a class that returns the value passed to constructor
-# replicating Enum-like behavior roughly for this usage
+# Mock IntentType as a class with attributes
 class MockIntentType:
     CHAT = "CHAT"
     TRADE = "TRADE"
     def __new__(cls, value):
+        # Allow instantiation with a value if needed, or just return value
         return value
 
 class MockIntent:
@@ -88,6 +88,7 @@ class TestStrategyOrchestrator(unittest.IsolatedAsyncioTestCase):
         orchestrator = StrategyOrchestrator()
         intent = await orchestrator.route_request("hello")
 
+        # This will use IntentType.CHAT
         self.assertEqual(intent.intent_type, MockIntentType.CHAT)
         self.assertEqual(intent.target_expert, "core")
         self.assertEqual(intent.confidence, 0.1)
