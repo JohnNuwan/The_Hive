@@ -82,13 +82,15 @@ class Strategist:
                 }
             }
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=2.0) as resp:
+                async with session.post(url, json=payload, timeout=5.0) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         gnn_bias = data.get("bias", "NEUTRAL")
                         gnn_confidence = data.get("confidence", 0.0)
+                    else:
+                        logger.warning(f"⚠️ GNN a retourné HTTP {resp.status}")
         except Exception as e:
-            logger.warning(f"⚠️ Impossible de joindre le GNN sur le Lab: {e}")
+            logger.warning(f"⚠️ Impossible de joindre le GNN sur le Lab: {e.__class__.__name__} - {e}")
             
         # 7. Merge Biases (If GNN is confident, it overrides/validates)
         final_bias = cortex_bias

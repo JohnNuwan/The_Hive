@@ -413,7 +413,8 @@ class AutoTradingEngine:
         try:
             import aiohttp
             import os
-            accountant_host = os.getenv("ACCOUNTANT_HOST", "localhost")
+            # Use LAB_HOST as a fallback since Accountant runs on the same Proxmox server
+            accountant_host = os.getenv("ACCOUNTANT_HOST", os.getenv("LAB_HOST", "localhost"))
             url = f"http://{accountant_host}:8500/pnl"
             
             # Re-fetch latest balance for true equity tracking
@@ -429,7 +430,7 @@ class AutoTradingEngine:
             }
             
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=2.0) as resp:
+                async with session.post(url, json=payload, timeout=5.0) as resp:
                      if resp.status == 200:
                          logger.debug(f"P&L of ${profit:.2f} properly accounted.")
                      else:
@@ -438,29 +439,30 @@ class AutoTradingEngine:
             logger.warning(f"Failed to reach Accountant: {e}")
 
     async def _send_pnl_feedback(self, symbol: str, action: str, price: float, pnl: float):
-        """Envoie le P&L réel d'une transaction fermée au Lab pour micro-entraînement"""
+        """Envoie le P&L réel d'une transaction fermée au Lab pour Shadow Learning"""
         try:
             import aiohttp
             import os
             lab_host = os.getenv("LAB_HOST", "localhost")
-            url = f"http://{lab_host}:8000/feedback/pnl"
+            url = f"http://{lab_host}:8600/shadow/record"
             
             payload = {
                 "symbol": symbol,
                 "action": action,
                 "price": price,
-                "pnl": pnl
+                "volume": 0.01,
+                "pnl": pnl,
+                "done": True
             }
             
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=2.0) as resp:
+                async with session.post(url, json=payload, timeout=5.0) as resp:
                      if resp.status == 200:
                          logger.debug(f"P&L feedback for {symbol} sent to Lab.")
                      else:
                          logger.warning(f"Lab returned HTTP {resp.status} for P&L feedback.")
         except Exception as e:
             logger.warning(f"Failed to send P&L feedback to Lab: {e}")
-
     # ═══════════════════════════════════════════════════════════════════════════
     # MAIN DRIFT LOOP
     # ═══════════════════════════════════════════════════════════════════════════
@@ -703,7 +705,7 @@ class AutoTradingEngine:
                             token = InternalAuth.generate_token("banker")
                             
                             async with aiohttp.ClientSession() as session:
-                                async with session.post(lab_url, json=observation, headers={"X-Hive-Internal-Token": token}, timeout=2.0) as resp:
+                                async with session.post(lab_url, json=observation, headers={"X-Hive-Internal-Token": token}, timeout=5.0) as resp:
                                     if resp.status == 200:
                                         result = await resp.json()
                                         mz_action = result.get("action", 0)
@@ -719,10 +721,14 @@ class AutoTradingEngine:
                                             
                                         # Strict neural-network enforcement in production.
                                         # No Epsilon-Greedy, no Bias fallback loops allowing random entries.
+                                    else:
+                                        logger.error(f"Dreamer Inference failed: HTTP {resp.status}")
+                                        action = None
+                                        comment = f"Lab error (HTTP {resp.status})"
                                         
                         except Exception as e_lab:
                             # If connection to Lab completely fails, DO NOT trade. HOLD explicitly.
-                            logger.error(f"Dreamer Inference failed for {symbol}: {e_lab}. Holding.")
+                            logger.error(f"Dreamer Inference failed for {symbol}: {e_lab.__class__.__name__} - {e_lab}. Holding.")
                             action = None
                             comment = "Error connecting to Lab"
 
