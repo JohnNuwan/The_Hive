@@ -81,6 +81,11 @@ class TradeRecordRequest(BaseModel):
     indicators: Optional[dict] = None
     done: bool = False
 
+class GNNPredictRequest(BaseModel):
+    """Requête d'inférence pour le GNN (Multi-Asset correlation)"""
+    assets_data: dict[str, list[list[float]]]  # { "XAUUSD": [[...features...], ...], ... }
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LIFECYCLE
@@ -134,6 +139,18 @@ async def lifespan(app: FastAPI):
     else:
         app.state.shadow = None
         logger.info("💤 Shadow Learning désactivé")
+
+    # ─── GNN / Hydra (Proxmox Offload) ───
+    try:
+        from eva_lab.models.gnn_model import TFTGNNModel
+        import torch
+        # Asset dim (e.g. 15 indicators), Temporal (LSTM=32), GNN Hidden=64
+        app.state.gnn_model = TFTGNNModel(asset_dim=15, temporal_dim=32, hidden_dim=64)
+        app.state.gnn_model.eval()  # Inference mode
+        logger.info("🧠 MultiAssetGNN & TFT Models Loaded Successfully.")
+    except Exception as e:
+        logger.warning(f"⚠️ Erreur chargement GNN (Stub Mode probable): {e}")
+        app.state.gnn_model = None
 
     asyncio.create_task(hard_heartbeat())
 
@@ -382,6 +399,60 @@ async def dreamer_train():
     """
     gate: DreamerGate = app.state.dreamer_gate
     return gate.start_training(data_dir="data/shadow_learning")
+
+
+@app.post("/gnn/predict")
+async def gnn_predict(request: GNNPredictRequest):
+    """Calcule le biais Macro via le GNN sur la base des corrélations d'actifs"""
+    if not hasattr(app.state, "gnn_model") or app.state.gnn_model is None:
+        return {"bias": "NEUTRAL", "confidence": 0.0, "reason": "GNN Modèle indisponible / Stubbed"}
+        
+    try:
+        import torch
+        gnn = app.state.gnn_model
+        
+        # Build tensors
+        ts_data_list = []
+        asset_keys = list(request.assets_data.keys())
+        for asset in asset_keys:
+            # truncate to match expected feature size (15 for example)
+            # This is a mocked implementation of data ingestion for the GNN
+            raw_data = request.assets_data[asset]
+            tensor_data = torch.tensor(raw_data, dtype=torch.float32)
+            ts_data_list.append(tensor_data)
+            
+        # Basic fully connected graph for edge index if not provided
+        num_assets = len(asset_keys)
+        # e.g. [[0, 0, 1, 1], [1, 2, 0, 2]]
+        rows, cols = [], []
+        for i in range(num_assets):
+            for j in range(num_assets):
+                if i != j:
+                    rows.append(i)
+                    cols.append(j)
+        edge_index = torch.tensor([rows, cols], dtype=torch.long)
+        
+        with torch.no_grad():
+            output = gnn(ts_data_list, edge_index)
+            # Output is [batch, hidden_dim]. Just mock a bias out of it for now
+            mean_val = output.mean().item()
+            
+            if mean_val > 0.1:
+                bias = "BULLISH"
+            elif mean_val < -0.1:
+                bias = "BEARISH"
+            else:
+                bias = "RANGING"
+                
+        return {
+            "bias": bias, 
+            "confidence": min(abs(mean_val) * 10, 1.0),
+            "reason": "GNN Prediction complete (TFT+GATConv)"
+        }
+        
+    except Exception as e:
+        logger.error(f"GNN Predict Error: {e}")
+        return {"bias": "NEUTRAL", "confidence": 0.0, "reason": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

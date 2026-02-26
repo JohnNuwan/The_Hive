@@ -57,11 +57,16 @@ class TelegramClient:
         """Synchronous wrapper for sending messages (fire & forget)."""
         if not self.enabled: return
         try:
-            # Create a detached task if loop is running, else run
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self.send_message(message))
-            else:
+            loop = asyncio.get_running_loop()
+            # We're inside an async context — schedule as a task
+            loop.create_task(self.send_message(message))
+        except RuntimeError:
+            # No running loop (e.g. shutting down or called from sync context)
+            try:
+                loop = asyncio.new_event_loop()
                 loop.run_until_complete(self.send_message(message))
+                loop.close()
+            except Exception:
+                pass  # Silently fail during shutdown
         except Exception as e:
             logger.error(f"Telegram Sync Error: {e}")

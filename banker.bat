@@ -10,5 +10,5 @@ if %errorlevel% neq 0 (
 
 set PYTHONPATH=%CD%\src\shared;%CD%\src\eva-banker
 set MOCK_MT5=false
-venv\Scripts\python -m uvicorn eva_banker.main:app --host 0.0.0.0 --port 8100
+venv\Scripts\python -m uvicorn eva_banker.main:app --host 0.0.0.0 --port 8100 --env-file .env
 pause

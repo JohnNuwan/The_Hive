@@ -2,6 +2,14 @@
  * THE HIVE — API Service
  */
 
+// ═══ HELPERS ═══
+function uuidv4() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+        const r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+}
+
 
 
 // ═══ AUTH HELPERS ═══
@@ -222,7 +230,10 @@ export async function sendChatMessage(message: string, sessionId: string, image?
 }
 
 export async function createSession(): Promise<{ session_id: string }> {
-    return safeFetch('/api/core/session', { session_id: (typeof window !== 'undefined' && window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : '00000000-0000-0000-0000-000000000000' })
+    const session_id = (typeof window !== 'undefined' && window.crypto && (window.crypto as any).randomUUID)
+        ? (window.crypto as any).randomUUID()
+        : uuidv4()
+    return safeFetch('/api/core/session', { session_id })
 }
 
 

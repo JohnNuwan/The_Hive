@@ -9,7 +9,9 @@ dependencies = [
     "pandas",
     "python-dotenv",
     "jax",
-    "jaxlib"
+    "jaxlib",
+    "torch",
+    "torch-geometric"
 ]
 
 [build-system]

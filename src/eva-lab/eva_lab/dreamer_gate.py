@@ -244,6 +244,7 @@ class DreamerGate:
 
                 result = agent.infer_action(obs_vec)
                 return {
+                    "action": result["action"], # CRITICAL FIX: Pass int action to Brain
                     "prediction": result["action_name"],
                     "confidence": result["confidence"],
                     "policy": result["policy"],
@@ -261,17 +262,22 @@ class DreamerGate:
         price = observation.get("price", 0.0)
         rsi = observation.get("indicators", {}).get("RSI", 50.0)
 
+        action_int = 0 # HOLD
         if rsi < 30:
             prediction = "BULLISH_REVERSAL"
             confidence = 0.75
+            action_int = 1 # BUY
         elif rsi > 70:
             prediction = "BEARISH_REVERSAL"
             confidence = 0.75
+            action_int = 2 # SELL
         else:
             prediction = "CONSOLIDATION"
             confidence = 0.50
+            action_int = 0 # HOLD
 
         return {
+            "action": action_int, # CRITICAL FIX
             "prediction": prediction,
             "confidence": confidence,
             "price_input": price,

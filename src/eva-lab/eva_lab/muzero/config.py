@@ -20,11 +20,11 @@ class MuZeroConfigV3:
     """Hunger Mode V3.1 — chase big wins, fear losses just as much."""
 
     def __init__(self, **overrides):
-        # ═══ Network Architecture ═══
+        # ═══ Network Architecture (EXTREME SCALE) ═══
         self.observation_shape = (32,)  # Adjusted for current features (Price + Vol + Indicators)
         self.action_space_size = 5       # Hold, Buy, Sell, Split, Close
-        self.hidden_state_size = 64
-        self.network_hidden_dims = [256, 256]
+        self.hidden_state_size = 256
+        self.network_hidden_dims = [512, 512, 512]
 
         # ═══ Symbols (Multi-Asset) ═══
         self.symbols = [
@@ -34,18 +34,18 @@ class MuZeroConfigV3:
             "GER40.cash", "US100.cash",
         ]
 
-        # ═══ Training — Aggressive ═══
-        self.batch_size = 128
+        # ═══ Training — Aggressive (RTX 3090 Optimized) ═══
+        self.batch_size = 32
         self.learning_rate = 5e-5
         self.weight_decay = 1e-4
         self.momentum = 0.9
-        self.training_steps = 30_000
-        self.checkpoint_interval = 100
+        self.training_steps = 100_000
+        self.checkpoint_interval = 250
         self.num_unroll_steps = 5
         self.td_steps = 10
 
         # ═══ MCTS ═══
-        self.num_simulations = 150
+        self.num_simulations = 50
         self.discount = 0.99
         self.root_dirichlet_alpha = 0.3
         self.root_exploration_fraction = 0.50  # Electrochoc V3.1

@@ -1,17 +1,18 @@
-FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.1.2-cuda11.8-cudnn8-devel
 
 WORKDIR /app
 
-# Install JAX with CUDA support
-RUN pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-
-# Install additional research dependencies
-RUN pip install --no-cache-dir \
-    tensorflow-probability \
-    dm-haiku \
-    optax \
-    chex \
-    distrax \
+# Install JAX with CUDA support explicitly locking version, alongside other dependencies
+RUN pip install --no-cache-dir --upgrade \
+    jax==0.4.23 \
+    jaxlib==0.4.23+cuda11.cudnn86 \
+    -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html \
+    tensorflow-probability==0.23.0 \
+    dm-haiku==0.0.11 \
+    optax==0.1.7 \
+    chex==0.1.85 \
+    distrax==0.1.5 \
+    "scipy<1.13" \
     gymnasium
 
 # Copy shared library

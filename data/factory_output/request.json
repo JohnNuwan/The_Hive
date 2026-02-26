@@ -1,0 +1,5 @@
+{
+    "prompt": "Crée un scraper minimaliste en Python avec requests et BeautifulSoup4 qui extrait les 5 premiers articles de HackerNews. Le script doit imprimer les titres et les liens. Pas de def_main si ce n'est pas nécessaire.",
+    "filename": "hn_scraper.py",
+    "language": "python"
+}

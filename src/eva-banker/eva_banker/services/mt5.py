@@ -258,51 +258,101 @@ class MT5Service:
             "time": tick.time
         }
 
+    def _get_deviation(self, symbol: str) -> int:
+        """Retourne la déviation (slippage) recommandée selon la volatilité de l'actif."""
+        if any(v in symbol.upper() for v in ["XAU", "BTC", "US30", "NAS100", "GER40"]):
+            return 50  # 5 pips pour les actifs volatils
+        return 20  # 2 pips par défaut pour le Forex
+
     async def execute_order(self, order: TradeOrder) -> dict[str, Any]:
-        """Exécute un ordre de trading"""
+        """Exécute un ordre de trading avec gestion des Requotes et Slippage."""
         if self.mock_mode:
             return await self._execute_mock_order(order)
 
-        # Préparation de la requête MT5
         symbol_info = await asyncio.to_thread(mt5.symbol_info, order.symbol)
         if symbol_info is None:
             return {"success": False, "message": f"Symbole {order.symbol} non trouvé"}
 
-        price = await asyncio.to_thread(mt5.symbol_info_tick, order.symbol)
-        if price is None:
-            return {"success": False, "message": "Prix non disponible"}
+        deviation = self._get_deviation(order.symbol)
+        
+        # Retry Loop pour gérer les Requotes/Busy terminal
+        for attempt in range(3):
+            price = await asyncio.to_thread(mt5.symbol_info_tick, order.symbol)
+            if price is None:
+                await asyncio.sleep(0.5)
+                continue
+                
+            # --- NEW (Sprint 10): Dynamic Spread Filter ---
+            # Mesure du spread actuel en points (tick_size dépendant)
+            current_spread = (price.ask - price.bid) / mt5.symbol_info(order.symbol).point
+            
+            # Limites de spread (Valeurs empiriques max)
+            max_spread = 25 # Forex default (2.5 pips)
+            sym = order.symbol.upper()
+            if "XAU" in sym:
+                max_spread = 40 # Or: 40 points = 4 pips ($0.40)
+            elif "US30" in sym or "NAS100" in sym or "GER40" in sym:
+                max_spread = 60 # Indices: 60 points
+                
+            if current_spread > max_spread:
+                logger.warning(f"❌ Spread trop élevé sur {order.symbol}: {current_spread:.1f} > {max_spread}. Ordre avorté.")
+                return {
+                    "success": False,
+                    "message": f"Échec Sécurité: Spread ({current_spread:.1f} pts) > Max autorisé ({max_spread} pts).",
+                    "retcode": 99999, # Code d'erreur interne
+                }
+            # ---------------------------------------------
 
-        order_type = mt5.ORDER_TYPE_BUY if order.action == TradeAction.BUY else mt5.ORDER_TYPE_SELL
-        exec_price = price.ask if order.action == TradeAction.BUY else price.bid
+            order_type = mt5.ORDER_TYPE_BUY if order.action == TradeAction.BUY else mt5.ORDER_TYPE_SELL
+            exec_price = price.ask if order.action == TradeAction.BUY else price.bid
 
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": order.symbol,
-            "volume": float(order.volume),
-            "type": order_type,
-            "price": exec_price,
-            "sl": float(order.stop_loss_price) if order.stop_loss_price else 0.0,
-            "tp": float(order.take_profit_price) if order.take_profit_price else 0.0,
-            "deviation": 10,
-            "magic": order.magic_number,
-            "comment": order.comment or "EVA Banker",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
+            # Sanitize comment
+            raw_comment = order.comment or "EVA"
+            safe_comment = "".join(c for c in raw_comment if c.isalnum() or c in " -_.")[:31]
+            if not safe_comment: safe_comment = "EVA"
 
-        result = await asyncio.to_thread(mt5.order_send, request)
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            return {
-                "success": False,
-                "message": f"Erreur MT5: {result.comment}",
-                "retcode": result.retcode,
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": order.symbol,
+                "volume": float(order.volume),
+                "type": order_type,
+                "price": exec_price,
+                "sl": float(order.stop_loss_price) if order.stop_loss_price else 0.0,
+                "tp": float(order.take_profit_price) if order.take_profit_price else 0.0,
+                "deviation": deviation,
+                "magic": order.magic_number,
+                "comment": safe_comment,
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
             }
 
-        return {
-            "success": True,
-            "ticket": result.order,
-            "message": f"Ordre exécuté: {order.action.value} {order.volume} {order.symbol}",
-        }
+            result = await asyncio.to_thread(mt5.order_send, request)
+            
+            if result is None:
+                logger.warning(f"MT5 order_send returned None for {order.symbol} (Attempt {attempt+1})")
+                await asyncio.sleep(0.5)
+                continue
+
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                return {
+                    "success": True,
+                    "ticket": result.order,
+                    "message": f"Ordre exécuté: {order.action.value} {order.volume} {order.symbol} (Att: {attempt+1})",
+                }
+            
+            # Requotes (10004) ou Request Rejected (10006) ou Price Changed (10021)
+            if result.retcode in [10004, 10006, 10021]:
+                logger.info(f"Retrying order {order.symbol} due to {result.comment} (Retcode: {result.retcode})")
+                await asyncio.sleep(0.5)
+                continue
+            else:
+                return {
+                    "success": False,
+                    "message": f"Erreur MT5: {result.comment}",
+                    "retcode": result.retcode,
+                }
+
+        return {"success": False, "message": "Échec de l'ordre après 3 tentatives (Slippage/Requotes)"}
 
     async def close_position(self, ticket: int) -> dict[str, Any]:
         """Ferme une position par son ticket"""
@@ -328,34 +378,47 @@ class MT5Service:
 
         pos = position[0]
         close_type = mt5.ORDER_TYPE_SELL if pos.type == 0 else mt5.ORDER_TYPE_BUY
-        price = await asyncio.to_thread(mt5.symbol_info_tick, pos.symbol)
-        close_price = price.bid if pos.type == 0 else price.ask
+        deviation = self._get_deviation(pos.symbol)
+        
+        for attempt in range(3):
+            price = await asyncio.to_thread(mt5.symbol_info_tick, pos.symbol)
+            if price is None:
+                await asyncio.sleep(0.5)
+                continue
+                
+            close_price = price.bid if pos.type == 0 else price.ask
 
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": pos.symbol,
-            "volume": pos.volume,
-            "type": close_type,
-            "position": ticket,
-            "price": close_price,
-            "deviation": 10,
-            "magic": pos.magic,
-            "comment": "EVA Close",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": pos.symbol,
+                "volume": pos.volume,
+                "type": close_type,
+                "position": ticket,
+                "price": close_price,
+                "deviation": deviation,
+                "magic": pos.magic,
+                "comment": "EVA Close",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
 
-        result = await asyncio.to_thread(mt5.order_send, request)
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            return {"success": False, "message": f"Erreur fermeture: {result.comment}"}
+            result = await asyncio.to_thread(mt5.order_send, request)
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                return {
+                    "success": True, 
+                    "ticket": ticket, 
+                    "message": f"Position fermée (Att: {attempt+1})",
+                    "profit": pos.profit,
+                    "symbol": pos.symbol
+                }
+            
+            if result.retcode in [10004, 10006, 10021]:
+                await asyncio.sleep(0.5)
+                continue
+            else:
+                return {"success": False, "message": f"Erreur fermeture: {result.comment}"}
 
-        return {
-            "success": True, 
-            "ticket": ticket, 
-            "message": "Position fermée",
-            "profit": pos.profit,
-            "symbol": pos.symbol
-        }
+        return {"success": False, "message": "Échec de fermeture après 3 tentatives (Slippage/Requotes)"}
 
     async def modify_position(self, ticket: int, sl: float = 0.0, tp: float = 0.0) -> dict[str, Any]:
         """Modifie le SL/TP d'une position"""
@@ -420,25 +483,57 @@ class MT5Service:
     async def execute_skill(self, skill, order: TradeOrder) -> dict[str, Any]:
         """
         Execute un ordre en utilisant une compétence (Skill) spécifique.
-
         Dispatche l'exécution en fonction du type de skill sélectionné
         par le Manager (niveau haut de l'architecture hiérarchique SPlaTES).
-        En mode lite, délègue simplement à execute_order().
-
-        Args:
-            skill: Le type de compétence à utiliser (SkilledBehavior enum).
-            order: L'ordre de trading à exécuter.
-
-        Returns:
-            dict[str, Any]: Résultat de l'exécution avec 'success', 'ticket', 'message'.
         """
-        logger.info(f"Exécution via skill: {skill} pour {order.symbol}")
-        # En production, chaque skill aurait sa propre logique d'exécution
-        # (timing, slicing, obfuscation, etc.)
-        # En mode lite, on délègue directement à execute_order()
-        result = await self.execute_order(order)
-        result["skill_used"] = str(skill)
-        return result
+        logger.info(f"Executing skill {skill} for {order.symbol}")
+        return await self.execute_order(order)
+
+    async def get_deal_history(self, from_dt: datetime, to_dt: datetime) -> list[dict]:
+        """Récupère l'historique des deals (trades fermés) sur une période."""
+        if self.mock_mode:
+            return []
+        
+        try:
+            deals = await asyncio.to_thread(mt5.history_deals_get, from_dt, to_dt)
+            if deals is None:
+                return []
+            
+            result = []
+            for deal in deals:
+                if deal.entry == 1:  # DEAL_ENTRY_OUT = fermeture
+                    result.append({
+                        "ticket": deal.ticket,
+                        "order": deal.order,
+                        "position_id": deal.position_id,
+                        "symbol": deal.symbol,
+                        "type": "BUY" if deal.type == 0 else "SELL",
+                        "volume": deal.volume,
+                        "price": deal.price,
+                        "profit": deal.profit,
+                        "swap": deal.swap,
+                        "commission": deal.commission,
+                        "time": datetime.fromtimestamp(deal.time),
+                        "comment": deal.comment,
+                        "magic": deal.magic,
+                    })
+            return result
+        except Exception as e:
+            logger.error(f"Error fetching deal history: {e}")
+            return []
+
+    async def get_account_summary(self) -> dict:
+        """Récupère un résumé du compte (pour Daily Report)."""
+        info = await self.get_account_info()
+        if not info:
+            return {}
+        return {
+            "balance": float(info.balance),
+            "equity": float(info.equity),
+            "margin": float(info.margin),
+            "free_margin": float(info.free_margin),
+            "profit": float(info.equity) - float(info.balance),
+        }
 
     def _get_mock_pnl(self) -> Decimal:
         """Calcule le P&L mock total"""

@@ -7,9 +7,10 @@ import asyncio
 import logging
 from decimal import Decimal
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import aiohttp
+import random
 
 from shared import (
     TradeAction,
@@ -23,6 +24,8 @@ from eva_banker.skill_library import SkillLibrary, SkilledBehavior
 from eva_banker.models.gnn_model import TFTGNNModel
 from eva_banker.services.risk import RiskValidator  # Type hinting only if needed at runtime
 from eva_banker.strategist import Strategist
+from eva_banker.nemesis import get_nemesis_system # Import the Nemesis System
+from eva_banker.services.news_filter import NewsFilterService # Import News Filter
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +55,6 @@ class BankerManager:
         
         # 2. Préparation des données pour le modèle (Normalisées via Symlog)
         price = symlog(market_history.get("price", 0))
-        
-        # logger.info(f"Manager decision core triggered. Price: {price}, VaR: {var}, CVaR: {cvar}")
         
         # Si le risque (VaR) est trop élevé, on bascule en mode conservateur
         if var < -0.02: # Perte potentielle > 2% attendue
@@ -99,6 +100,7 @@ class AutoTradingEngine:
         self.risk = risk
         self.is_active = False
         self._loop_task = None
+        self._daily_report_task = None
         # The Hive Mind: Multi-Asset Symbols
         self.symbols = ["XAUUSD", "EURUSD", "BTCUSD", "US30.cash"]
         self.latest_decisions = {} # Stores latest analysis per symbol
@@ -109,6 +111,15 @@ class AutoTradingEngine:
         # Sprint 8.5: Telegram Notification
         from shared.telegram_client import TelegramClient
         self.telegram = TelegramClient()
+        
+        # Sprint 9: Close Detection & Anti-Spam
+        self._known_tickets = set()         # Tickets currently open (for close detection)
+        self._last_veto_sent = {}           # symbol -> datetime (anti-spam)
+        self._trade_open_info = {}          # ticket -> {symbol, action, entry_price, open_time, comment}
+        
+        # Sprint 10: News Filter 📰
+        self.news = NewsFilterService(filter_minutes=30)
+        self._news_task = None
 
     async def start(self):
         """Démarre le pilote automatique"""
@@ -116,21 +127,343 @@ class AutoTradingEngine:
             return
         self.is_active = True
         self._loop_task = asyncio.create_task(self._drift_loop())
+        self._daily_report_task = asyncio.create_task(self._half_day_report_loop())
+        self._news_task = asyncio.create_task(self.news.start_monitoring())
         logger.info(f"🚀 AUTO-TRADING ENGINE STARTED on {self.symbols}")
-        self.telegram.send_sync(f"🐝 **THE HIVE IS AWAKE**\nMonitoring: {self.symbols}\nRisk: {self.risk.max_risk_per_trade * 100}%")
+        self.telegram.send_sync(
+            f"🐝 *THE HIVE IS AWAKE*\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Symbols: {', '.join(self.symbols)}\n"
+            f"⚙️ Risk: {self.risk.max_risk_per_trade * 100}%\n"
+            f"🕐 {datetime.now().strftime('%H:%M UTC+1')}"
+        )
 
     async def stop(self):
         """Arrête le pilote automatique"""
         if not self.is_active:
             return
         self.is_active = False
-        if self._loop_task:
-            self._loop_task.cancel()
-            try:
-                await self._loop_task
-            except asyncio.CancelledError:
-                pass
+        for task in [self._loop_task, self._daily_report_task, self._news_task]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         logger.info("🛑 AUTO-TRADING ENGINE STOPPED")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TELEGRAM FORMATTERS (Sprint 9)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _fmt_open_msg(self, symbol: str, action: str, entry_price: float, sl_price: float,
+                      rsi: float, atr: float, bias: str, comment: str) -> str:
+        """Formate un message d'ouverture riche."""
+        sl_dist = abs(entry_price - sl_price)
+        emoji = "🟢" if action == "BUY" else "🔴"
+        return (
+            f"⚡ *E.V.A | New Position*\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"🔹 *Asset:* {symbol}\n"
+            f"🔹 *Action:* {emoji} {action}\n"
+            f"🔹 *Entry:* {entry_price:.5f}\n"
+            f"🛡️ *S/L:* {sl_price:.5f} (-{sl_dist:.2f})\n\n"
+            f"📊 *Markets & Signals:*\n"
+            f"  • RSI: {rsi:.1f} | ATR: {atr:.1f}\n"
+            f"  • Cortex: {bias}\n"
+            f"🧠 *AI Reasoning:*\n"
+            f"  • {comment}\n\n"
+            f"⏳ {datetime.now().strftime('%H:%M')} | The Hive"
+        )
+
+    def _fmt_close_msg(self, symbol: str, action: str, entry_price: float, exit_price: float,
+                       profit: float, duration_min: int, reason: str = "SL/TP Hit") -> str:
+        """Formate un message de fermeture riche."""
+        pips = exit_price - entry_price
+        if action == "SELL":
+            pips = -pips
+        # Normalize pips based on asset type
+        pip_size = 0.1 if "XAU" in symbol else (1.0 if "US30" in symbol or "BTC" in symbol else 0.0001)
+        pips_display = pips / pip_size
+        
+        emoji = "✅" if profit >= 0 else "❌"
+        pnl_sign = "+" if profit >= 0 else ""
+        
+        # Duration formatting
+        if duration_min >= 60:
+            dur_str = f"{duration_min // 60}h{duration_min % 60:02d}m"
+        else:
+            dur_str = f"{duration_min}min"
+        
+        return (
+            f"⚡ *E.V.A | Trade Closed*\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"🔹 *Asset:* {symbol}\n"
+            f"🔹 *Action:* {action}\n"
+            f"🔹 *Result:* {emoji} {pnl_sign}{pips_display:.1f} pips\n\n"
+            f"💰 *Financials:*\n"
+            f"  • Entry: {entry_price:.5f}\n"
+            f"  • Exit: {exit_price:.5f}\n"
+            f"  • P&L: {pnl_sign}${profit:.2f}\n"
+            f"  • Duration: {dur_str}\n\n"
+            f"🏷️ *Reason:* {reason}\n"
+            f"⏳ {datetime.now().strftime('%H:%M')} | The Hive"
+        )
+
+    def _fmt_shepherd_msg(self, symbol: str, action: str, event: str, 
+                          new_sl: float, profit_pips: float) -> str:
+        """Formate un message Shepherd enrichi."""
+        return (
+            f"🛡️ *E.V.A Shepherd | {event}*\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"🔹 *Asset:* {symbol} {action}\n"
+            f"🔹 *New S/L:* {new_sl:.5f}\n"
+            f"🔹 *Secured:* +{profit_pips:.1f} pips"
+        )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CLOSE DETECTION (Sprint 9)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    async def _detect_closed_positions(self, current_positions: list):
+        """Détecte les positions fermées et envoie une notification."""
+        current_tickets = {pos.ticket for pos in current_positions}
+        
+        # Find tickets that disappeared (= closed)
+        closed_tickets = self._known_tickets - current_tickets
+        
+        for ticket in closed_tickets:
+            info = self._trade_open_info.get(ticket, {})
+            if not info:
+                continue
+            
+            # Try to get the actual close info from MT5 deal history
+            try:
+                from_dt = info.get("open_time", datetime.now() - timedelta(days=1))
+                deals = await self.mt5.get_deal_history(from_dt, datetime.now())
+                
+                # Find the closing deal for this position
+                close_deal = None
+                for deal in deals:
+                    if deal.get("position_id") == ticket or deal.get("magic") == 12345:
+                        if deal.get("symbol") == info.get("symbol"):
+                            close_deal = deal
+                            break
+                
+                if close_deal:
+                    profit = close_deal["profit"] + close_deal.get("swap", 0) + close_deal.get("commission", 0)
+                    exit_price = close_deal["price"]
+                    duration = (close_deal["time"] - info["open_time"]).total_seconds() / 60
+                    reason = close_deal.get("comment", "SL/TP Hit") or "SL/TP Hit"
+                else:
+                    # Fallback: no deal found, use stored info
+                    profit = 0.0
+                    exit_price = info.get("entry_price", 0.0)
+                    duration = (datetime.now() - info["open_time"]).total_seconds() / 60
+                    reason = "Fermé (détails indisponibles)"
+                
+                msg = self._fmt_close_msg(
+                    symbol=info["symbol"],
+                    action=info["action"],
+                    entry_price=info["entry_price"],
+                    exit_price=exit_price,
+                    profit=profit,
+                    duration_min=int(duration),
+                    reason=reason
+                )
+                self.telegram.send_sync(msg)
+                logger.info(f"📤 Close notification sent for {info['symbol']} #{ticket} (P&L: ${profit:.2f})")
+                
+                # 🧠 FEEDBACK LOOP: Send real P&L to Lab for micro-training
+                asyncio.create_task(self._send_pnl_feedback(
+                    symbol=info["symbol"],
+                    action=info["action"],
+                    price=exit_price,
+                    pnl=profit,
+                ))
+                
+                # 💰 ACCOUNTANT LOOP: Send financial event for Drawdown validation
+                asyncio.create_task(self._send_pnl_to_accountant(
+                    symbol=info["symbol"],
+                    profit=profit
+                ))
+
+                
+            except Exception as e:
+                logger.error(f"Error detecting close for #{ticket}: {e}")
+            
+            # Cleanup
+            self._trade_open_info.pop(ticket, None)
+        
+        # Update known tickets
+        self._known_tickets = current_tickets
+        
+        # Store info for new tickets
+        for pos in current_positions:
+            if pos.ticket not in self._trade_open_info:
+                self._trade_open_info[pos.ticket] = {
+                    "symbol": pos.symbol,
+                    "action": pos.action.value,
+                    "entry_price": float(pos.open_price),
+                    "open_time": pos.open_time,
+                }
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # DAILY REPORT (Sprint 9)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    async def _half_day_report_loop(self):
+        """Envoie un rapport récapitulatif toutes les demi-journées (midi et minuit)."""
+        while self.is_active:
+            try:
+                now = datetime.now()
+                # Determine next target: 11:55 or 23:55 (just before half-day ends)
+                target1 = now.replace(hour=11, minute=55, second=0, microsecond=0)
+                target2 = now.replace(hour=23, minute=55, second=0, microsecond=0)
+                
+                if now < target1:
+                    next_report = target1
+                elif now < target2:
+                    next_report = target2
+                else:
+                    next_report = target1 + timedelta(days=1)
+                
+                wait_seconds = (next_report - now).total_seconds()
+                await asyncio.sleep(wait_seconds)
+                
+                if not self.is_active:
+                    break
+                
+                await self._send_half_day_report()
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Half-day report error: {e}")
+                await asyncio.sleep(3600)
+
+    async def _send_half_day_report(self):
+        """Génère et envoie le rapport de la demi-journée."""
+        try:
+            now = datetime.now()
+            # Define period:
+            if now.hour < 15:
+                period_name = "Matinée"
+                period_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                period_name = "Après-Midi"
+                period_start = now.replace(hour=12, minute=0, second=0, microsecond=0)
+            
+            period_end = now
+            
+            # Get deals from the period
+            deals = await self.mt5.get_deal_history(period_start, period_end)
+            
+            # Get account info
+            summary = await self.mt5.get_account_summary()
+            
+            total_trades = len(deals)
+            wins = sum(1 for d in deals if d["profit"] > 0)
+            losses = sum(1 for d in deals if d["profit"] < 0)
+            total_pnl = sum(d["profit"] + d.get("swap", 0) + d.get("commission", 0) for d in deals)
+            
+            best_trade = max(deals, key=lambda d: d["profit"]) if deals and any(d["profit"] > 0 for d in deals) else None
+            worst_trade = min(deals, key=lambda d: d["profit"]) if deals and any(d["profit"] < 0 for d in deals) else None
+            
+            win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+            balance = summary.get("balance", 0)
+            pnl_pct = (total_pnl / balance * 100) if balance > 0 else 0
+            pnl_sign = "+" if total_pnl >= 0 else ""
+            
+            best_str = f"{best_trade['symbol']} +${best_trade['profit']:.2f}" if best_trade and best_trade["profit"] > 0 else "N/A"
+            worst_str = f"{worst_trade['symbol']} ${worst_trade['profit']:.2f}" if worst_trade and worst_trade["profit"] < 0 else "N/A"
+            
+            # Additional Context for Report
+            nemesis_str = "Actif" if self.risk._is_anti_tilt_active() else "Inactif"
+            dd_pct = getattr(self.risk, "_get_daily_drawdown_percent", lambda: 0.0)()
+            
+            msg = (
+                f"📈 *E.V.A | Bilan {period_name}*\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"📆 Date: {now.strftime('%d/%m/%Y %H:%M')}\n\n"
+                f"📊 *Performances*\n"
+                f"  • P&L: {pnl_sign}${total_pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)\n"
+                f"  • Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)\n"
+                f"  • Balance: ${balance:,.2f}\n"
+                f"  • Drawdown Journée: {dd_pct}%\n\n"
+                f"🏆 *Top / Flop*\n"
+                f"  • Best: {best_str}\n"
+                f"  • Worst: {worst_str}\n\n"
+                f"🛡️ *Sécurité*\n"
+                f"  • Marge Libre: ${summary.get('margin_free', 0):,.2f}\n"
+                f"  • Nemesis (Anti-Tilt): {nemesis_str}\n\n"
+                f"🧠 _The Hive continuously learning._"
+            )
+            
+            self.telegram.send_sync(msg)
+        except Exception as e:
+            logger.error(f"Error generating half-day report: {e}")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ACCOUNTANT & LAB INTEGRATION (REST API)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    async def _send_pnl_to_accountant(self, symbol: str, profit: float):
+        """Envoie le résultat financier à l'Accountant (Port 8500) pour le suivi de la Drawdown"""
+        try:
+            import aiohttp
+            import os
+            accountant_host = os.getenv("ACCOUNTANT_HOST", "localhost")
+            url = f"http://{accountant_host}:8500/pnl"
+            
+            # Re-fetch latest balance for true equity tracking
+            summary = await self.mt5.get_account_summary()
+            balance = float(summary.get("balance", 100000.0))
+            equity = float(summary.get("equity", balance))
+            
+            payload = {
+                "symbol": symbol,
+                "profit_loss": profit,
+                "balance": balance,
+                "equity": equity
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=2.0) as resp:
+                     if resp.status == 200:
+                         logger.debug(f"P&L of ${profit:.2f} properly accounted.")
+                     else:
+                         logger.warning(f"Accountant returned HTTP {resp.status}")
+        except Exception as e:
+            logger.warning(f"Failed to reach Accountant: {e}")
+
+    async def _send_pnl_feedback(self, symbol: str, action: str, price: float, pnl: float):
+        """Envoie le P&L réel d'une transaction fermée au Lab pour micro-entraînement"""
+        try:
+            import aiohttp
+            import os
+            lab_host = os.getenv("LAB_HOST", "localhost")
+            url = f"http://{lab_host}:8000/feedback/pnl"
+            
+            payload = {
+                "symbol": symbol,
+                "action": action,
+                "price": price,
+                "pnl": pnl
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=2.0) as resp:
+                     if resp.status == 200:
+                         logger.debug(f"P&L feedback for {symbol} sent to Lab.")
+                     else:
+                         logger.warning(f"Lab returned HTTP {resp.status} for P&L feedback.")
+        except Exception as e:
+            logger.warning(f"Failed to send P&L feedback to Lab: {e}")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MAIN DRIFT LOOP
+    # ═══════════════════════════════════════════════════════════════════════════
 
     async def _drift_loop(self):
         """Boucle principale de drift (Multi-Asset)"""
@@ -139,66 +472,86 @@ class AutoTradingEngine:
             try:
                 # 1. Vérifier si trading autorisé (Loi 2 + Kill Switch)
                 status = await self.risk.get_current_status()
+                nemesis = get_nemesis_system()
+                
+                # Fetch Balance and update RiskValidator
+                summary = await self.mt5.get_account_summary()
+                balance = Decimal(str(summary.get("balance", 100000)))
+                self.risk.update_account_balance(balance)
+                
                 if not status.trading_allowed:
                     logger.warning("Auto-Trading paused: Risk limits hit or Kill-Switch active.")
                     await asyncio.sleep(60)
                     continue
+                    
+                if nemesis.should_block_trading():
+                    logger.warning("Auto-Trading paused: Nemesis Meditation Phase Active (Consecutive Losses).")
+                    await asyncio.sleep(60)
+                    continue
+
+                if self.news.should_block_trading():
+                    logger.warning(f"Auto-Trading paused: High Impact News Event ('{self.news.current_blocking_event}').")
+                    await asyncio.sleep(60)
+                    continue
 
                 # 2. Vérifier positions ouvertes (Global Limit)
-                # 2. Vérifier positions ouvertes (Global Limit)
                 positions = await self.mt5.get_open_positions()
+                
+                # CLOSE DETECTION (Sprint 9)
+                await self._detect_closed_positions(positions)
                 
                 # THE SHEPHERD (MANAGEMENT) 🐑
                 # Loop through open positions to secure profits (Break-Even & Trailing)
                 for pos in positions:
                     try:
-                        # Skip if already secured/managed or recently opened (avoid noise)
+                        # Skip if recently opened (avoid noise)
                         if (datetime.now() - pos.open_time).total_seconds() < 60: continue
                         
                         current_price = float(pos.current_price)
                         open_price = float(pos.open_price)
                         sl = float(pos.stop_loss) if pos.stop_loss else 0.0
                         
-                        # Calculate profit in points
+                        # Dynamic trailing thresholds based on asset class (FX vs Gold/Indices)
+                        is_high_vol = "XAU" in pos.symbol or "BTC" in pos.symbol or "US30" in pos.symbol
+                        be_threshold = 2.5 if is_high_vol else 0.0015 # Room to breathe
+                        trail_activation = 5.0 if is_high_vol else 0.0030
+                        trail_distance = 2.0 if is_high_vol else 0.0010
+                        
                         if pos.action == TradeAction.BUY:
-                            profit_points = current_price - open_price
-                            # Break-Even Logic (Secure after ~150 points / 15 pips)
-                            if profit_points > 1.5 and (sl == 0.0 or sl < open_price):
-                                new_sl = open_price + 0.1 # Secure small profit
+                            profit = current_price - open_price
+                            # Break-Even Logic
+                            if profit > be_threshold and (sl == 0.0 or sl < open_price):
+                                new_sl = open_price + (0.1 if is_high_vol else 0.0001) # Secure small profit
                                 await self.mt5.modify_position(pos.ticket, sl=new_sl, tp=0.0)
-                                msg = f"🛡️ **Shepherd**: Secured BUY {pos.symbol} at Break-Even ({new_sl})"
+                                msg = self._fmt_shepherd_msg(pos.symbol, "BUY", "SECURED", new_sl, profit)
                                 logger.info(msg)
                                 self.telegram.send_sync(msg)
                             
-                            # Trailing Stop (Follow if Profit > 300 points)
-                            elif profit_points > 3.0:
-                                trailing_sl = current_price - 1.0 # Trail by 1.0 (approx 10 pips)
+                            # Trailing Stop 
+                            elif profit > trail_activation:
+                                trailing_sl = current_price - trail_distance
                                 if trailing_sl > sl:
                                     await self.mt5.modify_position(pos.ticket, sl=trailing_sl, tp=0.0)
-                                    msg = f"🐑 **Shepherd**: Trailing BUY {pos.symbol} to {trailing_sl}"
+                                    msg = self._fmt_shepherd_msg(pos.symbol, "BUY", "TRAILING", trailing_sl, profit)
                                     logger.debug(msg)
-                                    if profit_points % 5.0 < 0.5: # Notify occasionally to avoid spam
-                                        self.telegram.send_sync(msg)
 
                         elif pos.action == TradeAction.SELL:
-                            profit_points = open_price - current_price
+                            profit = open_price - current_price
                             # Break-Even
-                            if profit_points > 1.5 and (sl == 0.0 or sl > open_price):
-                                new_sl = open_price - 0.1
+                            if profit > be_threshold and (sl == 0.0 or sl > open_price):
+                                new_sl = open_price - (0.1 if is_high_vol else 0.0001)
                                 await self.mt5.modify_position(pos.ticket, sl=new_sl, tp=0.0)
-                                msg = f"🛡️ **Shepherd**: Secured SELL {pos.symbol} at Break-Even ({new_sl})"
+                                msg = self._fmt_shepherd_msg(pos.symbol, "SELL", "SECURED", new_sl, profit)
                                 logger.info(msg)
                                 self.telegram.send_sync(msg)
                                 
                             # Trailing
-                            elif profit_points > 3.0:
-                                trailing_sl = current_price + 1.0
+                            elif profit > trail_activation:
+                                trailing_sl = current_price + trail_distance
                                 if sl == 0.0 or trailing_sl < sl:
                                     await self.mt5.modify_position(pos.ticket, sl=trailing_sl, tp=0.0)
-                                    msg = f"🐑 **Shepherd**: Trailing SELL {pos.symbol} to {trailing_sl}"
+                                    msg = self._fmt_shepherd_msg(pos.symbol, "SELL", "TRAILING", trailing_sl, profit)
                                     logger.debug(msg)
-                                    if profit_points % 5.0 < 0.5:
-                                        self.telegram.send_sync(msg)
 
                     except Exception as e_shepherd:
                         logger.error(f"Shepherd Error on {pos.ticket}: {e_shepherd}")
@@ -213,8 +566,11 @@ class AutoTradingEngine:
                     if not self.is_active: break
                     
                     try:
+                        # NEW (Sprint 10) : Night Session Filter (Rollover Trap)
+                        if not self.risk.is_within_trading_session(symbol):
+                            continue
+                            
                         # 0. CORTEX STRATEGY (Macro) - The Conscious Mind
-                        # Refresh strategy every 15 minutes (900s)
                         last_strat = self.cortex.latest_strategy.get(symbol, {})
                         last_time = last_strat.get("timestamp")
                         
@@ -222,9 +578,6 @@ class AutoTradingEngine:
                         should_refresh = not last_time or (datetime.now() - datetime.fromisoformat(last_time)).total_seconds() > 900
                         
                         if should_refresh:
-                            # Non-blocking async call? No, we need the bias.
-                            # But we don't want to block other symbols too long.
-                            # For now, we await. It takes ~5-10s per symbol every 15m. Acceptable.
                             try:
                                 strategy = await self.cortex.analyze_market_context(symbol)
                                 bias = strategy.get("bias", "NEUTRAL")
@@ -236,7 +589,6 @@ class AutoTradingEngine:
                         # A. Market Data
                         tick = await self.mt5.get_symbol_tick(symbol)
                         if not tick or (isinstance(tick, dict) and "bid" not in tick):
-                            # logger.debug(f"Skipping {symbol}: No Tick Data")
                             continue
                             
                         current_price = tick['bid'] if isinstance(tick, dict) else tick.bid
@@ -273,14 +625,67 @@ class AutoTradingEngine:
                                 "Cycle_High": cycles["bars_since_high"],
                                 "Cycle_Low": cycles["bars_since_low"],
                                 "Fib_0": fib_levels.get("fib_0", 0.0),
+                                "Fib_236": fib_levels.get("fib_236", 0.0),
+                                "Fib_382": fib_levels.get("fib_382", 0.0),
+                                "Fib_500": fib_levels.get("fib_500", 0.0),
+                                "Fib_618": fib_levels.get("fib_618", 0.0),
+                                "Fib_100": fib_levels.get("fib_100", 0.0)
                             }
-                            # Add full fib levels for vector mapping
-                            for k, v in fib_levels.items():
-                                features[k] = v
+                            
+                            # ----- EXTENDED FEATURES (For future AI V4 training & Shadow Learning) -----
+                            vwap_val = IndicatorFactory.vwap(highs, lows, closes, volumes).iloc[-1]
+                            obv_val = IndicatorFactory.obv(closes, volumes).iloc[-1]
+                            momentum_val = IndicatorFactory.momentum(closes, 10).iloc[-1]
+                            trix_val = IndicatorFactory.trix(closes, 15).iloc[-1]
+                            stoch_data = IndicatorFactory.stochastic(highs, lows, closes)
+                            cci_val = IndicatorFactory.cci(highs, lows, closes).iloc[-1]
+                            adx_data = IndicatorFactory.adx(highs, lows, closes)
+                            ichimoku_data = IndicatorFactory.ichimoku(highs, lows, closes)
+                            trendlines_val = IndicatorFactory.trendlines(closes).iloc[-1]
+                            sr_data = IndicatorFactory.support_resistance(highs, lows, closes)
+                            gann_data = IndicatorFactory.gann_angles(highs, lows, 100)
+
+                            extended_features = {
+                                "vwap": vwap_val,
+                                "obv": obv_val,
+                                "momentum": momentum_val,
+                                "trix": trix_val,
+                                "stoch_k": stoch_data["percent_k"].iloc[-1],
+                                "stoch_d": stoch_data["percent_d"].iloc[-1],
+                                "cci": cci_val,
+                                "adx": adx_data["adx"].iloc[-1],
+                                "adx_plus_di": adx_data["plus_di"].iloc[-1],
+                                "adx_minus_di": adx_data["minus_di"].iloc[-1],
+                                "ichi_tenkan": ichimoku_data["tenkan_sen"].iloc[-1],
+                                "ichi_kijun": ichimoku_data["kijun_sen"].iloc[-1],
+                                "ichi_senkou_a": ichimoku_data["senkou_span_a"].iloc[-1],
+                                "ichi_senkou_b": ichimoku_data["senkou_span_b"].iloc[-1],
+                                "trendline_slope": trendlines_val,
+                                "sr_res": sr_data["nearest_resistance"],
+                                "sr_sup": sr_data["nearest_support"],
+                                "fib_786": fib_levels.get("fib_786", 0.0),
+                                "fib_ext_1618": fib_levels.get("fib_ext_1618", 0.0),
+                                "fib_ext_2618": fib_levels.get("fib_ext_2618", 0.0),
+                                "gann_1x1": gann_data["gann_1x1"],
+                                "gann_1x2": gann_data["gann_1x2"],
+                                "gann_2x1": gann_data["gann_2x1"]
+                            }
                                 
-                            logger.debug(f"👁️ {symbol} Vision: RSI={rsi_val:.1f} MACD={features['MACD_Hist']:.5f}")
+                            # --- FORMATTED LOGGING ---
+                            from colorama import Fore, Style, init
+                            init(autoreset=True)
+                            sym_color = Fore.CYAN if "XAU" in symbol else (Fore.YELLOW if "BTC" in symbol else Fore.WHITE)
+                            bias_color = Fore.GREEN if bias == "BULLISH" else (Fore.RED if bias == "BEARISH" else Fore.LIGHTBLACK_EX)
+                            
+                            logger.info(
+                                f"🧠 {sym_color}{symbol:<8}{Style.RESET_ALL} | "
+                                f"Price: {current_price:<9.2f} | "
+                                f"RSI: {rsi_val:<4.1f} | "
+                                f"Cortex: {bias_color}[{bias}]{Style.RESET_ALL}"
+                            )
                         else:
                             features = {"RSI": 50.0}
+                            extended_features = {}
 
                         # C. Dreamer Inference
                         observation = {
@@ -293,7 +698,6 @@ class AutoTradingEngine:
                         
                         try:
                             from shared.internal_auth import InternalAuth
-                            # DYNAMIC URL: Use 'localhost' for native mode, 'lab' for docker
                             lab_host = os.getenv("LAB_HOST", "localhost")
                             lab_url = f"http://{lab_host}:8600/dreamer/predict"
                             token = InternalAuth.generate_token("banker")
@@ -312,30 +716,32 @@ class AutoTradingEngine:
                                         elif mz_action == 2:
                                             action = TradeAction.SELL
                                             comment = f"{dreamer_comment} -> SELL"
-                                    else:
-                                        # Failover RSI
-                                        if rsi_val < 30: action = TradeAction.BUY
-                                        elif rsi_val > 70: action = TradeAction.SELL
-                                        comment = f"Fallback RSI ({rsi_val:.1f})"
-                        except Exception:
-                            # Silent failover
-                            if rsi_val < 30: action = TradeAction.BUY
-                            elif rsi_val > 70: action = TradeAction.SELL
-                            comment = "Fallback (Error)"
+                                            
+                                        # Strict neural-network enforcement in production.
+                                        # No Epsilon-Greedy, no Bias fallback loops allowing random entries.
+                                        
+                        except Exception as e_lab:
+                            # If connection to Lab completely fails, DO NOT trade. HOLD explicitly.
+                            logger.error(f"Dreamer Inference failed for {symbol}: {e_lab}. Holding.")
+                            action = None
+                            comment = "Error connecting to Lab"
 
-                            comment = "Fallback (Error)"
-
-                        # CORTEX FILTER (The Conscious Check)
+                        # CORTEX FILTER (The Conscious Check) — with ANTI-SPAM (Sprint 9)
                         if action == TradeAction.BUY and bias == "BEARISH":
-                            msg = f"🙅 Cortex VETO: Blocking BUY on {symbol} (Trend is BEARISH)"
-                            logger.info(msg)
-                            self.telegram.send_sync(msg)
+                            logger.info(f"🙅 Cortex VETO: Blocking BUY on {symbol} (Trend is BEARISH)")
+                            # Anti-spam: only notify once per 30 min per symbol
+                            last_sent = self._last_veto_sent.get(symbol)
+                            if not last_sent or (datetime.now() - last_sent).total_seconds() > 1800:
+                                self.telegram.send_sync(f"🙅 *VETO* | {symbol} BUY blocked (Bearish)")
+                                self._last_veto_sent[symbol] = datetime.now()
                             action = None
                             comment = "Blocked by Cortex (Bearish Trend)"
                         elif action == TradeAction.SELL and bias == "BULLISH":
-                            msg = f"🙅 Cortex VETO: Blocking SELL on {symbol} (Trend is BULLISH)"
-                            logger.info(msg)
-                            self.telegram.send_sync(msg)
+                            logger.info(f"🙅 Cortex VETO: Blocking SELL on {symbol} (Trend is BULLISH)")
+                            last_sent = self._last_veto_sent.get(symbol)
+                            if not last_sent or (datetime.now() - last_sent).total_seconds() > 1800:
+                                self.telegram.send_sync(f"🙅 *VETO* | {symbol} SELL blocked (Bullish)")
+                                self._last_veto_sent[symbol] = datetime.now()
                             action = None
                             comment = "Blocked by Cortex (Bullish Trend)"
 
@@ -359,24 +765,47 @@ class AutoTradingEngine:
                         skill = self.manager.plan_strategy({"price": float(current_price), "indicators": {"RSI": rsi_val}})
                         
                         atr = features.get("ATR", 0.0)
+                        is_high_vol = "XAU" in symbol or "BTC" in symbol or "US30" in symbol
+                        
                         if atr > 0:
-                            sl_dist = Decimal(str(atr * 1.5))
+                            # Multiply ATR to give the algorithm breathing room.
+                            # Usually SL = ATR * 2.5 is minimum for trend following.
+                            sl_dist = Decimal(str(atr * 3.0)) 
                             tp_dist = Decimal("0.0") # Let profits run (Shepherd Mode)
                         else:
-                            sl_dist = Decimal("10.0") if "USD" in symbol else Decimal("0.0050")
-                            tp_dist = Decimal("0.0") # Let profits run (Shepherd Mode)
+                            # Realistic baseline stop loss distances if ATR fails
+                            # e.g Gold ($10), Indices ($30), Forex (20 pips)
+                            if "XAU" in symbol: sl_dist = Decimal("8.0")
+                            elif "US30" in symbol or "BTC" in symbol: sl_dist = Decimal("30.0")
+                            else: sl_dist = Decimal("0.0020")
+                            tp_dist = Decimal("0.0") # Let profits run
                             
                         entry_price = Decimal(str(current_price))
                         sl_price = entry_price - sl_dist if action == TradeAction.BUY else entry_price + sl_dist
                         tp_price = Decimal("0.0") # No TP
                         
+                        # Dynamic Volume Calculation (Sprint 10)
+                        balance = self.risk._account_balance
+                        risk_pct = self.risk.max_risk_per_trade
+                        
+                        dynamic_vol = self.risk.calculate_lot_size(
+                            balance=balance,
+                            risk_percent=risk_pct,
+                            sl_distance=sl_dist,
+                            symbol=symbol
+                        )
+                        
+                        # Safety Caps
+                        final_vol = min(0.10, max(0.01, dynamic_vol))
+                        
+                        safe_comment = comment[:30] if comment else ""
                         order = TradeOrder(
                             symbol=symbol,
                             action=action,
-                            volume=Decimal("0.01"),
+                            volume=Decimal(str(final_vol)),
                             stop_loss_price=sl_price,
                             take_profit_price=tp_price,
-                            comment=comment
+                            comment=safe_comment
                         )
                         
                         validation = await self.risk.validate_order(order)
@@ -384,12 +813,43 @@ class AutoTradingEngine:
                             logger.info(f"🤖 EXEC {symbol}: {action} | {comment}")
                             result = await self.worker.execute_skill(skill, order)
                             if result.get("success"):
-                                # Notify Telegram
-                                self.telegram.send_sync(f"🚀 **OPEN EXECUTION**\n{symbol} {action.value} @ {entry_price}\nSL: {sl_price}\nMethod: {comment}")
-                                asyncio.create_task(self._record_learning_experience(order, result))
+                                # Rich Telegram OPEN notification (Sprint 9)
+                                open_msg = self._fmt_open_msg(
+                                    symbol=symbol,
+                                    action=action.value,
+                                    entry_price=float(entry_price),
+                                    sl_price=float(sl_price),
+                                    rsi=rsi_val,
+                                    atr=atr,
+                                    bias=bias,
+                                    comment=comment
+                                )
+                                self.telegram.send_sync(open_msg)
+                                
+                                # Track this position for close detection
+                                ticket = result.get("ticket", 0)
+                                if ticket:
+                                    self._trade_open_info[ticket] = {
+                                        "symbol": symbol,
+                                        "action": action.value,
+                                        "entry_price": float(entry_price),
+                                        "open_time": datetime.now(),
+                                    }
+                                    self._known_tickets.add(ticket)
+                                
+                                asyncio.create_task(self._record_learning_experience(order, result, features, extended_features, float(current_price)))
+                            else:
+                                # ═══ ORDER FAILED — LOG IT ═══
+                                fail_msg = result.get("message", "Unknown error")
+                                fail_code = result.get("retcode", "?")
+                                logger.error(f"❌ ORDER FAILED {symbol} {action}: {fail_msg} (retcode={fail_code})")
+                                self.telegram.send_sync(
+                                    f"❌ *ORDER FAILED* | {symbol} {action.value}\n"
+                                    f"Reason: {fail_msg}\n"
+                                    f"SL: {float(sl_price):.2f} | Vol: {float(order.volume)}"
+                                )
                         else:
                             logger.warning(f"Rejected {symbol}: {validation['reason']}")
-                            self.telegram.send_sync(f"⚠️ **REJECTED** {symbol}: {validation['reason']}")
                             
                         # Small delay between symbols
                         await asyncio.sleep(1.0)
@@ -407,23 +867,25 @@ class AutoTradingEngine:
                 logger.error(f"Auto-Trading Loop Error: {e}")
                 await asyncio.sleep(60)
 
-    async def _record_learning_experience(self, order: TradeOrder, result: dict):
+    async def _record_learning_experience(self, order: TradeOrder, result: dict, features: dict, extended_features: dict, current_price: float):
         """Envoie les données du trade au Lab pour Shadow Learning (DreamerV3)"""
         try:
             import aiohttp
             from shared.internal_auth import InternalAuth
             
-            # DYNAMIC URL: Use 'localhost' for native mode, 'lab' for docker
             lab_host = os.getenv("LAB_HOST", "localhost")
             lab_url = f"http://{lab_host}:8600/shadow/record"
             
+            # Fuse core features and extended features for the background DB payload
+            db_indicators = {**features, **extended_features}
+            
             payload = {
                 "symbol": order.symbol,
-                "action": order.action.value,
-                "price": float(order.stop_loss_price) + 10.0, # Approx entry price if not in result
+                "action": order.action.name,
+                "price": float(order.stop_loss_price) if order.stop_loss_price else 0.0,
                 "volume": float(order.volume),
-                "pnl": 0.0, # PnL inconnu à l'ouverture
-                "indicators": {"strategy": "drift_v1", "reason": order.comment},
+                "pnl": 0.0, 
+                "indicators": db_indicators,
                 "done": False
             }
             
@@ -441,3 +903,34 @@ class AutoTradingEngine:
                         
         except Exception as e:
             logger.error(f"Failed to send shadow learning data: {e}")
+
+    async def _send_pnl_feedback(self, symbol: str, action: str, price: float, pnl: float):
+        """Envoie le P&L réel au Lab pour micro-training (Sprint 9.5)."""
+        try:
+            from shared.internal_auth import InternalAuth
+            
+            lab_host = os.getenv("LAB_HOST", "localhost")
+            lab_url = f"http://{lab_host}:8600/shadow/feedback"
+            
+            payload = {
+                "symbol": symbol,
+                "action": action,
+                "price": price,
+                "pnl": pnl,
+                "indicators": {"price_norm": price / 3000.0},
+                "done": True
+            }
+            
+            token = InternalAuth.generate_token("banker")
+            headers = {"X-Hive-Internal-Token": token}
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(lab_url, json=payload, headers=headers, timeout=5.0) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        logger.info(f"🧠 Shadow Feedback: {symbol} P&L=${pnl:.2f} → Lab trained (loss={result.get('wm_loss', '?')})")
+                    else:
+                        logger.warning(f"Shadow Feedback failed: {resp.status}")
+                        
+        except Exception as e:
+            logger.error(f"Failed to send P&L feedback: {e}")

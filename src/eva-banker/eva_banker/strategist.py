@@ -62,20 +62,78 @@ class Strategist:
         response = await self.cortex.analyze(json.dumps(context), prompt)
         
         # 5. Parse Response (Simple heuristic parsing if JSON fails)
-        bias = "NEUTRAL"
-        if "BULLISH" in response.upper(): bias = "BULLISH"
-        elif "BEARISH" in response.upper(): bias = "BEARISH"
-        elif "RANGING" in response.upper(): bias = "RANGING"
+        cortex_bias = "NEUTRAL"
+        if "BULLISH" in response.upper(): cortex_bias = "BULLISH"
+        elif "BEARISH" in response.upper(): cortex_bias = "BEARISH"
+        elif "RANGING" in response.upper(): cortex_bias = "RANGING"
         
+        # 6. Ask Proxmox GNN via REST API
+        gnn_bias = "NEUTRAL"
+        gnn_confidence = 0.0
+        try:
+            import aiohttp
+            import os
+            lab_host = os.getenv("LAB_HOST", "localhost")
+            url = f"http://{lab_host}:8600/gnn/predict"
+            # We mock the feature tensor here for the API structure
+            payload = {
+                "assets_data": {
+                    symbol: [closes[-15:]] # Mock 15 features
+                }
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=2.0) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        gnn_bias = data.get("bias", "NEUTRAL")
+                        gnn_confidence = data.get("confidence", 0.0)
+        except Exception as e:
+            logger.warning(f"⚠️ Impossible de joindre le GNN sur le Lab: {e}")
+            
+        # 7. Merge Biases (If GNN is confident, it overrides/validates)
+        final_bias = cortex_bias
+        if gnn_bias != "NEUTRAL" and gnn_confidence > 0.5:
+            if gnn_bias == cortex_bias:
+                 # Synergy!
+                 pass 
+            else:
+                 # GNN overrides or forces ranging if contradictions
+                 final_bias = "RANGING" if gnn_confidence < 0.8 else gnn_bias
+
         strategy = {
             "symbol": symbol,
-            "bias": bias,
+            "cortex_bias": cortex_bias,
+            "gnn_bias": gnn_bias,
+            "bias": final_bias,
             "raw_thought": response,
             "timestamp": datetime.now().isoformat()
         }
         
         self.latest_strategy[symbol] = strategy
-        logger.info(f"🧠 Cortex Strategy for {symbol}: {bias}")
+        
+        # --- COMMAND LINE LOGGING ---
+        from colorama import Fore, Style, init
+        init(autoreset=True)
+        sym_color = Fore.CYAN if "XAU" in symbol else (Fore.YELLOW if "BTC" in symbol else Fore.WHITE)
+        
+        def get_color(b):
+            if b == "BULLISH": return Fore.GREEN
+            if b == "BEARISH": return Fore.RED
+            if b == "RANGING": return Fore.MAGENTA
+            return Fore.LIGHTBLACK_EX
+            
+        cb_color = get_color(cortex_bias)
+        gb_color = get_color(gnn_bias)
+        fb_color = get_color(final_bias)
+        
+        logger.info(
+            f"🧠 {Fore.MAGENTA}Cortex Strategy{Style.RESET_ALL} -> {sym_color}{symbol:<8}{Style.RESET_ALL} | "
+            f"Cortex: {cb_color}[{cortex_bias}]{Style.RESET_ALL} | "
+            f"GNN: {gb_color}[{gnn_bias}]{Style.RESET_ALL} -> "
+            f"Final: {fb_color}[{final_bias}]{Style.RESET_ALL} "
+        )
+        # ----------------------------
+        
         return strategy
 
     def get_bias(self, symbol: str) -> str:

@@ -162,6 +162,7 @@ async def predict_action(request: ObservationRequest):
     
     return {
         "action": int(action),
+        "value": float(value_est[0, 0]),
         "reward_pred": float(pred_rew[0, 0]),
         "latency_ms": elapsed * 1000,
         "engine": "DreamerV3-Observe-JAX"
@@ -192,8 +193,71 @@ async def imagine_future(request: ObservationRequest):
         "latent_summary": "RSSM state is stable"
     }
 
+@app.post("/shadow/feedback")
+async def shadow_feedback(request: ShadowRecordRequest):
+    """Receive real P&L feedback and do 1 micro-training step."""
+    import numpy as np
+    
+    # 1. Build observation from feedback
+    obs_val = [request.price] + [float(v) for v in request.indicators.values() if isinstance(v, (int, float))]
+    obs_vec = jnp.zeros(state.config.observation_shape)
+    for i, v in enumerate(obs_val[:obs_vec.shape[0]]):
+        obs_vec = obs_vec.at[i].set(v)
+    
+    # 2. Build a micro-batch for 1 training step
+    T = 2  # Minimum sequence length
+    B = 1
+    obs_shape = state.config.observation_shape
+    act_dim = state.config.action_space_size
+    
+    # Create a minimal batch with the feedback
+    obs_batch = jnp.zeros((B, T, *obs_shape))
+    obs_batch = obs_batch.at[0, 0, :].set(obs_vec)
+    obs_batch = obs_batch.at[0, 1, :].set(obs_vec)  # Same obs for simplicity
+    
+    # Action one-hot
+    act_map = {"BUY": 1, "SELL": 2, "HOLD": 0}
+    act_idx = act_map.get(str(request.action), 0) if isinstance(request.action, str) else int(request.action)
+    act_batch = jnp.zeros((B, T, act_dim))
+    act_batch = act_batch.at[0, 0, act_idx].set(1.0)
+    
+    # Reward = real P&L (normalized)
+    reward_val = float(request.pnl)
+    rew_batch = jnp.zeros((B, T, 1))
+    rew_batch = rew_batch.at[0, 1, 0].set(reward_val)  # Reward at step 1
+    
+    from eva_lab.muzero.dreamer_trainer import WorldModelBatch
+    
+    # is_first: marks episode boundaries (first step = True)
+    is_first_batch = jnp.zeros((B, T, 1))
+    is_first_batch = is_first_batch.at[0, 0, 0].set(1.0)  # First timestep is start of episode
+    
+    batch = WorldModelBatch(
+        observations=obs_batch,
+        actions=act_batch,
+        rewards=rew_batch,
+        is_first=is_first_batch,
+    )
+    
+    # 3. Single training step
+    try:
+        metrics = state.trainer.train_step(batch)
+        # Save params back
+        state.params = state.trainer.params["wm"]
+        
+        logger.info(f"🧠 Micro-training: P&L={reward_val:.2f} | WM Loss={metrics.get('wm_loss', 0):.4f}")
+        return {
+            "status": "trained",
+            "pnl_received": reward_val,
+            "wm_loss": float(metrics.get('wm_loss', 0)),
+        }
+    except Exception as e:
+        logger.error(f"Micro-training failed: {e}")
+        return {"status": "error", "reason": str(e)}
+
+
 @app.post("/shadow/record")
-async def record_experience(request: ShadowRecordRequest):
+async def record_shadow(request: ShadowRecordRequest):
     """Store MT5 experiences into Replay Buffer for Shadow Learning."""
     # Process Observation
     obs_val = [request.price] + list(request.indicators.values())

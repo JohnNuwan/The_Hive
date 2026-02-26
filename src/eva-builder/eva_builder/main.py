@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from shared.redis_client import init_redis, get_redis_client
 
 from eva_builder.services.librarian import LibrarianService
+from eva_builder.services.factory import CodeFactoryService, CodeRequest
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,9 +55,11 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Redis connecté")
     except Exception as e:
         logger.warning(f"⚠️ Redis non disponible: {e}")
+        pass # Force continue
 
     # Services
     app.state.librarian = LibrarianService()
+    app.state.factory = CodeFactoryService()
 
     # Heartbeat
     asyncio.create_task(hard_heartbeat())
@@ -77,17 +80,23 @@ async def hard_heartbeat():
 
     Publie l'état « online » dans Redis toutes les 2 secondes.
     """
-    redis = get_redis_client()
+    try:
+        redis = get_redis_client()
+    except Exception:
+        redis = None
+        
     while True:
         try:
-            payload = {
-                "status": "online",
-                "ts": datetime.now().timestamp(),
-                "expert": "builder",
-            }
-            await redis.cache_set("eva.builder.status", payload, ttl_seconds=10)
+            if redis:
+                payload = {
+                    "status": "online",
+                    "ts": datetime.now().timestamp(),
+                    "expert": "builder",
+                }
+                await redis.cache_set("eva.builder.status", payload, ttl_seconds=10)
         except Exception as e:
-            logger.error(f"Heartbeat error: {e}")
+            # Silent fail for local testing without Redis
+            pass
         await asyncio.sleep(2.0)
 
 
@@ -151,3 +160,20 @@ async def analyze_errors():
         dict: Résultat de l'analyse (statut et message).
     """
     return {"status": "info", "message": "Aucune erreur majeure détectée dans les 24h"}
+
+
+@app.post("/factory/build", tags=["Factory"])
+async def build_software(request: CodeRequest):
+    """
+    Déclenche la création d'un logiciel ou script autonome.
+    
+    E.V.A connectera cette demande à son architecture interne (Ollama/LLMs)
+    pour générer le code, l'enregistrer dans `data/factory_output` et
+    le commiter sur le dépôt via le noyau OpenClaw.
+    """
+    factory: CodeFactoryService = app.state.factory
+    result = await factory.generate_code(request)
+    if result.get("status") == "error":
+        # Returns 200 with error details to not crash the microservice
+        return result 
+    return result

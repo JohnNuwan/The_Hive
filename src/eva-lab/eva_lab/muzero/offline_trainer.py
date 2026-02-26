@@ -150,7 +150,7 @@ class OfflineTrainer:
             
         logger.info(f"Loaded {self.replay_buffer.size} episodes ({total_steps} steps).")
 
-    def train_loop(self, epochs=10):
+    def train_loop(self, epochs=5000):
         logger.info("🎓 Starting Offline Training...")
         
         for epoch in range(epochs):
@@ -187,5 +187,5 @@ class OfflineTrainer:
 if __name__ == "__main__":
     trainer = OfflineTrainer()
     trainer.load_and_process_data()
-    trainer.train_loop(epochs=5)
+    trainer.train_loop(epochs=5000) # Hunger Mode: Massive heavy training
     trainer.save_checkpoint("data/checkpoints/dreamer_pretrained")

@@ -10,6 +10,8 @@ dependencies = [
     "metatrader5>=5.0.45; sys_platform == 'win32'",
     "httpx>=0.26.0",
     "python-multipart>=0.0.6",
+    "aiohttp>=3.9.0",
+    "psycopg2-binary>=2.9.0",
 ]
 
 [project.optional-dependencies]

@@ -1,24 +1,6 @@
-# Build Stage
-FROM rust:latest AS builder
-
-# Install build dependencies
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY src/eva-kernel /app
-RUN rm -f rust-toolchain.toml
-
-# Build the kernel
-RUN cargo build --release
-
-# Run Stage
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/lib/apt/lists/*
-
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=builder /app/target/release/eva-kernel .
-
-# Ensure mnt/tablet exists for the constitution
-RUN mkdir -p /mnt/tablet
-
-CMD ["./eva-kernel"]
+COPY src/eva-kernel/target/release/eva-kernel /usr/local/bin/eva-kernel
+RUN chmod +x /usr/local/bin/eva-kernel
+CMD ["/usr/local/bin/eva-kernel"]

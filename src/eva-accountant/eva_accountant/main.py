@@ -248,6 +248,62 @@ async def register_expense(expense: OperatingExpense):
     return {"status": "recorded", "new_net_roi": financial_state["net_roi"]}
 
 
+class PnLReport(BaseModel):
+    """Bilan quotidien ou PnL envoyé par le Banker"""
+    timestamp: datetime = Field(default_factory=datetime.now)
+    symbol: str = "GLOBAL"
+    profit_loss: float
+    balance: float
+    equity: float
+
+@app.post("/pnl", tags=["Trading"])
+async def receive_pnl(report: PnLReport):
+    """
+    Reçoit les mises à jour de PnL du Banker (E.V.A).
+    Vérifie le Max Drawdown Journalier (ex: 4%).
+    """
+    financial_state["gross_profit"] += report.profit_loss
+    
+    # 1. Update High Water Mark & Current Drawdown
+    if report.equity > financial_state.get("high_water_mark", 0):
+        financial_state["high_water_mark"] = report.equity
+        financial_state["current_drawdown_pct"] = 0.0
+    else:
+        if financial_state.get("high_water_mark", 0) > 0:
+            dd_amount = financial_state["high_water_mark"] - report.equity
+            financial_state["current_drawdown_pct"] = (dd_amount / financial_state["high_water_mark"]) * 100
+            
+    # Max Drawdown record
+    if financial_state.get("current_drawdown_pct", 0) > financial_state.get("max_drawdown_pct", 0):
+        financial_state["max_drawdown_pct"] = financial_state["current_drawdown_pct"]
+
+    # 2. Daily Drawdown Limit Check (Default 4.0%)
+    MAX_DAILY_DD = float(os.getenv("MAX_DD_DAILY", "4.0"))
+    
+    if financial_state.get("current_drawdown_pct", 0) >= MAX_DAILY_DD:
+        logger.error(f"🚨 HARD LIMIT BREACH! Drawdown: {financial_state['current_drawdown_pct']:.2f}% (Limit: {MAX_DAILY_DD}%)")
+        redis = get_redis_client()
+        if redis:
+            payload = {
+                "command": "GLOBAL_STOP",
+                "issuer": "accountant",
+                "reason": f"Max Daily Drawdown Reached: {financial_state['current_drawdown_pct']:.2f}%",
+                "timestamp": datetime.now().isoformat()
+            }
+            # Broadcast on the swarm command channel
+            await redis.publish("eva.all.swarm_command", payload)
+            logger.critical("🛑 SENT GLOBAL_STOP TO ALL EXPERTS")
+
+    # Recalcul ROI Net
+    financial_state["net_roi"] = (
+        financial_state["gross_profit"]
+        - financial_state["tax_provision"]
+        - financial_state["operating_expenses"]
+    )
+
+    save_ledger()
+    return {"status": "pnl_recorded", "drawdown_pct": financial_state.get("current_drawdown_pct", 0)}
+
 @app.post("/sync-ledger", tags=["Comptabilité"])
 async def sync_with_compliance(data: dict):
     """
@@ -262,7 +318,12 @@ async def sync_with_compliance(data: dict):
     Returns:
         dict: Statut de synchronisation et ROI net actualisé.
     """
-    financial_state["gross_profit"] = data.get("total_profit", 0.0)
+    # Si le profit vient du compliance, on ne l'écrase pas violemment, on synchronise
+    # Mais par sécurité pour ce POC, on garde gross_profit localement maître s'il est plus grand
+    compliance_profit = data.get("total_profit", 0.0)
+    if compliance_profit > financial_state["gross_profit"]:
+        financial_state["gross_profit"] = compliance_profit
+        
     financial_state["tax_provision"] = data.get("total_tax", 0.0)
 
     # Recalcul ROI

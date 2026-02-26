@@ -333,8 +333,9 @@ class DreamerTrainerJAX:
     def init_params(self, sample_obs):
         self._rng, rng_init = jax.random.split(self._rng)
         batch_size = sample_obs.shape[0]
+        state_size = (self.config.hidden_state_size * 8) + (32 * 32) * 2
         dummy_action = jnp.zeros((batch_size, self.config.action_space_size))
-        dummy_state = jnp.zeros((batch_size, 2560))
+        dummy_state = jnp.zeros((batch_size, state_size))
         
         
         # Init through dispatcher (mode 5: Init All - Observe & ActorCritic)
@@ -359,8 +360,7 @@ class DreamerTrainerJAX:
         # Actually, since we are inside init_params, checking structure is tricky.
         # EASIER: Just creates zeros manually as I planned before!
         # RSSM state size is deterministic + (stoch * discrete) * 2
-        # 512 + (32 * 32) * 2 = 2560.
-        init_state = jnp.zeros((batch_size, 2560))
+        init_state = jnp.zeros((batch_size, state_size))
         
         # Now init all params using mode 5
         params = self.model.init(rng_init, 5, sample_obs, dummy_action, init_state)

@@ -74,6 +74,9 @@ services:
       - POSTGRES_USER=eva
       - POSTGRES_PASSWORD=devpassword
       - POSTGRES_DB=thehive
+      - PGHOST=/tmp
+    command: postgres -c unix_socket_directories='/tmp'
+    user: root
     volumes:
       - timescale_data:/var/lib/postgresql/data
 
@@ -92,27 +95,27 @@ services:
     volumes:
       - mosquitto_data:/mosquitto/data
 
-  vllm-server:
-    build:
-      context: .
-      dockerfile: src/eva-core/vllm/Dockerfile
-    container_name: hive-infra-vllm
-    ports: [ "8000:8000" ]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [ gpu ]
-    environment:
-      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
-    volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-    command: >
-      --model google/gemma-3-4b-it --quantization awq --gpu-memory-utilization 0.85 --enforce-eager --speculative-model yuhuili/EAGLE3-Gemma3-4B-IT --num-speculative-tokens 5 --speculative-draft-tensor-parallel-size 1
-    networks: [ "hive-net" ]
-    restart: unless-stopped
+  #  vllm-server:
+  #    build:
+  #      context: .
+  #      dockerfile: src/eva-core/vllm/Dockerfile
+  #    container_name: hive-infra-vllm
+  #    ports: [ "8000:8000" ]
+  #    deploy:
+  #      resources:
+  #        reservations:
+  #          devices:
+  #            - driver: nvidia
+  #              count: 1
+  #              capabilities: [ gpu ]
+  #    environment:
+  #      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+  #    volumes:
+  #      - ~/.cache/huggingface:/root/.cache/huggingface
+  #    command: >
+  #      --model google/gemma-3-4b-it --quantization awq --gpu-memory-utilization 0.85 --enforce-eager --speculative-model yuhuili/EAGLE3-Gemma3-4B-IT --num-speculative-tokens 5 --speculative-draft-tensor-parallel-size 1
+  #    networks: [ "hive-net" ]
+  #    restart: unless-stopped
 
   # ─────────────────────────────────────────────────────────────────────────────
   # CORE & KERNEL (Triumvirat Vital)
@@ -171,6 +174,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
+      - REDIS_URL=redis://:devpassword@redis:6379
+      - MQTT_HOST=mosquitto
     volumes:
       - black_box:/mnt/black_box
       - ./data/tablet:/mnt/tablet:ro
@@ -199,23 +204,23 @@ services:
   # EXPERTS PYTHON
   # ─────────────────────────────────────────────────────────────────────────────
 
-  banker:
-    build:
-      context: .
-      dockerfile: src/eva-banker/Dockerfile
-    container_name: hive-banker
-    ports: [ "8100:8100" ]
-    depends_on:
-      redis:
-        condition: service_healthy
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PASSWORD=devpassword
-      - MOCK_MT5=false
-    volumes:
-      - ./data/tablet:/mnt/tablet:ro
-    networks: [ "hive-net" ]
-    restart: unless-stopped
+  #  banker:
+  #    build:
+  #      context: .
+  #      dockerfile: src/eva-banker/Dockerfile
+  #    container_name: hive-banker
+  #    ports: [ "8100:8100" ]
+  #    depends_on:
+  #      redis:
+  #        condition: service_healthy
+  #    environment:
+  #      - REDIS_HOST=redis
+  #      - REDIS_PASSWORD=devpassword
+  #      - MOCK_MT5=false
+  #    volumes:
+  #      - ./data/tablet:/mnt/tablet:ro
+  #    networks: [ "hive-net" ]
+  #    restart: unless-stopped
 
   sentinel:
     build:
@@ -445,12 +450,12 @@ services:
     depends_on:
       - core
       # - banker (Running Natively)
-      # - sentinel
-      # - compliance (Commented for MVP Flash Launch)
-      # - substrate
-      # - accountant
-      # - lab
-      # - rwa
+      - sentinel
+      - compliance
+      - substrate
+      - accountant
+      - lab
+      - rwa
     networks: [ "hive-net" ]
     restart: unless-stopped
 
