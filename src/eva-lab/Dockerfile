@@ -19,9 +19,9 @@ RUN pip install --no-cache-dir --upgrade \
 COPY src/shared /app/shared
 RUN python3 -m pip install grpcio-tools && \
     python3 -m grpc_tools.protoc -I/app/shared/shared/proto \
-            --python_out=/app/shared/shared/proto \
-            --grpc_python_out=/app/shared/shared/proto \
-            /app/shared/shared/proto/swarm.proto
+    --python_out=/app/shared/shared/proto \
+    --grpc_python_out=/app/shared/shared/proto \
+    /app/shared/shared/proto/swarm.proto
 RUN pip install --no-cache-dir /app/shared
 
 # Copy eva-lab
@@ -32,4 +32,4 @@ WORKDIR /app/eva-lab
 
 EXPOSE 8600
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8600"]
+CMD ["uvicorn", "eva_lab.main:app", "--host", "0.0.0.0", "--port", "8600"]
