@@ -16,6 +16,10 @@ def deploy():
         print(stdout.read().decode())
         print(stderr.read().decode())
         
+        print("Creating ComfyUI directories on /mnt/data...")
+        dir_cmds = "echo 'Kumara-42/600' | sudo -S mkdir -p /mnt/data/comfyui/{output,input,models,custom_nodes} && echo 'Kumara-42/600' | sudo -S chmod -R 777 /mnt/data/comfyui"
+        client.exec_command(dir_cmds)
+        
         print("Starting ComfyUI Docker Container with NVIDIA GPU access...")
         # Start docker compose
         docker_cmd = "cd ~/The_Hive && echo 'Kumara-42/600' | sudo -S docker compose -f docker-compose.comfyui.yml up -d"
