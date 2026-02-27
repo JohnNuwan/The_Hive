@@ -13,6 +13,7 @@ dependencies = [
     "aiohttp>=3.9.0",
     "psycopg2-binary>=2.9.0",
     "torch_geometric>=2.5.0",
+    "python-dateutil>=2.8.2",
 ]
 
 [project.optional-dependencies]

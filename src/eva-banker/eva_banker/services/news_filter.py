@@ -18,6 +18,11 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+import httpx
+from dateutil import parser
+
+from shared.telegram_client import TelegramClient
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,7 +60,8 @@ class NewsFilterService:
         now = datetime.now()
 
         for event in self.high_impact_events:
-            if event["impact"] != "HIGH":
+            # On considère "High" (et parfois Holiday comme critique selon les setups)
+            if event.get("impact", "").upper() not in ["HIGH", "HOLIDAY"]:
                 continue
 
             event_time = event["time"]
@@ -67,53 +73,59 @@ class NewsFilterService:
                     self.is_active = True
                     self.blocked_until = window_end
                     self.current_blocking_event = event["name"]
-                    logger.warning(
-                        f"🚨 NEWS FILTER ACTIVÉ: '{event['name']}' "
-                        f"— Trading bloqué jusqu'à {window_end.strftime('%H:%M')}"
+                    msg = (
+                        f"🚨 *NEWS FILTER ACTIVÉ*\n\n"
+                        f"Événement: `{event['name']}` ({event.get('currency', 'ALL')})\n"
+                        f"Impact: {event.get('impact', 'HIGH')}\n"
+                        f"Trading bloqué jusqu'à {window_end.strftime('%H:%M')}"
                     )
+                    logger.warning(msg.replace("\n", " - "))
+                    asyncio.create_task(TelegramClient().send_message(msg))
                 return
 
         # Aucun événement en cours
         if self.is_active and (not self.blocked_until or now > self.blocked_until):
             self.is_active = False
             self.blocked_until = None
+            msg = f"✅ *NEWS FILTER DÉSACTIVÉ*\nL'événement `{self.current_blocking_event}` est terminé.\nReprise du Trading."
             self.current_blocking_event = None
-            logger.info("✅ NEWS FILTER DÉSACTIVÉ — Trading autorisé")
+            logger.info(msg.replace("\n", " "))
+            asyncio.create_task(TelegramClient().send_message(msg))
 
     async def _fetch_economic_calendar(self) -> List[Dict[str, Any]]:
         """
-        Récupère le calendrier économique.
-
-        Stub: retourne des événements simulés.
-        En production: connecter à ForexFactory API ou MQL5 Calendar.
+        Récupère le calendrier économique temps réel via ForexFactory.
         """
-        now = datetime.now()
-        return [
-            {
-                "name": "NFP Report",
-                "impact": "HIGH",
-                "currency": "USD",
-                "time": now.replace(hour=14, minute=30, second=0),
-            },
-            {
-                "name": "FOMC Rate Decision",
-                "impact": "HIGH",
-                "currency": "USD",
-                "time": now.replace(hour=20, minute=0, second=0),
-            },
-            {
-                "name": "CPI Data (YoY)",
-                "impact": "HIGH",
-                "currency": "USD",
-                "time": now.replace(hour=14, minute=30, second=0) + timedelta(days=1),
-            },
-            {
-                "name": "PMI Manufacturing",
-                "impact": "MEDIUM",
-                "currency": "EUR",
-                "time": now.replace(hour=10, minute=0, second=0),
-            },
-        ]
+        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                
+                events = []
+                for item in data:
+                    try:
+                        # Parsing des dates ISO 8601 renvoyées par ForexFactory
+                        event_date = parser.isoparse(item["date"]).replace(tzinfo=None)
+                        events.append({
+                            "name": item.get("title", "Unknown"),
+                            "impact": item.get("impact", "").upper(),
+                            "currency": item.get("country", ""),
+                            "time": event_date,
+                        })
+                    except Exception as e:
+                        logger.warning(f"Erreur parsing date calendrier: {e} sur {item}")
+                        
+                # On trie par date histoire d'être propre
+                events.sort(key=lambda x: x["time"])
+                return events
+                
+        except Exception as e:
+            logger.error(f"Impossible de joindre ForexFactory: {e}")
+            # Stub de sécurité local en cas de crash réseau pour qu'une version vide ne casse pas tout
+            return []
 
     def should_block_trading(self) -> bool:
         """Retourne True si le trading doit être bloqué."""
