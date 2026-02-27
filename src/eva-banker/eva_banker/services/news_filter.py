@@ -41,6 +41,7 @@ class NewsFilterService:
         self.current_blocking_event: Optional[str] = None
         self.high_impact_events: List[Dict[str, Any]] = []
         self._running = True
+        self.last_fetch_time: Optional[datetime] = None
 
     async def start_monitoring(self) -> None:
         """Démarre la surveillance du calendrier en tâche de fond."""
@@ -94,8 +95,14 @@ class NewsFilterService:
 
     async def _fetch_economic_calendar(self) -> List[Dict[str, Any]]:
         """
-        Récupère le calendrier économique temps réel via ForexFactory.
+        Récupère le calendrier économique temps réel via ForexFactory avec un cache de 4 heures.
         """
+        now = datetime.now()
+        # Anti 429: Fetch uniquement toutes les 4 heures
+        if self.high_impact_events and self.last_fetch_time:
+            if (now - self.last_fetch_time).total_seconds() < 14400:
+                return self.high_impact_events
+
         url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
         
         try:
@@ -120,12 +127,14 @@ class NewsFilterService:
                         
                 # On trie par date histoire d'être propre
                 events.sort(key=lambda x: x["time"])
+                self.last_fetch_time = now
+                self.high_impact_events = events
                 return events
                 
         except Exception as e:
             logger.error(f"Impossible de joindre ForexFactory: {e}")
-            # Stub de sécurité local en cas de crash réseau pour qu'une version vide ne casse pas tout
-            return []
+            # Renvoie le cache précédent si échec au lieu de vider la mémoire
+            return self.high_impact_events
 
     def should_block_trading(self) -> bool:
         """Retourne True si le trading doit être bloqué."""

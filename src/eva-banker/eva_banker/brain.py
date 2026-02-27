@@ -579,16 +579,19 @@ class AutoTradingEngine:
                         last_time = last_strat.get("timestamp")
                         
                         bias = "NEUTRAL"
+                        gnn_bias = "UNKNOWN"
                         should_refresh = not last_time or (datetime.now() - datetime.fromisoformat(last_time)).total_seconds() > 900
                         
                         if should_refresh:
                             try:
                                 strategy = await self.cortex.analyze_market_context(symbol)
                                 bias = strategy.get("bias", "NEUTRAL")
+                                gnn_bias = strategy.get("gnn_bias", "UNKNOWN")
                             except Exception as e_cortex:
                                 logger.error(f"🧠 Cortex Error: {e_cortex}")
                         else:
                             bias = last_strat.get("bias", "NEUTRAL")
+                            gnn_bias = last_strat.get("gnn_bias", "UNKNOWN")
 
                         # A. Market Data
                         tick = await self.mt5.get_symbol_tick(symbol)
