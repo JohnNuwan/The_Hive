@@ -277,7 +277,25 @@ async def swarm_listener():
 
     async def handle_swarm(channel, message):
         action = message.get("action")
-        if action == "SWARM_SURVEILLANCE":
+        command = message.get("command")
+        
+        if command == "GLOBAL_STOP":
+            logger.critical(f"🛑 KILL-SWITCH RECEIVED: {message.get('reason')}")
+            # Arrêt du moteur d'exécution The Hive Mind
+            if hasattr(app.state, 'auto_engine') and app.state.auto_engine.is_active:
+                await app.state.auto_engine.stop()
+                
+            # Notification d'urgence
+            if hasattr(app.state.auto_engine, 'telegram'):
+                app.state.auto_engine.telegram.send_sync(
+                    f"🚨 *URGENCE : KILL-SWITCH DÉCLENCHÉ* 🚨\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 Par : {message.get('issuer', 'Unknown')}\n"
+                    f"⚠️ Raison : {message.get('reason')}\n"
+                    f"⏸️ Le Bot E.V.A est totalement HALTÉ."
+                )
+                
+        elif action == "SWARM_SURVEILLANCE":
             # Lancement automatique d'un drone de surveillance
             await swarm.spawn_drone(
                 name="GoldSurveillance",

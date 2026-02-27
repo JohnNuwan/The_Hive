@@ -35,9 +35,19 @@ class Strategist:
 
         # 2. Calculate Macro Indicators
         closes = [c["close"] for c in candles]
+        highs = [c["high"] for c in candles]
+        lows = [c["low"] for c in candles]
+        volumes = [c["tick_volume"] for c in candles]
+        
         rsi = IndicatorFactory.rsi(closes, 14).iloc[-1]
         trend_ema = IndicatorFactory.ema(closes, 50).iloc[-1]
         current_price = closes[-1]
+        
+        # New Advanced Indicators (VWAP, ADX, Fibs)
+        vwap = IndicatorFactory.vwap(highs, lows, closes, volumes).iloc[-1]
+        adx_data = IndicatorFactory.adx(highs, lows, closes, 14)
+        adx_val = adx_data["adx"].iloc[-1]
+        fibs = IndicatorFactory.get_fibonacci_levels(highs, lows, 50)
         
         trend = "BULLISH" if current_price > trend_ema else "BEARISH"
         
@@ -48,13 +58,20 @@ class Strategist:
             "price": current_price,
             "trend_50ema": trend,
             "rsi_14": round(rsi, 2),
-            "last_5_candles": [c["close"] for c in candles[-5:]]
+            "vwap": round(vwap, 2) if not __import__("math").isnan(vwap) else current_price,
+            "adx_trend_strength": round(adx_val, 2),
+            "fib_382": round(fibs.get("fib_382", 0), 2),
+            "fib_618": round(fibs.get("fib_618", 0), 2),
+            "last_5_candles": [round(c["close"], 2) for c in candles[-5:]]
         }
         
         prompt = (
             f"Review the M15 market structure for {symbol}. "
-            f"Trend is {trend}. RSI is {rsi}. "
+            f"Trend is {trend}. RSI is {rsi:.1f}. ADX (Trend Strength) is {adx_val:.1f}. "
+            f"Price is at {current_price:.2f} relative to VWAP {context['vwap']:.2f}. "
+            f"Key Fib support/resistances lie at {context['fib_382']:.2f} and {context['fib_618']:.2f}. "
             "Determine the strategic bias: BULLISH (Buy Dips), BEARISH (Sell Rallies), or RANGING (Scalp Both). "
+            "Consider VWAP rejections and ADX > 25 for strong trend continuation. "
             "Output JSON: {\"bias\": \"...\", \"reason\": \"...\"}"
         )
 

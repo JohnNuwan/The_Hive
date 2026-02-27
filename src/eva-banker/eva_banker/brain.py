@@ -157,7 +157,7 @@ class AutoTradingEngine:
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _fmt_open_msg(self, symbol: str, action: str, entry_price: float, sl_price: float,
-                      rsi: float, atr: float, bias: str, comment: str) -> str:
+                      rsi: float, atr: float, vwap: float, adx: float, cortex_bias: str, gnn_bias: str, comment: str) -> str:
         """Formate un message d'ouverture riche."""
         sl_dist = abs(entry_price - sl_price)
         emoji = "🟢" if action == "BUY" else "🔴"
@@ -169,8 +169,10 @@ class AutoTradingEngine:
             f"🔹 *Entry:* {entry_price:.5f}\n"
             f"🛡️ *S/L:* {sl_price:.5f} (-{sl_dist:.2f})\n\n"
             f"📊 *Markets & Signals:*\n"
-            f"  • RSI: {rsi:.1f} | ATR: {atr:.1f}\n"
-            f"  • Cortex: {bias}\n"
+            f"  • RSI: {rsi:.1f} | ADX: {adx:.1f}\n"
+            f"  • VWAP: {vwap:.2f}\n"
+            f"  • Cortex: {cortex_bias}\n"
+            f"  • GNN (Proxmox): {gnn_bias}\n\n"
             f"🧠 *AI Reasoning:*\n"
             f"  • {comment}\n\n"
             f"⏳ {datetime.now().strftime('%H:%M')} | The Hive"
@@ -683,6 +685,7 @@ class AutoTradingEngine:
                                 f"🧠 {sym_color}{symbol:<8}{Style.RESET_ALL} | "
                                 f"Price: {current_price:<9.2f} | "
                                 f"RSI: {rsi_val:<4.1f} | "
+                                f"ADX: {adx_data['adx'].iloc[-1]:<4.1f} | VWAP: {vwap_val:<9.2f} | "
                                 f"Cortex: {bias_color}[{bias}]{Style.RESET_ALL}"
                             )
                         else:
@@ -759,6 +762,10 @@ class AutoTradingEngine:
                             "price": float(current_price),
                             "rsi": rsi_val,
                             "macd": features.get("MACD_Hist", 0.0),
+                            "vwap": float(vwap_val),
+                            "adx": float(adx_data["adx"].iloc[-1]),
+                            "cortex_bias": str(bias),
+                            "gnn_bias": str(gnn_bias),
                             "action": str(action) if action else "WAIT",
                             "comment": comment,
                             "timestamp": datetime.now().isoformat()
@@ -827,7 +834,10 @@ class AutoTradingEngine:
                                     sl_price=float(sl_price),
                                     rsi=rsi_val,
                                     atr=atr,
-                                    bias=bias,
+                                    vwap=extended_features.get("vwap", float(current_price)),
+                                    adx=extended_features.get("adx", 0.0),
+                                    cortex_bias=last_strat.get("cortex_bias", "UNKNOWN"),
+                                    gnn_bias=last_strat.get("gnn_bias", "UNKNOWN"),
                                     comment=comment
                                 )
                                 self.telegram.send_sync(open_msg)

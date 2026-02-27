@@ -98,12 +98,11 @@ export default function TradingPanel() {
                         trend={account.balance ? `${((totalProfit / parseFloat(account.balance)) * 100).toFixed(2)}%` : "0%"}
                         glow={totalProfit >= 0 ? "emerald" : "amber"}
                     />
-                    <StatCard
-                        title="VaR / Drawdown"
-                        value={`${parseFloat(risk.daily_drawdown_percent || 0).toFixed(2)}% | VaR: ${parseFloat(risk.details?.var_check?.details || 0).toFixed(4)}`}
-                        icon={<ShieldAlert className="text-amber-400" />}
-                        trend={risk.trading_allowed ? "SECURE" : "LOCKED"}
-                        glow="amber"
+                    {/* Dynamic Drawdown Gauge */}
+                    <DrawdownGauge
+                        drawdown={parseFloat(risk.daily_drawdown_percent || 0)}
+                        limit={4.0}
+                        isLocked={!risk.trading_allowed}
                     />
                 </div>
 
@@ -262,6 +261,10 @@ export default function TradingPanel() {
                                     price={data.price}
                                     action={data.action}
                                     rsi={data.rsi}
+                                    vwap={data.vwap}
+                                    adx={data.adx}
+                                    cortex_bias={data.cortex_bias}
+                                    gnn_bias={data.gnn_bias}
                                     comment={data.comment}
                                 />
                             ))
@@ -331,45 +334,137 @@ function SincerityGauge({ score }: { score: number }) {
     )
 }
 
-function SentimentItem({ symbol, price, action, rsi, comment }: { symbol: string, price: number, action: string, rsi: number, comment: string }) {
+function SentimentItem({ symbol, price, action, rsi, vwap, adx, cortex_bias, gnn_bias, comment }: { symbol: string, price: number, action: string, rsi: number, vwap?: number, adx?: number, cortex_bias?: string, gnn_bias?: string, comment: string }) {
     const isBull = action.includes('BUY')
     const isBear = action.includes('SELL')
 
     const barColor = isBull ? 'bg-gradient-to-r from-emerald-600 to-emerald-400' : isBear ? 'bg-gradient-to-r from-red-600 to-red-400' : 'bg-gradient-to-r from-slate-600 to-slate-400'
     const textColor = isBull ? 'text-emerald-400' : isBear ? 'text-red-400' : 'text-slate-400'
-    const sentimentText = isBull ? 'HAUSSIER' : isBear ? 'BAISSIER' : 'ATTENTE'
 
     // RSI visual position (0-100)
     const width = Math.min(Math.max(rsi, 0), 100)
 
+    // Bias Badge Coloring
+    const getBiasColor = (bias?: string) => {
+        if (!bias) return 'text-slate-500 bg-slate-500/10 border-slate-500/20'
+        if (bias.includes('BULL')) return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+        if (bias.includes('BEAR')) return 'text-red-400 bg-red-500/10 border-red-500/20'
+        return 'text-sky-400 bg-sky-500/10 border-sky-500/20'
+    }
+
     return (
-        <div className="space-y-3 group p-3 rounded-2xl hover:bg-white/[0.02] transition-colors border border-transparent hover:border-white/5">
-            <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-widest">
-                <div className="flex flex-col">
-                    <span className="text-slate-300 group-hover:text-white transition-colors text-xs">{symbol}</span>
-                    <span className="text-slate-500 mt-0.5">{price.toFixed(2)} $</span>
+        <div className="space-y-4 group p-4 rounded-3xl bg-black/40 hover:bg-white/[0.04] transition-all border border-white/5 hover:border-white/10 shadow-lg relative overflow-hidden">
+            {/* Background Glow */}
+            <div className={`absolute top-0 right-0 w-32 h-32 blur-[50px] rounded-full opacity-20 pointer-events-none ${isBull ? 'bg-emerald-500' : isBear ? 'bg-red-500' : 'bg-slate-500'}`} />
+
+            <div className="flex justify-between items-start relative z-10">
+                <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                        <span className="text-white font-black text-lg tracking-tight">{symbol}</span>
+                        <span className="text-slate-400 font-mono text-xs">{price.toFixed(2)} $</span>
+                    </div>
+
+                    {/* Multi-Agent Judgement Matrix */}
+                    <div className="flex items-center gap-2 mt-2">
+                        {cortex_bias && (
+                            <div className={`px-2 py-0.5 rounded-md border text-[8px] font-black uppercase tracking-widest ${getBiasColor(cortex_bias)}`}>
+                                CORTEX: {cortex_bias}
+                            </div>
+                        )}
+                        {gnn_bias && (
+                            <div className={`px-2 py-0.5 rounded-md border text-[8px] font-black uppercase tracking-widest ${getBiasColor(gnn_bias)}`}>
+                                GNN: {gnn_bias}
+                            </div>
+                        )}
+                    </div>
                 </div>
-                <div className="text-right">
-                    <span className={`${textColor} bg-white/[0.03] px-2 py-1 rounded-lg border border-white/5 shadow-sm block mb-1`}>
+
+                <div className="text-right flex flex-col items-end">
+                    <div className={`${textColor} bg-black/60 px-4 py-1.5 rounded-xl border border-white/10 shadow-[0_0_15px_rgba(0,0,0,0.5)] font-black uppercase tracking-widest text-xs flex items-center gap-2`}>
+                        {action !== 'WAIT' && <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${isBull ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-red-500 shadow-[0_0_8px_#ef4444]'}`} />}
                         {action}
+                    </div>
+                    <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-2 block max-w-[120px] truncate" title={comment}>
+                        {comment}
                     </span>
-                    <span className="text-[9px] text-slate-600">{comment}</span>
                 </div>
             </div>
 
-            <div className="relative pt-1">
-                <div className="flex justify-between text-[8px] font-bold text-slate-600 uppercase mb-1 px-1">
+            {/* Advanced Metrics Dash */}
+            <div className="grid grid-cols-2 gap-3 relative z-10">
+                <div className="bg-white/[0.02] border border-white/5 rounded-xl p-2 flex flex-col">
+                    <span className="text-[8px] text-slate-500 uppercase font-black tracking-widest">VWAP (Institutional Level)</span>
+                    <span className="text-xs font-mono font-bold text-sky-400 mt-0.5">{vwap ? vwap.toFixed(2) : '---'} $</span>
+                </div>
+                <div className="bg-white/[0.02] border border-white/5 rounded-xl p-2 flex flex-col">
+                    <span className="text-[8px] text-slate-500 uppercase font-black tracking-widest">ADX (Trend Strength)</span>
+                    <span className={`text-xs font-mono font-bold mt-0.5 ${adx && adx > 25 ? 'text-amber-400 drop-shadow-[0_0_5px_rgba(251,191,36,0.5)]' : 'text-slate-400'}`}>
+                        {adx ? adx.toFixed(1) : '---'} {adx && adx > 25 ? '🔥' : ''}
+                    </span>
+                </div>
+            </div>
+
+            <div className="relative pt-2 z-10">
+                <div className="flex justify-between text-[8px] font-bold text-slate-500 uppercase mb-1 px-1">
                     <span>Oversold (30)</span>
-                    <span>RSI {rsi.toFixed(1)}</span>
+                    <span className="text-slate-300">RSI {rsi.toFixed(1)}</span>
                     <span>Overbought (70)</span>
                 </div>
-                <div className="h-1.5 bg-white/[0.03] rounded-full overflow-hidden border border-white/5 shadow-inner relative">
+                <div className="h-1.5 bg-black/40 rounded-full overflow-hidden border border-white/5 shadow-inner relative">
                     {/* Zones safe */}
-                    <div className="absolute left-[30%] right-[30%] top-0 bottom-0 bg-white/[0.02]" />
-
+                    <div className="absolute left-[30%] right-[30%] top-0 bottom-0 bg-white/[0.04]" />
                     <div
-                        className={`h-full rounded-full transition-all duration-1500 ease-out shadow-lg ${barColor}`}
+                        className={`h-full rounded-full transition-all duration-1500 ease-out shadow-[0_0_10px_currentColor] ${barColor}`}
                         style={{ width: `${width}%` }}
+                    />
+                </div>
+            </div>
+        </div>
+    )
+}
+
+function DrawdownGauge({ drawdown, limit, isLocked }: { drawdown: number, limit: number, isLocked: boolean }) {
+    const dangerZone = drawdown > (limit * 0.8) // 80% du drawdown max = Danger
+    const fatalZone = drawdown >= limit || isLocked
+
+    const glowClass = fatalZone ? 'shadow-red-600/50' : dangerZone ? 'shadow-amber-500/40' : 'shadow-sky-500/20'
+    const borderClass = fatalZone ? 'border-red-500/60' : dangerZone ? 'border-amber-500/40' : 'border-sky-500/20'
+    const barColor = fatalZone ? 'bg-red-500' : dangerZone ? 'bg-gradient-to-r from-amber-500 to-red-500' : 'bg-gradient-to-r from-sky-500 to-sky-400'
+    const iconColor = fatalZone ? 'text-red-500' : dangerZone ? 'text-amber-400' : 'text-sky-400'
+
+    const percentage = Math.min((drawdown / limit) * 100, 100)
+
+    return (
+        <div className={`glass p-7 rounded-[2rem] border ${borderClass} shadow-2xl relative overflow-hidden group transition-all duration-300 ${fatalZone ? 'animate-pulse' : ''}`}>
+            <div className={`absolute top-0 right-0 w-32 h-32 blur-3xl rounded-full opacity-20 pointer-events-none ${fatalZone ? 'bg-red-600' : dangerZone ? 'bg-amber-600' : 'bg-sky-600'}`} />
+
+            <div className="flex items-center justify-between mb-4 relative z-10">
+                <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] flex items-center gap-2">
+                    <ShieldAlert size={12} className={iconColor} />
+                    Accountant Kill-Switch
+                </p>
+                <div className={`px-3 py-1 bg-black/40 rounded-xl border ${borderClass} shadow-inner`}>
+                    <span className={`text-[9px] font-black uppercase text-slate-500 tracking-widest ${iconColor}`}>
+                        {fatalZone ? 'HALTED' : dangerZone ? 'WARNING' : 'SECURE'}
+                    </span>
+                </div>
+            </div>
+
+            <div className="flex items-end justify-between mb-2 relative z-10">
+                <div className="flex items-baseline gap-2">
+                    <p className={`text-3xl font-black tracking-tight ${fatalZone ? 'text-red-500 drop-shadow-[0_0_15px_rgba(239,68,68,0.8)]' : dangerZone ? 'text-amber-400 text-shadow-glow' : 'text-white'}`}>
+                        -{drawdown.toFixed(2)}%
+                    </p>
+                </div>
+                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Max: -{limit.toFixed(1)}%</p>
+            </div>
+
+            {/* Gauge */}
+            <div className="relative pt-2 z-10">
+                <div className="h-2 bg-black/60 rounded-full overflow-hidden border border-white/5 shadow-inner">
+                    <div
+                        className={`h-full rounded-full transition-all duration-1000 ease-out shadow-[0_0_15px_currentColor] ${barColor}`}
+                        style={{ width: `${Math.max(percentage, 2)}%` }}
                     />
                 </div>
             </div>

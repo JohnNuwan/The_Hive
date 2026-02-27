@@ -53,6 +53,7 @@ class OfflineTrainer:
             
             # Pre-compute columns (Vectorized = Instant)
             try:
+                # Vectorized calculations for speed
                 # RSI
                 df['rsi'] = IndicatorFactory.rsi(df['close'], 14)
                 
@@ -62,20 +63,35 @@ class OfflineTrainer:
                 df['macd_signal'] = macd_res['signal']
                 df['macd_hist'] = macd_res['histogram']
                 
-                # ATR
-                df['atr'] = IndicatorFactory.atr(df['high'], df['low'], df['close'], 14)
+                # VWAP
+                df['vwap'] = IndicatorFactory.vwap(df['high'], df['low'], df['close'], df['tick_volume'])
                 
-                # Bollinger
-                bb_res = IndicatorFactory.bollinger_bands(df['close'])
-                df['bb_width'] = bb_res['width']
-                df['bb_pct'] = bb_res['pct_b']
+                # OBV & Momentum
+                df['obv'] = IndicatorFactory.obv(df['close'], df['tick_volume'])
+                df['momentum'] = IndicatorFactory.momentum(df['close'])
+                df['trix'] = IndicatorFactory.trix(df['close'])
                 
-                # Rel Vol
-                df['rvol'] = IndicatorFactory.relative_volume(df['tick_volume'])
+                # Stochastic
+                stoch_res = IndicatorFactory.stochastic(df['high'], df['low'], df['close'])
+                df['stoch_k'] = stoch_res['percent_k']
+                df['stoch_d'] = stoch_res['percent_d']
+                
+                # CCI & ADX
+                df['cci'] = IndicatorFactory.cci(df['high'], df['low'], df['close'])
+                adx_res = IndicatorFactory.adx(df['high'], df['low'], df['close'])
+                df['adx'] = adx_res['adx']
+                df['adx_plus_di'] = adx_res['plus_di']
+                df['adx_minus_di'] = adx_res['minus_di']
+                
+                # Ichimoku
+                ichi_res = IndicatorFactory.ichimoku(df['high'], df['low'], df['close'])
+                df['ichi_tenkan'] = ichi_res['tenkan_sen']
+                df['ichi_kijun'] = ichi_res['kijun_sen']
+                df['ichi_senkou_a'] = ichi_res['senkou_span_a']
+                df['ichi_senkou_b'] = ichi_res['senkou_span_b']
                 
                 # Fill NaN from rolling windows (start of file)
                 df = df.fillna(method='bfill').fillna(0.0)
-                
             except Exception as e:
                 logger.error(f"Error computing indicators for {file}: {e}")
                 continue
@@ -102,44 +118,79 @@ class OfflineTrainer:
                 # We want balanced classes: 40% Hold, 30% Buy, 30% Sell
                 actions = np.random.choice([0, 1, 2], size=segment_length, p=[0.4, 0.3, 0.3])
                 
+                # Virtual Account for Drawdown Simulation
+                initial_balance = 10000.0
+                balance = initial_balance
+                peak_balance = initial_balance
+                position = 0 # 1=Long, -1=Short, 0=None
+                entry_price = 0.0
+                
                 for i in range(segment_length):
+                    idx = start_idx + i
                     price = seg_closes[i]
-                    vol = seg_vols[i]
                     
                     obs_vec = np.zeros(self.config.observation_shape)
-                    obs_vec[0] = price
-                    obs_vec[1] = np.log1p(vol)
-                    # TODO: Add more indicators here efficiently
+                    obs_vec[0] = price / 3000.0 # Normalize 
+                    obs_vec[1] = df['rsi'].values[idx] / 100.0
+                    
+                    # Mirroring brain.py indicator iteration exactly
+                    features_list = [
+                        df['rsi'].values[idx],
+                        df['macd_hist'].values[idx],
+                        df['macd_signal'].values[idx],
+                        df['vwap'].values[idx],
+                        df['obv'].values[idx] / 10000.0, # Scaled down
+                        df['momentum'].values[idx],
+                        df['trix'].values[idx],
+                        df['stoch_k'].values[idx],
+                        df['stoch_d'].values[idx],
+                        df['cci'].values[idx],
+                        df['adx'].values[idx],
+                        df['adx_plus_di'].values[idx],
+                        df['adx_minus_di'].values[idx],
+                        df['ichi_tenkan'].values[idx],
+                        df['ichi_kijun'].values[idx],
+                        df['ichi_senkou_a'].values[idx],
+                        df['ichi_senkou_b'].values[idx]
+                    ]
+                    
+                    for f_idx, f_val in enumerate(features_list):
+                        if f_idx + 2 < self.config.observation_shape[0]:
+                            obs_vec[f_idx + 2] = f_val
                     
                     action_val = actions[i]
                     
-                    # Reward Calculation
+                    # Simulated Execution & Reward Calculation
                     reward = 0.0
                     if i < segment_length - 1:
                         next_price = seg_closes[i+1]
-                        ret = np.log(next_price / price) * 100 # Percentage return approx
+                        ret = (next_price - price) / price * 100 # % Return
                         
                         if action_val == 1: # BUY
                             reward = ret - 0.02 # Spread cost
+                            if position == 0: 
+                                position = 1; entry_price = price
                         elif action_val == 2: # SELL
                             reward = -ret - 0.02 # Spread cost
+                            if position == 0: 
+                                position = -1; entry_price = price
                         elif action_val == 0: # HOLD
-                            reward = 0.0 # No cost, no gain
+                            reward = 0.0
+                            if position != 0:
+                                # Track running PNL
+                                trade_pnl = (price - entry_price) / entry_price * 100 if position == 1 else (entry_price - price) / entry_price * 100
+                                balance += (balance * trade_pnl / 100)
+                                position = 0
+                                
+                        # Update peak & drawdown
+                        if balance > peak_balance:
+                            peak_balance = balance
+                        drawdown_pct = (peak_balance - balance) / peak_balance * 100
+                        
+                        # Kill-Switch Penalty !
+                        if drawdown_pct >= 4.0:
+                            reward -= 15.0 # Massive penalty for breaching Accountant Limit
                             
-                    # One-hot action for storage
-                    # But replay_buffer.store expects integer action? 
-                    # Check params: buffer.store(obs, action, reward, ...)
-                    # Usually action is integer or one-hot?
-                    # In MuZero GameHistory, action is stored as is.
-                    # DreamerTrainerJAX.prepare_batch converts it.
-                    # Let's check prepare_batch... it calls jnp.array(actions).
-                    # If we store int, it becomes int array.
-                    # But Dreamer model expects One-Hot in standard implementations.
-                    # My implementation in dreamer_trainer.py:
-                    # act_t = jnp.transpose(batch.actions, (1, 0, 2))
-                    # It expects [B, T, ActionDim].
-                    # So we MUST store ONE-HOT actions in GameHistory!
-                    
                     action_one_hot = np.zeros(self.config.action_space_size)
                     action_one_hot[action_val] = 1.0
                     

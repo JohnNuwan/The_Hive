@@ -302,11 +302,12 @@ export async function getNewsFilter(): Promise<NewsFilterStatus> {
     })
 }
 
-export async function getTradingStatus(): Promise<{ account: AccountInfo; positions: TradingPosition[]; risk: any }> {
+export async function getTradingStatus(): Promise<any> {
     return safeFetch('/api/banker/trading/status', {
         account: { equity: 0, balance: 0, margin: 0, currency: 'USD' },
         positions: [],
-        risk: { daily_drawdown_percent: 0, trading_allowed: true }
+        risk: { daily_drawdown_percent: 0, trading_allowed: true },
+        decisions: {} // Now expected to contain vwap, adx, cortex_bias, gnn_bias
     })
 }
 

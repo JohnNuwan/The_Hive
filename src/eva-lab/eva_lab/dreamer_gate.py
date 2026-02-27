@@ -234,12 +234,12 @@ class DreamerGate:
                 indicators = observation.get("indicators", {})
                 rsi = indicators.get("RSI", 50.0)
 
-                # Create a simplified obs vector (pad to 142 features)
-                obs_vec = np.zeros(142, dtype=np.float32)
+                # Create a simplified obs vector (pad to 32 features)
+                obs_vec = np.zeros(32, dtype=np.float32)
                 obs_vec[0] = price / 3000.0  # Normalized price
                 obs_vec[1] = rsi / 100.0     # Normalized RSI
                 for i, (k, v) in enumerate(indicators.items()):
-                    if i + 2 < 142:
+                    if i + 2 < 32:
                         obs_vec[i + 2] = float(v) if isinstance(v, (int, float)) else 0.0
 
                 result = agent.infer_action(obs_vec)

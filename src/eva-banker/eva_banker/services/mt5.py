@@ -58,6 +58,7 @@ class MT5Service:
             # Initialisation MT5
             if not await asyncio.to_thread(mt5.initialize):
                 logger.error(f"MT5 initialize failed: {mt5.last_error()}")
+                self.mock_mode = True
                 return False
 
             # Verifier si le terminal est deja connecte au bon compte
@@ -85,6 +86,7 @@ class MT5Service:
                     else:
                         logger.error(f"MT5 login echoue pour {self._login}@{self._server}: {mt5.last_error()}")
                         await asyncio.to_thread(mt5.shutdown)
+                        self.mock_mode = True
                         return False
             elif account_info:
                 logger.info(f"MT5 connecte: compte {account_info.login} sur {account_info.server}")
@@ -95,6 +97,7 @@ class MT5Service:
             return True
         except Exception as e:
             logger.exception(f"Erreur connexion MT5: {e}")
+            self.mock_mode = True
             return False
 
     async def initialize_symbols(self, symbols: list[str]) -> None:
@@ -291,6 +294,8 @@ class MT5Service:
             sym = order.symbol.upper()
             if "XAU" in sym:
                 max_spread = 40 # Or: 40 points = 4 pips ($0.40)
+            elif "BTC" in sym or "ETH" in sym:
+                max_spread = 300 # Crypto: 300 points ($3.00)
             elif "US30" in sym or "NAS100" in sym or "GER40" in sym:
                 max_spread = 60 # Indices: 60 points
                 
