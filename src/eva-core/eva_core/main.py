@@ -461,6 +461,31 @@ async def get_memory_graph(
     return await memory_service.get_graph_data(limit=limit, similarity_threshold=similarity_threshold)
 
 
+@app.get("/gnn/graph", tags=["GNN"])
+async def get_gnn_knowledge_graph() -> dict[str, Any]:
+    """
+    Proxy pour récupérer la topologie (Nodes & Liens) du Multi-Asset GNN
+    depuis l'expert Lab.
+    """
+    import httpx
+    settings: Settings = app.state.settings
+    lab_url = f"http://{settings.lab_api_host}:{settings.lab_api_port}"
+    
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        try:
+            # On passe les headers d'authentification interne pour eva-lab
+            response = await client.get(
+                f"{lab_url}/gnn/graph",
+                headers=get_internal_headers("core")
+            )
+            if response.status_code == 200:
+                return response.json()
+            return {"nodes": [], "links": []}
+        except Exception as e:
+            logger.error(f"Erreur proxy GNN Graph: {e}")
+            return {"nodes": [], "links": []}
+
+
 @app.get("/memory/search", tags=["Mémoire"])
 async def search_memory(
     query: str,

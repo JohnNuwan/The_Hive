@@ -347,6 +347,10 @@ export async function getMemoryGraph(limit = 50, similarityThreshold = 0.8) {
     return safeFetch(`/api/core/memory/graph?limit=${limit}&similarity_threshold=${similarityThreshold}`, { nodes: [], links: [] })
 }
 
+export async function getGNNGraph() {
+    return safeFetch(`/api/core/gnn/graph`, { nodes: [], links: [] })
+}
+
 // ═══ ACCOUNTANT ═══
 export interface AccountantReport {
     summary: {

@@ -12,7 +12,7 @@ def deploy():
         print("Connected! Fetching remote changes and resetting branch...")
         
         # Git commands
-        git_cmds = "cd ~/The_Hive && git fetch origin feat/sprint-6 && git reset --hard origin/feat/sprint-6"
+        git_cmds = "cd ~/The_Hive && git fetch origin main && git reset --hard origin/main"
         stdin, stdout, stderr = client.exec_command(git_cmds)
         print(stdout.read().decode())
         print(stderr.read().decode())
