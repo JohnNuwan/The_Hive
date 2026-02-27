@@ -153,7 +153,7 @@ async def lifespan(app: FastAPI):
     app.state.memory_service = get_memory_service()
     
     # Intégration Biblio_IA / PromptMaster
-    app.state.prompt_master = PromptMaster()
+    app.state.prompt_master = PromptMaster(templates_dir=settings.prompt_master_templates_dir)
 
     # Intégration MQTT
     app.state.mqtt = EVAMQTTClient("core")
@@ -584,7 +584,7 @@ async def system_status() -> dict[str, Any]:
     """
     import httpx
     settings: Settings = app.state.settings
-    sentinel_url = f"http://localhost:{settings.sentinel_api_port}"
+    sentinel_url = f"http://{settings.sentinel_api_host}:{settings.sentinel_api_port}"
     
     async with httpx.AsyncClient(timeout=3.0) as client:
         try:

@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     jwt_secret_key: SecretStr = Field(default=SecretStr("dev-secret-change-in-prod"))
     jwt_algorithm: str = "HS256"
     jwt_expiration_hours: int = 24
+    prompt_master_templates_dir: str = "Documentation/Biblio_IA"
 
     # ═══════════════════════════════════════════════════════════════════════════
     # LLM SERVER
@@ -140,6 +141,7 @@ class Settings(BaseSettings):
     # ═══════════════════════════════════════════════════════════════════════════
     # SECURITY & SUPPORT SERVICES
     # ═══════════════════════════════════════════════════════════════════════════
+    sentinel_api_host: str = "localhost"
     sentinel_api_port: int = 8200
     compliance_api_port: int = 8300
     substrate_api_port: int = 8400

@@ -9,12 +9,13 @@ agents OpenClaw pour lire, lister et rechercher.
 Skills disponibles :
     - fs_read        : Lecture sécurisée d'un fichier (read-only).
     - fs_list        : Listing du contenu d'un répertoire.
-    - web_search     : Recherche web (placeholder Exa/Tavily).
+    - web_search     : Recherche web (Exa/Tavily avec fallback mock).
     - get_public_apis: Catalogue des catégories d'APIs publiques.
 """
 
 import os
 import logging
+import httpx
 from .registry import skill
 
 logger = logging.getLogger(__name__)
@@ -81,26 +82,99 @@ def fs_list(path: str = ".") -> str:
         return f"Error listing dir: {e}"
 
 
-@skill("web_search", "Recherche sur le web (Placeholder Exa/Tavily)")
+def _tavily_search(query: str, api_key: str) -> str:
+    """Effectue une recherche via l'API Tavily."""
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.post(
+                "https://api.tavily.com/search",
+                json={"query": query},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+            )
+            response.raise_for_status()
+            data = response.json()
+            results = data.get("results", [])
+
+            output = [f"Résultats Tavily pour '{query}':"]
+            for i, res in enumerate(results[:5], 1):
+                title = res.get("title", "No title")
+                url = res.get("url", "#")
+                content = res.get("content", "")[:200] + "..."
+                output.append(f"{i}. {title}\n   URL: {url}\n   Snippet: {content}")
+
+            return "\n\n".join(output)
+    except Exception as e:
+        logger.error(f"Tavily search error: {e}")
+        return f"Error performing Tavily search: {str(e)}"
+
+
+def _exa_search(query: str, api_key: str) -> str:
+    """Effectue une recherche via l'API Exa.ai."""
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.post(
+                "https://api.exa.ai/search",
+                json={
+                    "query": query,
+                    "numResults": 5,
+                    "contents": {"text": True}
+                },
+                headers={
+                    "x-api-key": api_key,
+                    "Content-Type": "application/json"
+                }
+            )
+            response.raise_for_status()
+            data = response.json()
+            results = data.get("results", [])
+
+            output = [f"Résultats Exa pour '{query}':"]
+            for i, res in enumerate(results, 1):
+                title = res.get("title", "No title")
+                url = res.get("url", "#")
+                text = res.get("text", "")[:200].replace("\n", " ") + "..."
+                output.append(f"{i}. {title}\n   URL: {url}\n   Snippet: {text}")
+
+            return "\n\n".join(output)
+    except Exception as e:
+        logger.error(f"Exa search error: {e}")
+        return f"Error performing Exa search: {str(e)}"
+
+
+@skill("web_search", "Recherche sur le web (Exa/Tavily avec fallback)")
 def web_search(query: str) -> str:
     """Effectue une recherche web et retourne les résultats.
 
-    Note : Actuellement un placeholder. Sera connecté à Exa.ai
-    ou Tavily API dans une version future.
+    Utilise Tavily API ou Exa.ai si les clés API sont présentes.
+    Sinon, retourne un résultat simulé (mock).
 
     Args:
         query: La requête de recherche.
 
     Returns:
-        Résultats de recherche (mock pour l'instant).
+        Résultats de recherche.
     """
-    # TODO: Intégrer Exa.ai ou Tavily API
-    logger.info(f"web_search called with query: '{query}' (MOCK)")
+    tavily_key = os.environ.get("TAVILY_API_KEY")
+    exa_key = os.environ.get("EXA_API_KEY")
+
+    if tavily_key:
+        logger.info(f"web_search: using Tavily for '{query}'")
+        return _tavily_search(query, tavily_key)
+
+    if exa_key:
+        logger.info(f"web_search: using Exa for '{query}'")
+        return _exa_search(query, exa_key)
+
+    logger.warning(f"web_search: No API key found (TAVILY_API_KEY or EXA_API_KEY). Using MOCK for '{query}'")
     return (
         f"[MOCK] Résultats de recherche pour '{query}':\n"
         f"1. Résultat pertinent A\n"
         f"2. Résultat pertinent B\n"
-        f"3. Résultat pertinent C"
+        f"3. Résultat pertinent C\n"
+        f"\n(Note: Set TAVILY_API_KEY or EXA_API_KEY to enable real search)"
     )
 
 
