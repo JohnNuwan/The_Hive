@@ -12,11 +12,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from shared import get_settings
 from shared.redis_client import init_redis, get_redis_client
+
+from eva_muse.services.comfy_client import ComfyUIClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,6 +45,13 @@ class ContentResponse(BaseModel):
     word_count: int
     generation_time_ms: int
     model_used: str
+
+class MediaRequest(BaseModel):
+    """Requête de génération de média (Image/Vidéo)"""
+    prompt: str = Field(..., description="Description de l'image (ex: Cyberpunk hacker, glowing green screens)")
+    width: int = Field(default=1024)
+    height: int = Field(default=1024)
+    media_type: str = Field(default="image", description="Type: image, video")
 
 
 class ContentTemplate(BaseModel):
@@ -231,6 +240,53 @@ async def generate_content(request: ContentRequest):
     """Génère du contenu textuel via le LLM"""
     service: MuseService = app.state.muse_service
     return await service.generate_content(request)
+
+@app.post("/generate/media")
+async def generate_media(request: MediaRequest):
+    """Génère une image (Media Factory) via l'API locale ComfyUI"""
+    client = ComfyUIClient()
+    
+    # Workflow API "Standard" (SDXL API format minimaliste). 
+    # Pour FLUX.1 ou d'autres complexités, il faudra charger un JSON externe.
+    workflow = {
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "cfg": 8,
+                "denoise": 1,
+                "latent_image": ["5", 0],
+                "model": ["4", 0],
+                "negative": ["7", 0],
+                "positive": ["6", 0],
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "seed": 8566257,
+                "steps": 20
+            }
+        },
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "v1-5-pruned-emaonly.safetensors"}},
+        "5": {"class_type": "EmptyLatentImage", "inputs": {"batch_size": 1, "height": request.height, "width": request.width}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": request.prompt}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": "text, watermark, ugly, low quality"}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "Hive_Muse", "images": ["8", 0]}}
+    }
+    
+    try:
+        images = await client.generate_from_workflow(workflow)
+        if not images:
+            raise HTTPException(status_code=500, detail="ComfyUI n'a renvoyé aucune image.")
+        
+        # On retourne l'image binaire avec le content-type image/png (prend le premier blob)
+        return Response(content=images[0], media_type="image/png")
+    
+    except Exception as e:
+        logger.error(f"Erreur Génération Media: {e}")
+        # Message d'erreur formaté si ComfyUI n'est pas encore installé ou si le modèle manque
+        raise HTTPException(
+            status_code=503, 
+            detail=f"Moteur Media Factory injoignable ou erreur de rendu. Assurez-vous que ComfyUI tourne sur le port 8188. ({str(e)})"
+        )
 
 
 @app.get("/stats")
