@@ -1,13 +1,28 @@
 {
     "loras": [
         {
-            "filename": "redhead_freckles.safetensors",
+            "filename": "fitness_athletic.safetensors",
             "niches": [
-                "rousse",
-                "girlfriend"
+                "fitness"
             ],
             "strength": 0.8,
-            "description": "Red hair, freckles, natural look — CivitAI"
+            "description": "Athletic woman, sporty, fitness — CivitAI (218MB)"
+        },
+        {
+            "filename": "gfe_girlfriend.safetensors",
+            "niches": [
+                "girlfriend"
+            ],
+            "strength": 0.75,
+            "description": "Girlfriend experience, intimate, realistic — CivitAI (218MB)"
+        },
+        {
+            "filename": "mature_milf.safetensors",
+            "niches": [
+                "milf"
+            ],
+            "strength": 0.8,
+            "description": "Mature, elegant, sophisticated — CivitAI (55MB)"
         },
         {
             "filename": "petite_cute.safetensors",
@@ -16,8 +31,17 @@
                 "cosplay"
             ],
             "strength": 0.75,
-            "description": "Petite, kawaii style — CivitAI"
+            "description": "Petite, kawaii, playful — CivitAI (145MB)"
+        },
+        {
+            "filename": "redhead_freckles.safetensors",
+            "niches": [
+                "rousse",
+                "girlfriend"
+            ],
+            "strength": 0.8,
+            "description": "Red hair, freckles, natural look — CivitAI (55MB)"
         }
     ],
-    "_note": "Run scripts/download_loras.py to add more LoRAs. Add entries here to activate them in the niche workflows."
+    "_note": "5 LoRAs downloaded and active. Run scripts/download_loras.py to add more (dominatrice, soumise, pied, furry)."
 }
