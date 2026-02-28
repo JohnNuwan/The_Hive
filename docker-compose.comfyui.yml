@@ -2,16 +2,16 @@ version: '3.8'
 
 services:
   comfyui:
-    image: tzwm/comfyui:cu121
+    image: ghcr.io/ai-dock/comfyui:latest-cuda
     container_name: eva_comfyui
     restart: unless-stopped
     ports:
       - "8188:8188"
     volumes:
-      - /mnt/data/comfyui/output:/workspace/ComfyUI/output
-      - /mnt/data/comfyui/input:/workspace/ComfyUI/input
-      - /mnt/data/comfyui/models:/workspace/ComfyUI/models
-      - /mnt/data/comfyui/custom_nodes:/workspace/ComfyUI/custom_nodes
+      - /mnt/data/comfyui/output:/opt/ComfyUI/output
+      - /mnt/data/comfyui/input:/opt/ComfyUI/input
+      - /mnt/data/comfyui/models:/opt/ComfyUI/models
+      - /mnt/data/comfyui/custom_nodes:/opt/ComfyUI/custom_nodes
     deploy:
       resources:
         reservations:
