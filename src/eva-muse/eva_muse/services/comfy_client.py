@@ -18,9 +18,11 @@ class ComfyUIClient:
     
     def __init__(self, server_address: Optional[str] = None):
         self.settings = get_settings()
-        # On lit l'adresse configurée dans les variables d'environnement, sinon valeur par défaut ComfyUI (8188)
-        self.server_address = server_address or "127.0.0.1:8188"
+        # Read ComfyUI address from settings (set via COMFYUI_HOST/COMFYUI_PORT env vars in docker-compose)
+        default = f"{self.settings.comfyui_host}:{self.settings.comfyui_port}"
+        self.server_address = server_address or default
         self.client_id = str(uuid.uuid4())
+
         
     def _queue_prompt(self, prompt: Dict[str, Any]) -> Dict[str, Any]:
         """Envoie le graphe (workflow) au serveur ComfyUI."""

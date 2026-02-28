@@ -376,11 +376,27 @@ services:
       redis:
         condition: service_healthy
     environment:
+      # Infrastructure
       - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-      - OLLAMA_HOST=host.docker.internal
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # LLM (Ollama on Proxmox)
+      - OLLAMA_HOST=192.168.1.5
+      - OLLAMA_PORT=11434
+      - OLLAMA_MODEL=gemma3:4b
+      - USE_OLLAMA=true
+      # ComfyUI (on Proxmox — GPU)
+      - COMFYUI_HOST=192.168.1.5
+      - COMFYUI_PORT=8188
+      # 🔔 Telegram — Autonomous posting
+      - TELEGRAM_BOT_TOKEN=6660646226:AAEwerIp1t_i5mToXseSFeic3ryrzTXmF-U
+      - TELEGRAM_CHAT_ID=-1003325793788
+      - TELEGRAM_TOPIC_ID=22
+      # CivitAI LoRA downloads
+      - CIVITAI_API_KEY=bd21426b880b6e020418b6109f312c1d
+      # Content Factory
+      - CORP_OWNER=Azazel
+      - ENVIRONMENT=production
     networks: [ "hive-net" ]
     restart: unless-stopped
 

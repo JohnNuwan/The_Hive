@@ -177,6 +177,18 @@ class Settings(BaseSettings):
     discord_webhook_alerts: str = ""
     discord_webhook_trades: str = ""
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # COMFYUI (Image/Video Generation — GPU Server)
+    # ═══════════════════════════════════════════════════════════════════════════
+    comfyui_host: str = "192.168.1.5"
+    comfyui_port: int = 8188
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CIVITAI
+    # ═══════════════════════════════════════════════════════════════════════════
+    civitai_api_key: str = ""
+
+
 
 @lru_cache
 def get_settings() -> Settings:
