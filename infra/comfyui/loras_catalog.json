@@ -1,83 +1,23 @@
 {
-    "_comment": "LoRA catalog mapping filenames to niches and weights. Add real CivitAI filenames here after download.",
-    "fitness_athletic_v2.safetensors": {
-        "niches": [
-            "fitness"
-        ],
-        "strength": 0.75,
-        "description": "Athletic physique enhancer",
-        "civitai_id": null
-    },
-    "gfe_realistic_v3.safetensors": {
-        "niches": [
-            "girlfriend"
-        ],
-        "strength": 0.8,
-        "description": "Girlfriend experience realistic style",
-        "civitai_id": null
-    },
-    "bdsm_dominant_lora.safetensors": {
-        "niches": [
-            "dominatrice"
-        ],
-        "strength": 0.85,
-        "description": "Dominant BDSM aesthetic",
-        "civitai_id": null
-    },
-    "soft_submissive_v2.safetensors": {
-        "niches": [
-            "soumise"
-        ],
-        "strength": 0.8,
-        "description": "Soft submissive pastel aesthetic",
-        "civitai_id": null
-    },
-    "foot_fetish_detail.safetensors": {
-        "niches": [
-            "pied"
-        ],
-        "strength": 0.9,
-        "description": "Foot detail enhancer",
-        "civitai_id": null
-    },
-    "redhead_freckles_lora.safetensors": {
-        "niches": [
-            "rousse"
-        ],
-        "strength": 0.85,
-        "description": "Red hair and freckles",
-        "civitai_id": null
-    },
-    "petite_cute_v1.safetensors": {
-        "niches": [
-            "petite"
-        ],
-        "strength": 0.75,
-        "description": "Petite and cute style",
-        "civitai_id": null
-    },
-    "mature_elegant_v2.safetensors": {
-        "niches": [
-            "milf"
-        ],
-        "strength": 0.8,
-        "description": "Mature elegant woman",
-        "civitai_id": null
-    },
-    "cosplay_detail_lora.safetensors": {
-        "niches": [
-            "cosplay"
-        ],
-        "strength": 0.8,
-        "description": "Cosplay costume detail",
-        "civitai_id": null
-    },
-    "furry_anthro_v3.safetensors": {
-        "niches": [
-            "furry"
-        ],
-        "strength": 0.9,
-        "description": "Furry anthropomorphic art",
-        "civitai_id": null
-    }
+    "loras": [
+        {
+            "filename": "redhead_freckles.safetensors",
+            "niches": [
+                "rousse",
+                "girlfriend"
+            ],
+            "strength": 0.8,
+            "description": "Red hair, freckles, natural look — CivitAI"
+        },
+        {
+            "filename": "petite_cute.safetensors",
+            "niches": [
+                "petite",
+                "cosplay"
+            ],
+            "strength": 0.75,
+            "description": "Petite, kawaii style — CivitAI"
+        }
+    ],
+    "_note": "Run scripts/download_loras.py to add more LoRAs. Add entries here to activate them in the niche workflows."
 }
