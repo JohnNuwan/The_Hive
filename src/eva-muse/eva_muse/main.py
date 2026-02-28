@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from shared import get_settings
 from shared.redis_client import init_redis, get_redis_client
+from shared.telegram_client import TelegramClient
 
 from eva_muse.services.comfy_client import ComfyUIClient
 
@@ -52,6 +53,12 @@ class MediaRequest(BaseModel):
     width: int = Field(default=1024)
     height: int = Field(default=1024)
     media_type: str = Field(default="image", description="Type: image, video")
+
+class TradeResult(BaseModel):
+    """Résultat d'un trade à viraliser"""
+    symbol: str = Field(..., description="Asset symbol (ex: BTCUSD, XAUUSD)")
+    action: str = Field(..., description="BUY or SELL")
+    pnl: float = Field(..., description="Trade Profit & Loss")
 
 
 class ContentTemplate(BaseModel):
@@ -287,6 +294,52 @@ async def generate_media(request: MediaRequest):
             status_code=503, 
             detail=f"Moteur Media Factory injoignable ou erreur de rendu. Assurez-vous que ComfyUI tourne sur le port 8188. ({str(e)})"
         )
+
+
+@app.post("/viralize/trade")
+async def viralize_trade(trade: TradeResult):
+    """Viralize un trade gagnant: Génère une image hype et la poste sur Telegram"""
+    
+    # 1. Construire le prompt
+    import random
+    styles = [
+        "cinematic lighting, hyperrealistic, 8k resolution, octane render",
+        "anime style, neon genesis evangelion, high quality, masterpiece",
+        "cyberpunk street, neon signs, rainy night, highly detailed"
+    ]
+    style = random.choice(styles)
+    
+    prompt = f"Cyberpunk hacker celebrating a successful {trade.action} trade on {trade.symbol} for ${trade.pnl:.2f}, glowing neon green holograms, {style}"
+    
+    # 2. Appeler ComfyUI
+    client = ComfyUIClient()
+    workflow = {
+        "3": {"class_type": "KSampler", "inputs": {"cfg": 8, "denoise": 1, "latent_image": ["5", 0], "model": ["4", 0], "negative": ["7", 0], "positive": ["6", 0], "sampler_name": "euler", "scheduler": "normal", "seed": 8566257, "steps": 20}},
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "v1-5-pruned-emaonly.safetensors"}},
+        "5": {"class_type": "EmptyLatentImage", "inputs": {"batch_size": 1, "height": 1024, "width": 1024}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": prompt}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": "text, watermark, ugly, low quality"}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "Hive_Muse_Trade", "images": ["8", 0]}}
+    }
+    
+    try:
+        images = await client.generate_from_workflow(workflow)
+        if not images:
+            raise HTTPException(status_code=500, detail="ComfyUI n'a renvoyé aucune image.")
+            
+        img_bytes = images[0]
+        
+        # 3. Envoyer sur Telegram
+        caption = f"🚀 *E.V.A Win !*\n\nAsset: `{trade.symbol}`\nAction: `{trade.action}`\nProfit: `+${trade.pnl:.2f}`\n\n*The Hive Automata | Muse Media Factory*"
+        telegram = TelegramClient()
+        await telegram.send_photo(img_bytes, caption)
+        
+        return {"status": "success", "message": "Trade viralized successfully!"}
+        
+    except Exception as e:
+        logger.error(f"Erreur Viralization Trade: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/stats")

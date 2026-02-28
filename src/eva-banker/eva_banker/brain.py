@@ -290,6 +290,14 @@ class AutoTradingEngine:
                     profit=profit
                 ))
 
+                # 📸 VIRALIZATION LOOP: Send winning trade to Muse Media Factory
+                if profit >= 0.5:
+                    asyncio.create_task(self._viralize_trade(
+                        symbol=info["symbol"],
+                        action=info["action"],
+                        pnl=profit
+                    ))
+
                 
             except Exception as e:
                 logger.error(f"Error detecting close for #{ticket}: {e}")
@@ -309,6 +317,26 @@ class AutoTradingEngine:
                     "entry_price": float(pos.open_price),
                     "open_time": pos.open_time,
                 }
+
+    async def _viralize_trade(self, symbol: str, action: str, pnl: float):
+        """Notifie l'agent The Muse pour générer une image virale d'un gain."""
+        try:
+            payload = {
+                "symbol": symbol,
+                "action": action,
+                "pnl": pnl
+            }
+            # Muse run par défaut sur le port 9100 selon le docker-compose
+            muse_url = f"http://{self.mt5.settings.api_host}:9100/viralize/trade"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(muse_url, json=payload, timeout=60) as resp:
+                    if resp.status == 200:
+                        logger.info(f"✨ Trade Viralization Success for {symbol}")
+                    else:
+                        logger.warning(f"⚠️ Muse Viralization Failed: {resp.status} - {await resp.text()}")
+        except Exception as e:
+            logger.error(f"Error calling Muse for viralization: {e}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # DAILY REPORT (Sprint 9)

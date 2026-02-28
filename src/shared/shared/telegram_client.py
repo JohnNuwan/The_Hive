@@ -53,6 +53,29 @@ class TelegramClient:
         except Exception as e:
             logger.error(f"Telegram Connection Error: {e}")
 
+    async def send_photo(self, photo: bytes, caption: str):
+        """Sends a photo to the configured chat/topic."""
+        if not self.enabled:
+            return
+
+        url = f"https://api.telegram.org/bot{self.token}/sendPhoto"
+        
+        data = aiohttp.FormData()
+        data.add_field("chat_id", self.chat_id)
+        if self.topic_id:
+            data.add_field("message_thread_id", str(self.topic_id))
+        data.add_field("caption", caption)
+        data.add_field("parse_mode", "Markdown")
+        data.add_field("photo", photo, filename="image.png", content_type="image/png")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data=data, timeout=30) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Telegram SendPhoto Error: {resp.status} - {await resp.text()}")
+        except Exception as e:
+            logger.error(f"Telegram Connection Error: {e}")
+
     def send_sync(self, message: str):
         """Synchronous wrapper for sending messages (fire & forget)."""
         if not self.enabled: return
