@@ -12,7 +12,8 @@ import {
     Lock,
     Globe,
     Share2,
-    Database
+    Database,
+    Camera
 } from 'lucide-react'
 
 // Core Components
@@ -26,11 +27,12 @@ import AdminPanel from './components/AdminPanel'
 import MatrixRain from './components/MatrixRain'
 import GraphView from './components/GraphView'
 import MemoryExplorer from './components/MemoryExplorer'
+import MuseFactory from './components/MuseFactory'
 
 // Services
 import { getStatus } from './services/api'
 
-type TabId = 'dashboard' | 'chat' | 'trading' | 'graph' | 'memory' | 'monitoring' | 'osint' | 'factories' | 'admin' | 'settings'
+type TabId = 'dashboard' | 'chat' | 'trading' | 'graph' | 'memory' | 'monitoring' | 'osint' | 'factories' | 'admin' | 'settings' | 'muse'
 
 function App() {
     const [activeTab, setActiveTab] = useState<TabId>('chat')
@@ -131,6 +133,13 @@ function App() {
                         active={activeTab === 'factories'}
                         onClick={() => setActiveTab('factories')}
                     />
+                    <NavItem
+                        id="muse"
+                        icon={<Camera size={18} />}
+                        label="Muse Factory"
+                        active={activeTab === 'muse'}
+                        onClick={() => setActiveTab('muse')}
+                    />
 
                     <div className="mt-auto space-y-1">
                         <NavItem
@@ -209,6 +218,7 @@ function ViewSwitcher({ activeTab }: { activeTab: TabId }) {
         case 'monitoring': return <MonitoringView />
         case 'osint': return <OSINTView />
         case 'factories': return <FactoriesView />
+        case 'muse': return <MuseFactory />
         case 'admin': return <AdminPanel />
         case 'settings': return (
             <div className="h-full flex flex-col items-center justify-center text-center space-y-4 opacity-50">
