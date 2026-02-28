@@ -8,8 +8,11 @@ dependencies = [
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
     "httpx>=0.26.0",
+    "aiohttp>=3.9.0",
     "websockets>=12.0",
+    "Pillow>=10.0.0",
 ]
+
 
 [build-system]
 requires = ["setuptools>=61.0"]
