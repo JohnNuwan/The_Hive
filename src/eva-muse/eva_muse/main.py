@@ -54,6 +54,11 @@ class MediaRequest(BaseModel):
     height: int = Field(default=1024)
     media_type: str = Field(default="image", description="Type: image, video")
 
+class AudioRequest(BaseModel):
+    """Requête de génération de musique (AudioCraft)"""
+    prompt: str = Field(..., description="Description of the track (e.g. Synthwave with heavy bass)")
+    duration: int = Field(default=15, description="Duration in seconds (1 to 30)")
+
 class TradeResult(BaseModel):
     """Résultat d'un trade à viraliser"""
     symbol: str = Field(..., description="Asset symbol (ex: BTCUSD, XAUUSD)")
@@ -295,6 +300,33 @@ async def generate_media(request: MediaRequest):
             detail=f"Moteur Media Factory injoignable ou erreur de rendu. Assurez-vous que ComfyUI tourne sur le port 8188. ({str(e)})"
         )
 
+
+@app.post("/generate/audio")
+async def generate_audio(request: AudioRequest):
+    """Génère un fichier audio/musical via l'API AudioCraft sur Proxmox"""
+    import httpx
+    
+    # L'API AudioCraft est déployée sur le serveur Proxmox (généralement 192.168.1.5:8288)
+    audiocraft_url = "http://192.168.1.5:8288/generate"
+    
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                audiocraft_url,
+                json={"prompt": request.prompt, "duration": request.duration}
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=500, detail=response.text)
+                
+            return Response(content=response.content, media_type="audio/wav")
+            
+    except Exception as e:
+        logger.error(f"Erreur Génération Audio: {e}")
+        raise HTTPException(
+            status_code=503, 
+            detail=f"Moteur Audio Factory injoignable. Assurez-vous que le conteneur AudioCraft tourne sur Proxmox. ({str(e)})"
+        )
 
 @app.post("/viralize/trade")
 async def viralize_trade(trade: TradeResult):
