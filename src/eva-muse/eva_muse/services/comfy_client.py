@@ -73,3 +73,36 @@ class ComfyUIClient:
                     output_images.append(image_data)
                     
         return output_images
+
+    async def generate_video_from_workflow(self, workflow_json: Dict[str, Any]) -> bytes | None:
+        """
+        Executes a VHS (VideoHelperSuite) workflow in ComfyUI and returns the video bytes.
+        Looks for 'videos' or 'gifs' in node outputs instead of 'images'.
+        """
+        prompt_id = self._queue_prompt(workflow_json)['prompt_id']
+
+        uri = f"ws://{self.server_address}/ws?clientId={self.client_id}"
+        logger.info(f"Waiting for video output from ComfyUI (job {prompt_id})...")
+
+        async with websockets.connect(uri) as websocket:
+            while True:
+                out = await websocket.recv()
+                if isinstance(out, str):
+                    message = json.loads(out)
+                    if message['type'] == 'executing':
+                        data = message['data']
+                        if data['node'] is None and data['prompt_id'] == prompt_id:
+                            break
+
+        history = self._get_history(prompt_id)[prompt_id]
+
+        for node_id in history['outputs']:
+            node_output = history['outputs'][node_id]
+            # VHS outputs videos under 'videos' or 'gifs' key
+            for key in ('videos', 'gifs', 'images'):
+                if key in node_output:
+                    for item in node_output[key]:
+                        return self._get_image(item['filename'], item.get('subfolder', ''), item.get('type', 'output'))
+
+        return None
+

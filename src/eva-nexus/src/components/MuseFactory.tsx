@@ -1,300 +1,418 @@
-import { useState } from 'react'
-import { Camera, Wand2, User, ImageIcon, Download, Sparkles, SlidersHorizontal, Settings, Music, LockKeyhole } from 'lucide-react'
+import { useState, useEffect } from 'react';
+import {
+    Zap, Image, Video, Film, TrendingUp,
+    Power, RefreshCw, Lock, Eye, ChevronDown, ChevronUp,
+    Clock, Target, Download, PlayCircle
+} from 'lucide-react';
 
-// Dummy data for influencers
-const INFLUENCERS = [
-    {
-        id: 'inf-001',
-        name: 'Neo Spectra',
-        style: 'Cyberpunk Fashion Model',
-        bio: 'Neon aesthetic, tactical street wear, high-tech props.',
-        avatar: 'https://images.unsplash.com/photo-1605806616949-1e87b487cb2a?w=150&h=150&fit=crop&q=80',
-    },
-    {
-        id: 'inf-002',
-        name: 'Lois',
-        style: 'Finance & Crypto Analyst',
-        bio: 'Professional corporate wear, trading screens background, sharp look.',
-        avatar: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=150&h=150&fit=crop&q=80',
-    },
-    {
-        id: 'inf-003',
-        name: 'Athena',
-        style: 'Gamer & Tech Streamer',
-        bio: 'RGB lighting, gaming headsets, casual tech wear, energetic.',
-        avatar: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=150&h=150&fit=crop&q=80',
-    }
-]
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface Niche {
+    id: string;
+    label: string;
+    description: string;
+    base_prompt?: string;
+    enabled: boolean;
+    is_nsfw: boolean;
+    post_interval_hours: number;
+    recommended_loras: { filename: string; strength: number }[];
+    trend_score?: number;
+}
+
+type ContentType = 'image' | 'video';
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function MuseFactory() {
-    const [selectedInfluencer, setSelectedInfluencer] = useState(INFLUENCERS[0])
-    const [prompt, setPrompt] = useState('Neon genesis evangelion style, highly detailed portrait, 8k resolution, cinematic lighting')
-    const [faceSwapEnabled, setFaceSwapEnabled] = useState(true)
-    const [onlyFansMode, setOnlyFansMode] = useState(false)
-    const [mediaType, setMediaType] = useState<'image' | 'audio'>('image')
-    const [duration, setDuration] = useState(15)
+    const MUSE_API = 'http://192.168.1.5:9100';
 
-    const [isGenerating, setIsGenerating] = useState(false)
-    const [generatedImage, setGeneratedImage] = useState<string | null>(null)
-    const [generatedAudio, setGeneratedAudio] = useState<string | null>(null)
+    const [niches, setNiches] = useState<Niche[]>([]);
+    const [trendScores, setTrendScores] = useState<Record<string, number>>({});
+    const [selectedNiche, setSelectedNiche] = useState<Niche | null>(null);
+    const [contentType, setContentType] = useState<ContentType>('image');
+    const [prompt, setPrompt] = useState('');
+    const [privateMode, setPrivateMode] = useState(false);
+    const [faceSwap, setFaceSwap] = useState(false);
+    const [loading, setLoading] = useState(false);
+    const [loadingScores, setLoadingScores] = useState(false);
+    const [outputUrl, setOutputUrl] = useState<string | null>(null);
+    const [outputType, setOutputType] = useState<'image' | 'video'>('image');
+    const [expanded, setExpanded] = useState<string | null>(null);
+    const [autoMode, setAutoMode] = useState(false);
+
+    // Load niches from API
+    useEffect(() => {
+        fetch(`${MUSE_API}/niches`)
+            .then(r => r.json())
+            .then(data => {
+                const loaded: Niche[] = data.niches || [];
+                setNiches(loaded);
+                if (loaded.length > 0) setSelectedNiche(loaded[0]);
+            })
+            .catch(() => {
+                // Fallback hardcoded niches while API loads
+                const fallback: Niche[] = [
+                    { id: 'girlfriend', label: '💕 Girlfriend Experience', description: 'Sweet, intimate, candid', enabled: true, is_nsfw: false, post_interval_hours: 6, recommended_loras: [] },
+                    { id: 'fitness', label: '🏋️ Fitness & Athletic', description: 'Sport, athletic, energetic', enabled: true, is_nsfw: false, post_interval_hours: 8, recommended_loras: [] },
+                    { id: 'dominatrice', label: '⛓️ Dominatrice', description: 'BDSM dominant, latex, leather', enabled: true, is_nsfw: true, post_interval_hours: 12, recommended_loras: [] },
+                    { id: 'soumise', label: '🎀 Douce & Soumise', description: 'Shy, submissive, pastel', enabled: true, is_nsfw: true, post_interval_hours: 10, recommended_loras: [] },
+                    { id: 'pied', label: '🦶 Foot Fetish', description: 'Elegant feet, pedicure, close-up', enabled: true, is_nsfw: false, post_interval_hours: 12, recommended_loras: [] },
+                    { id: 'rousse', label: '🦊 Rousse', description: 'Red hair, freckles, natural', enabled: true, is_nsfw: false, post_interval_hours: 8, recommended_loras: [] },
+                    { id: 'petite', label: '🌸 Petite & Cute', description: 'Small frame, playful, kawaii', enabled: true, is_nsfw: false, post_interval_hours: 8, recommended_loras: [] },
+                    { id: 'milf', label: '👑 MILF & Mature', description: 'Mature, confident, elegant', enabled: true, is_nsfw: false, post_interval_hours: 10, recommended_loras: [] },
+                    { id: 'cosplay', label: '🎮 Cosplay & Anime', description: 'Gaming, anime, costume', enabled: true, is_nsfw: false, post_interval_hours: 12, recommended_loras: [] },
+                    { id: 'furry', label: '🦊 Furry Anthro', description: 'Anthropomorphic art', enabled: true, is_nsfw: false, post_interval_hours: 12, recommended_loras: [] },
+                ];
+                setNiches(fallback);
+                setSelectedNiche(fallback[0]);
+            });
+    }, []);
+
+    const loadTrendScores = async () => {
+        setLoadingScores(true);
+        try {
+            const res = await fetch(`${MUSE_API}/niches/scores`);
+            const data = await res.json();
+            setTrendScores(data.scores || {});
+        } catch (e) {
+            console.error('Could not load trend scores', e);
+        } finally {
+            setLoadingScores(false);
+        }
+    };
+
+    const nichesWithScores = niches
+        .map(n => ({ ...n, trend_score: trendScores[n.id] }))
+        .sort((a, b) => (b.trend_score ?? 0) - (a.trend_score ?? 0));
 
     const handleGenerate = async () => {
-        setIsGenerating(true)
-        if (mediaType === 'image') {
-            try {
-                const res = await fetch('/api/muse/generate/influencer', {
+        if (!selectedNiche || !prompt.trim()) return;
+        setLoading(true);
+        setOutputUrl(null);
+
+        const finalPrompt = privateMode
+            ? `${selectedNiche.base_prompt ?? prompt}, nsfw, boudoir, seductive, extremely intimate, private selfie`
+            : prompt || selectedNiche.description;
+
+        try {
+            if (contentType === 'image') {
+                const res = await fetch(`${MUSE_API}/generate/influencer`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        influencer_id: selectedInfluencer.id,
-                        prompt: prompt,
-                        onlyfans_mode: onlyFansMode,
-                        use_faceswap: faceSwapEnabled
-                    })
-                })
-
-                if (res.ok) {
-                    const blob = await res.blob()
-                    const url = URL.createObjectURL(blob)
-                    setGeneratedImage(url)
-                } else {
-                    console.error("Image generation failed")
-                }
-            } catch (e) {
-                console.error("Image generation error", e)
-            } finally {
-                setIsGenerating(false)
-            }
-        } else {
-            try {
-                // Call our explicit Audio API
-                const res = await fetch('/api/muse/generate/audio', {
+                        influencer_id: 'inf-001',
+                        prompt: finalPrompt,
+                        onlyfans_mode: privateMode,
+                        use_faceswap: faceSwap,
+                        niche_id: selectedNiche.id,
+                    }),
+                });
+                if (!res.ok) throw new Error(await res.text());
+                const blob = await res.blob();
+                setOutputUrl(URL.createObjectURL(blob));
+                setOutputType('image');
+            } else {
+                const res = await fetch(`${MUSE_API}/generate/video`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ prompt, duration })
-                })
-
-                if (res.ok) {
-                    const blob = await res.blob()
-                    const url = URL.createObjectURL(blob)
-                    setGeneratedAudio(url)
-                } else {
-                    console.error("Audio generation failed")
-                }
-            } catch (e) {
-                console.error("Audio generation error", e)
-            } finally {
-                setIsGenerating(false)
+                    body: JSON.stringify({
+                        prompt: finalPrompt,
+                        niche_id: selectedNiche.id,
+                        use_faceswap: faceSwap,
+                        influencer_id: 'inf-001',
+                    }),
+                });
+                if (!res.ok) throw new Error(await res.text());
+                const blob = await res.blob();
+                setOutputUrl(URL.createObjectURL(blob));
+                setOutputType('video');
             }
+        } catch (e: any) {
+            console.error(e);
+            alert(`Error: ${e.message}`);
+        } finally {
+            setLoading(false);
         }
-    }
+    };
+
+    const TrendBar = ({ score }: { score?: number }) => {
+        const pct = score !== undefined ? Math.round(score * 100) : 0;
+        const color = pct > 80 ? '#00ff41' : pct > 60 ? '#ffd700' : '#ff6b35';
+        return (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+                <div style={{ flex: 1, height: '3px', background: '#1a1a2e', borderRadius: '2px' }}>
+                    <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: '2px', transition: 'width 0.6s ease' }} />
+                </div>
+                {score !== undefined && <span style={{ fontSize: '10px', color, fontFamily: 'monospace', minWidth: '28px' }}>{pct}%</span>}
+            </div>
+        );
+    };
 
     return (
-        <div className="h-full flex flex-col lg:flex-row gap-6">
+        <div style={{ display: 'flex', height: '100%', gap: '16px', padding: '16px', background: '#060611', color: '#e0e0e0', fontFamily: "'Inter', sans-serif" }}>
 
-            {/* Left Column: Config Panel */}
-            <div className="w-full lg:w-1/3 flex flex-col gap-6">
+            {/* LEFT — Niche Roster */}
+            <div style={{ width: '340px', display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto' }}>
 
-                {/* Roster Selection */}
-                <div className="glass p-4 rounded-xl border border-matrix/20 flex flex-col gap-4">
-                    <div className="flex items-center gap-2 text-matrix font-display font-bold uppercase tracking-widest border-b border-matrix/10 pb-2">
-                        <User size={16} />
-                        <h2>Hive Virtual Roster</h2>
+                {/* Header */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <Target size={14} color="#00ff41" />
+                        <span style={{ fontSize: '12px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase' }}>Niche Roster</span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                        <button
+                            onClick={loadTrendScores}
+                            disabled={loadingScores}
+                            style={{ background: 'none', border: '1px solid #1a2a3a', borderRadius: '4px', padding: '4px 8px', color: '#888', cursor: 'pointer', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                        >
+                            <RefreshCw size={10} style={{ animation: loadingScores ? 'spin 1s linear infinite' : 'none' }} />
+                            {loadingScores ? 'Analyse...' : 'Score marché'}
+                        </button>
+                    </div>
+                </div>
+
+                {/* Niche Cards */}
+                {nichesWithScores.map(niche => (
+                    <div
+                        key={niche.id}
+                        onClick={() => { setSelectedNiche(niche); setPrompt(niche.description); }}
+                        style={{
+                            background: selectedNiche?.id === niche.id ? '#0d1f35' : '#0a0a1a',
+                            border: `1px solid ${selectedNiche?.id === niche.id ? '#00ff41' : '#1a2a3a'}`,
+                            borderRadius: '6px',
+                            padding: '10px 12px',
+                            cursor: 'pointer',
+                            transition: 'all 0.15s ease',
+                        }}
+                    >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '13px', fontWeight: 600 }}>{niche.label}</span>
+                            <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                                {niche.is_nsfw && (
+                                    <span style={{ fontSize: '9px', background: '#2a0a2a', color: '#ff69b4', border: '1px solid #4a0a4a', borderRadius: '3px', padding: '1px 4px' }}>NSFW</span>
+                                )}
+                                <Clock size={10} color="#555" />
+                                <span style={{ fontSize: '10px', color: '#555' }}>{niche.post_interval_hours}h</span>
+                            </div>
+                        </div>
+                        <p style={{ fontSize: '11px', color: '#666', margin: '3px 0 0', lineHeight: 1.4 }}>{niche.description}</p>
+                        <TrendBar score={niche.trend_score} />
+                    </div>
+                ))}
+            </div>
+
+            {/* CENTER — Generator */}
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '12px', overflowY: 'auto' }}>
+
+                <div style={{ fontSize: '12px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Zap size={14} />
+                    Studio — {selectedNiche?.label || 'Sélectionne une niche'}
+                </div>
+
+                {/* Content Type Toggle */}
+                <div style={{ display: 'flex', background: '#0a0a1a', border: '1px solid #1a2a3a', borderRadius: '6px', padding: '3px' }}>
+                    {(['image', 'video'] as ContentType[]).map(type => (
+                        <button
+                            key={type}
+                            onClick={() => setContentType(type)}
+                            style={{
+                                flex: 1, border: 'none', borderRadius: '4px',
+                                background: contentType === type ? '#00ff41' : 'none',
+                                color: contentType === type ? '#000' : '#555',
+                                padding: '7px', cursor: 'pointer', fontSize: '12px',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                                fontWeight: contentType === type ? 700 : 400
+                            }}
+                        >
+                            {type === 'image' ? <Image size={13} /> : <Film size={13} />}
+                            {type === 'image' ? 'Image' : 'Vidéo (AnimateDiff)'}
+                        </button>
+                    ))}
+                </div>
+
+                {/* Prompt */}
+                <div>
+                    <label style={{ fontSize: '11px', color: '#444', letterSpacing: '1px', display: 'block', marginBottom: '6px' }}>PROMPT</label>
+                    <textarea
+                        value={prompt}
+                        onChange={e => setPrompt(e.target.value)}
+                        rows={3}
+                        placeholder={selectedNiche?.description || 'Décris le contenu à générer...'}
+                        style={{
+                            width: '100%', background: '#0a0a1a', border: '1px solid #1a2a3a', borderRadius: '6px',
+                            color: '#c0c0c0', padding: '10px 12px', fontSize: '13px', resize: 'vertical',
+                            outline: 'none', boxSizing: 'border-box', lineHeight: 1.5
+                        }}
+                    />
+                </div>
+
+                {/* Toggles */}
+                <div style={{ display: 'flex', gap: '10px' }}>
+
+                    {/* Private Mode */}
+                    <div
+                        onClick={() => setPrivateMode(v => !v)}
+                        style={{
+                            flex: 1, padding: '10px 14px', borderRadius: '6px', cursor: 'pointer',
+                            border: `1px solid ${privateMode ? '#ff1493' : '#1a2a3a'}`,
+                            background: privateMode ? '#1a0015' : '#0a0a1a',
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        }}
+                    >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <Lock size={13} color={privateMode ? '#ff1493' : '#444'} />
+                            <div>
+                                <div style={{ fontSize: '12px', color: privateMode ? '#ff1493' : '#888' }}>Contenu Privé</div>
+                                <div style={{ fontSize: '10px', color: '#444' }}>Mode OnlyFans / NSFW</div>
+                            </div>
+                        </div>
+                        <div style={{ width: '34px', height: '18px', background: privateMode ? '#ff1493' : '#1a2a3a', borderRadius: '9px', position: 'relative', transition: 'all 0.2s' }}>
+                            <div style={{ position: 'absolute', top: '2px', left: privateMode ? '16px' : '2px', width: '14px', height: '14px', background: '#fff', borderRadius: '50%', transition: 'all 0.2s' }} />
+                        </div>
                     </div>
 
-                    <div className="flex flex-col gap-3 max-h-[250px] overflow-y-auto custom-scrollbar pr-2">
-                        {INFLUENCERS.map((inf) => (
-                            <button
-                                key={inf.id}
-                                onClick={() => setSelectedInfluencer(inf)}
-                                className={`flex items-start gap-4 p-3 rounded-lg border transition-all text-left
-                                    ${selectedInfluencer.id === inf.id
-                                        ? 'bg-matrix/10 border-matrix/40 shadow-[0_0_10px_rgba(0,255,65,0.1)]'
-                                        : 'bg-black/40 border-matrix/10 hover:border-matrix/30 hover:bg-matrix/5'}
-                                `}
-                            >
-                                <img src={inf.avatar} alt={inf.name} className="w-12 h-12 rounded-lg object-cover border border-matrix/30" />
-                                <div>
-                                    <h3 className="text-sm font-bold text-white neon-text-subtle">{inf.name}</h3>
-                                    <p className="text-[10px] text-matrix font-mono">{inf.style}</p>
-                                    <p className="text-[10px] text-white/50 mt-1 line-clamp-2">{inf.bio}</p>
-                                </div>
-                            </button>
+                    {/* Face Swap */}
+                    <div
+                        onClick={() => setFaceSwap(v => !v)}
+                        style={{
+                            flex: 1, padding: '10px 14px', borderRadius: '6px', cursor: 'pointer',
+                            border: `1px solid ${faceSwap ? '#00bfff' : '#1a2a3a'}`,
+                            background: faceSwap ? '#001a2a' : '#0a0a1a',
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        }}
+                    >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <Eye size={13} color={faceSwap ? '#00bfff' : '#444'} />
+                            <div>
+                                <div style={{ fontSize: '12px', color: faceSwap ? '#00bfff' : '#888' }}>ReActor FaceSwap</div>
+                                <div style={{ fontSize: '10px', color: '#444' }}>Injecte l'identité</div>
+                            </div>
+                        </div>
+                        <div style={{ width: '34px', height: '18px', background: faceSwap ? '#00bfff' : '#1a2a3a', borderRadius: '9px', position: 'relative', transition: 'all 0.2s' }}>
+                            <div style={{ position: 'absolute', top: '2px', left: faceSwap ? '16px' : '2px', width: '14px', height: '14px', background: '#fff', borderRadius: '50%', transition: 'all 0.2s' }} />
+                        </div>
+                    </div>
+                </div>
+
+                {/* LoRAs Info */}
+                {selectedNiche && selectedNiche.recommended_loras.length > 0 && (
+                    <div style={{ background: '#0a0a1a', border: '1px solid #1a2a3a', borderRadius: '6px', padding: '10px 12px' }}>
+                        <div style={{ fontSize: '11px', color: '#444', letterSpacing: '1px', marginBottom: '6px' }}>LORAS ACTIFS</div>
+                        {selectedNiche.recommended_loras.map((l, i) => (
+                            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#666', padding: '2px 0' }}>
+                                <span>{l.filename}</span>
+                                <span style={{ color: '#00ff41' }}>×{l.strength}</span>
+                            </div>
                         ))}
                     </div>
-                </div>
+                )}
 
-                {/* Generator Settings */}
-                <div className="glass p-4 rounded-xl border border-matrix/20 flex flex-col gap-4 flex-grow">
-                    <div className="flex items-center justify-between border-b border-matrix/10 pb-2">
-                        <div className="flex items-center gap-2 text-matrix font-display font-bold uppercase tracking-widest">
-                            <SlidersHorizontal size={16} />
-                            <h2>Generator Settings</h2>
-                        </div>
-                    </div>
-
-                    <div className="flex gap-2 mb-2">
-                        <button
-                            onClick={() => setMediaType('image')}
-                            className={`flex-1 py-2 text-xs font-bold uppercase tracking-widest flex items-center justify-center gap-2 border rounded-lg transition-all ${mediaType === 'image' ? 'bg-matrix/20 border-matrix text-matrix' : 'bg-black/30 border-matrix/20 text-matrix/40 hover:border-matrix/40'}`}
-                        >
-                            <ImageIcon size={14} /> Image
-                        </button>
-                        <button
-                            onClick={() => setMediaType('audio')}
-                            className={`flex-1 py-2 text-xs font-bold uppercase tracking-widest flex items-center justify-center gap-2 border rounded-lg transition-all ${mediaType === 'audio' ? 'bg-matrix/20 border-matrix text-matrix' : 'bg-black/30 border-matrix/20 text-matrix/40 hover:border-matrix/40'}`}
-                        >
-                            <Music size={14} /> Audio
-                        </button>
-                    </div>
-
-                    <div className="flex flex-col gap-2">
-                        <label className="text-[10px] text-matrix font-mono uppercase tracking-widest">
-                            {mediaType === 'image' ? 'Creative Prompt (Scene)' : 'Audio Prompt (Genre, Instruments, Mood)'}
-                        </label>
-                        <textarea
-                            value={prompt}
-                            onChange={(e) => setPrompt(e.target.value)}
-                            className="bg-black/50 border border-matrix/20 rounded-lg p-3 text-sm text-white focus:outline-none focus:border-matrix/50 h-28 custom-scrollbar resize-none"
-                            placeholder={mediaType === 'image' ? "Describe the scene..." : "e.g. 80s synthwave fast beat with heavy bass"}
-                        />
-                    </div>
-
-                    {mediaType === 'audio' && (
-                        <div className="flex flex-col gap-2">
-                            <label className="text-[10px] text-matrix font-mono uppercase tracking-widest flex justify-between">
-                                <span>Duration</span>
-                                <span>{duration}s</span>
-                            </label>
-                            <input
-                                type="range"
-                                min="5"
-                                max="30"
-                                value={duration}
-                                onChange={(e) => setDuration(parseInt(e.target.value))}
-                                className="w-full accent-matrix"
-                            />
-                        </div>
-                    )}
-
-                    {mediaType === 'image' && (
-                        <div className="flex items-center justify-between bg-black/40 border border-matrix/20 p-3 rounded-lg mt-auto mb-2">
-                            <div className="flex items-center gap-2">
-                                <LockKeyhole size={16} className={onlyFansMode ? "text-[#FF00FF]" : "text-white/40"} />
-                                <div>
-                                    <p className={`text-xs font-bold ${onlyFansMode ? 'text-[#FF00FF] neon-text-pink' : 'text-white'}`}>Private Content</p>
-                                    <p className="text-[9px] text-white/50">OnlyFans Aesthetic Injector</p>
-                                </div>
-                            </div>
-                            <button
-                                onClick={() => setOnlyFansMode(!onlyFansMode)}
-                                className={`w-10 h-5 rounded-full relative transition-colors ${onlyFansMode ? 'bg-[#FF00FF]' : 'bg-white/20'}`}
-                            >
-                                <div className={`w-3 h-3 bg-black rounded-full absolute top-1 transition-all ${onlyFansMode ? 'right-1' : 'left-1'}`} />
-                            </button>
-                        </div>
-                    )}
-
-                    {mediaType === 'image' && (
-                        <div className="flex items-center justify-between bg-black/40 border border-matrix/20 p-3 rounded-lg">
-                            <div className="flex items-center gap-2">
-                                <User size={16} className={faceSwapEnabled ? "text-matrix" : "text-white/40"} />
-                                <div>
-                                    <p className="text-xs font-bold text-white">ReActor Face Swap</p>
-                                    <p className="text-[9px] text-white/50">Inject {selectedInfluencer.name}'s identity</p>
-                                </div>
-                            </div>
-                            <button
-                                onClick={() => setFaceSwapEnabled(!faceSwapEnabled)}
-                                className={`w-10 h-5 rounded-full relative transition-colors ${faceSwapEnabled ? 'bg-matrix' : 'bg-white/20'}`}
-                            >
-                                <div className={`w-3 h-3 bg-black rounded-full absolute top-1 transition-all ${faceSwapEnabled ? 'right-1' : 'left-1'}`} />
-                            </button>
-                        </div>
-                    )}
-
-                    <button
-                        onClick={handleGenerate}
-                        disabled={isGenerating}
-                        className={`mt-2 flex items-center justify-center gap-2 w-full py-3 rounded-lg font-bold uppercase tracking-widest transition-all
-                            ${isGenerating
-                                ? 'bg-matrix/20 text-matrix/50 cursor-not-allowed'
-                                : 'bg-matrix/10 text-matrix border border-matrix/30 hover:bg-matrix hover:text-black hover:shadow-[0_0_20px_rgba(0,255,65,0.4)]'}
-                        `}
-                    >
-                        {isGenerating ? (
-                            <>
-                                <Settings size={18} className="animate-spin" />
-                                Generating...
-                            </>
-                        ) : (
-                            <>
-                                <Wand2 size={18} />
-                                Generate Media
-                            </>
-                        )}
-                    </button>
-                </div>
-            </div>
-
-            {/* Right Column: Preview Area */}
-            <div className="w-full lg:w-2/3 glass rounded-xl border border-matrix/20 relative overflow-hidden flex flex-col">
-                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-matrix to-transparent opacity-50"></div>
-
-                <div className="p-4 border-b border-matrix/10 flex items-center justify-between bg-black/20 z-10">
-                    <div className="flex items-center gap-2 text-matrix font-display font-bold uppercase tracking-widest">
-                        {mediaType === 'image' ? <Camera size={16} /> : <Music size={16} />}
-                        <h2>{mediaType === 'image' ? "Studio Output" : "Audio Track Output"}</h2>
-                    </div>
-                    {(generatedImage || generatedAudio) && (
-                        <button className="flex items-center gap-2 text-[10px] bg-matrix/10 text-matrix px-3 py-1.5 rounded border border-matrix/20 hover:bg-matrix/20 transition-all">
-                            <Download size={12} />
-                            Save
-                        </button>
-                    )}
-                </div>
-
-                <div className="flex-grow flex items-center justify-center p-6 bg-black/40 relative">
-                    {/* Background grid */}
-                    <div className="absolute inset-0 grid-bg opacity-10"></div>
-
-                    {isGenerating ? (
-                        <div className="flex flex-col items-center gap-6 animate-pulse z-10">
-                            <div className="w-24 h-24 border-2 border-dashed border-matrix rounded-full flex items-center justify-center relative">
-                                <Sparkles size={32} className="text-matrix animate-ping absolute" />
-                                <Wand2 size={32} className="text-matrix" />
-                            </div>
-                            <div className="text-center">
-                                <p className="text-matrix font-bold tracking-widest uppercase">Rendering Request</p>
-                                <p className="text-xs text-matrix/50 font-mono mt-2">Connecting to Proxmox GPU Engine...</p>
-                            </div>
-                        </div>
-                    ) : mediaType === 'image' && generatedImage ? (
-                        <img
-                            src={generatedImage}
-                            alt="Generated Output"
-                            className="max-h-full max-w-full rounded-lg border border-matrix/30 shadow-[0_0_30px_rgba(0,255,65,0.1)] z-10 object-contain"
-                        />
-                    ) : mediaType === 'audio' && generatedAudio ? (
-                        <div className="flex flex-col items-center gap-8 w-full max-w-md z-10 p-8 glass rounded-xl border border-matrix/30">
-                            <div className="w-16 h-16 rounded-full bg-matrix/10 border border-matrix/40 flex items-center justify-center shadow-[0_0_20px_rgba(0,255,65,0.2)]">
-                                <Music size={32} className="text-matrix" />
-                            </div>
-                            <div className="text-center w-full">
-                                <h3 className="text-white font-bold tracking-widest uppercase mb-1">Generated Track</h3>
-                                <p className="text-xs text-white/40 mb-6 truncate px-4">{prompt}</p>
-                                <audio controls src={generatedAudio} className="w-full custom-audio-player" autoPlay />
-                            </div>
-                        </div>
+                {/* Generate Button */}
+                <button
+                    onClick={handleGenerate}
+                    disabled={loading || !selectedNiche}
+                    style={{
+                        padding: '14px', border: 'none', borderRadius: '6px',
+                        background: loading ? '#1a2a3a' : '#00ff41',
+                        color: loading ? '#444' : '#000', fontWeight: 700,
+                        fontSize: '13px', cursor: loading ? 'wait' : 'pointer',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+                        letterSpacing: '1px', textTransform: 'uppercase',
+                        transition: 'all 0.2s'
+                    }}
+                >
+                    {loading ? (
+                        <><RefreshCw size={14} style={{ animation: 'spin 1s linear infinite' }} /> Génération en cours...</>
+                    ) : contentType === 'video' ? (
+                        <><PlayCircle size={14} /> Générer Clip Vidéo</>
                     ) : (
-                        <div className="flex flex-col items-center gap-4 text-white/20 z-10">
-                            {mediaType === 'image' ? <ImageIcon size={64} /> : <Music size={64} />}
-                            <p className="text-sm font-mono uppercase tracking-[0.2em]">Awaiting Input Sequence</p>
+                        <><Zap size={14} /> Générer Image</>
+                    )}
+                </button>
+            </div>
+
+            {/* RIGHT — Output */}
+            <div style={{ width: '380px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+
+                <div style={{ fontSize: '12px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <TrendingUp size={14} />
+                    Studio Output
+                </div>
+
+                <div style={{
+                    flex: 1, minHeight: '380px', background: '#0a0a1a', border: '1px solid #1a2a3a',
+                    borderRadius: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    position: 'relative', overflow: 'hidden'
+                }}>
+                    {outputUrl ? (
+                        outputType === 'video' ? (
+                            <video controls src={outputUrl} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+                        ) : (
+                            <img src={outputUrl} alt="Output" style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+                        )
+                    ) : (
+                        <div style={{ textAlign: 'center', color: '#2a2a3a' }}>
+                            {loading ? (
+                                <div>
+                                    <div style={{ width: '40px', height: '40px', border: '2px solid #1a2a3a', borderTop: '2px solid #00ff41', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 12px' }} />
+                                    <div style={{ fontSize: '12px', color: '#444' }}>{contentType === 'video' ? 'AnimateDiff generating...' : 'ComfyUI generating...'}</div>
+                                </div>
+                            ) : (
+                                <>
+                                    {contentType === 'video' ? <Video size={40} style={{ marginBottom: '12px' }} /> : <Image size={40} style={{ marginBottom: '12px' }} />}
+                                    <div style={{ fontSize: '12px' }}>En attente de génération</div>
+                                </>
+                            )}
                         </div>
                     )}
                 </div>
+
+                {outputUrl && (
+                    <a
+                        href={outputUrl}
+                        download={outputType === 'video' ? 'hive_clip.mp4' : 'hive_img.png'}
+                        style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                            padding: '10px', border: '1px solid #1a2a3a', borderRadius: '6px',
+                            color: '#00ff41', textDecoration: 'none', fontSize: '12px'
+                        }}
+                    >
+                        <Download size={13} /> Télécharger
+                    </a>
+                )}
+
+                {/* Niche Stats */}
+                {selectedNiche && (
+                    <div style={{ background: '#0a0a1a', border: '1px solid #1a2a3a', borderRadius: '6px', padding: '12px' }}>
+                        <div style={{ fontSize: '11px', color: '#444', letterSpacing: '1px', marginBottom: '8px' }}>NICHE STATS</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                                <span style={{ color: '#666' }}>Posting Schedule</span>
+                                <span style={{ color: '#aaa' }}>Every {selectedNiche.post_interval_hours}h</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                                <span style={{ color: '#666' }}>Content Rating</span>
+                                <span style={{ color: selectedNiche.is_nsfw ? '#ff69b4' : '#00ff41' }}>{selectedNiche.is_nsfw ? 'NSFW' : 'SFW'}</span>
+                            </div>
+                            {trendScores[selectedNiche.id] !== undefined && (
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                                    <span style={{ color: '#666' }}>Trend Score</span>
+                                    <span style={{ color: '#ffd700' }}>{Math.round((trendScores[selectedNiche.id] || 0) * 100)}%</span>
+                                </div>
+                            )}
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                                <span style={{ color: '#666' }}>LoRAs chargés</span>
+                                <span style={{ color: '#aaa' }}>{selectedNiche.recommended_loras.length}</span>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
 
+            <style>{`
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+      `}</style>
         </div>
-    )
+    );
 }

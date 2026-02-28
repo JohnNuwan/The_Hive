@@ -524,3 +524,101 @@ async def get_stats():
         "model": service.settings.ollama_model,
         "mode": "text_only_lite"
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONTENT FACTORY — Niches & Video
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/niches")
+async def list_niches():
+    """Liste toutes les niches de contenu disponibles avec leurs configurations."""
+    from eva_muse.niches import list_niches as _list_niches
+    niches = _list_niches()
+    return {
+        "niches": [
+            {
+                "id": n.id,
+                "label": n.label,
+                "description": n.description,
+                "enabled": n.enabled,
+                "is_nsfw": n.is_nsfw,
+                "post_interval_hours": n.post_interval_hours,
+                "recommended_loras": n.recommended_loras,
+            }
+            for n in niches
+        ]
+    }
+
+
+@app.get("/niches/scores")
+async def get_niche_scores():
+    """Lance l'analyse de marché via Ollama et retourne les scores de tendance par niche."""
+    from eva_muse.services.market_researcher import score_niches
+    scores = await score_niches()
+    return {"scores": scores}
+
+
+class VideoRequest(BaseModel):
+    """Requête de génération de clip vidéo (AnimateDiff)."""
+    prompt: str = Field(..., description="Scene description")
+    niche_id: str | None = Field(default=None, description="Niche ID to apply LoRAs (ex: 'fitness')")
+    influencer_id: str | None = Field(default=None, description="Influencer ID for face swap (ex: 'inf-001')")
+    num_frames: int = Field(default=16, description="Number of frames (16 = ~1s at 16fps)")
+    fps: int = Field(default=8, description="Output frame rate")
+    width: int = Field(default=512)
+    height: int = Field(default=768)
+    use_faceswap: bool = Field(default=False)
+
+
+@app.post("/generate/video")
+async def generate_video(request: VideoRequest):
+    """
+    Génère un clip vidéo court via AnimateDiff + VHS.
+    Applique optionnellement les LoRAs de niche et le FaceSwap ReActor.
+    """
+    from eva_muse.services.video_generator import generate_video_clip
+    from eva_muse.services.lora_manager import get_loras_for_niche
+    from eva_muse.niches import get_niche
+
+    INFLUENCER_FACES = {
+        "inf-001": "neo_face.jpg",
+        "inf-002": "lois_face.jpg",
+        "inf-003": "athena_face.jpg",
+    }
+
+    # Get niche LoRAs
+    loras = []
+    negative_prompt = "ugly, disfigured, low quality, bad anatomy, watermark"
+    if request.niche_id:
+        loras = get_loras_for_niche(request.niche_id)
+        niche = get_niche(request.niche_id)
+        if niche:
+            negative_prompt = niche.negative_prompt
+
+    # Get face file for swap
+    face_file = None
+    if request.use_faceswap and request.influencer_id:
+        face_file = INFLUENCER_FACES.get(request.influencer_id)
+
+    try:
+        video_bytes = await generate_video_clip(
+            prompt=request.prompt,
+            negative_prompt=negative_prompt,
+            width=request.width,
+            height=request.height,
+            num_frames=request.num_frames,
+            fps=request.fps,
+            influencer_face=face_file,
+            loras=loras if loras else None,
+        )
+        if not video_bytes:
+            raise HTTPException(status_code=500, detail="ComfyUI n'a renvoyé aucune vidéo.")
+        return Response(content=video_bytes, media_type="video/mp4")
+    except Exception as e:
+        logger.error(f"Video generation error: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Moteur vidéo injoignable (AnimateDiff requis). ({str(e)})"
+        )
+
