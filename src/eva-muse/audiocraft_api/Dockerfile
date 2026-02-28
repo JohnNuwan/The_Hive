@@ -2,6 +2,10 @@ FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
 
 WORKDIR /app
 
+# Prevent tzdata from prompting for timezone
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
+
 # Install system dependencies (ffmpeg is required for AudioCraft)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
