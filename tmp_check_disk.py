@@ -1,0 +1,21 @@
+import paramiko
+
+client = paramiko.SSHClient()
+client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+client.connect('192.168.1.5', username='aza', password='Kumara-42/600')
+
+cmds = [
+    "echo 'Kumara-42/600' | sudo -S journalctl --vacuum-time=1d",
+    "echo 'Kumara-42/600' | sudo -S docker system prune -a -f --volumes",
+    "df -h /"
+]
+
+for cmd in cmds:
+    print(f"=== {cmd} ===")
+    stdin, stdout, stderr = client.exec_command(cmd)
+    print(stdout.read().decode())
+    err = stderr.read().decode()
+    if err and "password" not in err.lower():
+        print(f"ERR: {err}")
+
+client.close()

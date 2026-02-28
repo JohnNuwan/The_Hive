@@ -13,7 +13,9 @@ import {
     Globe,
     Share2,
     Database,
-    Camera
+    Camera,
+    BookOpen,
+    Radio
 } from 'lucide-react'
 
 // Core Components
@@ -28,11 +30,13 @@ import MatrixRain from './components/MatrixRain'
 import GraphView from './components/GraphView'
 import MemoryExplorer from './components/MemoryExplorer'
 import MuseFactory from './components/MuseFactory'
+import KnowledgeVault from './components/KnowledgeVault'
+import AgentFeed from './components/AgentFeed'
 
 // Services
 import { getStatus } from './services/api'
 
-type TabId = 'dashboard' | 'chat' | 'trading' | 'graph' | 'memory' | 'monitoring' | 'osint' | 'factories' | 'admin' | 'settings' | 'muse'
+type TabId = 'dashboard' | 'chat' | 'trading' | 'graph' | 'memory' | 'monitoring' | 'osint' | 'factories' | 'admin' | 'settings' | 'muse' | 'knowledge' | 'agentfeed'
 
 function App() {
     const [activeTab, setActiveTab] = useState<TabId>('chat')
@@ -140,6 +144,20 @@ function App() {
                         active={activeTab === 'muse'}
                         onClick={() => setActiveTab('muse')}
                     />
+                    <NavItem
+                        id="knowledge"
+                        icon={<BookOpen size={18} />}
+                        label="Knowledge Vault"
+                        active={activeTab === 'knowledge'}
+                        onClick={() => setActiveTab('knowledge')}
+                    />
+                    <NavItem
+                        id="agentfeed"
+                        icon={<Radio size={18} />}
+                        label="Agent Feed"
+                        active={activeTab === 'agentfeed'}
+                        onClick={() => setActiveTab('agentfeed')}
+                    />
 
                     <div className="mt-auto space-y-1">
                         <NavItem
@@ -219,6 +237,8 @@ function ViewSwitcher({ activeTab }: { activeTab: TabId }) {
         case 'osint': return <OSINTView />
         case 'factories': return <FactoriesView />
         case 'muse': return <MuseFactory />
+        case 'knowledge': return <KnowledgeVault />
+        case 'agentfeed': return <AgentFeed />
         case 'admin': return <AdminPanel />
         case 'settings': return (
             <div className="h-full flex flex-col items-center justify-center text-center space-y-4 opacity-50">

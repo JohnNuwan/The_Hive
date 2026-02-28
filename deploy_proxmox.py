@@ -17,9 +17,9 @@ def deploy():
         print(stdout.read().decode())
         print(stderr.read().decode())
         
-        print("Rebuilding Docker containers Lab and Accountant...")
+        print("Rebuilding Docker containers Lab, Core, and Nexus...")
         # Docker build commands
-        docker_cmd = "cd ~/The_Hive && echo 'Kumara-42/600' | sudo -S docker compose -f docker-compose.yml up -d --build lab accountant"
+        docker_cmd = "cd ~/The_Hive && echo 'Kumara-42/600' | sudo -S docker compose -f docker-compose.yml up -d --build lab core nexus"
         stdin, stdout, stderr = client.exec_command(docker_cmd, get_pty=True)
         
         # Stream the output for better visibility

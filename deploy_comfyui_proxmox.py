@@ -20,6 +20,10 @@ def deploy():
         dir_cmds = "echo 'Kumara-42/600' | sudo -S mkdir -p /mnt/data/comfyui/{output,input,models,custom_nodes} && echo 'Kumara-42/600' | sudo -S chmod -R 777 /mnt/data/comfyui"
         client.exec_command(dir_cmds)
         
+        print("Installing ReActor FaceSwap Custom Node...")
+        reactor_cmd = "if [ ! -d /mnt/data/comfyui/custom_nodes/comfyui-reactor-node ]; then git clone https://github.com/Gourieff/comfyui-reactor-node /mnt/data/comfyui/custom_nodes/comfyui-reactor-node; fi"
+        client.exec_command(reactor_cmd)
+        
         print("Starting ComfyUI Docker Container with NVIDIA GPU access...")
         # Start docker compose
         docker_cmd = "cd ~/The_Hive && echo 'Kumara-42/600' | sudo -S docker compose -f docker-compose.comfyui.yml up -d"
