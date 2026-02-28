@@ -1,0 +1,5 @@
+fastapi>=0.111.0
+uvicorn>=0.30.0
+pydantic>=2.7.0
+xformers>=0.0.26.post1
+# AudioCraft is installed from github in Dockerfile

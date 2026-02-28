@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  audiocraft_api:
+    build:
+      context: ./src/eva-muse/audiocraft_api
+    container_name: eva_audiocraft
+    restart: unless-stopped
+    ports:
+      - "8288:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
