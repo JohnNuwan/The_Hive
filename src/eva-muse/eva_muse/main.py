@@ -59,6 +59,13 @@ class AudioRequest(BaseModel):
     prompt: str = Field(..., description="Description of the track (e.g. Synthwave with heavy bass)")
     duration: int = Field(default=15, description="Duration in seconds (1 to 30)")
 
+class InfluencerRequest(BaseModel):
+    """Requête de génération d'image d'influenceuse avec FaceSwap et rendu optionnel privé."""
+    influencer_id: str = Field(..., description="ID de l'influenceuse (inf-001, inf-002, inf-003)")
+    prompt: str = Field(..., description="Description of the scene")
+    onlyfans_mode: bool = Field(default=False, description="Activer le mode de contenu privé / NSFW")
+    use_faceswap: bool = Field(default=True, description="Appliquer le ReActor FaceSwap")
+
 class TradeResult(BaseModel):
     """Résultat d'un trade à viraliser"""
     symbol: str = Field(..., description="Asset symbol (ex: BTCUSD, XAUUSD)")
@@ -193,6 +200,7 @@ async def lifespan(app: FastAPI):
 
     app.state.muse_service = MuseService()
     asyncio.create_task(hard_heartbeat())
+    asyncio.create_task(autonomous_influencer_loop())
 
     logger.info("✅ The Muse est inspirée (prête)")
     yield
@@ -209,6 +217,87 @@ async def hard_heartbeat():
         except Exception:
             pass
         await asyncio.sleep(2.0)
+
+async def autonomous_influencer_loop():
+    """Tâche d'arrière-plan pour générer des posts d'influenceuses automatiquement"""
+    import random
+    import httpx
+    
+    # Liste d'influenceuses locales (les visages sources doivent exister sur le serveur ComfyUI dans input/)
+    INFLUENCERS = [
+        {"id": "inf-001", "name": "Neo Spectra", "style": "cyberpunk fashion model, neon aesthetic", "face_file": "neo_face.jpg"},
+        {"id": "inf-002", "name": "Lois", "style": "corporate finance baddie, sharp look", "face_file": "lois_face.jpg"},
+        {"id": "inf-003", "name": "Athena", "style": "gamer girl, RGB lighting headset", "face_file": "athena_face.jpg"},
+    ]
+    
+    logger.info("🤖 Autonomous Influencer Subsystem started. Waiting for first cycle...")
+    await asyncio.sleep(60) # Delay start
+    
+    while True:
+        try:
+            inf = random.choice(INFLUENCERS)
+            logger.info(f"Producing autonomous content for {inf['name']}...")
+            
+            # Demander au LLM un caption et un prompt image
+            settings = get_settings()
+            prompt_llm = f"You are {inf['name']}, a {inf['style']} influencer on Twitter/Telegram. Write a short, engaging, slightly arrogant 2-sentence post about the crypto market today. Do not use hashtags."
+            
+            caption = "Just chilling."
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    res = await client.post(
+                        f"http://{settings.ollama_host}:{settings.ollama_port}/api/generate",
+                        json={"model": settings.ollama_model, "prompt": prompt_llm, "stream": False}
+                    )
+                    caption = res.json().get("response", caption).strip()
+            except Exception as e:
+                logger.error(f"Failed to generate caption: {e}")
+            
+            # Generer l'image via l'API interne (qui utilise ComfyUI)
+            # On passe par le endpoint interne
+            img_prompt = f"1girl, masterpiece, high quality, 8k, highly detailed, realistic, {inf['style']}, casual selfie pose, looking at viewer"
+            
+            # Appel interne de la logique influencer ou comfy
+            payload = {
+                "influencer_id": inf["id"],
+                "prompt": img_prompt,
+                "onlyfans_mode": False,
+                "use_faceswap": True
+            }
+            
+            # Note: since we're in the same app, we can just simulate the endpoint call, but httpx to self is cleaner when testing API boundaries if port is known.
+            # Instead of a real HTTP call, we'll just implement the logic using ComfyUIClient directly to avoid port hardcoding issues.
+            
+            client = ComfyUIClient()
+            workflow = {
+                "3": {"class_type": "KSampler", "inputs": {"cfg": 7, "denoise": 1, "latent_image": ["5", 0], "model": ["4", 0], "negative": ["7", 0], "positive": ["6", 0], "sampler_name": "euler", "scheduler": "normal", "seed": random.randint(1,100000), "steps": 25}},
+                "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "v1-5-pruned-emaonly.safetensors"}},
+                "5": {"class_type": "EmptyLatentImage", "inputs": {"batch_size": 1, "height": 1024, "width": 1024}},
+                "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": img_prompt}},
+                "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": "ugly, disfigured, low quality, bad anatomy"}},
+                "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+                "10": {"class_type": "LoadImage", "inputs": {"image": inf["face_file"]}},
+                "11": {"class_type": "ReActorFaceSwap", "inputs": {"enabled": True, "input_image": ["8", 0], "source_image": ["10", 0], "swap_model": "inswapper_128.onnx", "facedetection": "retinaface_resnet50", "face_restore_model": "none", "face_restore_visibility": 1.0, "codeformer_weight": 0.5}},
+                "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "Hive_Auto_Inf", "images": ["11", 0]}}
+            }
+            
+            try:
+                images = await client.generate_from_workflow(workflow)
+                if images:
+                    img_bytes = images[0]
+                    # Post to Telegram
+                    from shared.telegram_client import TelegramClient
+                    telegram = TelegramClient()
+                    await telegram.send_photo(img_bytes, f"💄 *{inf['name']}*\n\n{caption}")
+                    logger.info("Successfully posted autonomous influencer content.")
+            except Exception as e:
+                logger.error(f"ComfyUI / Telegram fail in autonomous loop: {e}")
+                
+        except Exception as e:
+            logger.error(f"Error in autonomous influencer loop: {e}")
+            
+        # Attendre 12 heures (ou 2 min si on veut tester vite, là on va mettre 4 heures)
+        await asyncio.sleep(4 * 3600)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -326,6 +415,57 @@ async def generate_audio(request: AudioRequest):
         raise HTTPException(
             status_code=503, 
             detail=f"Moteur Audio Factory injoignable. Assurez-vous que le conteneur AudioCraft tourne sur Proxmox. ({str(e)})"
+        )
+
+@app.post("/generate/influencer")
+async def generate_influencer(request: InfluencerRequest):
+    """Génère du contenu Influencer (avec option OnlyFans/NSFW et FaceSwap ReActor)"""
+    client = ComfyUIClient()
+    
+    INFLUENCER_DB = {
+        "inf-001": {"name": "Neo Spectra", "face_file": "neo_face.jpg"},
+        "inf-002": {"name": "Lois", "face_file": "lois_face.jpg"},
+        "inf-003": {"name": "Athena", "face_file": "athena_face.jpg"},
+    }
+    
+    inf_data = INFLUENCER_DB.get(request.influencer_id)
+    if not inf_data:
+        raise HTTPException(status_code=400, detail="Influencer ID non valide.")
+        
+    # Modifier la prompt si en mode OnlyFans
+    final_prompt = request.prompt
+    if request.onlyfans_mode:
+        final_prompt = f"nsfw, boudoir, extremely intimate, heavily lit, private selfie, seductive, {final_prompt}"
+        
+    # Workflow API avec ou sans FaceSwap ReActor
+    import random
+    workflow = {
+        "3": {"class_type": "KSampler", "inputs": {"cfg": 7, "denoise": 1, "latent_image": ["5", 0], "model": ["4", 0], "negative": ["7", 0], "positive": ["6", 0], "sampler_name": "euler", "scheduler": "normal", "seed": random.randint(1,999999), "steps": 25}},
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "v1-5-pruned-emaonly.safetensors"}},
+        "5": {"class_type": "EmptyLatentImage", "inputs": {"batch_size": 1, "height": 1024, "width": 1024}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": final_prompt}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": "ugly, disfigured, low quality, bad anatomy, text, watermark"}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}}
+    }
+    
+    # Gestion conditionnelle du FaceSwap
+    if request.use_faceswap:
+        workflow["10"] = {"class_type": "LoadImage", "inputs": {"image": inf_data["face_file"]}}
+        workflow["11"] = {"class_type": "ReActorFaceSwap", "inputs": {"enabled": True, "input_image": ["8", 0], "source_image": ["10", 0], "swap_model": "inswapper_128.onnx", "facedetection": "retinaface_resnet50", "face_restore_model": "none", "face_restore_visibility": 1.0, "codeformer_weight": 0.5}}
+        workflow["9"] = {"class_type": "SaveImage", "inputs": {"filename_prefix": "Hive_Inf", "images": ["11", 0]}}
+    else:
+        workflow["9"] = {"class_type": "SaveImage", "inputs": {"filename_prefix": "Hive_Inf", "images": ["8", 0]}}
+
+    try:
+        images = await client.generate_from_workflow(workflow)
+        if not images:
+            raise HTTPException(status_code=500, detail="ComfyUI n'a renvoyé aucune image.")
+        return Response(content=images[0], media_type="image/png")
+    except Exception as e:
+        logger.error(f"Erreur Influencer Generation: {e}")
+        raise HTTPException(
+            status_code=503, 
+            detail=f"Moteur Media Factory injoignable ou erreur ReActor Node. ({str(e)})"
         )
 
 @app.post("/viralize/trade")

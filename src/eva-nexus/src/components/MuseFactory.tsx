@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Camera, Wand2, User, ImageIcon, Download, Sparkles, SlidersHorizontal, Settings, Music } from 'lucide-react'
+import { Camera, Wand2, User, ImageIcon, Download, Sparkles, SlidersHorizontal, Settings, Music, LockKeyhole } from 'lucide-react'
 
 // Dummy data for influencers
 const INFLUENCERS = [
@@ -30,6 +30,7 @@ export default function MuseFactory() {
     const [selectedInfluencer, setSelectedInfluencer] = useState(INFLUENCERS[0])
     const [prompt, setPrompt] = useState('Neon genesis evangelion style, highly detailed portrait, 8k resolution, cinematic lighting')
     const [faceSwapEnabled, setFaceSwapEnabled] = useState(true)
+    const [onlyFansMode, setOnlyFansMode] = useState(false)
     const [mediaType, setMediaType] = useState<'image' | 'audio'>('image')
     const [duration, setDuration] = useState(15)
 
@@ -40,10 +41,30 @@ export default function MuseFactory() {
     const handleGenerate = async () => {
         setIsGenerating(true)
         if (mediaType === 'image') {
-            setTimeout(() => {
-                setGeneratedImage(`https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&h=800&fit=crop&q=80&rand=${Math.random()}`)
+            try {
+                const res = await fetch('/api/muse/generate/influencer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        influencer_id: selectedInfluencer.id,
+                        prompt: prompt,
+                        onlyfans_mode: onlyFansMode,
+                        use_faceswap: faceSwapEnabled
+                    })
+                })
+
+                if (res.ok) {
+                    const blob = await res.blob()
+                    const url = URL.createObjectURL(blob)
+                    setGeneratedImage(url)
+                } else {
+                    console.error("Image generation failed")
+                }
+            } catch (e) {
+                console.error("Image generation error", e)
+            } finally {
                 setIsGenerating(false)
-            }, 3000)
+            }
         } else {
             try {
                 // Call our explicit Audio API
@@ -157,7 +178,25 @@ export default function MuseFactory() {
                     )}
 
                     {mediaType === 'image' && (
-                        <div className="flex items-center justify-between bg-black/40 border border-matrix/20 p-3 rounded-lg mt-auto">
+                        <div className="flex items-center justify-between bg-black/40 border border-matrix/20 p-3 rounded-lg mt-auto mb-2">
+                            <div className="flex items-center gap-2">
+                                <LockKeyhole size={16} className={onlyFansMode ? "text-[#FF00FF]" : "text-white/40"} />
+                                <div>
+                                    <p className={`text-xs font-bold ${onlyFansMode ? 'text-[#FF00FF] neon-text-pink' : 'text-white'}`}>Private Content</p>
+                                    <p className="text-[9px] text-white/50">OnlyFans Aesthetic Injector</p>
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setOnlyFansMode(!onlyFansMode)}
+                                className={`w-10 h-5 rounded-full relative transition-colors ${onlyFansMode ? 'bg-[#FF00FF]' : 'bg-white/20'}`}
+                            >
+                                <div className={`w-3 h-3 bg-black rounded-full absolute top-1 transition-all ${onlyFansMode ? 'right-1' : 'left-1'}`} />
+                            </button>
+                        </div>
+                    )}
+
+                    {mediaType === 'image' && (
+                        <div className="flex items-center justify-between bg-black/40 border border-matrix/20 p-3 rounded-lg">
                             <div className="flex items-center gap-2">
                                 <User size={16} className={faceSwapEnabled ? "text-matrix" : "text-white/40"} />
                                 <div>
