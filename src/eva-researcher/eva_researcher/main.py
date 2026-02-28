@@ -22,6 +22,8 @@ from pydantic import BaseModel, Field
 from shared import get_settings
 from shared.redis_client import init_redis, get_redis_client
 
+from eva_researcher.services.pea_analyzer import PEAAnalyzerService
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -212,6 +214,7 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ Redis non disponible: {e}")
 
     app.state.research = ResearchService()
+    app.state.pea_analyzer = PEAAnalyzerService(app.state.research)
     asyncio.create_task(hard_heartbeat())
 
     logger.info("✅ The Researcher est en veille active")
@@ -282,3 +285,9 @@ async def get_stats():
         "total_searches": service.search_count,
         "available_domains": list(service.RSS_SOURCES.keys()),
     }
+
+@app.get("/analysis/pea")
+async def get_pea_analysis():
+    """Réalise une analyse fondamentale macro-économique des actions PEA ciblées"""
+    service: PEAAnalyzerService = app.state.pea_analyzer
+    return await service.analyze_basket()

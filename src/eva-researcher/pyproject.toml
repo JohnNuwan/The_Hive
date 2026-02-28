@@ -9,6 +9,7 @@ dependencies = [
     "uvicorn[standard]>=0.27.0",
     "httpx>=0.26.0",
     "beautifulsoup4>=4.12.0",
+    "yfinance>=0.2.36",
 ]
 
 [build-system]

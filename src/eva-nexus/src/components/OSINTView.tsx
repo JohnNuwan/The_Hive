@@ -300,11 +300,10 @@ function ThreatFeedPanel() {
             <div className="space-y-2">
                 {MOCK_THREAT_FEED.map((threat, i) => (
                     <div key={i} className="flex items-center gap-3 p-2 border border-white/[0.03] bg-white/[0.01]">
-                        <span className={`text-[8px] tracking-wider px-2 py-0.5 border shrink-0 ${
-                            threat.risk === 'CRITICAL' ? 'border-cyber-pink/30 text-cyber-pink/70 bg-cyber-pink/10' :
-                            threat.risk === 'HIGH' ? 'border-cyber-pink/20 text-cyber-pink/50 bg-cyber-pink/5' :
-                            'border-cyber-amber/20 text-cyber-amber/50 bg-cyber-amber/5'
-                        }`}>{threat.risk}</span>
+                        <span className={`text-[8px] tracking-wider px-2 py-0.5 border shrink-0 ${threat.risk === 'CRITICAL' ? 'border-cyber-pink/30 text-cyber-pink/70 bg-cyber-pink/10' :
+                                threat.risk === 'HIGH' ? 'border-cyber-pink/20 text-cyber-pink/50 bg-cyber-pink/5' :
+                                    'border-cyber-amber/20 text-cyber-amber/50 bg-cyber-amber/5'
+                            }`}>{threat.risk}</span>
                         <div className="flex-1 min-w-0">
                             <div className="text-[10px] text-white/40 truncate font-bold">{threat.indicator}</div>
                             <div className="text-[8px] text-white/15">{threat.type}</div>
@@ -371,6 +370,76 @@ function NetworkMapPanel() {
     )
 }
 
+function PEARadarPanel() {
+    const [peaData, setPeaData] = useState<any>(null)
+    const [loading, setLoading] = useState(false)
+
+    const fetchPEA = async () => {
+        setLoading(true)
+        try {
+            const res = await fetch('/api/researcher/analysis/pea')
+            if (res.ok) {
+                const data = await res.json()
+                setPeaData(data)
+            }
+        } catch (e) {
+            console.error("PEA Fetch Error", e)
+        } finally {
+            setLoading(false)
+        }
+    }
+
+    return (
+        <div className="cyber-panel hud-corners p-4">
+            <div className="flex items-center justify-between mb-3">
+                <div className="text-[9px] uppercase tracking-[0.2em] text-white/60 mb-3">📈 LONG-TERM PEA RADAR — THE SAGE</div>
+                <button onClick={fetchPEA} disabled={loading} className="cyber-btn-cyan text-[8px] px-2 py-1">
+                    {loading ? 'ANALYZING...' : 'RUN LLM ANALYSIS'}
+                </button>
+            </div>
+
+            {!peaData && !loading && (
+                <div className="text-center p-4 border border-white/[0.03] bg-white/[0.01]">
+                    <span className="text-[9px] text-white/30 tracking-widest">AWAITING ANALYSIS TRIGGER</span>
+                </div>
+            )}
+
+            {peaData && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar">
+                        {peaData.analysis.map((stock: any, i: number) => (
+                            <div key={i} className="p-3 border border-matrix/20 bg-matrix/[0.02]">
+                                <div className="flex justify-between items-start">
+                                    <div>
+                                        <h4 className="text-[11px] font-bold text-white neon-text-subtle">{stock.metrics.company_name} <span className="text-[9px] text-matrix/50">({stock.metrics.symbol})</span></h4>
+                                        <p className="text-[8px] text-white/40">{stock.metrics.sector}</p>
+                                    </div>
+                                    <div className="text-right">
+                                        <div className="text-[10px] font-bold text-white">€{stock.metrics.current_price?.toFixed(2)}</div>
+                                        <div className="text-[8px] text-matrix">Div: {stock.metrics.dividend_yield?.toFixed(2)}%</div>
+                                    </div>
+                                </div>
+                                <div className="mt-2 grid grid-cols-3 gap-2 text-[8px]">
+                                    <div className="bg-black/40 p-1 border border-matrix/10">P/E: <span className="text-white">{stock.metrics.pe_ratio?.toFixed(1) || 'N/A'}</span></div>
+                                    <div className="bg-black/40 p-1 border border-matrix/10">ROE: <span className="text-white">{stock.metrics.roe?.toFixed(1)}%</span></div>
+                                    <div className="bg-black/40 p-1 border border-matrix/10">Target: <span className="text-white">€{stock.metrics.target_mean_price || 'N/A'}</span></div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="p-4 border border-cyber-cyan/20 bg-cyber-cyan/[0.02] flex flex-col">
+                        <div className="text-[9px] uppercase tracking-[0.1em] text-cyber-cyan font-bold mb-2">🧠 L.L.M Strategic Synthesis</div>
+                        <div className="text-[10px] text-white/70 whitespace-pre-wrap leading-relaxed overflow-y-auto custom-scrollbar flex-grow">
+                            {peaData.llm_synthesis}
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    )
+}
+
 // ═══════════════════════════════════════════════════════
 // MAIN VIEW
 // ═══════════════════════════════════════════════════════
@@ -405,7 +474,7 @@ export default function OSINTView() {
             const isRecon = query.startsWith('recon:')
             const q = isRecon ? query.slice(6) : query
             const endpoint = isRecon ? `/api/shadow/recon?target=${encodeURIComponent(q)}` : `/api/shadow/search?q=${encodeURIComponent(q)}`
-            
+
             const controller = new AbortController()
             const timeout = setTimeout(() => controller.abort(), 10000)
             const res = await fetch(endpoint, { signal: controller.signal })
@@ -472,6 +541,9 @@ export default function OSINTView() {
                 <SecurityAlertsPanel />
                 <ThreatFeedPanel />
             </div>
+
+            {/* PEA Analysis */}
+            <PEARadarPanel />
 
             {/* Network Map */}
             <NetworkMapPanel />
