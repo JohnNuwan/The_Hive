@@ -1,5 +1,5 @@
 # --- Build Stage ---
-FROM rust:1.80-slim-bookworm AS builder
+FROM rust:nightly AS builder
 
 # Installer les dépendances de compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -9,18 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copier les fichiers de définition (depuis le context .)
-COPY src/eva-kernel/Cargo.toml ./
+# Copier les fichiers du projet
+COPY src/eva-kernel/ .
 
-
-# Créer un projet dummy pour mettre en cache les dépendances
-# On crée le dossier src attendu par Cargo
-RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
-
-# Copier le code source réel
-COPY src/eva-kernel/src ./src
-
-# Compiler le vrai projet
+# Compiler le projet
 RUN cargo build --release
 
 # --- Runtime Stage ---
