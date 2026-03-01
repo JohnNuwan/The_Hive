@@ -1,6 +1,9 @@
 # --- Build Stage ---
 FROM rust:1.80 AS builder
 
+# Forcer l'utilisation du toolchain stable installé dans l'image
+ENV RUSTUP_TOOLCHAIN=stable
+
 WORKDIR /app
 COPY src/eva-kernel/ .
 RUN cargo build --release
