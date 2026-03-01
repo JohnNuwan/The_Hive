@@ -216,48 +216,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // On lance l'écouteur Redis dans sa propre tâche pour isoler les types
                 tokio::spawn(async move {
-                    loop {
-                        // Spécifier explicitement le type redis::Msg pour aider l'inférence
-                        let msg_res: redis::RedisResult<redis::Msg> = pubsub.get_message().await;
-                        if let Ok(msg) = msg_res {
-                            let channel_name = String::from(msg.get_channel_name());
-                            if let Ok(payload_str) = msg.get_payload::<String>() {
-                                // 1. Map and Broadcast
-                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload_str) {
-                                    let mut final_msg = serde_json::json!({
-                                        "id": val.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                                        "agent": val.get("source_agent").and_then(|v| v.as_str()).unwrap_or("Unknown"),
-                                        "company": "Hive Swarm",
-                                        "type": "action",
-                                        "content": val.get("action").and_then(|v| v.as_str()).unwrap_or(""),
-                                        "timestamp": val.get("timestamp").and_then(|v| v.as_str()).unwrap_or(""),
-                                        "target": val.get("target_agent").and_then(|v| v.as_str()),
-                                    });
+                    let mut msg_stream = pubsub.on_message();
+                    while let Some(msg) = msg_stream.next().await {
+                        let channel_name = String::from(msg.get_channel_name());
+                        if let Ok(payload_str) = msg.get_payload::<String>() {
+                            // Map and Broadcast
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload_str) {
+                                let mut final_msg = serde_json::json!({
+                                    "id": val.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                                    "agent": val.get("source_agent").and_then(|v| v.as_str()).unwrap_or("Unknown"),
+                                    "company": "Hive Swarm",
+                                    "type": "action",
+                                    "content": val.get("action").and_then(|v| v.as_str()).unwrap_or(""),
+                                    "timestamp": val.get("timestamp").and_then(|v| v.as_str()).unwrap_or(""),
+                                    "target": val.get("target_agent").and_then(|v| v.as_str()),
+                                });
 
-                                    if let Some(msg_type) = val.get("type").and_then(|v| v.as_str()) {
-                                        let display_type = match msg_type {
-                                            "alert" => "error",
-                                            "event" => "action",
-                                            "request" => "thought",
-                                            "response" => "result",
-                                            _ => "message",
-                                        };
-                                        if let Some(obj) = final_msg.as_object_mut() {
-                                            obj.insert("type".to_string(), serde_json::json!(display_type));
-                                        }
+                                if let Some(msg_type) = val.get("type").and_then(|v| v.as_str()) {
+                                    let display_type = match msg_type {
+                                        "alert" => "error",
+                                        "event" => "action",
+                                        "request" => "thought",
+                                        "response" => "result",
+                                        _ => "message",
+                                    };
+                                    if let Some(obj) = final_msg.as_object_mut() {
+                                        obj.insert("type".to_string(), serde_json::json!(display_type));
                                     }
-                                    let _ = tx_redis.send(final_msg.to_string());
-                                } else {
-                                    let raw_msg = serde_json::json!({
-                                        "id": uuid::Uuid::new_v4().to_string(),
-                                        "agent": channel_name.clone(),
-                                        "company": "System",
-                                        "type": "message",
-                                        "content": payload_str,
-                                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                                    });
-                                    let _ = tx_redis.send(raw_msg.to_string());
                                 }
+                                let _ = tx_redis.send(final_msg.to_string());
+                            } else {
+                                let raw_msg = serde_json::json!({
+                                    "id": uuid::Uuid::new_v4().to_string(),
+                                    "agent": channel_name.clone(),
+                                    "company": "System",
+                                    "type": "message",
+                                    "content": payload_str,
+                                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                                });
+                                let _ = tx_redis.send(raw_msg.to_string());
                             }
                         }
                     }
