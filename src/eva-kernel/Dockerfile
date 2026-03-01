@@ -1,5 +1,5 @@
 # --- Build Stage ---
-FROM rust:1.75-slim-bookworm AS builder
+FROM rust:1.80-slim-bookworm AS builder
 
 # Installer les dépendances de compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
