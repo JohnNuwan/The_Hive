@@ -1,5 +1,5 @@
 # --- Build Stage ---
-FROM rust:nightly AS builder
+FROM rustlang/rust:nightly AS builder
 
 # Installer les dépendances de compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
