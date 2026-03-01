@@ -166,7 +166,7 @@ services:
       context: .
       dockerfile: src/eva-kernel/Dockerfile
     container_name: hive-kernel
-    ports: [ "8800:8800" ]
+    ports: [ "8800:8080" ]
     depends_on:
       redis:
         condition: service_healthy
