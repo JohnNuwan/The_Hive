@@ -1,5 +1,5 @@
 # --- Build Stage ---
-FROM rustlang/rust:nightly AS builder
+FROM rust:1.81-bookworm AS builder
 
 # Installer les dépendances de compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
