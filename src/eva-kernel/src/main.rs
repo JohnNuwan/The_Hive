@@ -217,7 +217,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // On lance l'écouteur Redis dans sa propre tâche pour isoler les types
                 tokio::spawn(async move {
                     loop {
-                        if let Ok(msg) = pubsub.get_message().await {
+                        // Spécifier explicitement le type redis::Msg pour aider l'inférence
+                        let msg_res: redis::RedisResult<redis::Msg> = pubsub.get_message().await;
+                        if let Ok(msg) = msg_res {
                             let channel_name = String::from(msg.get_channel_name());
                             if let Ok(payload_str) = msg.get_payload::<String>() {
                                 // 1. Map and Broadcast
