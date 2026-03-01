@@ -10,7 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copier les fichiers de définition (depuis le context .)
-COPY src/eva-kernel/Cargo.toml src/eva-kernel/Cargo.lock ./
+COPY src/eva-kernel/Cargo.toml ./
+
 
 # Créer un projet dummy pour mettre en cache les dépendances
 # On crée le dossier src attendu par Cargo
