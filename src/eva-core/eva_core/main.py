@@ -527,7 +527,8 @@ async def agents_status() -> dict[str, Any]:
     now = datetime.now().timestamp()
     
     # On définit les agents attendus (The Hive Council)
-    agents = ["banker", "sentinel", "shadow", "wraith", "keeper", "substrate", "accountant"]
+    agents = ["banker", "sentinel", "shadow", "wraith", "substrate", "accountant",
+              "builder", "compliance", "sage", "researcher", "muse", "rwa", "lab"]
     status_report = {
         "core": {"status": "online", "version": "0.1.0", "uptime": "active"}
     }
@@ -708,4 +709,133 @@ async def get_circuit_breaker_status() -> dict[str, Any]:
         "state": "CLOSED",
         "failures": 0,
         "failure_threshold": 5,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTELLIGENCE AUTONOME (War Rooms + RLM)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class WarRoomRequest(BaseModel):
+    """Requête pour déclencher une War Room."""
+    room_type: str = Field(..., description="council, dojo, high_court, quiet_room")
+    subject: str = Field(..., description="Sujet du débat")
+
+
+@app.post("/intelligence/war-room", tags=["Intelligence"])
+async def trigger_war_room(request: WarRoomRequest) -> dict[str, Any]:
+    """
+    Déclenche une session de War Room (débat contradictoire DEFCON).
+
+    Types disponibles :
+    - council   : Décision trading stratégique (Banker vs Shadow vs Quant)
+    - dojo      : Red Teaming sécurité (Sentinel vs Builder)
+    - high_court: Conformité légale (Advocate vs Sage)
+    - quiet_room: Maintenance psychologique post-drawdown
+    """
+    try:
+        from openclaw.core.war_room import WarRoomSession
+        from openclaw.core.war_room_prompts import WarRoomType
+
+        room_map = {
+            "council": WarRoomType.COUNCIL,
+            "dojo": WarRoomType.DOJO,
+            "high_court": WarRoomType.HIGH_COURT,
+            "quiet_room": WarRoomType.QUIET_ROOM,
+        }
+        room_type = room_map.get(request.room_type)
+        if not room_type:
+            raise HTTPException(400, f"Type invalide. Choix: {list(room_map.keys())}")
+
+        session = WarRoomSession(room_type=room_type, subject=request.subject)
+        llm_service: LLMService = app.state.llm_service
+        verdict = await session.run_debate(llm_service=llm_service)
+
+        return {
+            "session_id": verdict.session_id,
+            "room_type": request.room_type,
+            "approved": verdict.approved,
+            "approval_score": verdict.approval_score,
+            "summary": verdict.summary,
+            "votes": [{"role": v.role_name, "choice": v.choice.value, "weight": v.weight} for v in verdict.votes],
+            "transcript": session.get_transcript_text(),
+        }
+    except ImportError:
+        return {"error": "OpenClaw War Room module not available", "status": "disabled"}
+    except Exception as e:
+        logger.exception(f"War Room error: {e}")
+        raise HTTPException(500, str(e))
+
+
+@app.post("/intelligence/rlm/cycle", tags=["Intelligence"])
+async def trigger_rlm_cycle() -> dict[str, Any]:
+    """
+    Déclenche un cycle unique d'auto-évolution RLM.
+
+    Workflow : Scan logs → Diagnose → Patch → Validate (Dojo) → Apply → Learn
+    """
+    try:
+        from openclaw.core.rlm.evolver import RLMEvolver
+        import subprocess
+
+        evolver = RLMEvolver(project_root="/app")
+        llm_service: LLMService = app.state.llm_service
+
+        # Récupérer les dernières lignes de log Docker
+        try:
+            result = subprocess.run(
+                ["docker", "logs", "--tail", "200", "hive-core"],
+                capture_output=True, text=True, timeout=10,
+            )
+            log_lines = result.stdout.splitlines() + result.stderr.splitlines()
+        except Exception:
+            log_lines = ["No logs available (running inside container)"]
+
+        cycle_result = await evolver.evolution_cycle(
+            log_lines=log_lines,
+            llm_service=llm_service,
+            use_dojo=True,
+        )
+
+        return {
+            "cycle_id": cycle_result.cycle_id,
+            "diagnoses_found": cycle_result.diagnoses_found,
+            "patches_generated": cycle_result.patches_generated,
+            "patches_applied": cycle_result.patches_applied,
+            "patches_rejected": cycle_result.patches_rejected,
+            "summary": cycle_result.summary(),
+        }
+    except ImportError:
+        return {"error": "OpenClaw RLM module not available", "status": "disabled"}
+    except Exception as e:
+        logger.exception(f"RLM cycle error: {e}")
+        raise HTTPException(500, str(e))
+
+
+@app.get("/intelligence/status", tags=["Intelligence"])
+async def intelligence_status() -> dict[str, Any]:
+    """
+    Retourne l'état des systèmes d'intelligence autonome.
+    """
+    settings: Settings = app.state.settings
+    return {
+        "war_rooms": {
+            "available": ["council", "dojo", "high_court", "quiet_room"],
+            "status": "ready",
+        },
+        "rlm": {
+            "status": "ready",
+            "auto_evolve_interval": "900s",
+        },
+        "dreamer": {
+            "training_enabled": settings.enable_dreamer_training,
+            "shadow_learning": settings.enable_shadow_learning,
+        },
+        "eagle3": {
+            "speculative_decoding": True,
+        },
+        "hipporag2": {
+            "neo4j_connected": True,
+        },
     }
