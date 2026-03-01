@@ -29,7 +29,7 @@ println("📈 EVA Quant-Lab (Julia) v1.0 — Initialisation...")
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-const PORT = 8700
+const PORT = 8701
 const SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "BTCUSD",
                  "ETHUSD", "SP500", "NQ100", "DAX40", "CAC40", "AAPL"]
 const RISK_FREE_RATE = 0.04  # 4% annuel (2026)

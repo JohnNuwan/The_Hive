@@ -233,7 +233,12 @@ services:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
+      - OLLAMA_HOST=host.docker.internal
+      - OLLAMA_PORT=11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data/tablet:/mnt/tablet:ro
     networks: [ "hive-net" ]
@@ -250,7 +255,12 @@ services:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
+      - OLLAMA_HOST=host.docker.internal
+      - OLLAMA_PORT=11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data/tablet:/mnt/tablet:ro
     networks: [ "hive-net" ]
@@ -267,6 +277,7 @@ services:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
     networks: [ "hive-net" ]
     restart: unless-stopped
@@ -282,6 +293,7 @@ services:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
     networks: [ "hive-net" ]
     restart: unless-stopped
@@ -347,7 +359,12 @@ services:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
+      - OLLAMA_HOST=host.docker.internal
+      - OLLAMA_PORT=11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks: [ "hive-net" ]
     restart: unless-stopped
 
@@ -362,7 +379,12 @@ services:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
+      - OLLAMA_HOST=host.docker.internal
+      - OLLAMA_PORT=11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks: [ "hive-net" ]
     restart: unless-stopped
 
@@ -413,7 +435,12 @@ services:
         condition: service_healthy
     environment:
       - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
+      - OLLAMA_HOST=host.docker.internal
+      - OLLAMA_PORT=11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks: [ "hive-net" ]
     restart: unless-stopped
 
