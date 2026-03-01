@@ -218,10 +218,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 loop {
                     tokio::select! {
                         Some(msg) = msg_stream.next() => {
-                            let channel = msg.get_channel_name();
+                            let channel_name = msg.get_channel_name().to_string();
                             if let Ok(payload_str) = msg.get_payload::<String>() {
                                 // 1. Log Interception
-                                if channel == "eva.banker.heartbeat" {
+                                if channel_name == "eva.banker.heartbeat" {
                                     last_heartbeat = std::time::Instant::now();
                                 }
 
@@ -257,7 +257,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // Si non-JSON, on envoie brut (fallback)
                                     let raw_msg = serde_json::json!({
                                         "id": uuid::Uuid::new_v4().to_string(),
-                                        "agent": channel,
+                                        "agent": channel_name,
                                         "company": "System",
                                         "type": "message",
                                         "content": payload_str,
