@@ -62,8 +62,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // CRÉER LES COMPOSANTS CRITIQUES (PARTAGÉS)
     // ═══════════════════════════════════════════════════════════════════
     use std::sync::Arc;
-    use tokio::sync::Mutex;
+    use tokio::sync::{broadcast, Mutex};
     use crate::audit::AuditTrail;
+
+    // Créer un canal de broadcast pour les messages d'agents (Redis -> WebSocket)
+    let (tx, _rx) = broadcast::channel::<String>(1024);
+    let tx_clone = tx.clone();
 
     let audit_path = std::path::PathBuf::from("/mnt/black_box/audit.json");
     let mut audit_trail = AuditTrail::load_from_disk(&audit_path, 10_000)
@@ -88,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         kill_switch_arc.clone(),
         constitution_arc.clone(),
         audit_trail_arc.clone(),
+        tx_clone,
     ));
 
     // ═══════════════════════════════════════════════════════════════════
@@ -198,31 +203,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(client) = redis_result {
             if let Ok(con) = client.get_async_connection().await {
                 let mut pubsub = con.into_pubsub();
-                let _ = pubsub.subscribe("eva.banker.heartbeat").await;
-                let _ = pubsub.subscribe("eva.banker.requests.critical").await;
+                
+                // On s'abonne à tous les canaux eva.*
+                if let Err(e) = pubsub.psubscribe("eva.*").await {
+                    error!("❌ Échec psubscribe Redis: {}", e);
+                }
 
-                info!("🛡️ Kernel Monitoring: Interception Redis + Watchdog actifs");
+                info!("🛡️ Kernel Monitoring: Interception Redis (Pattern eva.*) + Watchdog actifs");
 
-                let mut msg_stream = pubsub.on_message();
+                let mut msg_stream = pubsub.on_p_message();
                 let mut last_heartbeat = std::time::Instant::now();
+                let tx_redis = tx.clone();
 
                 loop {
                     tokio::select! {
                         Some(msg) = msg_stream.next() => {
                             let channel = msg.get_channel_name();
-                            if let Ok(payload) = msg.get_payload::<String>() {
+                            if let Ok(payload_str) = msg.get_payload::<String>() {
+                                // 1. Log Interception
                                 if channel == "eva.banker.heartbeat" {
                                     last_heartbeat = std::time::Instant::now();
+                                }
+
+                                // 2. Broadcast to WebSocket Feed (Nexus)
+                                // On tente de parser le message pour le reformater pour le frontend
+                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload_str) {
+                                    let mut final_msg = serde_json::json!({
+                                        "id": val.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                                        "agent": val.get("source_agent").and_then(|v| v.as_str()).unwrap_or("Unknown"),
+                                        "company": "Hive Swarm",
+                                        "type": "action", // Default
+                                        "content": val.get("action").and_then(|v| v.as_str()).unwrap_or(""),
+                                        "timestamp": val.get("timestamp").and_then(|v| v.as_str()).unwrap_or(""),
+                                        "target": val.get("target_agent").and_then(|v| v.as_str()),
+                                    });
+
+                                    // Mapping des types pour le frontend
+                                    if let Some(msg_type) = val.get("type").and_then(|v| v.as_str()) {
+                                        let display_type = match msg_type {
+                                            "alert" => "error",
+                                            "event" => "action",
+                                            "request" => "thought",
+                                            "response" => "result",
+                                            _ => "message",
+                                        };
+                                        if let Some(obj) = final_msg.as_object_mut() {
+                                            obj.insert("type".to_string(), serde_json::json!(display_type));
+                                        }
+                                    }
+
+                                    let _ = tx_redis.send(final_msg.to_string());
                                 } else {
-                                    info!("🔍 Kernel Interception ({}): {}", channel, payload);
+                                    // Si non-JSON, on envoie brut (fallback)
+                                    let raw_msg = serde_json::json!({
+                                        "id": uuid::Uuid::new_v4().to_string(),
+                                        "agent": channel,
+                                        "company": "System",
+                                        "type": "message",
+                                        "content": payload_str,
+                                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                                    });
+                                    let _ = tx_redis.send(raw_msg.to_string());
                                 }
                             }
                         }
                         _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                             if last_heartbeat.elapsed().as_secs() > 10 {
                                 error!("🚨 WATCHDOG: BANKER HEARTBEAT LOST >10s! Alert triggered.");
-                                // En prod: déclencher kill-switch via channel Redis
-                                last_heartbeat = std::time::Instant::now(); // Reset pour éviter spam
+                                last_heartbeat = std::time::Instant::now();
                             }
                         }
                     }
