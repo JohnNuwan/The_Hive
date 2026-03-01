@@ -385,8 +385,8 @@ services:
       - OLLAMA_PORT=11434
       - OLLAMA_MODEL=gemma3:4b
       - USE_OLLAMA=true
-      # ComfyUI (on Proxmox — GPU)
-      - COMFYUI_HOST=192.168.1.5
+      # ComfyUI (on Proxmox — GPU) — must use host.docker.internal, not 192.168.1.5
+      - COMFYUI_HOST=host.docker.internal
       - COMFYUI_PORT=8188
       # 🔔 Telegram — Autonomous posting
       - TELEGRAM_BOT_TOKEN=6660646226:AAEwerIp1t_i5mToXseSFeic3ryrzTXmF-U
@@ -397,6 +397,8 @@ services:
       # Content Factory
       - CORP_OWNER=Azazel
       - ENVIRONMENT=production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks: [ "hive-net" ]
     restart: unless-stopped
 
