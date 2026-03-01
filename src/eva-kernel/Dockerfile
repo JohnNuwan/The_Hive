@@ -1,18 +1,8 @@
 # --- Build Stage ---
-FROM rust:1.81-bookworm AS builder
-
-# Installer les dépendances de compilation
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+FROM rust:1.80 AS builder
 
 WORKDIR /app
-
-# Copier les fichiers du projet
 COPY src/eva-kernel/ .
-
-# Compiler le projet
 RUN cargo build --release
 
 # --- Runtime Stage ---
@@ -23,14 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# Copier le binaire depuis l'étape de construction
 COPY --from=builder /app/target/release/eva-kernel /usr/local/bin/eva-kernel
-
 RUN chmod +x /usr/local/bin/eva-kernel
 
-# Port exposé (Axum)
 EXPOSE 8080
-
 CMD ["/usr/local/bin/eva-kernel"]
-
