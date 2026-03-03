@@ -1,12 +1,15 @@
 import urllib.request
+import os
 import json
 import time
 import jwt # Requires PyJWT
 
 URL = "http://localhost:8100/trading/auto"
-SECRET = "dev-internal-secret-change-in-prod"
+SECRET = os.environ.get("INTERNAL_SECRET_KEY")
 
 def generate_token():
+    if not SECRET:
+        raise ValueError("INTERNAL_SECRET_KEY environment variable is not set")
     payload = {
         "iss": "hive-test-script",
         "sub": "internal-swarm-request",

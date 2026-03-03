@@ -1,6 +1,12 @@
+import os
 import pytest
 import time
 from shared.internal_auth import InternalAuth
+
+@pytest.fixture(autouse=True)
+def setup_env():
+    os.environ["INTERNAL_SECRET_KEY"] = "test-internal-secret"
+    os.environ["JWT_SECRET_KEY"] = "test-jwt-secret"
 
 def test_token_generation_and_verification():
     """Verify that a token generated can be verified and contains correct data."""

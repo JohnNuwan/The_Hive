@@ -40,8 +40,12 @@ def test_agent_status_validation():
     assert status.status == "online"
     assert status.agent_id == "eva-core"
 
+import os
+
 def test_settings_load():
     """Vérifie que les réglages se chargent (ou utilisent les défauts)"""
+    os.environ["INTERNAL_SECRET_KEY"] = "test-internal-secret"
+    os.environ["JWT_SECRET_KEY"] = "test-jwt-secret"
     settings = get_settings()
     assert settings.app_name == "THE HIVE"
     # Par défaut Redis est localhost dans les settings de base
