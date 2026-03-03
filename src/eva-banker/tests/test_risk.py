@@ -26,12 +26,12 @@ def test_drawdown_limit():
 def test_lot_size_calculation():
     """Vérifie le calcul de taille de lot (exemple simplifié)"""
     manager = RiskValidator()
-    # Risque 1% sur 100k avec stop loss de 100 pips
+    # Risque 1% sur 100k avec un SL distant de 0.0100 (100 pips en prix standard Forex)
     lot = manager.calculate_lot_size(
         balance=Decimal("100000"),
         risk_percent=Decimal("1.0"),
-        stop_loss_pips=Decimal("100")
+        sl_distance=Decimal("0.0100")
     )
-    # Risk amount = 1000. SL points value = 100 * 10 = 1000. Lot = 1.0
+    # Risk amount = 1000. Point value = 100,000. sl_distance * point_value = 0.0100 * 100,000 = 1000. Lot = 1.0
     assert lot == 1.0
     assert isinstance(lot, float)
