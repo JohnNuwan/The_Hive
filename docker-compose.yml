@@ -187,11 +187,7 @@ services:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
       - NEO4J_URI=bolt://neo4j:7687
-      - OLLAMA_HOST=host.docker.internal
-      - OLLAMA_PORT=11434
-      - USE_OLLAMA=true
-      - LLM_BACKEND=ollama
-      - OLLAMA_MODEL=gemma3:4b
+      - LLM_BACKEND=vllm
       - ENVIRONMENT=development
     deploy:
       resources:
@@ -382,8 +378,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-      - OLLAMA_HOST=host.docker.internal
-      - OLLAMA_PORT=11434
+      - LLM_BACKEND=vllm
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:
@@ -405,8 +400,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-      - OLLAMA_HOST=host.docker.internal
-      - OLLAMA_PORT=11434
+      - LLM_BACKEND=vllm
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:
@@ -425,10 +419,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-      - OLLAMA_HOST=192.168.1.5
-      - OLLAMA_PORT=11434
-      - OLLAMA_MODEL=gemma3:4b
-      - USE_OLLAMA=true
+      - LLM_BACKEND=vllm
       - COMFYUI_HOST=host.docker.internal
       - COMFYUI_PORT=8188
       - TELEGRAM_BOT_TOKEN=6660646226:AAEwerIp1t_i5mToXseSFeic3ryrzTXmF-U
@@ -458,8 +449,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-      - OLLAMA_HOST=host.docker.internal
-      - OLLAMA_PORT=11434
+      - LLM_BACKEND=vllm
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:
@@ -477,7 +467,7 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
-      - OLLAMA_HOST=host.docker.internal
+      - LLM_BACKEND=vllm
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:
@@ -495,7 +485,7 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
-      - OLLAMA_HOST=host.docker.internal
+      - LLM_BACKEND=vllm
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:
