@@ -1,72 +1,81 @@
-# ═══════════════════════════════════════════════════════════════════════════════
-# THE HIVE — Docker Compose Full Stack
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-# Lance l'intégralité de la Ruche : Infrastructure, Experts, Frontend, Observabilité.
-# Tous les langages (Python, Rust, Go) compilent et tournent dans leurs conteneurs.
-#
-# Usage:
-#   docker compose up -d --build
-#   docker compose down
-#
-# ═══════════════════════════════════════════════════════════════════════════════
-
 services:
-  # ─────────────────────────────────────────────────────────────────────────────
-  # INFRASTRUCTURE
-  # ─────────────────────────────────────────────────────────────────────────────
-
   redis:
     image: redis:7-alpine
-    container_name: hive-infra-redis
-    ports: [ "6379:6379" ]
+    ports:
+      - 6379:6379
     command: redis-server --requirepass devpassword --maxmemory 256mb --maxmemory-policy allkeys-lru
-    networks: [ "hive-net" ]
-    restart: unless-stopped
+    networks:
+      - hive-net
     healthcheck:
-      test: [ "CMD", "redis-cli", "-a", "devpassword", "ping" ]
+      test:
+        - CMD
+        - redis-cli
+        - -a
+        - devpassword
+        - ping
       interval: 10s
       timeout: 5s
       retries: 5
     volumes:
       - redis_data:/data
-
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      replicas: 1
+      restart_policy:
+        condition: on-failure
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: hive-infra-qdrant
-    ports: [ "6333:6333" ]
-    networks: [ "hive-net" ]
-    restart: unless-stopped
+    ports:
+      - 6333:6333
+    networks:
+      - hive-net
     healthcheck:
-      test: [ "CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'" ]
+      test:
+        - CMD-SHELL
+        - bash -c 'echo > /dev/tcp/localhost/6333'
       interval: 10s
       timeout: 5s
       retries: 5
     volumes:
       - qdrant_data:/qdrant/storage
-
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      replicas: 1
+      restart_policy:
+        condition: on-failure
   neo4j:
     image: neo4j:5-community
-    container_name: hive-infra-neo4j
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - 7474:7474
+      - 7687:7687
     environment:
       - NEO4J_AUTH=neo4j/devpassword
       - NEO4J_PLUGINS=["apoc"]
-    networks: [ "hive-net" ]
-    restart: unless-stopped
+    networks:
+      - hive-net
     volumes:
       - neo4j_data:/data
-
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      replicas: 1
+      restart_policy:
+        condition: on-failure
   timescaledb:
     image: timescale/timescaledb:latest-pg15
-    container_name: hive-infra-timescale
-    ports: [ "5432:5432" ]
-    networks: [ "hive-net" ]
-    restart: unless-stopped
+    ports:
+      - 5432:5432
+    networks:
+      - hive-net
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U eva -d thehive" ]
+      test:
+        - CMD-SHELL
+        - pg_isready -U eva -d thehive
       interval: 10s
       timeout: 5s
       retries: 5
@@ -79,63 +88,96 @@ services:
     user: root
     volumes:
       - timescale_data:/var/lib/postgresql/data
-
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      replicas: 1
+      restart_policy:
+        condition: on-failure
   mosquitto:
     image: eclipse-mosquitto:2
-    container_name: hive-infra-mosquitto
-    ports: [ "1883:1883" ]
-    networks: [ "hive-net" ]
-    restart: unless-stopped
+    ports:
+      - 1883:1883
+    networks:
+      - hive-net
     command: mosquitto -c /mosquitto-no-auth.conf
     healthcheck:
-      test: [ "CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 3 || exit 1" ]
+      test:
+        - CMD-SHELL
+        - mosquitto_sub -t '$$SYS/#' -C 1 -W 3 || exit 1
       interval: 10s
       timeout: 5s
       retries: 5
     volumes:
       - mosquitto_data:/mosquitto/data
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+  vllm:
+    image: vllm/vllm-openai:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_NAME=google/gemma-3-4b-it
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.labels.gpu == true
+    volumes:
+      - huggingface_cache:/root/.cache/huggingface
+    networks:
+      - hive-net
 
-  #  vllm-server:
-  #    build:
-  #      context: .
-  #      dockerfile: src/eva-core/vllm/Dockerfile
-  #    container_name: hive-infra-vllm
-  #    ports: [ "8000:8000" ]
-  #    deploy:
-  #      resources:
-  #        reservations:
-  #          devices:
-  #            - driver: nvidia
-  #              count: 1
-  #              capabilities: [ gpu ]
-  #    environment:
-  #      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
-  #    volumes:
-  #      - ~/.cache/huggingface:/root/.cache/huggingface
-  #    command: >
-  #      --model google/gemma-3-4b-it --quantization awq --gpu-memory-utilization 0.85 --enforce-eager --speculative-model yuhuili/EAGLE3-Gemma3-4B-IT --num-speculative-tokens 5 --speculative-draft-tensor-parallel-size 1
-  #    networks: [ "hive-net" ]
-  #    restart: unless-stopped
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # CORE & KERNEL (Triumvirat Vital)
-  # ─────────────────────────────────────────────────────────────────────────────
+  comfyui:
+    image: ghcr.io/ai-dock/comfyui:latest-cuda
+    ports:
+      - "8188:8188"
+    environment:
+      - CLI_ARGS=--listen 0.0.0.0 --port 8188
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.labels.gpu == true
+    volumes:
+      - ./data/comfyui/output:/opt/ComfyUI/output
+      - ./data/comfyui/input:/opt/ComfyUI/input
+      - ./data/comfyui/models:/opt/ComfyUI/models
+      - ./data/comfyui/custom_nodes:/opt/ComfyUI/custom_nodes
+    networks:
+      - hive-net
 
   core:
     build:
       context: .
       dockerfile: src/eva-core/Dockerfile
-    container_name: hive-core
-    ports: [ "8080:8080" ]
+    ports:
+      - 8080:8080
     extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      redis:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-      # vllm-server: (Disabled for Ollama Mode)
-      #   condition: service_started
+      - host.docker.internal:host-gateway
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -147,9 +189,9 @@ services:
       - NEO4J_URI=bolt://neo4j:7687
       - OLLAMA_HOST=host.docker.internal
       - OLLAMA_PORT=11434
-      - USE_OLLAMA=true # Kept true for compatibility, handled in code
-      - LLM_BACKEND=vllm # Explicit backend switch
-      - MODEL_NAME=google/gemma-3-4b-it
+      - USE_OLLAMA=true
+      - LLM_BACKEND=ollama
+      - OLLAMA_MODEL=gemma3:4b
       - ENVIRONMENT=development
     deploy:
       resources:
@@ -157,19 +199,22 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [ gpu ]
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+              capabilities:
+                - gpu
+      replicas: 2
+      restart_policy:
+        condition: any
+      placement:
+        constraints:
+          - node.labels.gpu == true
+    networks:
+      - hive-net
   kernel:
     build:
       context: .
       dockerfile: src/eva-kernel/Dockerfile
-    container_name: hive-kernel
-    ports: [ "8800:8080" ]
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - 8800:8080
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -179,136 +224,109 @@ services:
     volumes:
       - black_box:/mnt/black_box
       - ./data/tablet:/mnt/tablet:ro
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+    networks:
+      - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
   nervous:
     build:
       context: .
       dockerfile: src/eva-nervous/Dockerfile
-    container_name: hive-nervous
     ports:
-      - "9090:9090"
-      - "9091:9091"
-    depends_on:
-      redis:
-        condition: service_healthy
+      - 9090:9090
+      - 9091:9091
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # EXPERTS PYTHON
-  # ─────────────────────────────────────────────────────────────────────────────
-
-  #  banker:
-  #    build:
-  #      context: .
-  #      dockerfile: src/eva-banker/Dockerfile
-  #    container_name: hive-banker
-  #    ports: [ "8100:8100" ]
-  #    depends_on:
-  #      redis:
-  #        condition: service_healthy
-  #    environment:
-  #      - REDIS_HOST=redis
-  #      - REDIS_PASSWORD=devpassword
-  #      - MOCK_MT5=false
-  #    volumes:
-  #      - ./data/tablet:/mnt/tablet:ro
-  #    networks: [ "hive-net" ]
-  #    restart: unless-stopped
-
+    networks:
+      - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
   sentinel:
     build:
       context: .
       dockerfile: src/eva-sentinel/Dockerfile
-    container_name: hive-sentinel
-    ports: [ "8200:8200" ]
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - 8200:8200
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-      - OLLAMA_HOST=host.docker.internal
-      - OLLAMA_PORT=11434
+      - LLM_BACKEND=vllm
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - host.docker.internal:host-gateway
     volumes:
       - ./data/tablet:/mnt/tablet:ro
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+    networks:
+      - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
   compliance:
     build:
       context: .
       dockerfile: src/eva-compliance/Dockerfile
-    container_name: hive-compliance
-    ports: [ "8300:8300" ]
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - 8300:8300
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-      - OLLAMA_HOST=host.docker.internal
-      - OLLAMA_PORT=11434
+      - LLM_BACKEND=vllm
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - host.docker.internal:host-gateway
     volumes:
       - ./data/tablet:/mnt/tablet:ro
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+    networks:
+      - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
   substrate:
     build:
       context: .
       dockerfile: src/eva-substrate/Dockerfile
-    container_name: hive-substrate
-    ports: [ "8400:8400" ]
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - 8400:8400
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+    networks:
+      - hive-net
+    deploy: {}
   accountant:
     build:
       context: .
       dockerfile: src/eva-accountant/Dockerfile
-    container_name: hive-accountant
-    ports: [ "8500:8500" ]
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - 8500:8500
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+    networks:
+      - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
   lab:
     build:
       context: .
       dockerfile: src/eva-lab/Dockerfile
-    container_name: hive-lab
     ports:
-      - "8600:8600"
+      - 8600:8600
     environment:
       - REDIS_HOST=hive-infra-redis
-      - LLM_BACKEND=${LLM_BACKEND:-ollama}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma3:4b}
+      - LLM_BACKEND=vllm
     networks:
       - hive-net
     deploy:
@@ -317,46 +335,49 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [ gpu ]
+              capabilities:
+                - gpu
+      replicas: 2
+      restart_policy:
+        condition: any
+      placement:
+        constraints:
+          - node.labels.gpu == true
     volumes:
       - ./data:/app/eva-lab/data
-    restart: unless-stopped
-
   quant-lab:
     build:
       context: .
       dockerfile: src/eva-quant-lab/Dockerfile
-    container_name: hive-quant-lab
     ports:
-      - "8701:8701"
+      - 8701:8701
     networks:
       - hive-net
-    restart: unless-stopped
-
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
   rwa:
     build:
       context: .
       dockerfile: src/eva-rwa/Dockerfile
-    container_name: hive-rwa
-    ports: [ "8700:8700" ]
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - 8700:8700
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+    networks:
+      - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
   shadow:
     build:
       context: .
       dockerfile: src/eva-shadow/Dockerfile
-    container_name: hive-shadow
-    ports: [ "8900:8900" ]
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - 8900:8900
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -364,19 +385,22 @@ services:
       - OLLAMA_HOST=host.docker.internal
       - OLLAMA_PORT=11434
     extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+      - host.docker.internal:host-gateway
+    networks:
+      - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
+      placement:
+        constraints:
+          - node.labels.gpu == true
   builder:
     build:
       context: .
       dockerfile: src/eva-builder/Dockerfile
-    container_name: hive-builder
-    ports: [ "9000:9000" ]
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - 9000:9000
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -384,55 +408,52 @@ services:
       - OLLAMA_HOST=host.docker.internal
       - OLLAMA_PORT=11434
     extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+      - host.docker.internal:host-gateway
+    networks:
+      - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
   muse:
     build:
       context: .
       dockerfile: src/eva-muse/Dockerfile
-    container_name: hive-muse
-    ports: [ "9100:9100" ]
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - 9100:9100
     environment:
-      # Infrastructure
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-      # LLM (Ollama on Proxmox)
       - OLLAMA_HOST=192.168.1.5
       - OLLAMA_PORT=11434
       - OLLAMA_MODEL=gemma3:4b
       - USE_OLLAMA=true
-      # ComfyUI (on Proxmox — GPU) — must use host.docker.internal, not 192.168.1.5
       - COMFYUI_HOST=host.docker.internal
       - COMFYUI_PORT=8188
-      # 🔔 Telegram — Autonomous posting
       - TELEGRAM_BOT_TOKEN=6660646226:AAEwerIp1t_i5mToXseSFeic3ryrzTXmF-U
       - TELEGRAM_CHAT_ID=-1003325793788
       - TELEGRAM_TOPIC_ID=22
-      # CivitAI LoRA downloads
       - CIVITAI_API_KEY=bd21426b880b6e020418b6109f312c1d
-      # Content Factory
       - CORP_OWNER=Azazel
       - ENVIRONMENT=production
     extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+      - host.docker.internal:host-gateway
+    networks:
+      - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
+      placement:
+        constraints:
+          - node.labels.gpu == true
   sage:
     build:
       context: .
       dockerfile: src/eva-sage/Dockerfile
-    container_name: hive-sage
-    ports: [ "9200:9200" ]
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - 9200:9200
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -440,113 +461,122 @@ services:
       - OLLAMA_HOST=host.docker.internal
       - OLLAMA_PORT=11434
     extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+      - host.docker.internal:host-gateway
+    networks:
+      - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
   researcher:
     build:
       context: .
       dockerfile: src/eva-researcher/Dockerfile
-    container_name: hive-researcher
-    ports: [ "9300:9300" ]
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - 9300:9300
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
       - OLLAMA_HOST=host.docker.internal
     extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+      - host.docker.internal:host-gateway
+    networks:
+      - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
   wraith:
     build:
       context: .
       dockerfile: src/eva-wraith/Dockerfile
-    container_name: hive-wraith
-    ports: [ "9400:9400" ]
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - 9400:9400
     environment:
       - REDIS_HOST=redis
       - REDIS_PASSWORD=devpassword
       - OLLAMA_HOST=host.docker.internal
     extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # FRONTEND
-  # ─────────────────────────────────────────────────────────────────────────────
-
+      - host.docker.internal:host-gateway
+    networks:
+      - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
+      placement:
+        constraints:
+          - node.labels.gpu == true
   nexus:
     build:
       context: src/eva-nexus
-    container_name: hive-nexus
-    ports: [ "3030:80" ]
+    ports:
+      - 3030:80
     extra_hosts:
-      - "banker:host-gateway"
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      - core
-      # - banker (Running Natively)
-      - sentinel
-      - compliance
-      - substrate
-      - accountant
-      - lab
-      - rwa
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # OBSERVABILITY (Grafana + Loki + Promtail)
-  # ─────────────────────────────────────────────────────────────────────────────
-
+      - banker:host-gateway
+      - host.docker.internal:host-gateway
+    networks:
+      - hive-net
+    volumes:
+      - ./src/eva-nexus/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
   loki:
     image: grafana/loki:latest
-    container_name: hive-infra-loki
-    ports: [ "3100:3100" ]
+    ports:
+      - 3100:3100
     volumes:
       - ./infra/config/loki-config.yaml:/etc/loki/local-config.yaml
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+    networks:
+      - hive-net
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      replicas: 1
+      restart_policy:
+        condition: on-failure
   promtail:
     image: grafana/promtail:latest
-    container_name: hive-infra-promtail
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./infra/config/promtail-config.yaml:/etc/promtail/config.yml
     command: -config.file=/etc/promtail/config.yml
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
+    networks:
+      - hive-net
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      replicas: 1
+      restart_policy:
+        condition: on-failure
   grafana:
     image: grafana/grafana:latest
-    container_name: hive-infra-grafana
-    ports: [ "3000:3000" ]
+    ports:
+      - 3000:3000
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
-    networks: [ "hive-net" ]
-    restart: unless-stopped
-
-# NETWORKS & VOLUMES
-# ─────────────────────────────────────────────────────────────────────────────
-
+    networks:
+      - hive-net
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      replicas: 1
+      restart_policy:
+        condition: on-failure
 networks:
   hive-net:
-    driver: bridge
-
+    driver: overlay
+    attachable: true
 volumes:
-  black_box:
-  redis_data:
-  qdrant_data:
-  timescale_data:
-  mosquitto_data:
-  neo4j_data:
+  black_box: null
+  redis_data: null
+  qdrant_data: null
+  timescale_data: null
+  mosquitto_data: null
+  neo4j_data: null
+  huggingface_cache: null

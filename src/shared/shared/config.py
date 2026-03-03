@@ -43,14 +43,14 @@ class Settings(BaseSettings):
     # ═══════════════════════════════════════════════════════════════════════════
     # LLM SERVER
     # ═══════════════════════════════════════════════════════════════════════════
-    vllm_host: str = "vllm-server"
+    vllm_host: str = "192.168.1.5"
     vllm_port: int = 8000
     vllm_model: str = "google/gemma-3-4b-it"
     llm_backend: Literal["ollama", "vllm"] = "vllm"
     # Alternative: Ollama
-    ollama_host: str = "localhost"
+    ollama_host: str = "192.168.1.5"
     ollama_port: int = 11434
-    ollama_model: str = "llama3:8b"
+    ollama_model: str = "gemma3:4b"  # Fallback to the user's active model
     use_ollama: bool = True  # True pour dev, False pour prod (vLLM)
 
     # EAGLE-3 Speculative Decoding (latence ÷3)
@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     # ═══════════════════════════════════════════════════════════════════════════
     banker_api_host: str = "localhost"
     banker_api_port: int = 8100
+    banker_symbols: list[str] = [
+        "XAUUSD", "EURUSD", "GBPUSD", "USDJPY", # Major FX & Gold (Low Spread/High Liquidity)
+        "US30.cash", "US100.cash", "GER40.cash", # Indices (High Volatility/Profit)
+        "BTCUSD", "ETHUSD"                       # Crypto (24/7 Liquidity)
+    ]
     mt5_magic_number: int = 12345
     mock_mt5: bool = True  # True pour dev sans MT5 réel
     paper_trading: bool = True
@@ -133,7 +138,7 @@ class Settings(BaseSettings):
     risk_max_daily_drawdown_percent: float = 4.0
     risk_max_total_drawdown_percent: float = 8.0
     risk_max_single_trade_percent: float = 1.0
-    risk_max_open_positions: int = 3
+    risk_max_open_positions: int = 10
     risk_anti_tilt_losses: int = 2
     risk_anti_tilt_duration_hours: int = 24
     risk_news_filter_minutes: int = 30
@@ -160,7 +165,7 @@ class Settings(BaseSettings):
     # ═══════════════════════════════════════════════════════════════════════════
     # EVA LAB (Feature Flags — Sprint 5)
     # ═══════════════════════════════════════════════════════════════════════════
-    enable_dreamer_training: bool = False  # RTX 3090 only — active DreamerV3 training
+    enable_dreamer_training: bool = True  # RTX 3090 only — active DreamerV3 training
     enable_shadow_learning: bool = True    # Collecte passive des données pour DreamerV3
     shadow_learning_buffer_size: int = 10000  # Nombre max de transitions en mémoire
     shadow_learning_flush_interval: int = 300  # Flush sur disque toutes les N secondes
