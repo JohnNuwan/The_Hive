@@ -9,7 +9,7 @@ C'est ici que les stratégies naissent, combattent et évoluent.
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from fastapi import FastAPI, Query
@@ -144,15 +144,29 @@ async def lifespan(app: FastAPI):
     try:
         from eva_lab.models.gnn_model import TFTGNNModel
         import torch
-        # Asset dim (e.g. 15 indicators), Temporal (LSTM=32), GNN Hidden=64
-        app.state.gnn_model = TFTGNNModel(asset_dim=15, temporal_dim=32, hidden_dim=64)
+        import os
+        # Asset dim (20 features), Temporal (LSTM=32), GNN Hidden=64
+        app.state.gnn_model = TFTGNNModel(asset_dim=20, temporal_dim=32, hidden_dim=64, num_classes=3)
+        
+        # Load weights if trained
+        model_path = "data/models/gnn_master.pth"
+        if os.path.exists(model_path):
+            try:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                app.state.gnn_model.load_state_dict(torch.load(model_path, map_location=device))
+                logger.info("🧠 MultiAssetGNN & TFT Models Loaded (Trained Weights).")
+            except Exception as w_e:
+                logger.warning(f"Failed to load GNN weights, running randomly initialized: {w_e}")
+        else:
+            logger.info("🧠 MultiAssetGNN initialized (Random Weights - untrained).")
+            
         app.state.gnn_model.eval()  # Inference mode
-        logger.info("🧠 MultiAssetGNN & TFT Models Loaded Successfully.")
     except Exception as e:
         logger.warning(f"⚠️ Erreur chargement GNN (Stub Mode probable): {e}")
         app.state.gnn_model = None
 
     asyncio.create_task(hard_heartbeat())
+    asyncio.create_task(_nightly_training_loop())
 
     logger.info("✅ EVA Lab opérationnel — les stratégies peuvent combattre")
     yield
@@ -177,6 +191,55 @@ async def hard_heartbeat():
         except Exception:
             pass
         await asyncio.sleep(2.0)
+
+async def _nightly_training_loop():
+    """
+    Déclenche l'entraînement des modèles tous les soirs à 23h40.
+    """
+    logger.info("🌙 Planificateur d'entraînement nocturne activé (Cible: 23h40).")
+    while True:
+        try:
+            now = datetime.now()
+            target = now.replace(hour=23, minute=40, second=0, microsecond=0)
+            
+            if now > target:
+                target += timedelta(days=1)
+                
+            wait_seconds = (target - now).total_seconds()
+            
+            # Attendre jusqu'à 23h40
+            await asyncio.sleep(wait_seconds)
+            
+            logger.info("🚀 Début de l'entraînement nocturne automatique (23h40)!")
+            import os
+            
+            script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "train_global_models.py")
+            if os.path.exists(script_path):
+                # Utiliser le shell pour hériter de l'environnement venv
+                process = await asyncio.create_subprocess_shell(
+                    f"python {script_path}",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode == 0:
+                    logger.info("✅ Entraînement nocturne terminé avec succès.")
+                    redis = get_redis_client()
+                    await redis.publish("eva.lab.events", {"action": "TRAINING_COMPLETE", "timestamp": datetime.now().isoformat()})
+                else:
+                    logger.error(f"❌ Échec de l'entraînement nocturne ({process.returncode}): {stderr.decode()}")
+            else:
+                logger.error(f"❌ Script d'entraînement introuvable: {script_path}")
+                
+            # Eviter de relancer immédiatement la même minute
+            await asyncio.sleep(60)
+            
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"⚠️ Erreur dans le planificateur nocturne: {e}")
+            await asyncio.sleep(3600)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -409,50 +472,77 @@ async def gnn_predict(request: GNNPredictRequest):
         
     try:
         import torch
+        import torch.nn.functional as F
+        
         gnn = app.state.gnn_model
         
         # Build tensors
         ts_data_list = []
         asset_keys = list(request.assets_data.keys())
+        
+        # Le Banker n'envoie que le symbole cible principal pour l'instant via le payload basique
+        # L'idéal est qu'il envoie le contexte global. Mais si on n'a qu'un actif, la topologie est de 1 noeud.
+        # Afin de faire correspondre avec ASSET_DIM=20, il faut parser
+        
         for asset in asset_keys:
-            # truncate to match expected feature size (15 for example)
-            # This is a mocked implementation of data ingestion for the GNN
             raw_data = request.assets_data[asset]
+            # Assurer le padding temporel et feature si incomplet (sécurité)
+            # En prod, on s'attend à [SEQ_LEN, ASSET_DIM] = [15, 20]
             tensor_data = torch.tensor(raw_data, dtype=torch.float32)
-            ts_data_list.append(tensor_data)
             
-        # Basic fully connected graph for edge index if not provided
+            # Simple padding if dimensions don't match the new trained architecture
+            if tensor_data.dim() == 1:
+                tensor_data = tensor_data.unsqueeze(0) # pretend seq_len=1
+            
+            # Expand to expected 20 dims and 15 seq if needed (Mock compat)
+            if tensor_data.size(1) < 20:
+                pad_dim = 20 - tensor_data.size(1)
+                tensor_data = F.pad(tensor_data, (0, pad_dim))
+                
+            if tensor_data.size(0) < 15:
+                # pad length (repeat last frame)
+                pad_len = 15 - tensor_data.size(0)
+                tensor_data = torch.cat([tensor_data, tensor_data[-1:].repeat(pad_len, 1)], dim=0)
+
+            ts_data_list.append(tensor_data[-15:]) # Keep last 15
+            
         num_assets = len(asset_keys)
-        # e.g. [[0, 0, 1, 1], [1, 2, 0, 2]]
+        # Graphe minimal
         rows, cols = [], []
         for i in range(num_assets):
             for j in range(num_assets):
                 if i != j:
                     rows.append(i)
                     cols.append(j)
-        edge_index = torch.tensor([rows, cols], dtype=torch.long)
+                    
+        if num_assets > 1:
+            edge_index = torch.tensor([rows, cols], dtype=torch.long)
+        else:
+            edge_index = torch.empty((2, 0), dtype=torch.long)
         
         with torch.no_grad():
-            output = gnn(ts_data_list, edge_index)
-            # Output is [batch, hidden_dim]. Just mock a bias out of it for now
-            mean_val = output.mean().item()
+            # Renvoie les logits pour chaque actif soumis [num_nodes, 3]
+            logits = gnn(ts_data_list, edge_index)
             
-            if mean_val > 0.1:
-                bias = "BULLISH"
-            elif mean_val < -0.1:
-                bias = "BEARISH"
-            else:
-                bias = "RANGING"
-                
+            # On prend la prediction de la première devise
+            # Labels: 0=BULLISH, 1=BEARISH, 2=RANGING
+            probs = F.softmax(logits[0], dim=0)
+            pred_class = torch.argmax(probs).item()
+            conf = probs[pred_class].item()
+            
+            CLASSES = ["BULLISH", "BEARISH", "RANGING"]
+            bias = CLASSES[pred_class]
+            
         return {
             "bias": bias, 
-            "confidence": min(abs(mean_val) * 10, 1.0),
-            "reason": "GNN Prediction complete (TFT+GATConv)"
+            "confidence": float(conf),
+            "reason": "GNN Prediction complete (TFT+MultiAsset Graph)"
         }
         
     except Exception as e:
         logger.error(f"Erreur GNN Predict: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Ne pas bloquer la transaction, envoyer NEUTRAL
+        return {"bias": "NEUTRAL", "confidence": 0.0, "reason": str(e)}
 
 
 @app.get("/gnn/graph")

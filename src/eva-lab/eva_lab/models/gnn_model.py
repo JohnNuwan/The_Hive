@@ -14,7 +14,6 @@ except ImportError:
 import logging
 logger = logging.getLogger(__name__)
 
-
 class MultiAssetGNN(nn.Module):
     """
     Graph Neural Network pour modéliser les corrélations entre actifs (Hydra).
@@ -29,13 +28,14 @@ class MultiAssetGNN(nn.Module):
             return
         self.stub = False
         self.conv1 = GATConv(in_channels, 32, heads=4)
+        # We process the graph to a hidden state
         self.conv2 = GATConv(128, out_channels, heads=1, concat=False)
 
     def forward(self, x, edge_index, batch):
         if self.stub:
             return self.fallback(x.mean(dim=0, keepdim=True))
         x = F.elu(self.conv1(x, edge_index))
-        x = self.conv2(x, edge_index)
+        x = F.elu(self.conv2(x, edge_index))
         return global_mean_pool(x, batch)
 
 class TemporalFusionTransformer(nn.Module):
@@ -58,21 +58,51 @@ class TemporalFusionTransformer(nn.Module):
 
 class TFTGNNModel(nn.Module):
     """
-    Modèle Hybride TFT-GNN.
+    Modèle Hybride TFT-GNN avec Tête de Classification Stratégique.
     Combine l'analyse temporelle (TFT) et structurelle du marché (GNN).
     """
-    def __init__(self, asset_dim, temporal_dim, hidden_dim):
+    def __init__(self, asset_dim, temporal_dim, hidden_dim, num_classes=3):
         super().__init__()
         self.tft = TemporalFusionTransformer(asset_dim, temporal_dim)
         self.gnn = MultiAssetGNN(temporal_dim, hidden_dim)
+        
+        # Classification Head: Predicts [BULLISH, BEARISH, RANGING]
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(32, num_classes)
+        )
 
-    def forward(self, ts_data_list, edge_index):
-        # ts_data_list: Liste de tenseurs [seq_len, asset_dim] pour chaque actif
-        # 1. Traitement temporel pour chaque actif
+    def forward(self, ts_data_list, edge_index, return_embeddings=False):
+        """
+        ts_data_list: Liste de tenseurs [seq_len, asset_dim] pour chaque actif.
+        Renvoie les logits bruts pour chaque actif.
+        """
+        # 1. Traitement temporel pour chaque actif globalement
+        # Output shape: [num_assets, temporal_dim]
         temporal_embeddings = torch.stack([self.tft(d.unsqueeze(0)) for d in ts_data_list]).squeeze(1)
         
-        # 2. Traitement structurel (GNN)
-        batch = torch.zeros(temporal_embeddings.size(0), dtype=torch.long)
-        market_state = self.gnn(temporal_embeddings, edge_index, batch)
+        # 2. Traitement structurel (GNN - Message Passing entre les actifs)
+        # On passe chaque noeud (=1 actif) dans le GNN
         
-        return market_state
+        # We need batch=None for single graph or batch=torch.zeros for pooling correctly per asset if we wanted graph-level.
+        # But here we want node-level predictions (per asset bias).
+        
+        if self.gnn.stub:
+            market_state = self.gnn(temporal_embeddings, edge_index, batch=torch.zeros(temporal_embeddings.size(0), dtype=torch.long))
+            # Just broadcast it back or use fallback
+            node_embeddings = temporal_embeddings
+        else:
+            # GATConv takes [num_nodes, in_channels]
+            x = F.elu(self.gnn.conv1(temporal_embeddings, edge_index))
+            node_embeddings = F.elu(self.gnn.conv2(x, edge_index)) # [num_nodes, hidden_dim]
+            
+        if return_embeddings:
+            return node_embeddings
+            
+        # 3. Decision temporelle par actif. 
+        # Chaque actif obtient sa propre prediction BULLISH/BEARISH/RANGING
+        logits = self.classifier(node_embeddings) # [num_nodes, num_classes]
+        
+        return logits
