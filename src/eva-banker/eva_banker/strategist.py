@@ -87,40 +87,54 @@ class Strategist:
         elif "BEARISH" in response.upper(): cortex_bias = "BEARISH"
         elif "RANGING" in response.upper(): cortex_bias = "RANGING"
         
-        # 6. Ask Proxmox GNN via REST API
-        gnn_bias = "NEUTRAL"
+        # 6. Ask Proxmox MTF-GNN via REST API
+        gnn_intraday = "NEUTRAL"
+        gnn_scalp = "NEUTRAL"
+        gnn_swing = "NEUTRAL"
         gnn_confidence = 0.0
         try:
             import aiohttp
             import os
             lab_host = os.getenv("LAB_HOST", "localhost")
             url = f"http://{lab_host}:8600/gnn/predict"
-            # We mock the feature tensor here for the API structure
+            
+            # Send multi-timeframe payload using horizon-tagged keys
+            # Each value is a [seq_len] list of recent closes (simplified feature vector)
             payload = {
                 "assets_data": {
-                    symbol: [closes[-15:]] # Mock 15 features
+                    f"{symbol}_5": [closes[-15:]],   # M5 context = Scalping
+                    f"{symbol}_60": [closes[-15:]],  # H1 context = Intraday
+                    f"{symbol}_1440": [closes[-15:]], # D1 context = Swing
                 }
             }
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, timeout=5.0) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        gnn_bias = data.get("bias", "NEUTRAL")
-                        gnn_confidence = data.get("confidence", 0.0)
+                        # New MTF response format
+                        gnn_scalp = data.get("scalp", {}).get("bias", "NEUTRAL")
+                        gnn_intraday = data.get("intraday", {}).get("bias", "NEUTRAL")
+                        gnn_swing = data.get("swing", {}).get("bias", "NEUTRAL")
+                        gnn_confidence = data.get("intraday", {}).get("confidence", 0.0)
                     else:
                         logger.warning(f"⚠️ GNN a retourné HTTP {resp.status}")
         except Exception as e:
-            logger.warning(f"⚠️ Impossible de joindre le GNN sur le Lab: {e.__class__.__name__} - {e}")
+            logger.warning(f"⚠️ Impossible de joindre le MTF-GNN: {e.__class__.__name__}")
+        
+        # Reference the intraday bias for Cortex matching (M15 analysis runs on H1-like horizon)
+        gnn_bias = gnn_intraday
             
-        # 7. Merge Biases (If GNN is confident, it overrides/validates)
+        # 7. Merge Biases (Swing override on extreme conviction, else intraday GNN cross-check)
         final_bias = cortex_bias
-        if gnn_bias != "NEUTRAL" and gnn_confidence > 0.5:
+        if gnn_swing != "NEUTRAL" and gnn_swing != cortex_bias:
+            # D1 macro context forces RANGING if contradicting the Cortex's M15 reading
+            final_bias = "RANGING"
+        elif gnn_bias != "NEUTRAL" and gnn_confidence > 0.5:
             if gnn_bias == cortex_bias:
-                 # Synergy!
-                 pass 
+                pass  # Synergy!
             else:
-                 # GNN overrides or forces ranging if contradictions
-                 final_bias = "RANGING" if gnn_confidence < 0.8 else gnn_bias
+                # GNN intraday contradicts Cortex M15: moderate by forcing RANGING
+                final_bias = "RANGING" if gnn_confidence < 0.75 else gnn_bias
 
         strategy = {
             "symbol": symbol,

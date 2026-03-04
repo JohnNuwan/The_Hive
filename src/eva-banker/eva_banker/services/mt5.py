@@ -9,7 +9,7 @@ import sys
 from datetime import datetime
 from decimal import Decimal
 from functools import lru_cache
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from shared import AccountBalance, Position, TradeAction, TradeOrder, get_settings
 
@@ -119,7 +119,7 @@ class MT5Service:
         self.is_connected = False
         logger.info("MT5 déconnecté")
 
-    async def get_account_info(self) -> AccountBalance:
+    async def get_account_info(self) -> Optional[AccountBalance]:
         """Récupère les informations du compte"""
         if self.mock_mode:
             return AccountBalance(
@@ -134,7 +134,8 @@ class MT5Service:
 
         info = await asyncio.to_thread(mt5.account_info)
         if info is None:
-            raise RuntimeError("Impossible de récupérer les infos du compte")
+            logger.warning("MT5: Impossible de récupérer les infos du compte (terminal occupé ou déconnecté)")
+            return None
 
         return AccountBalance(
             login=info.login,
@@ -155,7 +156,8 @@ class MT5Service:
 
         positions_data = await asyncio.to_thread(mt5.positions_get)
         if positions_data is None:
-            return []
+            # None indicates a terminal/connection error, not "no positions"
+            return None
 
         positions = []
         for pos in positions_data:
@@ -178,59 +180,76 @@ class MT5Service:
             )
         return positions
 
-    async def get_recent_candles(self, symbol: str, timeframe: int = 1, count: int = 20) -> list[dict]:
-        """Récupère les dernières bougies (M1 par défaut)"""
-        # Mapping timeframe int -> MT5 constant if needed, but assuming M1=1 for now implies simple mapping logic or direct use if caller passes constant.
-        # Actually, let's just default to M1 (1 minute) if 1 is passed.
-        # MT5 constants: TIMEFRAME_M1 = 1, etc.
+    async def get_mtf_candles(self, symbol: str, timeframes: list[int] = [5, 60, 1440], count: int = 100) -> dict[int, list[dict]]:
+        """
+        Récupère les bougies OMNI-STATE (Multi-Timeframe) synchronisées.
+        Renvoie un dictionnaire: {5: [candles_m5], 60: [candles_h1], 1440: [candles_d1]}
+        """
+        import random
+        from datetime import datetime
         
-        if self.mock_mode:
-            # Generate fake candles
-            import random
-            candles = []
-            base_price = 2080.0
-            for i in range(count):
-                close = base_price + random.uniform(-5, 5)
-                candles.append({
-                    "time": datetime.now().timestamp() - (count - i) * 60,
-                    "open": base_price,
-                    "high": max(base_price, close) + 1,
-                    "low": min(base_price, close) - 1,
-                    "close": close,
-                    "tick_volume": 100,
-                })
-                base_price = close
-            return candles
+        tf_map = {
+            1: 1 if self.mock_mode else mt5.TIMEFRAME_M1, 
+            5: 5 if self.mock_mode else mt5.TIMEFRAME_M5, 
+            15: 15 if self.mock_mode else mt5.TIMEFRAME_M15,
+            60: 60 if self.mock_mode else mt5.TIMEFRAME_H1,
+            1440: 1440 if self.mock_mode else mt5.TIMEFRAME_D1
+        }
+        
+        result = {}
+        
+        for tf in timeframes:
+            mt5_tf = tf_map.get(tf, tf_map[1])
+            
+            if self.mock_mode:
+                # Generate fake candles
+                candles = []
+                base_price = 2080.0
+                for i in range(count):
+                    close = base_price + random.uniform(-5, 5)
+                    candles.append({
+                        "time": datetime.now().timestamp() - (count - i) * (tf * 60),
+                        "open": base_price,
+                        "high": max(base_price, close) + 1,
+                        "low": min(base_price, close) - 1,
+                        "close": close,
+                        "tick_volume": 100,
+                    })
+                    base_price = close
+                result[tf] = candles
+                continue
 
-        # Real MT5
-        tf_map = {1: mt5.TIMEFRAME_M1, 5: mt5.TIMEFRAME_M5, 15: mt5.TIMEFRAME_M15}
-        mt5_tf = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
-        
-        rates = None
-        for attempt in range(3):
-            rates = await asyncio.to_thread(mt5.copy_rates_from_pos, symbol, mt5_tf, 0, count)
-            if rates is not None and len(rates) > 0:
-                break
-            # Trigger download and wait
-            logger.debug(f"MT5: Waiting for data {symbol} (Attempt {attempt+1}/3)...")
-            await asyncio.sleep(0.5)
-        
-        if rates is None or len(rates) == 0:
-            logger.warning(f"No rates found for {symbol}")
-            return []
+            # Real MT5
+            rates = None
+            for attempt in range(3):
+                rates = await asyncio.to_thread(mt5.copy_rates_from_pos, symbol, mt5_tf, 0, count)
+                if rates is not None and len(rates) > 0:
+                    break
+                logger.debug(f"MT5: Waiting for MTF data {symbol} (TF={tf}, Attempt {attempt+1}/3)...")
+                await asyncio.sleep(0.5)
+            
+            if rates is None or len(rates) == 0:
+                logger.warning(f"No rates found for {symbol} on TF {tf}")
+                result[tf] = []
+            else:
+                candles = []
+                for rate in rates:
+                    candles.append({
+                        "time": rate['time'],
+                        "open": rate['open'],
+                        "high": rate['high'],
+                        "low": rate['low'],
+                        "close": rate['close'],
+                        "tick_volume": rate['tick_volume'],
+                    })
+                result[tf] = candles
+                
+        return result
 
-        # Convert to list of dicts
-        candles = []
-        for rate in rates:
-            candles.append({
-                "time": rate['time'],
-                "open": rate['open'],
-                "high": rate['high'],
-                "low": rate['low'],
-                "close": rate['close'],
-                "tick_volume": rate['tick_volume'],
-            })
-        return candles
+    async def get_recent_candles(self, symbol: str, timeframe: int = 15, count: int = 20) -> list[dict]:
+        """Wrapper de compatibilité (Legacy 1D)"""
+        res = await self.get_mtf_candles(symbol, [timeframe], count)
+        return res.get(timeframe, [])
 
     async def get_symbol_tick(self, symbol: str) -> dict[str, Any]:
         """Récupère le dernier tick pour un symbole"""
@@ -263,7 +282,7 @@ class MT5Service:
 
     def _get_deviation(self, symbol: str) -> int:
         """Retourne la déviation (slippage) recommandée selon la volatilité de l'actif."""
-        if any(v in symbol.upper() for v in ["XAU", "BTC", "US30", "NAS100", "GER40"]):
+        if any(v in symbol.upper() for v in ["XAU", "BTC", "US30", "US100", "GER40"]):
             return 50  # 5 pips pour les actifs volatils
         return 20  # 2 pips par défaut pour le Forex
 
@@ -293,11 +312,11 @@ class MT5Service:
             max_spread = 25 # Forex default (2.5 pips)
             sym = order.symbol.upper()
             if "XAU" in sym:
-                max_spread = 40 # Or: 40 points = 4 pips ($0.40)
+                max_spread = 60 # Gold: 60 points ($0.60)
             elif "BTC" in sym or "ETH" in sym:
-                max_spread = 300 # Crypto: 300 points ($3.00)
-            elif "US30" in sym or "NAS100" in sym or "GER40" in sym:
-                max_spread = 60 # Indices: 60 points
+                max_spread = 1500 # Crypto: 1500 points ($15.00) for BTC
+            elif "US30" in sym or "US100" in sym or "GER40" in sym:
+                max_spread = 150 # Indices: 150 points
                 
             if current_spread > max_spread:
                 logger.warning(f"❌ Spread trop élevé sur {order.symbol}: {current_spread:.1f} > {max_spread}. Ordre avorté.")
@@ -346,9 +365,12 @@ class MT5Service:
                 }
             
             # Requotes (10004) ou Request Rejected (10006) ou Price Changed (10021)
-            if result.retcode in [10004, 10006, 10021]:
+            if result.retcode in [10004, 10006, 10021, 10031]:
                 logger.info(f"Retrying order {order.symbol} due to {result.comment} (Retcode: {result.retcode})")
-                await asyncio.sleep(0.5)
+                if result.retcode == 10031: # No connection
+                    logger.warning("🌐 MT5 Connection lost (10031). Attempting emergency reconnection...")
+                    await self.connect()
+                await asyncio.sleep(1.0)
                 continue
             else:
                 return {
@@ -448,6 +470,28 @@ class MT5Service:
             
         return {"success": True, "message": f"Position {ticket} modified SL={sl} TP={tp}"}
 
+    async def get_margin_required(self, symbol: str, action: TradeAction, volume: float) -> Optional[float]:
+        """Estime la marge requise pour un ordre (Sprint 13)."""
+        if self.mock_mode:
+            # Estimation pifométrique pour le mock
+            return volume * 500.0  # $500 de marge par lot
+            
+        order_type = mt5.ORDER_TYPE_BUY if action == TradeAction.BUY else mt5.ORDER_TYPE_SELL
+        
+        # Récupérer le tick actuel pour le calcul
+        tick = await asyncio.to_thread(mt5.symbol_info_tick, symbol)
+        if tick is None:
+            return None
+            
+        price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
+        
+        margin = await asyncio.to_thread(mt5.order_calc_margin, order_type, symbol, volume, price)
+        if margin is None:
+            logger.warning(f"Calcul de marge échoué pour {symbol} {volume} lots")
+            return None
+            
+        return float(margin)
+
     async def _execute_mock_order(self, order: TradeOrder) -> dict[str, Any]:
         """Exécute un ordre en mode mock"""
         ticket = self._next_ticket
@@ -536,6 +580,7 @@ class MT5Service:
             "balance": float(info.balance),
             "equity": float(info.equity),
             "margin": float(info.margin),
+            "margin_free": float(info.free_margin),
             "free_margin": float(info.free_margin),
             "profit": float(info.equity) - float(info.balance),
         }

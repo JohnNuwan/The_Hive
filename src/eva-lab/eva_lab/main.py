@@ -140,12 +140,12 @@ async def lifespan(app: FastAPI):
         app.state.shadow = None
         logger.info("💤 Shadow Learning désactivé")
 
-    # ─── GNN / Hydra (Proxmox Offload) ───
+    # ─── GNN / Hydra (MTF Omni-Architecture) ───
     try:
         from eva_lab.models.gnn_model import TFTGNNModel
         import torch
         import os
-        # Asset dim (20 features), Temporal (LSTM=32), GNN Hidden=64
+        # MTF Architecture: asset_dim=20 features, temporal_dim=32, hidden_dim=64, 3 classes
         app.state.gnn_model = TFTGNNModel(asset_dim=20, temporal_dim=32, hidden_dim=64, num_classes=3)
         
         # Load weights if trained
@@ -154,13 +154,13 @@ async def lifespan(app: FastAPI):
             try:
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 app.state.gnn_model.load_state_dict(torch.load(model_path, map_location=device))
-                logger.info("🧠 MultiAssetGNN & TFT Models Loaded (Trained Weights).")
+                logger.info("🧠 MTF-GNN Loaded (Trained Weights: Scalp + Intraday + Swing).")
             except Exception as w_e:
                 logger.warning(f"Failed to load GNN weights, running randomly initialized: {w_e}")
         else:
-            logger.info("🧠 MultiAssetGNN initialized (Random Weights - untrained).")
+            logger.info("🧠 MTF-GNN initialized (Untrained - run train_gnn.py to evolve).")
             
-        app.state.gnn_model.eval()  # Inference mode
+        app.state.gnn_model.eval()
     except Exception as e:
         logger.warning(f"⚠️ Erreur chargement GNN (Stub Mode probable): {e}")
         app.state.gnn_model = None
@@ -466,83 +466,101 @@ async def dreamer_train():
 
 @app.post("/gnn/predict")
 async def gnn_predict(request: GNNPredictRequest):
-    """Calcule le biais Macro via le GNN sur la base des corrélations d'actifs"""
+    """
+    Prédit les biais par horizon temporel via le MTF GNN.
+    Réponse: {scalp, intraday, swing} x {bias, confidence}
+    """
     if not hasattr(app.state, "gnn_model") or app.state.gnn_model is None:
-        return {"bias": "NEUTRAL", "confidence": 0.0, "reason": "GNN Modèle indisponible / Stubbed"}
+        return {
+            "scalp": {"bias": "NEUTRAL", "confidence": 0.0},
+            "intraday": {"bias": "NEUTRAL", "confidence": 0.0},
+            "swing": {"bias": "NEUTRAL", "confidence": 0.0},
+            "reason": "GNN Modèle indisponible"
+        }
         
     try:
         import torch
         import torch.nn.functional as F
         
         gnn = app.state.gnn_model
+        CLASSES = ["BULLISH", "BEARISH", "RANGING"]
         
-        # Build tensors
-        ts_data_list = []
+        def _prep_tensor(raw, seq_len=15, feat_dim=20):
+            """Normalize an incoming data array into [seq_len, feat_dim]."""
+            t = torch.tensor(raw, dtype=torch.float32)
+            if t.dim() == 1:
+                t = t.unsqueeze(0)  # [1, feat_dim]
+            if t.size(1) < feat_dim:
+                t = F.pad(t, (0, feat_dim - t.size(1)))
+            if t.size(0) < seq_len:
+                pad_len = seq_len - t.size(0)
+                t = torch.cat([t, t[-1:].repeat(pad_len, 1)], dim=0)
+            return t[-seq_len:]
+        
         asset_keys = list(request.assets_data.keys())
         
-        # Le Banker n'envoie que le symbole cible principal pour l'instant via le payload basique
-        # L'idéal est qu'il envoie le contexte global. Mais si on n'a qu'un actif, la topologie est de 1 noeud.
-        # Afin de faire correspondre avec ASSET_DIM=20, il faut parser
+        # Build MTF lists for each asset
+        # request.assets_data can carry keys like "EURUSD_M5", "EURUSD_H1", "EURUSD_D1"
+        # OR (legacy) just "EURUSD" which we use for all 3 timeframes (gracefully)
+        ts_m5, ts_h1, ts_d1 = [], [], []
         
         for asset in asset_keys:
-            raw_data = request.assets_data[asset]
-            # Assurer le padding temporel et feature si incomplet (sécurité)
-            # En prod, on s'attend à [SEQ_LEN, ASSET_DIM] = [15, 20]
-            tensor_data = torch.tensor(raw_data, dtype=torch.float32)
-            
-            # Simple padding if dimensions don't match the new trained architecture
-            if tensor_data.dim() == 1:
-                tensor_data = tensor_data.unsqueeze(0) # pretend seq_len=1
-            
-            # Expand to expected 20 dims and 15 seq if needed (Mock compat)
-            if tensor_data.size(1) < 20:
-                pad_dim = 20 - tensor_data.size(1)
-                tensor_data = F.pad(tensor_data, (0, pad_dim))
-                
-            if tensor_data.size(0) < 15:
-                # pad length (repeat last frame)
-                pad_len = 15 - tensor_data.size(0)
-                tensor_data = torch.cat([tensor_data, tensor_data[-1:].repeat(pad_len, 1)], dim=0)
-
-            ts_data_list.append(tensor_data[-15:]) # Keep last 15
-            
-        num_assets = len(asset_keys)
-        # Graphe minimal
+            raw = request.assets_data[asset]
+            t = _prep_tensor(raw)
+            # MTF payload: check horizon suffix
+            if "_M5" in asset or "_5" in asset:
+                ts_m5.append(t)
+            elif "_H1" in asset or "_60" in asset:
+                ts_h1.append(t)
+            elif "_D1" in asset or "_1440" in asset:
+                ts_d1.append(t)
+            else:
+                # Legacy single-timeframe: put in all 3 contexts
+                ts_m5.append(t)
+                ts_h1.append(t)
+                ts_d1.append(t)
+        
+        # If only one set was populated (legacy mode), copy to others
+        if ts_m5 and not ts_h1: ts_h1 = ts_m5[:]
+        if ts_m5 and not ts_d1: ts_d1 = ts_m5[:]
+        if not ts_m5: ts_m5 = ts_h1[:] if ts_h1 else ts_d1
+        
+        na = len(ts_m5)
         rows, cols = [], []
-        for i in range(num_assets):
-            for j in range(num_assets):
+        for i in range(na):
+            for j in range(na):
                 if i != j:
                     rows.append(i)
                     cols.append(j)
-                    
-        if num_assets > 1:
-            edge_index = torch.tensor([rows, cols], dtype=torch.long)
-        else:
-            edge_index = torch.empty((2, 0), dtype=torch.long)
+        edge_index = torch.tensor([rows, cols], dtype=torch.long) if na > 1 else torch.empty((2, 0), dtype=torch.long)
+        
+        def _parse(logits_per_class):
+            probs = F.softmax(logits_per_class, dim=0)
+            idx = torch.argmax(probs).item()
+            return {"bias": CLASSES[idx], "confidence": round(float(probs[idx]), 3)}
         
         with torch.no_grad():
-            # Renvoie les logits pour chaque actif soumis [num_nodes, 3]
-            logits = gnn(ts_data_list, edge_index)
+            outputs = gnn(ts_m5, ts_h1, ts_d1, edge_index)  # dict with scalp/intraday/swing
             
-            # On prend la prediction de la première devise
-            # Labels: 0=BULLISH, 1=BEARISH, 2=RANGING
-            probs = F.softmax(logits[0], dim=0)
-            pred_class = torch.argmax(probs).item()
-            conf = probs[pred_class].item()
-            
-            CLASSES = ["BULLISH", "BEARISH", "RANGING"]
-            bias = CLASSES[pred_class]
+            scalp_result = _parse(outputs["scalp"][0])
+            intraday_result = _parse(outputs["intraday"][0])
+            swing_result = _parse(outputs["swing"][0])
             
         return {
-            "bias": bias, 
-            "confidence": float(conf),
-            "reason": "GNN Prediction complete (TFT+MultiAsset Graph)"
+            "scalp": scalp_result,
+            "intraday": intraday_result,
+            "swing": swing_result,
+            "reason": "MTF GNN Prediction (TFT+CrossFusion+GAT)"
         }
         
     except Exception as e:
-        logger.error(f"Erreur GNN Predict: {e}")
-        # Ne pas bloquer la transaction, envoyer NEUTRAL
-        return {"bias": "NEUTRAL", "confidence": 0.0, "reason": str(e)}
+        logger.error(f"Erreur MTF GNN Predict: {e}")
+        return {
+            "scalp": {"bias": "NEUTRAL", "confidence": 0.0},
+            "intraday": {"bias": "NEUTRAL", "confidence": 0.0},
+            "swing": {"bias": "NEUTRAL", "confidence": 0.0},
+            "reason": str(e)
+        }
 
 
 @app.get("/gnn/graph")

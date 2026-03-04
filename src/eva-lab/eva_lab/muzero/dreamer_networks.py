@@ -13,12 +13,16 @@ from eva_lab.muzero.imagination import ActorCritic
 
 
 class Encoder(hk.Module):
-    """Encodeur pour transformer l'observation en vecteur d'embedding."""
+    """Encodeur pour transformer l'observation MTF (M5+H1+D1) en vecteur d'embedding."""
     def __init__(self, hidden_dims: list, name: Optional[str] = None):
         super().__init__(name=name)
         self._hidden_dims = hidden_dims
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        # Support multi-timeframe input: x can be [batch, 3, obs_dim] or [batch, obs_dim]
+        if x.ndim == 3:
+            # Flatten (M5, H1, D1) into a single 1D context vector
+            x = x.reshape(x.shape[0], -1)
         for h_dim in self._hidden_dims:
             x = hk.Linear(h_dim)(x)
             x = jax.nn.relu(x)
