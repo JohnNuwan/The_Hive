@@ -43,9 +43,14 @@ def main():
 
     # 1. Setup global configuration
     config = MuZeroConfigV3()
-    # Force long training params for the master script if not set correctly via ENV
-    config.training_steps = 5000  # Start with 5000 for a demonstration run, increase later in config
-    config.num_simulations = 50   # Deep MCTS planning
+    # 🔥 RTX 3090 FE — Maximum Overnight Training Parameters
+    # training_steps is cumulative (checkpoint resumes from latest)
+    config.training_steps = 50_000    # 50k gradient steps per nightly session
+    config.num_simulations = 200      # Deep MCTS planning (was 50)
+    config.batch_size = 512           # Saturate GPU VRAM (was 32)
+    config.checkpoint_interval = 500  # Checkpoint every 500 steps
+    config.num_unroll_steps = 10      # Longer rollouts for better world model
+    config.td_steps = 20              # Deeper temporal credit assignment
     
     symbols = config.symbols
     num_symbols = len(symbols)
@@ -69,9 +74,11 @@ def main():
     logger.info("🎮 PHASE 1: COLLECTE DE DONNEES (SELF-PLAY MULTI-ACTIFS)")
     logger.info("==================================================")
     
-    games_per_symbol = 3
+    games_per_symbol = 20          # 🔥 Rich replay buffer (was 3)
     total_games = num_symbols * games_per_symbol
     games_played = 0
+    
+    logger.info(f"  → {games_per_symbol} games × {num_symbols} symbols = {total_games} episodes")
 
     for symbol in symbols:
         logger.info(f"📊 Collecte de données pour: {symbol}")

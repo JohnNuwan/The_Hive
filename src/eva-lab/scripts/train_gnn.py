@@ -39,11 +39,11 @@ SYMBOLS = [
     "XAGUSD", "SOLUSD"
 ]
 
-# Multi-Timeframe Settings
+# Multi-Timeframe Settings — 🔥 3090 FE Max History
 MTF = {
-    "M5":  {"tf": 5,    "count": 2000, "seq_len": 20, "future": 12},   # +1H look-ahead (more history)
-    "H1":  {"tf": 60,   "count": 1000, "seq_len": 20, "future": 24},   # +1D look-ahead
-    "D1":  {"tf": 1440, "count": 500,  "seq_len": 15, "future": 7},    # +1W look-ahead
+    "M5":  {"tf": 5,    "count": 2000, "seq_len": 20, "future": 12},   # 2000 M5 ≈ 7 jours   | → +1H
+    "H1":  {"tf": 60,   "count": 2000, "seq_len": 20, "future": 24},   # 2000 H1 ≈ 83 jours  | → +1D
+    "D1":  {"tf": 1440, "count": 1000, "seq_len": 15, "future": 7},    # 1000 D1 ≈ 4 ans     | → +1W
 }
 
 # 🔥 RTX 3090 FE optimized (24 GB VRAM)
