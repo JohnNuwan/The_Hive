@@ -70,7 +70,8 @@ export default function AgentFeed() {
             ws.onmessage = (event) => {
                 try {
                     const msg: AgentMessage = JSON.parse(event.data);
-                    setMessages(prev => [...prev.slice(-500), { ...msg, id: crypto.randomUUID() }]);
+                    const safeId = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).substr(2, 9);
+                    setMessages(prev => [...prev.slice(-500), { ...msg, id: safeId }]);
                     setMsgCount(c => c + 1);
                 } catch { }
             };
@@ -212,6 +213,12 @@ export default function AgentFeed() {
 
             {/* Feed */}
             <div ref={feedRef} style={{ flex: 1, overflowY: 'auto', padding: '8px 16px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {connected && displayMessages.length === 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', opacity: 0.3 }}>
+                        <div style={{ fontSize: '10px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase', marginBottom: '8px' }}>Scanning Neural Network...</div>
+                        <div style={{ fontSize: '11px', color: '#555' }}>Waiting for live signals from Kernel</div>
+                    </div>
+                )}
                 {displayMessages.map(msg => (
                     <div key={msg.id} style={{
                         display: 'flex', gap: '10px', padding: '7px 10px', borderRadius: '5px',
