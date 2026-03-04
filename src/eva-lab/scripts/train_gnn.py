@@ -61,8 +61,38 @@ CLASSES = ["BULLISH", "BEARISH", "RANGING"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# UTILITIES
+# PREPROCESSING — Julia (fast) ou Python (fallback)
 # ═══════════════════════════════════════════════════════════════════════════════
+import subprocess, json, tempfile, os as _os, shutil
+
+_JULIA_SCRIPT = str(Path(__file__).parent / "julia" / "compute_indicators.jl")
+_JULIA_BIN    = shutil.which("julia")
+
+if _JULIA_BIN:
+    logger.info(f"⚡ Julia détecté ({_JULIA_BIN}) — preprocessing ultra-rapide activé.")
+else:
+    logger.warning("⚠️  Julia non installé — fallback Python (plus lent). Préférer le container eva-trainer.")
+
+
+def compute_features_julia(candles, seq_len, future_n):
+    """Fast path: appelle Julia pour calculer tous les indicateurs d'un coup."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fh:
+        json.dump(candles, fh)
+        tmp = fh.name
+    try:
+        res = subprocess.run(
+            [_JULIA_BIN, "--startup-file=no", _JULIA_SCRIPT,
+             tmp, str(seq_len), str(future_n)],
+            capture_output=True, text=True, timeout=300
+        )
+        if res.returncode != 0:
+            raise RuntimeError(f"Julia error: {res.stderr[:300]}")
+        data = json.loads(res.stdout)
+        return data["features"], data["labels"]
+    finally:
+        _os.unlink(tmp)
+
+
 def get_label(current_price, future_price, atr):
     """Label: 0=BULLISH, 1=BEARISH, 2=RANGING"""
     change = future_price - current_price
@@ -132,26 +162,45 @@ async def fetch_mtf_data(mt5: MT5Service):
             
             seq_len = cfg["seq_len"]
             future_n = cfg["future"]
-            start_idx = 50
             
-            features, labels = [], []
-            for i in range(start_idx, len(candles) - future_n):
-                seq = compute_features(
-                    candles, seq_len,
-                    i - seq_len + 1, i,
-                    atr, rsi, adx, vwap, macd_hist, bb_pct,
-                    closes, highs, lows, volumes
-                )
-                # Pad sequence if needed
-                while len(seq) < seq_len:
-                    seq.insert(0, seq[0] if seq else [0.0]*ASSET_DIM)
-                features.append(seq[-seq_len:])
-                
-                cur_p = closes[i]
-                fut_p = closes[i + future_n]
-                cur_atr = atr.iloc[i] if not np.isnan(atr.iloc[i]) else 0.001 * cur_p
-                labels.append(get_label(cur_p, fut_p, cur_atr))
+            # ⚡ Julia fast path (Docker container eva-trainer has Julia installed)
+            if _JULIA_BIN:
+                try:
+                    features, labels = compute_features_julia(candles, seq_len, future_n)
+                    logger.debug(f"   Julia OK: {symbol}/{horizon_key} → {len(labels)} samples")
+                except Exception as je:
+                    logger.warning(f"Julia fallback Python pour {symbol}/{horizon_key}: {je}")
+                    features = None
+            else:
+                features = None
             
+            # 🐍 Python fallback
+            if features is None:
+                closes = [c["close"] for c in candles]
+                highs  = [c["high"]  for c in candles]
+                lows   = [c["low"]   for c in candles]
+                volumes = [c["tick_volume"] for c in candles]
+                rsi = IndicatorFactory.rsi(closes, 14)
+                adx = IndicatorFactory.adx(highs, lows, closes, 14)["adx"]
+                vwap = IndicatorFactory.vwap(highs, lows, closes, volumes)
+                macd_hist = IndicatorFactory.macd(closes)["histogram"]
+                atr = IndicatorFactory.atr(highs, lows, closes, 14)
+                bb_pct = IndicatorFactory.bollinger_bands(closes)["pct_b"]
+                start_idx = 50
+                features, labels = [], []
+                for i in range(start_idx, len(candles) - future_n):
+                    seq = compute_features(
+                        candles, seq_len, i - seq_len + 1, i,
+                        atr, rsi, adx, vwap, macd_hist, bb_pct,
+                        closes, highs, lows, volumes
+                    )
+                    while len(seq) < seq_len:
+                        seq.insert(0, seq[0] if seq else [0.0]*ASSET_DIM)
+                    features.append(seq[-seq_len:])
+                    cur_p = closes[i]; fut_p = closes[i + future_n]
+                    cur_atr = atr.iloc[i] if not np.isnan(atr.iloc[i]) else 0.001 * cur_p
+                    labels.append(get_label(cur_p, fut_p, cur_atr))
+
             sym_data[horizon_key] = {
                 "features": torch.tensor(features, dtype=torch.float32),  # [N, seq_len, ASSET_DIM]
                 "labels": torch.tensor(labels, dtype=torch.long)          # [N]
