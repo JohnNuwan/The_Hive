@@ -24,7 +24,7 @@ git pull origin feat/sprint-6 >> "$LOG_FILE" 2>&1
 
 # ─── Pause vLLM to free the GPU ─────────────────────────────────────────────
 log "⏸️  Pausing vLLM container (libérer GPU pour entraînement)..."
-echo "$PASS" | sudo -S docker stop the_hive_lite-vllm-1 2>/dev/null \
+echo "$PASS" | sudo -S docker stop the_hive-vllm-1 2>/dev/null \
   && log "   ✅ vLLM stoppé." \
   || log "   ℹ️  vLLM déjà arrêté."
 
@@ -85,7 +85,7 @@ echo "$PASS" | sudo -S docker image prune -f >> "$LOG_FILE" 2>&1
 
 # ─── Resume vLLM ───────────────────────────────────────────────────────────
 log "▶️  Redémarrage de vLLM..."
-echo "$PASS" | sudo -S docker start the_hive_lite-vllm-1 >> "$LOG_FILE" 2>&1 \
+echo "$PASS" | sudo -S docker start the_hive-vllm-1 >> "$LOG_FILE" 2>&1 \
   && log "   ✅ vLLM redémarré." \
   || log "   ⚠️  Impossible de redémarrer vLLM."
 
