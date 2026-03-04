@@ -139,7 +139,7 @@ services:
         constraints:
           - node.labels.gpu == true
     volumes:
-      - huggingface_cache:/root/.cache/huggingface
+      - /mnt/storage/ai_models/huggingface_cache:/root/.cache/huggingface
     networks:
       - hive-net
 
@@ -569,4 +569,3 @@ volumes:
   timescale_data: null
   mosquitto_data: null
   neo4j_data: null
-  huggingface_cache: null
