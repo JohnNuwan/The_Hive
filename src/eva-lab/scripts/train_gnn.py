@@ -41,17 +41,18 @@ SYMBOLS = [
 
 # Multi-Timeframe Settings
 MTF = {
-    "M5":  {"tf": 5,    "count": 1000, "seq_len": 15, "future": 12},   # +1H look-ahead
-    "H1":  {"tf": 60,   "count": 500,  "seq_len": 15, "future": 24},   # +1D look-ahead
-    "D1":  {"tf": 1440, "count": 200,  "seq_len": 10, "future": 7},    # +1W look-ahead
+    "M5":  {"tf": 5,    "count": 2000, "seq_len": 20, "future": 12},   # +1H look-ahead (more history)
+    "H1":  {"tf": 60,   "count": 1000, "seq_len": 20, "future": 24},   # +1D look-ahead
+    "D1":  {"tf": 1440, "count": 500,  "seq_len": 15, "future": 7},    # +1W look-ahead
 }
 
-ASSET_DIM = 20
-TEMPORAL_DIM = 32
-HIDDEN_DIM = 64
-NUM_CLASSES = 3
-EPOCHS = 60
-BATCH_SIZE = 24
+# 🔥 RTX 3090 FE optimized (24 GB VRAM)
+ASSET_DIM    = 20
+TEMPORAL_DIM = 64   # Wider TFT hidden state
+HIDDEN_DIM   = 128  # Wider GNN hidden state
+NUM_CLASSES  = 3
+EPOCHS       = 500  # Full overnight saturation
+BATCH_SIZE   = 128  # Saturate GPU memory
 
 MODEL_DIR = Path("data/models")
 MODEL_PATH = MODEL_DIR / "gnn_master.pth"
@@ -214,9 +215,13 @@ async def train_gnn():
                 logger.warning(f"Failed to load checkpoint: {e}. Starting fresh.")
         
         model = model.to(device)
-        optimizer = optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
+        optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+        # CosineAnnealing: warm convergence over 500 epochs
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-5)
         criterion = nn.CrossEntropyLoss()
         edge_index = build_graph(na).to(device)
+        # Pin model in eval memory for faster inference logging
+        torch.backends.cudnn.benchmark = True
         
         model.train()
         for epoch in range(EPOCHS):
@@ -258,6 +263,8 @@ async def train_gnn():
                     ) / 3.0
                     
                     loss.backward()
+                    # Gradient clipping: stable long training with 500 epochs
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     batch_loss += loss.item()
                     
                     # Accuracy tracking
@@ -269,15 +276,24 @@ async def train_gnn():
                 optimizer.step()
                 total_loss += batch_loss
             
+            scheduler.step()
+            
             avg_loss = total_loss / (num_samples / BATCH_SIZE + 1)
             
+            lr_now = scheduler.get_last_lr()[0]
             print(
                 f"[{epoch+1:03d}/{EPOCHS}] "
-                f"{Fore.YELLOW}Loss: {avg_loss:.4f}{Style.RESET_ALL} | "
+                f"{Fore.YELLOW}Loss: {avg_loss:.4f}{Style.RESET_ALL} "
+                f"(lr={lr_now:.2e}) | "
                 f"Scalp: {Fore.GREEN}{100*correct_scalp/total_nodes:.1f}%{Style.RESET_ALL} | "
                 f"Intraday: {Fore.CYAN}{100*correct_intraday/total_nodes:.1f}%{Style.RESET_ALL} | "
                 f"Swing: {Fore.MAGENTA}{100*correct_swing/total_nodes:.1f}%{Style.RESET_ALL}"
             )
+            # Save checkpoint every 50 epochs
+            if (epoch + 1) % 50 == 0:
+                ckpt = MODEL_DIR / f"gnn_ckpt_ep{epoch+1}.pth"
+                torch.save(model.state_dict(), ckpt)
+                print(f"  💾 Checkpoint saved: {ckpt}")
         
         # Save
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
