@@ -245,7 +245,7 @@ services:
     ports:
       - 8200:8200
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
       - LLM_BACKEND=vllm
@@ -414,7 +414,7 @@ services:
     ports:
       - 9100:9100
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
       - LLM_BACKEND=vllm
@@ -434,9 +434,6 @@ services:
       replicas: 2
       restart_policy:
         condition: any
-      placement:
-        constraints:
-          - node.labels.gpu == true
   sage:
     build:
       context: .
@@ -444,7 +441,7 @@ services:
     ports:
       - 9200:9200
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
       - LLM_BACKEND=vllm
@@ -463,7 +460,7 @@ services:
     ports:
       - 9300:9300
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PASSWORD=devpassword
       - LLM_BACKEND=vllm
     extra_hosts:
@@ -481,7 +478,7 @@ services:
     ports:
       - 9400:9400
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PASSWORD=devpassword
       - LLM_BACKEND=vllm
     extra_hosts:
@@ -492,9 +489,6 @@ services:
       replicas: 2
       restart_policy:
         condition: any
-      placement:
-        constraints:
-          - node.labels.gpu == true
   nexus:
     build:
       context: src/eva-nexus
