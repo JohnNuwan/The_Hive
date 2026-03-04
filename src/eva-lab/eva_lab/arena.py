@@ -75,8 +75,13 @@ class Arena:
         """
         logger.info(f"⚔️ ARENA FIGHT: {challenger_id} (Challenger) vs {champion_id} (Champion)")
         
-        # Actifs de validation restreints mais ultra-liquides pour ne pas biaiser le test
-        eval_symbols = ["EURUSD", "XAUUSD", "BTCUSD", "US30.cash"]
+        # Récupération de l'intégralité des actifs (27+) pour un crash-test total sur la RTX 3090
+        try:
+            from shared.config import get_settings
+            eval_symbols = get_settings().banker_symbols
+        except ImportError:
+            eval_symbols = ["EURUSD", "XAUUSD", "BTCUSD", "US30.cash"]
+            logger.warning("Could not load full symbol list from settings, using fallback.")
         
         challenger_path = os.path.join(self.weights_dir, f"{challenger_id}.pkl")
         champion_path = os.path.join(self.weights_dir, f"{champion_id}.pkl")
