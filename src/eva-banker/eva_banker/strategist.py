@@ -147,12 +147,43 @@ class Strategist:
         gb_color = get_color(gnn_bias)
         fb_color = get_color(final_bias)
         
-        logger.info(
-            f"🧠 {Fore.MAGENTA}Cortex Strategy{Style.RESET_ALL} -> {sym_color}{symbol:<8}{Style.RESET_ALL} | "
-            f"Cortex: {cb_color}[{cortex_bias}]{Style.RESET_ALL} | "
-            f"GNN: {gb_color}[{gnn_bias}]{Style.RESET_ALL} -> "
-            f"Final: {fb_color}[{final_bias}]{Style.RESET_ALL} "
-        )
+        # --- RICH CONSOLE OUTPUT ---
+        try:
+            from rich.console import Console
+            from rich.panel import Panel
+            from rich.text import Text
+            
+            console = Console()
+            
+            text = Text()
+            text.append("🧠 LLM Reasoning:\n", style="bold cyan")
+            text.append(f"{response}\n\n", style="italic white")
+            
+            text.append(f"Cortex Bias: ", style="bold")
+            text.append(f"[{cortex_bias}]\n", style=cb_color.replace('\x1b[', '').replace('m', '').lower() if hasattr(cb_color, 'replace') else "white")
+            
+            text.append(f"GNN Bias: ", style="bold")
+            text.append(f"[{gnn_bias}]\n", style=gb_color.replace('\x1b[', '').replace('m', '').lower() if hasattr(gb_color, 'replace') else "white")
+            
+            text.append(f"Final Bias: ", style="bold")
+            text.append(f"[{final_bias}]", style=fb_color.replace('\x1b[', '').replace('m', '').lower() if hasattr(fb_color, 'replace') else "white")
+            
+            panel = Panel(
+                text,
+                title=f"The Cortex: {symbol} (M15)",
+                border_style="magenta",
+                expand=False
+            )
+            console.print(panel)
+            
+        except ImportError:
+            # Fallback if rich is somehow missing
+            logger.info(
+                f"🧠 Cortex Strategy -> {sym_color}{symbol:<8}{Style.RESET_ALL} | "
+                f"Cortex: {cb_color}[{cortex_bias}]{Style.RESET_ALL} | "
+                f"GNN: {gb_color}[{gnn_bias}]{Style.RESET_ALL} -> "
+                f"Final: {fb_color}[{final_bias}]{Style.RESET_ALL} "
+            )
         
         # PUBLISH TO AGENT FEED (UI)
         try:

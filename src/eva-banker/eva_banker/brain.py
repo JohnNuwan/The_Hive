@@ -831,9 +831,26 @@ class AutoTradingEngine:
                             action = None
                             comment = "Blocked by Cortex (Bullish Trend on M15)"
 
-                        # FORCE LOGGING for user visibility
-                        log_msg = f"[M1/M15] {symbol}: Price={current_price:.2f} RSI={rsi_val:.1f} -> Action={action} ({comment}) [Context: {bias}]"
-                        logger.info(f"🧠 {log_msg}")
+                        # FORCE LOGGING for user visibility (via rich)
+                        try:
+                            from rich.console import Console
+                            console = Console()
+                            
+                            act_color = "bold green" if action == TradeAction.BUY else ("bold red" if action == TradeAction.SELL else "bold yellow")
+                            act_str = action.name if action else "HOLD"
+                            bias_color = "bold green" if bias == "BULLISH" else ("bold red" if bias == "BEARISH" else "bold magenta")
+                            sym_color = "bold cyan" if "XAU" in symbol else ("bold yellow" if "BTC" in symbol else "bold white")
+                            
+                            console.print(
+                                f"[white]M1/M15[/white] [{sym_color}]{symbol}[/{sym_color}] | "
+                                f"Price: [italic]{current_price:.2f}[/italic] | "
+                                f"RSI: [magenta]{rsi_val:.1f}[/magenta] ➔ "
+                                f"Action: [{act_color}]{act_str}[/{act_color}] ({comment}) | "
+                                f"Context: [{bias_color}]{bias}[/{bias_color}]"
+                            )
+                        except ImportError:
+                            log_msg = f"[M1/M15] {symbol}: Price={current_price:.2f} RSI={rsi_val:.1f} -> Action={action} ({comment}) [Context: {bias}]"
+                            logger.info(f"🧠 {log_msg}")
 
                         # PUBLISH TO AGENT FEED (UI)
                         redis = get_redis_client()
