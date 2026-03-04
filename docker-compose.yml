@@ -558,6 +558,45 @@ services:
       replicas: 1
       restart_policy:
         condition: on-failure
+  # ═══ AI TRAINER (GPU — Run on demand via cron) ═══
+  # ⚠️  Ce service ne démarre PAS automatiquement.
+  # Il est invoqué par le cron noctune: docker compose run --rm eva-trainer
+  # Étape 1: GNN PyTorch (CUDA) | Étape 2: MuZero/DreamerV3 (JAX)
+  eva-trainer:
+    build:
+      context: .
+      dockerfile: src/eva-lab/Dockerfile.trainer
+    image: thehive/eva-trainer:latest
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=devpassword
+      - MT5_LOGIN=${MT5_LOGIN:-1512664750}
+      - MT5_SERVER=${MT5_SERVER:-FTMO-Demo}
+      - MT5_PASSWORD=${MT5_PASSWORD:-changeme}
+      - CUDA_VISIBLE_DEVICES=0
+      - XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+    volumes:
+      # Persistent: model weights survive across training runs
+      - trainer_models:/app/eva-lab/data
+      # Live code: no rebuild needed for script changes
+      - ./src/eva-lab/scripts:/app/eva-lab/scripts:ro
+      - ./src/eva-lab/eva_lab:/app/eva-lab/eva_lab:ro
+    networks:
+      - hive-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+      # restart: no = only runs when explicitly called (never auto-restart)
+      restart_policy:
+        condition: none
+      placement:
+        constraints:
+          - node.labels.gpu == true
+
 networks:
   hive-net:
     driver: overlay
@@ -569,3 +608,9 @@ volumes:
   timescale_data: null
   mosquitto_data: null
   neo4j_data: null
+  trainer_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /home/aza/The_Hive/src/eva-lab/data

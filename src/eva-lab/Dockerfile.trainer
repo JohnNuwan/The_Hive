@@ -1,0 +1,73 @@
+# ═══════════════════════════════════════════════════════════════
+# THE HIVE — eva-trainer
+# Isolated GPU training container for MTF-GNN + MuZero/DreamerV3
+# Base: PyTorch 2.1.2 + CUDA 11.8 + JAX (GPU) + Julia 1.10
+# ═══════════════════════════════════════════════════════════════
+
+FROM pytorch/pytorch:2.1.2-cuda11.8-cudnn8-devel
+
+LABEL maintainer="TheHive" description="Nightly AI Model Training Container"
+
+# ─── System deps ──────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget curl git build-essential \
+    libopenblas-dev libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ─── Julia 1.10 LTS ───────────────────────────────────────────
+ARG JULIA_VERSION=1.10.2
+RUN curl -fsSL "https://julialang-s3.julialang.org/bin/linux/x64/1.10/julia-${JULIA_VERSION}-linux-x86_64.tar.gz" \
+    | tar -xz -C /opt && \
+    ln -s /opt/julia-${JULIA_VERSION}/bin/julia /usr/local/bin/julia
+
+# Julia packages: IndicatorsBase, DataFrames (for preprocessing)
+RUN julia -e 'using Pkg; Pkg.add(["DataFrames", "CSV", "Statistics", "LinearAlgebra", "CUDA"]); Pkg.precompile()'
+
+# ─── Python / PyTorch deps ────────────────────────────────────
+RUN pip install --no-cache-dir --upgrade \
+    torch==2.1.2 \
+    torchvision \
+    torchaudio \
+    torch-geometric \
+    torch-scatter \
+    torch-sparse \
+    -f https://data.pyg.org/whl/torch-2.1.2+cu118.html
+
+# ─── JAX with CUDA 11.8 ───────────────────────────────────────
+RUN pip install --no-cache-dir \
+    "jax[cuda11_pip]==0.4.23" \
+    -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+# ─── Dreamer / MuZero stack ───────────────────────────────────
+RUN pip install --no-cache-dir \
+    dm-haiku==0.0.11 \
+    optax==0.1.7 \
+    chex==0.1.85 \
+    gymnasium \
+    "scipy<1.13"
+
+# ─── ML utilities ─────────────────────────────────────────────
+RUN pip install --no-cache-dir \
+    numpy pandas colorama tqdm \
+    MetaTrader5 \
+    ta-lib-python || true
+
+# ─── Application code ─────────────────────────────────────────
+WORKDIR /app
+
+COPY src/shared /app/shared
+RUN pip install --no-cache-dir /app/shared
+
+COPY src/eva-lab /app/eva-lab
+RUN pip install --no-cache-dir /app/eva-lab
+
+COPY src/eva-banker /app/eva-banker
+RUN pip install --no-cache-dir /app/eva-banker
+
+# Copy Julia indicator scripts
+COPY src/eva-lab/scripts/julia /app/julia_scripts
+
+WORKDIR /app/eva-lab
+
+# Default: run GNN training — can be overridden by docker compose run
+CMD ["python", "scripts/train_gnn.py"]
