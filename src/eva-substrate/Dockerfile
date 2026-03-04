@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copier les dépendances partagées
 COPY src/shared /app/shared
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir aiohttp \
     && pip install --no-cache-dir /app/shared
 
 # Copier eva-substrate
