@@ -181,28 +181,20 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-      - QDRANT_HOST=qdrant
+      - QDRANT_HOST=host.docker.internal
       - QDRANT_PORT=6333
-      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_URI=bolt://host.docker.internal:7687
       - LLM_BACKEND=vllm
       - ENVIRONMENT=development
     deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities:
-                - gpu
+      # ⚠️ GPU removed: core uses vLLM via REST API, not direct CUDA.
+      # vLLM needs exclusive GPU access to avoid GetDeviceCount() failures.
       replicas: 2
       restart_policy:
         condition: any
-      placement:
-        constraints:
-          - node.labels.gpu == true
     networks:
       - hive-net
   kernel:
@@ -211,12 +203,15 @@ services:
       dockerfile: src/eva-kernel/Dockerfile
     ports:
       - 8800:8080
+    extra_hosts:
+      - host.docker.internal:host-gateway
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
-      - REDIS_URL=redis://:devpassword@redis:6379
-      - MQTT_HOST=mosquitto
+      - REDIS_URL=redis://:devpassword@host.docker.internal:6379
+      # ✔ MQTT via host IP (Mosquitto Swarm VIP unreachable from overlay containers)
+      - MQTT_HOST=host.docker.internal
     volumes:
       - black_box:/mnt/black_box
       - ./data/tablet:/mnt/tablet:ro
@@ -271,7 +266,7 @@ services:
     ports:
       - 8300:8300
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
       - LLM_BACKEND=vllm
@@ -291,8 +286,10 @@ services:
       dockerfile: src/eva-substrate/Dockerfile
     ports:
       - 8400:8400
+    extra_hosts:
+      - host.docker.internal:host-gateway
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
     networks:
@@ -304,8 +301,10 @@ services:
       dockerfile: src/eva-accountant/Dockerfile
     ports:
       - 8500:8500
+    extra_hosts:
+      - host.docker.internal:host-gateway
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
     networks:
@@ -359,8 +358,10 @@ services:
       dockerfile: src/eva-rwa/Dockerfile
     ports:
       - 8700:8700
+    extra_hosts:
+      - host.docker.internal:host-gateway
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PASSWORD=devpassword
     networks:
       - hive-net
@@ -375,7 +376,7 @@ services:
     ports:
       - 8900:8900
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
       - LLM_BACKEND=vllm
@@ -387,9 +388,6 @@ services:
       replicas: 2
       restart_policy:
         condition: any
-      placement:
-        constraints:
-          - node.labels.gpu == true
   builder:
     build:
       context: .
@@ -397,7 +395,7 @@ services:
     ports:
       - 9000:9000
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=host.docker.internal
       - REDIS_PORT=6379
       - REDIS_PASSWORD=devpassword
       - LLM_BACKEND=vllm
@@ -530,6 +528,8 @@ services:
         condition: on-failure
   promtail:
     image: grafana/promtail:latest
+    extra_hosts:
+      - host.docker.internal:host-gateway
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./infra/config/promtail-config.yaml:/etc/promtail/config.yml
