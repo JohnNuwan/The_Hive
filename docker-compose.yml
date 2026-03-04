@@ -576,11 +576,11 @@ services:
       - CUDA_VISIBLE_DEVICES=0
       - XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
     volumes:
-      # Persistent: model weights survive across training runs
+      # Persistent named volume for all trained model weights
       - trainer_models:/app/eva-lab/data
-      # Live code: no rebuild needed for script changes
-      - ./src/eva-lab/scripts:/app/eva-lab/scripts:ro
-      - ./src/eva-lab/eva_lab:/app/eva-lab/eva_lab:ro
+      # Live code mounts (no container rebuild needed to change scripts)
+      - ./src/eva-lab/scripts:/app/eva-lab/scripts
+      - ./src/eva-lab/eva_lab:/app/eva-lab/eva_lab
     networks:
       - hive-net
     deploy:
@@ -608,9 +608,4 @@ volumes:
   timescale_data: null
   mosquitto_data: null
   neo4j_data: null
-  trainer_models:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /home/aza/The_Hive/src/eva-lab/data
+  trainer_models: {}
