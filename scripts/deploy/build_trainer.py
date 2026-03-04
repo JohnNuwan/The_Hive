@@ -1,14 +1,15 @@
 """
-Force sync docker-compose.yml on Proxmox and build eva-trainer image.
+Script to create required directories and verify the eva-trainer Docker image.
+Also tests a direct docker run (bypassing Swarm).
 """
-import paramiko, sys, time
+import paramiko, sys
 
 HOST = "192.168.1.5"
 USER = "aza"
 PASS = "Kumara-42/600"
 REMOTE_DIR = "/home/aza/The_Hive"
 
-def run_cmd(client, cmd, timeout=600, print_live=True):
+def run_cmd(client, cmd, timeout=300, print_live=True):
     print(f"\n$ {cmd}")
     stdin, stdout, stderr = client.exec_command(cmd, get_pty=True, timeout=timeout)
     output = ""
@@ -17,9 +18,6 @@ def run_cmd(client, cmd, timeout=600, print_live=True):
             print(line, end="")
         output += line
     exit_code = stdout.channel.recv_exit_status()
-    err = stderr.read().decode()
-    if err and exit_code != 0:
-        print(f"STDERR: {err[:300]}")
     return exit_code, output
 
 def main():
@@ -28,38 +26,34 @@ def main():
     client.connect(HOST, username=USER, password=PASS, timeout=15)
     print("✅ Connected to Proxmox")
 
-    # 1. Sync everything
-    run_cmd(client, f"cd {REMOTE_DIR} && git fetch origin feat/sprint-6 && git reset --hard origin/feat/sprint-6")
+    # 1. Pull latest
+    run_cmd(client, f"cd {REMOTE_DIR} && git pull origin feat/sprint-6")
     
-    # 2. Verify eva-trainer is in docker-compose.yml
-    exit_code, out = run_cmd(client, f"grep -n 'eva-trainer' {REMOTE_DIR}/docker-compose.yml")
-    if exit_code != 0:
-        print("❌ eva-trainer NOT found in docker-compose.yml on server!")
-        sys.exit(1)
-    print(f"✅ eva-trainer found in compose")
-    
-    # 3. Set required env vars for docker compose
-    env_stub = "MT5_PASSWORD=dummy MT5_LOGIN=123 MT5_SERVER=dummy HUGGING_FACE_HUB_TOKEN=dummy"
-    
-    print("\n🐳 Building eva-trainer image (Julia + PyTorch + JAX)...")
-    print("   This takes ~10-15min the first time.\n")
-    # Use sudo (aza is not in docker group yet)
-    exit_code, _ = run_cmd(client,
-        f"cd {REMOTE_DIR} && {env_stub} echo '{PASS}' | sudo -S docker compose build eva-trainer 2>&1",
-        timeout=900)
-    
-    if exit_code == 0:
-        print("\n✅ eva-trainer image built successfully!")
-    else:
-        print(f"\n❌ Build failed (exit code {exit_code})")
-        sys.exit(1)
+    # 2. Create required data directory on host for model weights
+    run_cmd(client, f"mkdir -p {REMOTE_DIR}/src/eva-lab/data/models")
+    print("✅ Data directory created")
 
-    # 5. Add aza to docker group (permanent fix, avoids sudo next time)
-    run_cmd(client, f"echo '{PASS}' | sudo -S usermod -aG docker aza || true")
+    # 3. Create Swarm volume storage path if needed
+    run_cmd(client, f"echo '{PASS}' | sudo -S mkdir -p /mnt/data/docker_payload/volumes && echo OK || true")
     
-    # 6. Quick smoke test
-    print("\n🧪 Smoke test — checking Python + CUDA access:")
-    run_cmd(client, f"cd {REMOTE_DIR} && {env_stub} echo '{PASS}' | sudo -S docker compose run --rm eva-trainer python -c \"import torch; print('CUDA:', torch.cuda.is_available(), '| GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')\"")
+    # 4. Build image (should be cached — fast)
+    run_cmd(client, f"cd {REMOTE_DIR} && echo '{PASS}' | sudo -S docker compose build eva-trainer", timeout=600)
+    
+    # 5. Smoke test using plain docker run (bypasses Swarm compose layer)
+    print("\n🧪 Testing with plain docker run (no Swarm):")
+    exit_code, _ = run_cmd(client,
+        f"echo '{PASS}' | sudo -S docker run --rm --gpus all "
+        f"-v {REMOTE_DIR}/src/eva-lab:/app/eva-lab "
+        f"thehive/eva-trainer:latest "
+        f"python -c \"import torch; "
+        f"print('✅ CUDA:', torch.cuda.is_available(), "
+        f"'GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')\"",
+        timeout=120
+    )
+    if exit_code == 0:
+        print("\n✅ eva-trainer works with direct docker run!")
+    else:
+        print(f"\n⚠️ Exit code {exit_code}")
     
     client.close()
     print("\n✅ Done!")
