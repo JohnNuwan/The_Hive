@@ -65,13 +65,13 @@ class DreamerGate:
                 config = MuZeroConfigV3()
                 self._muzero_agent = MuZeroAgent(config)
 
-                # Try to load pre-trained weights if available
-                weights_path = os.path.join(config.weights_path, "muzero_latest.pt")
+                # Try to load pre-trained Champion weights if available
+                weights_path = os.path.join(config.weights_path, "muzero_champion.pkl")
                 if os.path.exists(weights_path):
                     self._muzero_agent.load(weights_path)
-                    logger.info(f"[DreamerGate] Loaded MuZero weights from {weights_path}")
+                    logger.info(f"[DreamerGate] Loaded Champion MuZero weights from {weights_path}")
                 else:
-                    logger.info("[DreamerGate] MuZero initialized (no pre-trained weights)")
+                    logger.info("[DreamerGate] MuZero initialized (no Champion weights found, using baseline)")
             except ImportError as e:
                 logger.warning(f"[DreamerGate] MuZero not available: {e}")
                 self._muzero_agent = None
