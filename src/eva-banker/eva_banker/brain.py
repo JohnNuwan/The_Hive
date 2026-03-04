@@ -11,6 +11,9 @@ from datetime import datetime, timedelta
 import os
 import aiohttp
 import random
+import uuid
+
+from shared.redis_client import get_redis_client
 
 from shared import (
     TradeAction,
@@ -101,8 +104,9 @@ class AutoTradingEngine:
         self.is_active = False
         self._loop_task = None
         self._daily_report_task = None
-        # The Hive Mind: Multi-Asset Symbols
-        self.symbols = ["XAUUSD", "EURUSD", "BTCUSD", "US30.cash"]
+        # The Hive Mind: Multi-Asset Symbols (Sprint 15: Global Universe)
+        from shared import get_settings
+        self.symbols = get_settings().banker_symbols
         self.latest_decisions = {} # Stores latest analysis per symbol
         
         # Sprint 7: The Cortex
@@ -126,6 +130,9 @@ class AutoTradingEngine:
         if self.is_active:
             return
         self.is_active = True
+        # --- NEW (Sprint 12): State Sync on startup ---
+        await self._sync_open_positions()
+        
         self._loop_task = asyncio.create_task(self._drift_loop())
         self._daily_report_task = asyncio.create_task(self._half_day_report_loop())
         self._news_task = asyncio.create_task(self.news.start_monitoring())
@@ -157,24 +164,44 @@ class AutoTradingEngine:
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _fmt_open_msg(self, symbol: str, action: str, entry_price: float, sl_price: float,
-                      rsi: float, atr: float, vwap: float, adx: float, cortex_bias: str, gnn_bias: str, comment: str) -> str:
-        """Formate un message d'ouverture riche."""
+                      rsi: float, atr: float, vwap: float, adx: float, cortex_bias: str, gnn_bias: str, 
+                      comment: str, indicators: dict = None) -> str:
+        """Formate un message d'ouverture riche avec indicateurs avancés."""
         sl_dist = abs(entry_price - sl_price)
         emoji = "🟢" if action == "BUY" else "🔴"
+        
+        # Format Indicators (Safe Get)
+        indicators = indicators or {}
+        macd = indicators.get("MACD_Hist", 0.0)
+        bb_pct = indicators.get("BB_Pct", 0.5)
+        rvol = indicators.get("RVOL", 1.0)
+        sup = indicators.get("sr_sup", 0.0)
+        res = indicators.get("sr_res", 0.0)
+        
+        # Visual MACD
+        macd_icon = "📈" if macd > 0 else "📉"
+        
         return (
-            f"⚡ *E.V.A | New Position*\n"
+            f"⚡ *E.V.A | New Position (M1/M15)*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"🔹 *Asset:* {symbol}\n"
             f"🔹 *Action:* {emoji} {action}\n"
             f"🔹 *Entry:* {entry_price:.5f}\n"
-            f"🛡️ *S/L:* {sl_price:.5f} (-{sl_dist:.2f})\n\n"
+            f"🛡️ *S/L:* {sl_price:.5f} ({sl_dist:.2f} pts)\n\n"
+            
             f"📊 *Markets & Signals:*\n"
             f"  • RSI: {rsi:.1f} | ADX: {adx:.1f}\n"
             f"  • VWAP: {vwap:.2f}\n"
-            f"  • Cortex: {cortex_bias}\n"
-            f"  • GNN (Proxmox): {gnn_bias}\n\n"
+            f"  • MACD: {macd_icon} {macd:.4f}\n"
+            f"  • Vol: {rvol:.1f}x (Relative)\n"
+            f"  • BB Position: {bb_pct*100:.1f}%\n"
+            f"  • S/R: {sup:.2f} / {res:.2f}\n\n"
+            
             f"🧠 *AI Reasoning:*\n"
-            f"  • {comment}\n\n"
+            f"  • Cortex: {cortex_bias}\n"
+            f"  • GNN (Proxmox): {gnn_bias}\n"
+            f"  • *Logic:* {comment}\n\n"
+            
             f"⏳ {datetime.now().strftime('%H:%M')} | The Hive"
         )
 
@@ -229,6 +256,10 @@ class AutoTradingEngine:
 
     async def _detect_closed_positions(self, current_positions: list):
         """Détecte les positions fermées et envoie une notification."""
+        if current_positions is None:
+            # Glitch in MT5 retrieval, abort detection safely
+            return
+            
         current_tickets = {pos.ticket for pos in current_positions}
         
         # Find tickets that disappeared (= closed)
@@ -242,7 +273,8 @@ class AutoTradingEngine:
             # Try to get the actual close info from MT5 deal history
             try:
                 from_dt = info.get("open_time", datetime.now() - timedelta(days=1))
-                deals = await self.mt5.get_deal_history(from_dt, datetime.now())
+                to_dt = datetime.now() + timedelta(days=1) # Deal with server timezone ahead of local
+                deals = await self.mt5.get_deal_history(from_dt, to_dt)
                 
                 # Find the closing deal for this position
                 close_deal = None
@@ -290,33 +322,38 @@ class AutoTradingEngine:
                     profit=profit
                 ))
 
-                # 📸 VIRALIZATION LOOP: Send winning trade to Muse Media Factory
+                # 📸 VIRALIZATION LOOP: Send winning trade to Muse Media Factory (Port 8601)
                 if profit >= 0.5:
                     asyncio.create_task(self._viralize_trade(
                         symbol=info["symbol"],
                         action=info["action"],
                         pnl=profit
                     ))
-
-                
             except Exception as e:
-                logger.error(f"Error detecting close for #{ticket}: {e}")
-            
-            # Cleanup
-            self._trade_open_info.pop(ticket, None)
+                logger.error(f"Error processing closed ticket #{ticket}: {e}")
+                # Cleanup if it failed mid-way
+                self._trade_open_info.pop(ticket, None)
         
-        # Update known tickets
+        # Update known tickets to current state
         self._known_tickets = current_tickets
-        
-        # Store info for new tickets
-        for pos in current_positions:
-            if pos.ticket not in self._trade_open_info:
-                self._trade_open_info[pos.ticket] = {
-                    "symbol": pos.symbol,
-                    "action": pos.action.value,
-                    "entry_price": float(pos.open_price),
-                    "open_time": pos.open_time,
-                }
+
+    async def _sync_open_positions(self):
+        """Peuple l'état au démarrage avec les positions existantes sur MT5 (Sprint 12)."""
+        logger.info("🔄 Syncing existing positions from MT5 state...")
+        try:
+            positions = await self.mt5.get_open_positions()
+            if positions is not None:
+                for pos in positions:
+                    self._known_tickets.add(pos.ticket)
+                    self._trade_open_info[pos.ticket] = {
+                        "symbol": pos.symbol,
+                        "action": pos.action.value if hasattr(pos.action, 'value') else str(pos.action),
+                        "entry_price": float(pos.open_price),
+                        "open_time": pos.open_time,
+                    }
+                logger.info(f"✅ Synced {len(positions)} existing positions.")
+        except Exception as e:
+            logger.error(f"Failed to startup-sync positions: {e}")
 
     async def _viralize_trade(self, symbol: str, action: str, pnl: float):
         """Notifie l'agent The Muse pour générer une image virale d'un gain."""
@@ -521,8 +558,8 @@ class AutoTradingEngine:
                     await asyncio.sleep(60)
                     continue
 
-                if self.news.should_block_trading():
-                    logger.warning(f"Auto-Trading paused: High Impact News Event ('{self.news.current_blocking_event}').")
+                if nemesis.should_block_trading():
+                    logger.warning("Auto-Trading paused: Nemesis Meditation Phase Active (Consecutive Losses).")
                     await asyncio.sleep(60)
                     continue
 
@@ -588,8 +625,8 @@ class AutoTradingEngine:
                     except Exception as e_shepherd:
                         logger.error(f"Shepherd Error on {pos.ticket}: {e_shepherd}")
 
-                if len(positions) >= 5: # Increased global limit for multi-asset
-                    logger.info("Max global positions reached (5). Waiting...")
+                if len(positions) >= 12: # Increased global limit for multi-asset (Sprint 15)
+                    logger.info("Max global positions reached (12). Waiting...")
                     await asyncio.sleep(60)
                     continue
 
@@ -602,24 +639,36 @@ class AutoTradingEngine:
                         if not self.risk.is_within_trading_session(symbol):
                             continue
                             
-                        # 0. CORTEX STRATEGY (Macro) - The Conscious Mind
-                        last_strat = self.cortex.latest_strategy.get(symbol, {})
+                        # NEW: Localized News Tracking (Sprint 11 P3)
+                        if getattr(self, "news", None) and self.news.should_block_trading(symbol):
+                            continue
+                            
+                        # 3. Get Context from Cortex (Sprint 10)
+                        last_strat = self.latest_decisions.get(symbol, {})
                         last_time = last_strat.get("timestamp")
                         
                         bias = "NEUTRAL"
-                        gnn_bias = "UNKNOWN"
+                        gnn_bias = "N/A" # Default if not refreshed
                         should_refresh = not last_time or (datetime.now() - datetime.fromisoformat(last_time)).total_seconds() > 900
                         
                         if should_refresh:
                             try:
-                                strategy = await self.cortex.analyze_market_context(symbol)
-                                bias = strategy.get("bias", "NEUTRAL")
-                                gnn_bias = strategy.get("gnn_bias", "UNKNOWN")
+                                strat_result = await self.cortex.analyze_market_context(symbol)
+                                self.latest_decisions[symbol] = strat_result
+                                last_strat = strat_result  # Keep memory pointer fresh for Telegram output
+                                bias = strat_result.get("bias", "NEUTRAL")
+                                
+                                # --- NEW (Sprint 12): Signal Reversal Logic ---
+                                # Close positions of opposite direction if bias is strong
+                                asyncio.create_task(self._handle_reversal(symbol, bias))
+                                
+                                # 4. Neural Analysis (GNN / Dreamer)
+                                gnn_bias = strat_result.get("gnn_bias", "UNKNOWN")
                             except Exception as e_cortex:
                                 logger.error(f"🧠 Cortex Error: {e_cortex}")
                         else:
                             bias = last_strat.get("bias", "NEUTRAL")
-                            gnn_bias = last_strat.get("gnn_bias", "UNKNOWN")
+                            gnn_bias = last_strat.get("gnn_bias", "N/A")
 
                         # A. Market Data
                         tick = await self.mt5.get_symbol_tick(symbol)
@@ -707,8 +756,7 @@ class AutoTradingEngine:
                             }
                                 
                             # --- FORMATTED LOGGING ---
-                            from colorama import Fore, Style, init
-                            init(autoreset=True)
+                            from colorama import Fore, Style
                             sym_color = Fore.CYAN if "XAU" in symbol else (Fore.YELLOW if "BTC" in symbol else Fore.WHITE)
                             bias_color = Fore.GREEN if bias == "BULLISH" else (Fore.RED if bias == "BEARISH" else Fore.LIGHTBLACK_EX)
                             
@@ -766,41 +814,51 @@ class AutoTradingEngine:
                             action = None
                             comment = "Error connecting to Lab"
 
-                        # CORTEX FILTER (The Conscious Check) — with ANTI-SPAM (Sprint 9)
                         if action == TradeAction.BUY and bias == "BEARISH":
-                            logger.info(f"🙅 Cortex VETO: Blocking BUY on {symbol} (Trend is BEARISH)")
+                            logger.info(f"🙅 Cortex VETO: Blocking BUY on {symbol} (Trend is BEARISH on M15)")
                             # Anti-spam: only notify once per 30 min per symbol
                             last_sent = self._last_veto_sent.get(symbol)
                             if not last_sent or (datetime.now() - last_sent).total_seconds() > 1800:
-                                self.telegram.send_sync(f"🙅 *VETO* | {symbol} BUY blocked (Bearish)")
+                                self.telegram.send_sync(f"🙅 *VETO* | {symbol} BUY blocked (Bearish Trend on M15)")
                                 self._last_veto_sent[symbol] = datetime.now()
                             action = None
-                            comment = "Blocked by Cortex (Bearish Trend)"
+                            comment = "Blocked by Cortex (Bearish Trend on M15)"
                         elif action == TradeAction.SELL and bias == "BULLISH":
-                            logger.info(f"🙅 Cortex VETO: Blocking SELL on {symbol} (Trend is BULLISH)")
+                            logger.info(f"🙅 Cortex VETO: Blocking SELL on {symbol} (Trend is BULLISH on M15)")
                             last_sent = self._last_veto_sent.get(symbol)
                             if not last_sent or (datetime.now() - last_sent).total_seconds() > 1800:
-                                self.telegram.send_sync(f"🙅 *VETO* | {symbol} SELL blocked (Bullish)")
+                                self.telegram.send_sync(f"🙅 *VETO* | {symbol} SELL blocked (Bullish Trend on M15)")
                                 self._last_veto_sent[symbol] = datetime.now()
                             action = None
-                            comment = "Blocked by Cortex (Bullish Trend)"
+                            comment = "Blocked by Cortex (Bullish Trend on M15)"
 
                         # FORCE LOGGING for user visibility
-                        logger.info(f"🧠 Analysis {symbol}: Price={current_price:.2f} RSI={rsi_val:.1f} -> Action={action} ({comment}) [Bias: {bias}]")
+                        log_msg = f"[M1/M15] {symbol}: Price={current_price:.2f} RSI={rsi_val:.1f} -> Action={action} ({comment}) [Context: {bias}]"
+                        logger.info(f"🧠 {log_msg}")
+
+                        # PUBLISH TO AGENT FEED (UI)
+                        redis = get_redis_client()
+                        await redis.publish("eva.banker.feed", {
+                            "id": str(uuid.uuid4()),
+                            "source_agent": "Banker",
+                            "action": f"Analyse {symbol}: Price={current_price:.2f} | RSI={rsi_val:.1f} -> {action or 'Hold'} ({comment})",
+                            "timestamp": datetime.now().isoformat(),
+                            "type": "request" if action is None else "event"
+                        })
 
                         # Store Decision State
-                        self.latest_decisions[symbol] = {
+                        decision_state = self.latest_decisions.get(symbol, {})
+                        decision_state.update({
                             "price": float(current_price),
                             "rsi": rsi_val,
                             "macd": features.get("MACD_Hist", 0.0),
                             "vwap": float(vwap_val),
                             "adx": float(adx_data["adx"].iloc[-1]),
-                            "cortex_bias": str(bias),
-                            "gnn_bias": str(gnn_bias),
                             "action": str(action) if action else "WAIT",
                             "comment": comment,
                             "timestamp": datetime.now().isoformat()
-                        }
+                        })
+                        self.latest_decisions[symbol] = decision_state
 
                         if action is None:
                             continue
@@ -851,13 +909,37 @@ class AutoTradingEngine:
                             take_profit_price=tp_price,
                             comment=safe_comment
                         )
-                        
+                        if action:
+                            # --- NEW (Sprint 13): Margin Pre-check ---
+                            margin_required = await self.mt5.get_margin_required(symbol, action, final_vol) # Use final_vol here
+                            account = await self.mt5.get_account_summary()
+                            
+                            if margin_required is not None and account:
+                                free_margin = float(account.get("free_margin", 0.0))
+                                if free_margin < margin_required:
+                                    logger.error(f"❌ MARGIN VETO: {symbol} {action} requires ${margin_required:.2f}, but only ${free_margin:.2f} free.")
+                                    self.telegram.send_sync(f"⚠️ *MARGIN VETO* | {symbol} {action} blocked\nNeed: ${margin_required:.2f} / Free: ${free_margin:.2f}")
+                                    action = None
+                                    comment = "Insufficient Margin"
+                            
+                        # If action was vetoed by margin check, skip execution
+                        if action is None:
+                            continue
+
                         validation = await self.risk.validate_order(order)
                         if validation["allowed"]:
                             logger.info(f"🤖 EXEC {symbol}: {action} | {comment}")
                             result = await self.worker.execute_skill(skill, order)
                             if result.get("success"):
-                                # Rich Telegram OPEN notification (Sprint 9)
+                                # --- NEW (Sprint 11): LLM Micro-Reasoning ---
+                                combined_indicators = {**features, **extended_features}
+                                reasoning = await self.cortex.get_micro_reasoning(
+                                    symbol=symbol, 
+                                    action=action.value, 
+                                    indicators=combined_indicators
+                                )
+                                
+                                # Rich Telegram OPEN notification (Sprint 9/11)
                                 open_msg = self._fmt_open_msg(
                                     symbol=symbol,
                                     action=action.value,
@@ -869,7 +951,8 @@ class AutoTradingEngine:
                                     adx=extended_features.get("adx", 0.0),
                                     cortex_bias=last_strat.get("cortex_bias", "UNKNOWN"),
                                     gnn_bias=last_strat.get("gnn_bias", "UNKNOWN"),
-                                    comment=comment
+                                    comment=reasoning, # Replace technical comment with LLM Reasoning
+                                    indicators=combined_indicators
                                 )
                                 self.telegram.send_sync(open_msg)
                                 
@@ -981,3 +1064,21 @@ class AutoTradingEngine:
                         
         except Exception as e:
             logger.error(f"Failed to send P&L feedback: {e}")
+
+    async def _handle_reversal(self, symbol: str, bias: str):
+        """Ferme les positions opposées au nouveau biais (Sprint 12)."""
+        if bias not in ["BULLISH", "BEARISH"]:
+            return
+            
+        for ticket, info in list(self._trade_open_info.items()):
+            if info["symbol"] == symbol:
+                should_close = False
+                if bias == "BEARISH" and info["action"] == "BUY":
+                    should_close = True
+                elif bias == "BULLISH" and info["action"] == "SELL":
+                    should_close = True
+                
+                if should_close:
+                    logger.warning(f"🔄 Reversal {symbol}: Closing opposite {info['action']} #{ticket}")
+                    await self.mt5.close_position(ticket)
+                    # Note: notification de fermeture sera envoyée par le loop principal au prochain cycle

@@ -3,6 +3,9 @@ import asyncio
 import json
 from datetime import datetime
 from typing import Dict, Any, Optional
+import uuid
+
+from shared.redis_client import get_redis_client
 
 from shared.llm_client import LLMClient
 from eva_banker.services.mt5 import MT5Service
@@ -131,8 +134,7 @@ class Strategist:
         self.latest_strategy[symbol] = strategy
         
         # --- COMMAND LINE LOGGING ---
-        from colorama import Fore, Style, init
-        init(autoreset=True)
+        from colorama import Fore, Style
         sym_color = Fore.CYAN if "XAU" in symbol else (Fore.YELLOW if "BTC" in symbol else Fore.WHITE)
         
         def get_color(b):
@@ -151,9 +153,49 @@ class Strategist:
             f"GNN: {gb_color}[{gnn_bias}]{Style.RESET_ALL} -> "
             f"Final: {fb_color}[{final_bias}]{Style.RESET_ALL} "
         )
+        
+        # PUBLISH TO AGENT FEED (UI)
+        try:
+            redis = get_redis_client()
+            asyncio.create_task(redis.publish("eva.cortex.feed", {
+                "id": str(uuid.uuid4()),
+                "source_agent": "Strategist",
+                "action": f"Cortex M15 Macro Bias for {symbol}: {final_bias} (GNN: {gnn_bias}) -> {response[:100]}...",
+                "timestamp": datetime.now().isoformat(),
+                "type": "thought"
+            }))
+        except Exception as e_redis:
+            logger.debug(f"Failed to publish Cortex thought to Feed: {e_redis}")
+            
         # ----------------------------
         
         return strategy
 
     def get_bias(self, symbol: str) -> str:
         return self.latest_strategy.get(symbol, {}).get("bias", "NEUTRAL")
+
+    async def get_micro_reasoning(self, symbol: str, action: str, indicators: dict) -> str:
+        """
+        Generates a very short (1 sentence) reasoning for a specific trade in French.
+        """
+        rsi = indicators.get("RSI", 50)
+        adx = indicators.get("adx", 25)
+        vwap_dist = indicators.get("vwap_dist", 0)
+        macd = indicators.get("MACD_Hist", 0)
+        
+        prompt = (
+            f"En tant qu'expert trading, explique en UNE seule phrase courte et percutante en FRANCAIS "
+            f"pourquoi on ouvre un {action} sur {symbol}. "
+            f"Contexte: RSI={rsi:.1f}, ADX={adx:.1f}, "
+            f"MACD Hist={macd:.4f}. "
+            "Sois technique mais clair. Pas de blabla."
+        )
+        
+        try:
+            # Use a faster/smaller model for micro-reasoning if available, else default
+            reasoning = await self.cortex.analyze(f"Action: {action} on {symbol}", prompt)
+            # Cleanup unwanted characters or long responses
+            return reasoning.strip().split('\n')[0][:200]
+        except Exception as e:
+            logger.warning(f"Failed to generate micro-reasoning: {e}")
+            return "Analyse technique confirmée par le Swarm."
