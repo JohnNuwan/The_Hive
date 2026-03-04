@@ -316,6 +316,14 @@ class AutoTradingEngine:
                     pnl=profit,
                 ))
                 
+                # 🛡️ ANTI-TILT LOOP: Report losses to Nemesis for Self-Healing
+                if profit < 0:
+                    asyncio.create_task(get_nemesis_system().report_loss(
+                        trade_id=str(ticket),
+                        loss_amount=abs(profit),
+                        market_context={"symbol": info["symbol"], "action": info["action"], "volatility": 0, "news_event": False, "trend_reversal": False}
+                    ))
+                
                 # 💰 ACCOUNTANT LOOP: Send financial event for Drawdown validation
                 asyncio.create_task(self._send_pnl_to_accountant(
                     symbol=info["symbol"],
@@ -816,19 +824,10 @@ class AutoTradingEngine:
 
                         if action == TradeAction.BUY and bias == "BEARISH":
                             logger.info(f"🙅 Cortex VETO: Blocking BUY on {symbol} (Trend is BEARISH on M15)")
-                            # Anti-spam: only notify once per 30 min per symbol
-                            last_sent = self._last_veto_sent.get(symbol)
-                            if not last_sent or (datetime.now() - last_sent).total_seconds() > 1800:
-                                self.telegram.send_sync(f"🙅 *VETO* | {symbol} BUY blocked (Bearish Trend on M15)")
-                                self._last_veto_sent[symbol] = datetime.now()
                             action = None
                             comment = "Blocked by Cortex (Bearish Trend on M15)"
                         elif action == TradeAction.SELL and bias == "BULLISH":
                             logger.info(f"🙅 Cortex VETO: Blocking SELL on {symbol} (Trend is BULLISH on M15)")
-                            last_sent = self._last_veto_sent.get(symbol)
-                            if not last_sent or (datetime.now() - last_sent).total_seconds() > 1800:
-                                self.telegram.send_sync(f"🙅 *VETO* | {symbol} SELL blocked (Bullish Trend on M15)")
-                                self._last_veto_sent[symbol] = datetime.now()
                             action = None
                             comment = "Blocked by Cortex (Bullish Trend on M15)"
 
