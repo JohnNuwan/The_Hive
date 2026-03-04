@@ -156,6 +156,11 @@ class Strategist:
             console = Console()
             
             text = Text()
+            text.append("📊 Technical Context:\n", style="bold yellow")
+            text.append(f"  • Price: {current_price:.2f} (Trend: {trend})\n", style="white")
+            text.append(f"  • RSI: {rsi:.1f} | ADX: {adx_val:.1f} | VWAP: {vwap:.2f}\n", style="white")
+            text.append(f"  • Fibs: {fibs.get('fib_382', 0):.2f} / {fibs.get('fib_618', 0):.2f}\n\n", style="white")
+            
             text.append("🧠 LLM Reasoning:\n", style="bold cyan")
             text.append(f"{response}\n\n", style="italic white")
             
