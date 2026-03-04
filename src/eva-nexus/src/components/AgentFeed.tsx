@@ -70,7 +70,8 @@ export default function AgentFeed() {
             ws.onmessage = (event) => {
                 try {
                     const msg: AgentMessage = JSON.parse(event.data);
-                    const safeId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') ? crypto.randomUUID() : Math.random().toString(36).substr(2, 9);
+                    let safeId;
+                    try { safeId = crypto.randomUUID(); } catch (e) { safeId = Math.random().toString(36).substr(2, 9); }
                     setMessages(prev => [...prev.slice(-500), { ...msg, id: safeId }]);
                     setMsgCount(c => c + 1);
                 } catch { }

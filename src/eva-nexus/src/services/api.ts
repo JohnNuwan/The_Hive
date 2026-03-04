@@ -230,9 +230,12 @@ export async function sendChatMessage(message: string, sessionId: string, image?
 }
 
 export async function createSession(): Promise<{ session_id: string }> {
-    const session_id = (typeof window !== 'undefined' && window.crypto && (window.crypto as any).randomUUID)
-        ? (window.crypto as any).randomUUID()
-        : uuidv4()
+    let session_id;
+    try {
+        session_id = crypto.randomUUID();
+    } catch (e) {
+        session_id = uuidv4();
+    }
     return safeFetch('/api/core/session', { session_id })
 }
 

@@ -25,7 +25,8 @@ export default function KnowledgeVault() {
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const uploadFile = async (file: File) => {
-        const safeId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') ? crypto.randomUUID() : Math.random().toString(36).substr(2, 9);
+        let safeId;
+        try { safeId = crypto.randomUUID(); } catch (e) { safeId = Math.random().toString(36).substr(2, 9); }
         const docId = safeId;
         const newDoc: UploadedDoc = {
             id: docId,
