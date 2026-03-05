@@ -190,8 +190,10 @@ services:
       - NEO4J_URI=bolt://host.docker.internal:7687
       - LLM_BACKEND=vllm
       - ENVIRONMENT=development
+      - OLLAMA_HOST=host.docker.internal
+      - OLLAMA_PORT=11434
     deploy:
-      # âš ï¸ GPU removed: core uses vLLM via REST API, not direct CUDA.
+      # ⚠️ GPU removed: core uses vLLM via REST API, not direct CUDA.
       # vLLM needs exclusive GPU access to avoid GetDeviceCount() failures.
       replicas: 2
       restart_policy:
@@ -604,4 +606,3 @@ volumes:
   mosquitto_data: null
   neo4j_data: null
   trainer_models: {}
-

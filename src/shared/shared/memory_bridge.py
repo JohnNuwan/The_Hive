@@ -43,6 +43,10 @@ class MemoryBridge:
         self.graph = get_graph_memory()
 
         # Configuration Mem0 (Qdrant backend)
+        ollama_host = self.settings.ollama_host if hasattr(self.settings, 'ollama_host') else "host.docker.internal"
+        ollama_port = self.settings.ollama_port if hasattr(self.settings, 'ollama_port') else "11434"
+        ollama_base_url = f"http://{ollama_host}:{ollama_port}/v1"
+
         config = {
             "vector_store": {
                 "provider": "qdrant",
@@ -59,7 +63,7 @@ class MemoryBridge:
                     "model": self.settings.vllm_model if self.settings.llm_backend == "vllm" else self.settings.ollama_model,
                     "openai_base_url": f"http://{self.settings.vllm_host}:{self.settings.vllm_port}/v1"
                                        if self.settings.llm_backend == "vllm"
-                                       else f"http://{self.settings.ollama_host}:{self.settings.ollama_port}/v1"
+                                       else ollama_base_url
                 }
             }
         }

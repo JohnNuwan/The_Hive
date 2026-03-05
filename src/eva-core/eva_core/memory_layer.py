@@ -18,25 +18,31 @@ class MemoryLayer:
         self.user_id = user_id
         if MEM0_AVAILABLE:
             # Configuration Mem0 (peut utiliser Qdrant ou Chroma en backend)
+            ollama_host = os.getenv("OLLAMA_HOST", "host.docker.internal")
+            ollama_port = os.getenv("OLLAMA_PORT", "11434")
+            ollama_base_url = f"http://{ollama_host}:{ollama_port}"
+
             config = {
                 "vector_store": {
                     "provider": "qdrant",
                     "config": {
-                        "host": os.getenv("QDRANT_HOST", "localhost"),
+                        "host": os.getenv("QDRANT_HOST", "host.docker.internal"),
                         "port": int(os.getenv("QDRANT_PORT", 6333)),
                     }
                 },
                 "embedder": {
                     "provider": "ollama",
                     "config": {
-                        "model": "nomic-embed-text:latest"
+                        "model": "nomic-embed-text:latest",
+                        "ollama_base_url": ollama_base_url
                     }
                 },
                 "llm": {
                     "provider": "ollama",
                     "config": {
-                        "model": "llama3.2",
-                        "temperature": 0
+                        "model": "gemma3", # Match current server models
+                        "temperature": 0,
+                        "ollama_base_url": ollama_base_url
                     }
                 }
             }
