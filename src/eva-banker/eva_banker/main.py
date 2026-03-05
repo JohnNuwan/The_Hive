@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from eva_banker.nemesis import NemesisSystem, get_nemesis_system
 from eva_banker.services.binance_service import BinanceService
+from eva_banker.services.traderepublic_client import TradeRepublicService
 from eva_banker.services.mt5 import MT5Service, get_mt5_service
 from eva_banker.services.news_filter import NewsFilterService
 from eva_banker.services.risk import RiskValidator, get_risk_validator
@@ -171,6 +172,12 @@ async def lifespan(app: FastAPI):
     app.state.mt5_service = get_mt5_service()
     app.state.risk_validator = get_risk_validator()
     app.state.binance_service = BinanceService()
+    app.state.tr_service = TradeRepublicService()
+    
+    # CCXT Init
+    await app.state.binance_service.initialize()
+    # TR Init
+    await app.state.tr_service.initialize()
 
     # Hiérarchie
     app.state.skill_library = SkillLibrary()
@@ -186,8 +193,6 @@ async def lifespan(app: FastAPI):
         mt5=app.state.mt5_service,
         risk=app.state.risk_validator
     )
-    # DÉMARRAGE AU LANCEMENT (Demande utilisateur)
-    await app.state.auto_engine.start()
 
     # Système Nemesis
     app.state.nemesis = get_nemesis_system()
@@ -218,8 +223,12 @@ async def lifespan(app: FastAPI):
         logger.info("✅ MT5 connecté")
         # S'assurer que les symboles nécessaires sont sélectionnés
         await mt5_service.initialize_symbols(app.state.auto_engine.symbols)
+        
+        # DÉMARRAGE AU LANCEMENT (Seulement après connexion réussie)
+        await app.state.auto_engine.start()
+        logger.info("🚀 Auto-Trading Engine Started")
     else:
-        logger.warning("⚠️ MT5 en mode mock")
+        logger.warning("⚠️ MT5 en mode mock (Reconnexion possible en arrière-plan)")
 
     logger.info("✅ The Banker (SWARM MODE) READY")
 
@@ -246,18 +255,19 @@ async def hard_heartbeat():
     while True:
         try:
             account = await mt5_service.get_account_info()
-            payload = {
-                "status": "online",
-                "ts": datetime.now().timestamp(),
-                "expert": "banker",
-                "equity": float(account.equity),
-                "balance": float(account.balance),
-                "currency": account.currency
-            }
-            # Publication Pub/Sub (temps réel pour le Kernel)
-            await redis.publish("eva.banker.heartbeat", payload)
-            # Persistence (découverte)
-            await redis.cache_set("eva.banker.status", payload, ttl_seconds=10)
+            if account is not None:
+                payload = {
+                    "status": "online",
+                    "ts": datetime.now().timestamp(),
+                    "expert": "banker",
+                    "equity": float(account.equity),
+                    "balance": float(account.balance),
+                    "currency": account.currency
+                }
+                # Publication Pub/Sub (temps réel pour le Kernel)
+                await redis.publish("eva.banker.heartbeat", payload)
+                # Persistence (découverte)
+                await redis.cache_set("eva.banker.status", payload, ttl_seconds=10)
         except Exception as e:
             logger.error(f"Heartbeat error: {e}")
 

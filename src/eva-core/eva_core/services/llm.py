@@ -177,8 +177,8 @@ class LLMService:
         last_msg = messages[-1].content if messages else ""
         return (
             f"[Mode Dev] J'ai bien reçu ton message: '{last_msg[:50]}...'. "
-            "Le serveur LLM (Ollama) n'est pas encore démarré. "
-            "Lance `ollama serve` puis `ollama pull llama3:8b` pour l'activer."
+            "Le serveur LLM distant (vLLM) n'est pas encore démarré ou n'est pas joignable "
+            f"sur l'adresse {self.host}. Vérifie ton hyperviseur Proxmox/Docker."
         )
 
 

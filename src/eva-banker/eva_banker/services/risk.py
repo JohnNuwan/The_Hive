@@ -159,10 +159,17 @@ class RiskValidator:
         # Simuler le calcul du risque
         # En production, on utiliserait le prix actuel du symbole
         mock_prices = {
-            "XAUUSD": Decimal("4900.00"), # Updated based on logs
+            "XAUUSD": Decimal("4900.00"),
             "EURUSD": Decimal("1.0850"),
             "BTCUSD": Decimal("67000.00"),
-            "US30.cash": Decimal("39000.00")
+            "US30.cash": Decimal("39000.00"),
+            # Sprint 15 Expansion
+            "GBPUSD": Decimal("1.2700"),
+            "USDJPY": Decimal("150.00"),
+            "AUDUSD": Decimal("0.6600"),
+            "XAGUSD": Decimal("23.50"),
+            "US100.cash": Decimal("18000.00"),
+            "GER40.cash": Decimal("17000.00")
         }
         current_price = mock_prices.get(order.symbol, Decimal("100"))
 
@@ -278,7 +285,7 @@ class RiskValidator:
         if "XAU" in symbol.upper():
             # Gold: 1 lot = 100 oz. Variation de $1.0 = $100 de P&L
             point_value = Decimal("100") 
-        elif any(idx in symbol.upper() for idx in ["US30", "NAS100", "GER40", "BTC"]):
+        elif any(idx in symbol.upper() for idx in ["US30", "US100", "GER40", "BTC"]):
             # Indices / Crypto: Souvent 1 lot = 1 contrat. Variation de 1.0 = $1 de P&L
             point_value = Decimal("1")
         else:

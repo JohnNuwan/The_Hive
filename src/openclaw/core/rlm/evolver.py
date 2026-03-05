@@ -22,12 +22,14 @@ Références :
 
 import logging
 import asyncio
+import httpx
 from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime
 
 from .evaluator import RLMEvaluator, Diagnosis, IssueSeverity
 from .patcher import RLMPatcher, Patch, PatchResult
+from .benchmark import RLMBenchmark, SystemMetrics, BenchmarkAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -109,17 +111,22 @@ class RLMEvolver:
         result = await evolver.evolution_cycle(logs, llm_service)
     """
 
-    def __init__(self, project_root: str):
+    def __init__(self, project_root: str, builder_url: str = "http://localhost:8006", core_url: str = "http://localhost:8000"):
         """Initialise l'Evolver.
 
         Args:
             project_root: Chemin racine du projet.
+            builder_url: URL de l'API eva-builder.
+            core_url: URL de l'Orchestrateur Core.
         """
         self.project_root = project_root
+        self.builder_url = builder_url
         self.evaluator = RLMEvaluator()
         self.patcher = RLMPatcher(project_root)
+        self.benchmark = RLMBenchmark(core_url=core_url)
         self._cycle_counter = 0
         self._total_patches_applied = 0
+        self._http_client = httpx.AsyncClient(timeout=30.0)
 
     async def evolution_cycle(
         self,
@@ -234,24 +241,75 @@ class RLMEvolver:
                     result.lessons_learned += 1
                 continue
 
-            # Phase 5 : Application du patch
+            # Phase 5 : Application du patch et Benchmark (A/B Testing)
+            # Capture Pre-Patch
+            pre_metrics = await self.benchmark.capture_metrics()
+            
             patch_result = await self.patcher.apply_patch(patch)
             result.details.append(patch_result)
 
             if patch_result.applied:
-                result.patches_applied += 1
-                self._total_patches_applied += 1
-                logger.info(f"[RLM:Evolver] ✅ Patch {diagnosis.id} applied successfully")
+                logger.info(f"[RLM:Evolver] 🛠️ Patch {diagnosis.id} applied to filesystem.")
+                
+                # Déclencher le Dynamic Hot-Patching via eva-builder
+                service_names = self._infer_services_from_path(patch.file_path)
+                builders_success = True
+                
+                for service_name in service_names:
+                    deploy_ok = await self._trigger_hot_patch(service_name)
+                    if not deploy_ok:
+                        builders_success = False
+                        logger.error(f"[RLM:Evolver] ❌ Hot-Patch failed for {service_name}")
+                
+                if builders_success:
+                    logger.info(f"[RLM:Evolver] ⏳ Hot-Patch deployed. Waiting for stabilization (60s)...")
+                    await asyncio.sleep(60.0)
+                    
+                    # Capture Post-Patch & Analyse (Self-Benchmark)
+                    post_metrics = await self.benchmark.capture_metrics()
+                    analysis = self.benchmark.compare(pre_metrics, post_metrics)
+                    
+                    logger.info(f"[RLM:Evolver] Benchmark Analysis: {analysis.summary}")
+                    
+                    if analysis.is_healthy:
+                        result.patches_applied += 1
+                        self._total_patches_applied += 1
+                        logger.info(f"[RLM:Evolver] ✅ Patch {diagnosis.id} approved by Benchmark.")
 
-                # Archiver le succès
-                if memory_bridge:
-                    await self._archive_lesson(
-                        memory_bridge,
-                        f"Patch appliqué pour {diagnosis.id}: {diagnosis.error_message}. "
-                        f"Correction: {patch.description}",
-                        success=True,
-                    )
-                    result.lessons_learned += 1
+                        # Archiver le succès
+                        if memory_bridge:
+                            await self._archive_lesson(
+                                memory_bridge,
+                                f"Patch appliqué pour {diagnosis.id}: {diagnosis.error_message}. "
+                                f"Correction: {patch.description}. Benchmark: {analysis.summary}",
+                                success=True,
+                            )
+                            result.lessons_learned += 1
+                    else:
+                        # Rollback Intelligent
+                        logger.error(f"[RLM:Evolver] 🚨 Intelligent Rollback triggered for {diagnosis.id}: {analysis.summary}")
+                        await self.patcher.rollback(patch.file_path)
+                        patch_result.rolled_back = True
+                        
+                        # Re-deploy rollback version
+                        for service_name in service_names:
+                            await self._trigger_hot_patch(service_name)
+                            
+                        # Archiver l'échec pour que le LLM ne recommence plus l'erreur
+                        if memory_bridge:
+                            await self._archive_lesson(
+                                memory_bridge,
+                                f"Patch annulé par sécurité (Rollback) pour {diagnosis.id}: {diagnosis.error_message}. "
+                                f"Raisons de la dégradation: {' | '.join(analysis.reasons)}",
+                                success=False,
+                            )
+                            result.lessons_learned += 1
+                else:
+                    # Déploiement a planté avant même de pouvoir benchmarker
+                    logger.error(f"[RLM:Evolver] 🚨 Déploiement builder a échoué. Rollback.")
+                    await self.patcher.rollback(patch.file_path)
+                    patch_result.rolled_back = True
+
             else:
                 logger.error(
                     f"[RLM:Evolver] ❌ Patch {diagnosis.id} application failed: "
@@ -385,3 +443,55 @@ class RLMEvolver:
             "total_patches_applied": self._total_patches_applied,
             "project_root": self.project_root,
         }
+
+    def _infer_services_from_path(self, file_path: str) -> List[str]:
+        """Déduit le nom du service Docker à redéployer depuis le fichier patché."""
+        services = []
+        if "eva-core" in file_path: services.append("core")
+        elif "eva-banker" in file_path: services.append("banker")
+        elif "eva-shadow" in file_path: services.append("shadow")
+        elif "eva-builder" in file_path: services.append("builder")
+        elif "eva-kernel" in file_path: services.append("kernel")
+        elif "eva-muse" in file_path: services.append("muse")
+        elif "eva-lab" in file_path: services.append("lab")
+        elif "eva-substrate" in file_path: services.append("substrate")
+        elif "eva-accountant" in file_path: services.append("accountant")
+        elif "eva-sage" in file_path: services.append("sage")
+        elif "eva-compliance" in file_path: services.append("compliance")
+        elif "eva-sentinel" in file_path: services.append("sentinel")
+        elif "eva-wraith" in file_path: services.append("wraith")
+        elif "eva-researcher" in file_path: services.append("researcher")
+        elif "eva-rwa" in file_path: services.append("rwa")
+        elif "openclaw" in file_path or "shared" in file_path:
+            # Code commun modifié, doit cibler core ou tout recommencer (trop long),
+            # par défaut, relance les noyaux stratégiques.
+            services.extend(["core", "banker", "shadow", "lab"])
+            
+        return list(set(services))
+
+    async def _trigger_hot_patch(self, service_name: str) -> bool:
+        """Déclenche le redéploiement d'un conteneur via eva-builder.
+        
+        Args:
+           service_name: Nom court du service (ex: 'banker', 'core').
+        """
+        try:
+            logger.info(f"[RLM:Evolver] Summoning builder to deploy '{service_name}'...")
+            res = await self._http_client.post(
+                f"{self.builder_url}/deploy",
+                json={"service": service_name, "target": "proxmox", "force_rebuild": True}
+            )
+            data = res.json()
+            if res.status_code == 200 and data.get("status") == "triggered":
+                return True
+            logger.error(f"[RLM:Evolver] Builder rejected deploy: {data}")
+            return False
+        except Exception as e:
+            logger.error(f"[RLM:Evolver] Builder communication failed: {e}")
+            return False
+
+    async def close(self):
+        """Nettoie l'instance de Client HTTP ainsi que le Benchmarker."""
+        await self._http_client.aclose()
+        if hasattr(self, "benchmark"):
+            await self.benchmark.close()

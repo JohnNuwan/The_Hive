@@ -18,8 +18,10 @@ from pydantic import BaseModel, Field
 from shared import get_settings
 from shared.redis_client import init_redis, get_redis_client
 from shared.telegram_client import TelegramClient
+from shared.llm_client import LLMClient
 
 from eva_muse.services.comfy_client import ComfyUIClient
+from eva_muse.scheduler import MuseScheduler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -85,6 +87,33 @@ class ContentTemplate(BaseModel):
 # SERVICE
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Gère le cycle de vie de l'application Muse (Hooks de démarrage)"""
+    logger.info("🎨 Démarrage de The Muse (Content Factory)...")
+
+    # Redis initialization
+    try:
+        await init_redis()
+        logger.info("✅ Redis connecté")
+    except Exception as e:
+        logger.warning(f"⚠️ Redis non disponible: {e}")
+        
+    # Initialize Core Service & Heartbeat
+    app.state.muse_service = MuseService()
+    asyncio.create_task(hard_heartbeat())
+        
+    # Start the continuous content generator
+    app.state.scheduler = MuseScheduler()
+    app.state.scheduler.start()
+
+    yield
+    
+    # Shutdown
+    if hasattr(app.state, "scheduler"):
+        app.state.scheduler.stop()
+    logger.info("🛑 Arrêt The Muse")
+
 class MuseService:
     """Service de génération de contenu via LLM"""
 
@@ -124,10 +153,10 @@ class MuseService:
     def __init__(self):
         self.settings = get_settings()
         self.generation_count = 0
+        self.llm_client = LLMClient()
 
     async def generate_content(self, request: ContentRequest) -> ContentResponse:
-        """Génère du contenu via le LLM local (Ollama)"""
-        import httpx
+        """Génère du contenu via le LLM unifé (vLLM)"""
         start = datetime.now()
 
         # Construire le prompt
@@ -146,23 +175,12 @@ class MuseService:
 
         prompt += f"\n\nLongueur maximale: {request.max_length} mots."
 
-        # Appel Ollama
+        # Appel LLMClient (vLLM/OpenAI compatible)
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    f"http://{self.settings.ollama_host}:{self.settings.ollama_port}/api/generate",
-                    json={
-                        "model": self.settings.ollama_model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.8, "top_p": 0.9}
-                    }
-                )
-                data = response.json()
-                content = data.get("response", "Erreur de génération")
+            content = await self.llm_client.analyze(context=f"Tu es un expert en {request.content_type}.", prompt=prompt)
         except Exception as e:
-            logger.error(f"Erreur Ollama: {e}")
-            content = f"[Mode Offline] Contenu placeholder pour '{request.topic}'. Connectez Ollama pour la génération réelle."
+            logger.error(f"Erreur LLM Backend: {e}")
+            content = f"[Mode Offline] Contenu placeholder pour '{request.topic}'."
 
         elapsed = int((datetime.now() - start).total_seconds() * 1000)
         self.generation_count += 1
@@ -184,28 +202,8 @@ class MuseService:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# LIFECYCLE
+# LIFECYCLE (Old autonomous loop helpers)
 # ═══════════════════════════════════════════════════════════════════════════════
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Cycle de vie Muse"""
-    logger.info("🎨 Démarrage The Muse (Media Factory)...")
-
-    try:
-        await init_redis()
-        logger.info("✅ Redis connecté")
-    except Exception as e:
-        logger.warning(f"⚠️ Redis non disponible: {e}")
-
-    app.state.muse_service = MuseService()
-    asyncio.create_task(hard_heartbeat())
-    asyncio.create_task(autonomous_influencer_loop())
-
-    logger.info("✅ The Muse est inspirée (prête)")
-    yield
-    logger.info("🛑 Arrêt The Muse")
-
 
 async def hard_heartbeat():
     """Signal de présence"""
@@ -306,8 +304,8 @@ async def autonomous_influencer_loop():
 
 app = FastAPI(
     title="The Muse API",
-    description="Agent Media & Création de Contenu - THE HIVE",
-    version="0.1.0",
+    description="Agent Contenu, Copywriting & Génération d'Image/Vidéo (Local Ollama/ComfyUI)",
+    version="1.0.0",
     lifespan=lifespan,
 )
 

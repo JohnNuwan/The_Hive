@@ -145,13 +145,14 @@ class VisionService:
             settings = self.settings
             ollama_host = getattr(settings, "OLLAMA_HOST", "localhost")
             ollama_port = getattr(settings, "OLLAMA_PORT", 11434)
+            ollama_model = getattr(settings, "OLLAMA_MODEL", "llava")
             import base64
             b64 = base64.b64encode(image_bytes).decode()
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
                     f"http://{ollama_host}:{ollama_port}/api/generate",
                     json={
-                        "model": "llava",
+                        "model": ollama_model,
                         "prompt": "Describe this image in detail, especially if it contains financial charts or data.",
                         "images": [b64],
                         "stream": False,
@@ -176,37 +177,93 @@ class VisionService:
             logger.warning(f"Screen capture failed: {e}")
             return None
 
-    def detect_chart_patterns(self, symbol: str = "XAUUSD", timeframe: str = "H1") -> list[dict]:
-        """Détecte des patterns de trading courants (simulation en mode lite)."""
-        import random
-        patterns = [
-            ("Double Top", "bearish", "Configuration de retournement baissier — deux sommets au même niveau"),
-            ("Double Bottom", "bullish", "Configuration de retournement haussier — deux creux au même niveau"),
-            ("Head and Shoulders", "bearish", "Pattern de retournement classique — épaules-tête-épaules"),
-            ("Ascending Triangle", "bullish", "Triangle ascendant — compression haussière"),
-            ("Descending Triangle", "bearish", "Triangle descendant — compression baissière"),
-            ("Flag", "bullish", "Drapeau haussier — continuation de tendance"),
-            ("Engulfing", "bullish", "Bougie englobante haussière — signal de retournement"),
-            ("Doji", "neutral", "Doji — indécision du marché"),
-        ]
+    async def detect_chart_patterns(self, symbol: str = "XAUUSD", timeframe: str = "H1", image_bytes: bytes = None) -> list[dict]:
+        """Détecte des patterns de trading réels via LLM Multimodal (LLaVA) et OCR."""
+        if image_bytes is None:
+            image_bytes = self.capture_screen()
+            
+        if image_bytes is None:
+             logger.warning("Aucune image / capture d'écran fournie pour l'analyse de pattern.")
+             return []
 
-        # En mode lite, simulation de patterns détectés
-        detected = random.sample(patterns, k=random.randint(1, 3))
-        results = []
-        for name, direction, desc in detected:
-            pattern = {
-                "pattern": name,
-                "confidence": round(random.uniform(0.4, 0.9), 2),
-                "direction": direction,
-                "description": desc,
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "timestamp": datetime.now().isoformat(),
-            }
-            results.append(pattern)
-            self.detected_patterns.append(pattern)
+        patterns_dict = {
+            "double top": ("Double Top", "bearish", "Configuration de retournement baissier détectée par IA"),
+            "double bottom": ("Double Bottom", "bullish", "Configuration de retournement haussier détectée par IA"),
+            "head and shoulders": ("Head and Shoulders", "bearish", "Pattern épaule-tête-épaule détecté par IA"),
+            "ascending triangle": ("Ascending Triangle", "bullish", "Triangle ascendant visible sur l'image"),
+            "descending triangle": ("Descending Triangle", "bearish", "Triangle descendant détecté"),
+            "flag": ("Flag", "bullish", "Drapeau de continuation haussier"),
+            "engulfing": ("Engulfing", "bullish", "Bougie englobante haussière observée"),
+            "doji": ("Doji", "neutral", "Indécision du marché (Doji) visible")
+        }
 
-        return results
+        # 1. Demande de description au VLM (LLaVA) orientée Trading Pattern
+        try:
+            import httpx
+            import base64
+            settings = self.settings
+            ollama_host = getattr(settings, "OLLAMA_HOST", "localhost")
+            ollama_port = getattr(settings, "OLLAMA_PORT", 11434)
+            ollama_model = getattr(settings, "OLLAMA_MODEL", "llava")
+            b64 = base64.b64encode(image_bytes).decode()
+            
+            prompt = (
+                f"You are a professional trading system named EVA Wraith. Analyze this {symbol} chart "
+                f"on {timeframe}. Do you detect any of the following technical analysis patterns: "
+                f"Double Top, Double Bottom, Head and Shoulders, Ascending Triangle, "
+                f"Descending Triangle, Flag, Engulfing, or Doji? "
+                f"Answer clearly which ones you see and briefly why."
+            )
+            
+            async with httpx.AsyncClient(timeout=45) as client:
+                resp = await client.post(
+                    f"http://{ollama_host}:{ollama_port}/api/generate",
+                    json={
+                        "model": ollama_model,
+                        "prompt": prompt,
+                        "images": [b64],
+                        "stream": False,
+                    }
+                )
+                if resp.status_code == 200:
+                    description = resp.json().get("response", "").lower()
+                    logger.info(f"Vision Analysis ({ollama_model}): {description[:100]}...")
+                    
+                    results = []
+                    # NLP text matching pour extraire les entités détectées
+                    for key, (name, direction, desc) in patterns_dict.items():
+                        if key in description:
+                            pattern = {
+                                "pattern": name,
+                                "confidence": 0.85, # Taux de certitude du LLM Multimodal
+                                "direction": direction,
+                                "description": desc,
+                                "symbol": symbol,
+                                "timeframe": timeframe,
+                                "timestamp": datetime.now().isoformat(),
+                                "raw_llm_insight": description[:250]
+                            }
+                            results.append(pattern)
+                            self.detected_patterns.append(pattern)
+                    
+                    # 2. Utilisation complémentaire de OCR pour lire les KPIs du graph
+                    if self.ocr_available:
+                        import pytesseract
+                        from PIL import Image
+                        import io
+                        try:
+                            img = Image.open(io.BytesIO(image_bytes))
+                            text = pytesseract.image_to_string(img)
+                            if "RSI" in text or "MACD" in text or "EMA" in text:
+                                logger.info(f"OCR détectée: Indicateurs présents sur l'écran pour {symbol}.")
+                        except Exception as e_ocr:
+                            logger.error(f"OCR failure during pattern detection: {e_ocr}")
+                            
+                    return results if results else [{"pattern": "None", "confidence": 0.0, "direction": "neutral", "description": "Aucun pattern clair détecté", "symbol": symbol, "timeframe": timeframe}]
+        except Exception as e:
+            logger.error(f"Vision Machine Learning Error: {e}")
+            
+        return []
 
     def get_status(self) -> dict[str, Any]:
         return {
@@ -297,9 +354,9 @@ async def get_vision_status():
 
 @app.post("/chart/analyze", tags=["Trading"])
 async def analyze_chart(request: ChartAnalysisRequest):
-    """Analyse un chart trading pour détecter des patterns."""
+    """Analyse un chart trading pour détecter des patterns via LLaVA Vision."""
     v: VisionService = app.state.vision
-    patterns = v.detect_chart_patterns(request.symbol, request.timeframe)
+    patterns = await v.detect_chart_patterns(request.symbol, request.timeframe)
     return {
         "symbol": request.symbol,
         "timeframe": request.timeframe,

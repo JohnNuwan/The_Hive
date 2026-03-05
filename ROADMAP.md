@@ -1,6 +1,6 @@
 # 🗺️ ROADMAP & PROGRESSION : THE HIVE
 
-> **Derniere mise a jour** : 01/03/2026 (Sprint 8 Module Hardening)
+> **Derniere mise a jour** : 02/03/2026 (Sprint 9 RLM Auto-Patching)
 > **Statut Global** : � PHASE BETA AVANCÉE (Tous modules opérationnels)
 
 ---
@@ -116,6 +116,48 @@
 | `eva-quant-lab` | Julia | 275 | 6 | ✅ | 🟢 Production |
 | `openclaw` | Python | ~42k | N/A | N/A | 🟢 Production |
 | `docker-compose` | YAML | 526 | N/A | N/A | ✅ Prêt |
+
+---
+
+## 🚀 ÉVOLUTION : BRIQUES DELTA (EN COURS) - ⏳ 25%
+
+### 🔧 Sprint 9 : RLM Auto-Patching (L'Auto-Codage) - ✅ COMPLÉTÉE
+- [x] **Dynamic Patching** : Le Core génère et applique des correctifs Python à chaud sur les experts via `eva-builder`.
+- [x] **Self-Benchmark** : Comparaison de performance post-patching (A/B testing de l'intelligence).
+- [x] **Rollback Intelligent** : Retour arrière automatique si les métriques `substrate` (GPU/CPU) ou `banker` (Drawdown) chutent.
+
+### 🌐 Sprint 10 : Multi-Node Swarm & HA (En cours) [/]
+- [x] **Proxmox Clustering** : Refonte `docker-compose.yml` (Overlay, Replicas 2, Manager/GPU Constraints).
+- [x] **Load Balancing Dynamique** : Configuration du resolver VIP DNS Nginx (`127.0.0.11`).
+- [ ] **Déploiement Physique** : Lancement effectif de la stack sur Proxmox avec le nouveau script `deploy_swarm`.
+
+### 🔌 Sprint 11 : "Un-Mocking" — Activation Réelle des Experts (Le Cerveau dans le Monde Réel)
+> *La phase actuelle a construit le système nerveux (gRPC, Redis) et le cortex (vLLM, MuZero). Cependant, les modules métiers sont actuellement "vides" (Mockés).*
+- [ ] **Banker (Trading)** : Connecter réellement l'API MetaTrader 5 en désactivant le mode `MOCK_MT5=true`. Lier les inférences **DreamerV3 / MuZero** directement aux passages d'ordres réels.
+- [ ] **Wraith (Vision)** : Remplacer la génération aléatoire par une vraie inférence d'image (YOLO / LLM Vision) pour l'analyse des graphiques en direct.
+- [ ] **Compliance (Juridique)** : Connexion aux vraies APIs URSSAF / Impôts pour déclarations automatisées.
+- [ ] **RWA (Sovereign)** : Connexion aux smart contracts (RealT, Centrifuge) via RPC pour lire les vrais tokens au lieu d'un JSON local.
+
+### 🤖 Sprint 12 : Generalist Agents & SIMA 2 (Scalable Instructable Multi-Agent)
+> *Déploiement d'agents de type SIMA 2 pour interagir avec des environnements complexes 3D ou UI web/applications métier.*
+- [ ] **SIMA 2 UI Action** : Intégrer un agent capable d'utiliser un ordinateur/navigateur (Web Navigation / Computer Use) pour gérer les plateformes non pourvues d'API (ex: portails bancaires archaïques, sites de gestion immobilière).
+- [ ] **Cross-Industry Application** : Permettre à The Hive d'exécuter des actions physiques réelles sur l'immobilier, l'énergie (IoT), la logistique ou les fournisseurs (via clics/clavier autonomes).
+- [ ] **DreamerV3 World Model Expansion** : Étendre le modèle du monde de la finance (prix) au monde physique (prédiction de rendement énergétique, gestion de SCPI).
+
+### 🏭 Sprint 13 : Digital Factories (Influencer & SaaS Builder)
+> *Mise en production des usines à cash décentralisées (Muse et Builder).*
+- [ ] **Influencer Factory (Muse)** : Connecter les personas (Neo Spectra, Athena, etc.) aux APIs réelles d'Instagram, Twitter/X, et TikTok pour une publication 100% autonome (au lieu du simple bridge Telegram actuel).
+- [ ] **SaaS Factory (Builder/Coder)** : Connecter le `CodeFactoryService` à des APIs de déploiement cloud (Vercel, AWS, ou instances lxc Proxmox dédiées) pour générer, builder et héberger de nouveaux micro-SaaS de manière autonome de A à Z.
+- [ ] **Monetization Engine** : Lier la comptabilité du Compliance expert aux revenus générés par les influenceuses et les SaaS.
+
+### ⚖️ Sprint 14 : Advanced Council & Diplomacy
+- [ ] **Recursive Debates** : Protocoles de débat sophistiqués (High Court) pour les décisions à haute variance avant un trade ou achat immobilier.
+- [ ] **Veto Audit** : Traçabilité complète des "Hard Veto" de la Constitution dans l'Audit Trail.
+- [ ] **Diplomatic Channels** : Protocoles de communication inter-swarm (The Hive 2.0 readiness).
+
+### 💎 Sprint 15 : Real-World Impact (RWA 2.0)
+- [ ] **IoT Deep Integration** : Monitoring en temps réel d'actifs physiques (solaire, immo) via APIs IoT.
+- [ ] **Automated Legal** : Génération de documents de conformité (PDF) par eva-compliance.
 
 ---
 *Ce document sert de référence officielle pour l'évolution de la Singularité.*

@@ -27,20 +27,17 @@ class MuZeroConfigV3:
         self.network_hidden_dims = [512, 512, 512]
 
         # ═══ Symbols (Multi-Asset) ═══
-        self.symbols = [
-            "EURUSD", "XAUUSD", "BTCUSD",
-            "US30.cash", "US500.cash", "USDJPY",
-            "GBPUSD", "USDCAD", "USDCHF",
-            "GER40.cash", "US100.cash",
-        ]
+        from shared import get_settings
+        self.symbols = get_settings().banker_symbols
 
         # ═══ Training — Aggressive (RTX 3090 Optimized) ═══
         self.batch_size = 32
         self.learning_rate = 5e-5
         self.weight_decay = 1e-4
         self.momentum = 0.9
-        self.training_steps = 100_000
-        self.checkpoint_interval = 250
+        # Sprint 16: Massive increase for global assets training
+        self.training_steps = 500_000 
+        self.checkpoint_interval = 1000
         self.num_unroll_steps = 5
         self.td_steps = 10
 

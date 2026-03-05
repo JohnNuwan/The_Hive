@@ -231,6 +231,20 @@ pub async fn get_audit_trail(State(state): State<AppState>) -> impl IntoResponse
     (StatusCode::OK, Json(serialized))
 }
 
+#[derive(Debug, Serialize)]
+pub struct RecentFeedResponse {
+    pub messages: Vec<AgentFeedMessage>,
+}
+
+/// GET /feed/recent — Retourne les derniers messages du feed (pour le polling frontend)
+pub async fn get_recent_feed() -> Json<RecentFeedResponse> {
+    // Pour l'instant on retourne une liste vide pour éviter les 404/502
+    // Le WebSocket est le canal privilégié.
+    Json(RecentFeedResponse {
+        messages: vec![],
+    })
+}
+
 /// GET /ws/feed — WebSocket pour le flux d'activité des agents
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -305,6 +319,7 @@ pub async fn start_kernel_server(
         .route("/kill-switch", get(get_kill_switch_status).post(manage_kill_switch))
         .route("/constitution", get(get_constitution))
         .route("/audit", get(get_audit_trail))
+        .route("/feed/recent", get(get_recent_feed))
         .route("/ws/feed", get(ws_handler))
         .with_state(state);
 

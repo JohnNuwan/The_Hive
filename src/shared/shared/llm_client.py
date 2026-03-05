@@ -4,18 +4,29 @@ import logging
 import os
 from typing import Optional, Dict, Any
 
+from shared.config import get_settings
+
 logger = logging.getLogger(__name__)
 
 class LLMClient:
     """
-    Client for interacting with Local LLMs (Ollama/Gemma 3).
+    Client for interacting with Local LLMs (Ollama or vLLM).
     Acts as the 'Language Center' of the Cortex.
     """
-    def __init__(self, model: str = "gemma3:4b", host: str = "http://localhost:11434"):
-        self.model = os.getenv("LLM_MODEL", model)
-        self.host = os.getenv("LLM_HOST", host)
-        self.api_url = f"{self.host}/api/generate"
-        logger.info(f"🧠 Cortex (LLM) initialized on {self.host} with model {self.model}")
+    def __init__(self, model: str = None, host: str = None):
+        self.settings = get_settings()
+        self.backend = self.settings.llm_backend
+        
+        if self.backend == "vllm":
+            self.model = model or self.settings.vllm_model
+            self.host = host or f"http://{self.settings.vllm_host}:{self.settings.vllm_port}"
+            self.api_url = f"{self.host}/v1/chat/completions"
+        else:
+            self.model = model or self.settings.ollama_model
+            self.host = host or f"http://{self.settings.ollama_host}:{self.settings.ollama_port}"
+            self.api_url = f"{self.host}/api/generate"
+            
+        logger.info(f"🧠 Cortex (LLM) initialized on {self.host} ({self.backend}) with model {self.model}")
 
     async def analyze(self, context: str, prompt: str) -> str:
         """
@@ -23,22 +34,33 @@ class LLMClient:
         """
         full_prompt = f"Context: {context}\n\nTask: {prompt}\n\nResponse:"
         
-        payload = {
-            "model": self.model,
-            "prompt": full_prompt,
-            "stream": False,
-            "options": {
+        if self.backend == "vllm":
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": full_prompt}],
                 "temperature": 0.2, # Low temp for analytical precision
-                "num_ctx": 4096
+                "max_tokens": 1024
             }
-        }
+        else:
+            payload = {
+                "model": self.model,
+                "prompt": full_prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.2,
+                    "num_ctx": 4096
+                }
+            }
 
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(self.api_url, json=payload, timeout=30.0) as resp:
                     if resp.status == 200:
                         result = await resp.json()
-                        return result.get("response", "").strip()
+                        if self.backend == "vllm":
+                            return result["choices"][0]["message"]["content"].strip()
+                        else:
+                            return result.get("response", "").strip()
                     else:
                         logger.error(f"LLM Error: {resp.status} - {await resp.text()}")
                         return "Error: LLM Unreachable"
