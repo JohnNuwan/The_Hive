@@ -106,7 +106,7 @@ class IndicatorFactory:
         return obv.fillna(0.0)
 
     @staticmethod
-    def vwap(highs: Union[List[float], pd.Series], lows: Union[List[float], pd.Series], closes: Union[List[float], pd.Series], volumes: Union[List[float], pd.Series]) -> pd.Series:
+    def vwap(highs: Union[List[float], pd.Series], lows: Union[List[float], pd.Series], closes: Union[List[float], pd.Series], volumes: Union[List[float], pd.Series], window: int = 100) -> pd.Series:
         """Simple Rolling VWAP over a session (approximate typically with rolling window if intraday without anchor)"""
         if isinstance(highs, list): highs = pd.Series(highs)
         if isinstance(lows, list): lows = pd.Series(lows)
@@ -115,7 +115,7 @@ class IndicatorFactory:
         
         typical_price = (highs + lows + closes) / 3
         # Assuming a rolling VWAP for algorithmic consistency without daily anchors
-        return (typical_price * volumes).rolling(window=100).sum() / volumes.rolling(window=100).sum()
+        return (typical_price * volumes).rolling(window=window, min_periods=1).sum() / volumes.rolling(window=window, min_periods=1).sum()
 
     @staticmethod
     def relative_volume(volumes: Union[List[float], pd.Series], period: int = 20) -> pd.Series:

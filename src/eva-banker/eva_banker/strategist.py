@@ -31,7 +31,7 @@ class Strategist:
         logger.info(f"🧠 Cortex: Analyzing Macro Context for {symbol}...")
         
         # 1. Fetch M15 Data (Macro View)
-        candles = await self.mt5.get_recent_candles(symbol, timeframe=15, count=50)
+        candles = await self.mt5.get_recent_candles(symbol, timeframe=15, count=100)
         if not candles:
             logger.warning("Cortex: No M15 data available.")
             return {"action": "NEUTRAL", "reason": "No Data"}
