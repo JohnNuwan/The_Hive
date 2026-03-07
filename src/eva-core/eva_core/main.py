@@ -1,4 +1,4 @@
-"""
+﻿"""
 Application FastAPI Principale pour l'Orchestrateur EVA (Core).
 
 Ce module est le point d'entrée de l'API REST centrale de THE HIVE.
@@ -53,9 +53,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 # MODÈLES API
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 
 
 class ChatRequest(BaseModel):
@@ -111,9 +111,9 @@ class SessionResponse(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 # LIFECYCLE
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 
 
 @asynccontextmanager
@@ -135,16 +135,16 @@ async def lifespan(app: FastAPI):
         None: Rend la main à l'application une fois l'initialisation terminée.
     """
     # Démarrage
-    logger.info("🚀 Démarrage EVA Core...")
+    logger.info("?? Démarrage EVA Core...")
     settings = get_settings()
     logger.info(f"Environnement: {settings.environment}")
 
     # Initialiser Redis
     try:
         await init_redis()
-        logger.info("✅ Redis connecté")
+        logger.info("? Redis connecté")
     except Exception as e:
-        logger.warning(f"⚠️ Redis non disponible: {e}")
+        logger.warning(f"?? Redis non disponible: {e}")
 
     # Initialiser les services
     app.state.settings = settings
@@ -175,7 +175,7 @@ async def lifespan(app: FastAPI):
     app.state.request_count = 0
     app.state.error_count = 0
 
-    logger.info("✅ EVA Core prêt avec moteur de prompts Biblio_IA et lien MQTT")
+    logger.info("? EVA Core prêt avec moteur de prompts Biblio_IA et lien MQTT")
 
     # Démarrage de l'orchestrateur de survie Phoenix
     asyncio.create_task(app.state.self_healing.start_monitoring())
@@ -183,14 +183,14 @@ async def lifespan(app: FastAPI):
     yield
 
     # Arrêt (Shutdown)
-    logger.info("🛑 Arrêt EVA Core...")
+    logger.info("?? Arrêt EVA Core...")
     redis_client = get_redis_client()
     await redis_client.disconnect()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 # APPLICATION
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 
 
 app = FastAPI(
@@ -213,9 +213,9 @@ app.add_middleware(
 app.add_middleware(InternalAuthMiddleware)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 # ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Système"])
@@ -356,7 +356,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             # Si le signal est critique, on tente d'abord gRPC
             grpc_success = False
             if intent.intent_type.value in ["DANGER", "TRADE", "ORDER", "KILL_SWITCH"]:
-                logger.info(f"⚡ tentative routage gRPC pour action critique: {intent.intent_type.value}")
+                logger.info(f"? tentative routage gRPC pour action critique: {intent.intent_type.value}")
                 grpc_success = grpc_client.send_signal(
                     source="core",
                     target=intent.target_expert,
@@ -365,7 +365,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     priority=1 # P1_CRITIQUE
                 )
                 if grpc_success:
-                    logger.info(f"✅ Signal gRPC envoyé avec succès vers {intent.target_expert}")
+                    logger.info(f"? Signal gRPC envoyé avec succès vers {intent.target_expert}")
             
             # Repli sur Redis si gRPC échoue ou n'est pas utilisé
             if not grpc_success:
@@ -380,7 +380,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             if intent.target_expert == "banker" and intent.intent_type.value in ["TRADE", "ORDER"]:
                 mqtt_client: EVAMQTTClient = app.state.mqtt
                 await mqtt_client.publish("eva/banker/requests/critical", payload, qos=2)
-                logger.info("🛡️ Critical Order mirrored on MQTT (QoS 2)")
+                logger.info("??? Critical Order mirrored on MQTT (QoS 2)")
 
             response_text = f"Consultation de l'expert {intent.target_expert} lancée."
 
@@ -525,29 +525,65 @@ async def agents_status() -> dict[str, Any]:
     """
     redis_client = get_redis_client()
     now = datetime.now().timestamp()
-    
-    # On définit les agents attendus (The Hive Council)
-    agents = ["banker", "sentinel", "shadow", "wraith", "substrate", "accountant",
-              "builder", "compliance", "sage", "researcher", "muse", "rwa", "lab"]
-    status_report = {
+
+    # Mapping des agents avec aliases de clés Redis pour compatibilité historique.
+    agent_status_keys: dict[str, list[str]] = {
+        "banker": ["eva.banker.status"],
+        "sentinel": ["eva.sentinel.status"],
+        "shadow": ["eva.shadow.status"],
+        "wraith": ["eva.wraith.status"],
+        "substrate": ["eva.substrate.status"],
+        "accountant": ["eva.accountant.status"],
+        "builder": ["eva.builder.status"],
+        "compliance": ["eva.compliance.status", "eva.keeper.status"],
+        "sage": ["eva.sage.status"],
+        "researcher": ["eva.researcher.status"],
+        "muse": ["eva.muse.status"],
+        "rwa": ["eva.rwa.status"],
+        "lab": ["eva.lab.status"],
+    }
+
+    status_report: dict[str, Any] = {
         "core": {"status": "online", "version": "0.1.0", "uptime": "active"}
     }
-    
-    # Optimisation: mget pour récupérer tous les status en un seul appel O(1)
-    agent_keys = [f"eva.{agent}.status" for agent in agents]
-    heartbeats = await redis_client.cache_mget(agent_keys)
 
-    # zip strict=False pour éviter les erreurs si la liste n'est pas alignée (ce qui ne devrait pas arriver)
-    for agent, heartbeat in zip(agents, heartbeats):
-        if not heartbeat:
-            # Fallback sur la vérification du channel PubSub (pour le banker spécifique à son heartbeat 300ms)
-            status_report[agent] = {"status": "offline"}
+    all_keys: list[str] = []
+    for keys in agent_status_keys.values():
+        for key in keys:
+            if key not in all_keys:
+                all_keys.append(key)
+
+    try:
+        if hasattr(redis_client, "cache_mget"):
+            fetched = await redis_client.cache_mget(all_keys)
+            key_to_heartbeat = {
+                key: value for key, value in zip(all_keys, fetched)
+            }
         else:
-            last_seen = heartbeat.get("ts", 0)
-            if now - last_seen < 30: # 30 secondes de grâce
-                status_report[agent] = {"status": "online", **heartbeat}
-            else:
-                status_report[agent] = {"status": "stale", "last_seen": last_seen}
+            key_to_heartbeat: dict[str, Any] = {}
+            for key in all_keys:
+                key_to_heartbeat[key] = await redis_client.cache_get(key)
+    except Exception as exc:
+        logger.warning("Redis indisponible pour agents/status: %s", exc)
+        key_to_heartbeat = {key: None for key in all_keys}
+
+    for agent, keys in agent_status_keys.items():
+        heartbeat = None
+        for key in keys:
+            candidate = key_to_heartbeat.get(key)
+            if candidate:
+                heartbeat = candidate
+                break
+
+        if not heartbeat:
+            status_report[agent] = {"status": "offline"}
+            continue
+
+        last_seen = heartbeat.get("ts", 0)
+        if now - last_seen < 30:
+            status_report[agent] = {"status": "online", **heartbeat}
+        else:
+            status_report[agent] = {"status": "stale", "last_seen": last_seen}
 
     return status_report
 
@@ -637,9 +673,9 @@ async def system_status() -> dict[str, Any]:
             }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 # ENDPOINTS MONITORING DIRECT (Docker, System Metrics, Telemetry)
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 
 
 @app.get("/system/metrics", tags=["Monitoring"])
@@ -712,9 +748,9 @@ async def get_circuit_breaker_status() -> dict[str, Any]:
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 # INTELLIGENCE AUTONOME (War Rooms + RLM)
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 
 
 class WarRoomRequest(BaseModel):
@@ -773,7 +809,7 @@ async def trigger_rlm_cycle() -> dict[str, Any]:
     """
     Déclenche un cycle unique d'auto-évolution RLM.
 
-    Workflow : Scan logs → Diagnose → Patch → Validate (Dojo) → Apply → Learn
+    Workflow : Scan logs ? Diagnose ? Patch ? Validate (Dojo) ? Apply ? Learn
     """
     try:
         from openclaw.core.rlm.evolver import RLMEvolver
@@ -839,3 +875,5 @@ async def intelligence_status() -> dict[str, Any]:
             "neo4j_connected": True,
         },
     }
+
+

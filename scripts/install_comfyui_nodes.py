@@ -3,11 +3,20 @@ Installs required ComfyUI custom nodes for video generation on Proxmox:
 - AnimateDiff-Evolved (video motion)
 - ComfyUI-VideoHelperSuite / VHS (video combining/saving)
 """
+import os
 import paramiko
+
+HOST = os.getenv("HIVE_SSH_HOST", "192.168.1.6")
+USER = os.getenv("HIVE_SSH_USER", "aza")
+PASS = os.getenv("HIVE_SSH_PASSWORD")
+SUDO_PASS = os.getenv("HIVE_SUDO_PASSWORD", PASS)
+
+if not PASS:
+    raise RuntimeError("Variable d'environnement HIVE_SSH_PASSWORD manquante.")
 
 client = paramiko.SSHClient()
 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-client.connect("192.168.1.5", username="aza", password="Kumara-42/600", timeout=10)
+client.connect(HOST, username=USER, password=PASS, timeout=10)
 
 CUSTOM_NODES_DIR = "/mnt/data/comfyui/custom_nodes"
 
@@ -36,10 +45,9 @@ fi
     if err:
         print(f"Stderr: {err}")
 
-# Restart ComfyUI container so it loads the new nodes
 print("Restarting ComfyUI container...")
-_, o, _ = client.exec_command("echo 'Kumara-42/600' | sudo -S docker restart eva_comfyui && echo OK")
+_, o, _ = client.exec_command(f"echo '{SUDO_PASS}' | sudo -S docker restart eva_comfyui && echo OK")
 print(o.read().decode())
 
 client.close()
-print("✅ ComfyUI custom nodes installed. AnimateDiff and VHS are ready.")
+print("ComfyUI custom nodes installed. AnimateDiff and VHS are ready.")

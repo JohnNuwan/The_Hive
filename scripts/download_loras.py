@@ -13,7 +13,7 @@ import tempfile
 import httpx
 from pathlib import Path
 
-CIVITAI_API_KEY = "bd21426b880b6e020418b6109f312c1d"
+CIVITAI_API_KEY = os.getenv("CIVITAI_API_KEY", "")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Curated LoRA list — (model_id, version_id, filename, niche)
@@ -35,10 +35,16 @@ NICHE_SEARCH_TERMS = [
     ("mature_milf.safetensors", "mature woman elegant realistic"),
 ]
 
-PROXMOX_HOST = "192.168.1.5"
-PROXMOX_USER = "aza"
-PROXMOX_PASS = "Kumara-42/600"
+PROXMOX_HOST = os.getenv("HIVE_SSH_HOST", "192.168.1.6")
+PROXMOX_USER = os.getenv("HIVE_SSH_USER", "aza")
+PROXMOX_PASS = os.getenv("HIVE_SSH_PASSWORD", "")
 REMOTE_LORA_DIR = "/mnt/data/comfyui/models/loras"
+
+if not CIVITAI_API_KEY:
+    raise RuntimeError("Variable d'environnement CIVITAI_API_KEY manquante.")
+
+if not PROXMOX_PASS:
+    raise RuntimeError("Variable d'environnement HIVE_SSH_PASSWORD manquante.")
 
 def search_civitai(query: str, limit: int = 1) -> list[dict]:
     """Search CivitAI for LoRA models matching a query."""

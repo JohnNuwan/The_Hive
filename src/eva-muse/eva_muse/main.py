@@ -8,6 +8,7 @@ pour la génération textuelle : copywriting, articles, scripts YouTube, etc.
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
@@ -393,8 +394,8 @@ async def generate_audio(request: AudioRequest):
     """Génère un fichier audio/musical via l'API AudioCraft sur Proxmox"""
     import httpx
     
-    # L'API AudioCraft est déployée sur le serveur Proxmox (généralement 192.168.1.5:8288)
-    audiocraft_url = "http://192.168.1.5:8288/generate"
+    # URL AudioCraft configurable pour éviter les IP codées en dur
+    audiocraft_url = os.getenv("AUDIOCRAFT_URL", "http://host.docker.internal:8288/generate")
     
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:

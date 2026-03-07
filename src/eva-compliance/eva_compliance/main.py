@@ -1,17 +1,17 @@
-"""
-EVA Compliance — Agent Juridique & Fiscal de THE HIVE.
+﻿"""
+EVA Compliance â€” Agent Juridique & Fiscal de THE HIVE.
 
-Ce module implémente le « Keeper » (Expert L) du système d'experts.
+Ce module implÃ©mente le Â« Keeper Â» (Expert L) du systÃ¨me d'experts.
 Il est responsable de :
-- L'écoute des trades profitables via Redis Pub/Sub.
+- L'Ã©coute des trades profitables via Redis Pub/Sub.
 - Le provisionnement automatique des taxes (URSSAF, 25% BNC).
-- La gestion du compte escrow (fonds bloqués pour l'État).
-- L'exposition de l'identité juridique de l'entité.
+- La gestion du compte escrow (fonds bloquÃ©s pour l'Ã‰tat).
+- L'exposition de l'identitÃ© juridique de l'entitÃ©.
 - La simulation fiscale prospective.
-- L'historique détaillé des provisions et alertes compliance.
+- L'historique dÃ©taillÃ© des provisions et alertes compliance.
 
 Architecture :
-    - Passif : écoute les événements du Banker et provisionne.
+    - Passif : Ã©coute les Ã©vÃ©nements du Banker et provisionne.
     - Aucune action de trading, uniquement comptable.
     - Persistance sur disque (escrow_ledger.json).
 """
@@ -35,28 +35,28 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# MODÈLES
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# MODÃˆLES
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 
 class TaxSimulation(BaseModel):
-    """Requête de simulation fiscale."""
+    """RequÃªte de simulation fiscale."""
     annual_revenue: float = Field(..., gt=0, description="Chiffre d'affaires annuel brut en EUR")
-    regime: str = Field(default="micro_bnc", description="Régime: micro_bnc, reel_simplifie")
-    activity: str = Field(default="trading", description="Activité: trading, saas, consulting")
+    regime: str = Field(default="micro_bnc", description="RÃ©gime: micro_bnc, reel_simplifie")
+    activity: str = Field(default="trading", description="ActivitÃ©: trading, saas, consulting")
 
 
 class ComplianceAlert(BaseModel):
-    """Alerte de conformité."""
-    severity: str = Field(description="Sévérité: info, warning, critical")
+    """Alerte de conformitÃ©."""
+    severity: str = Field(description="SÃ©vÃ©ritÃ©: info, warning, critical")
     category: str
     message: str
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
 class ProvisionEntry(BaseModel):
-    """Entrée de provision fiscale."""
+    """EntrÃ©e de provision fiscale."""
     trade_id: str | None = None
     gross_profit: float
     tax_rate: float
@@ -64,22 +64,22 @@ class ProvisionEntry(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # LIFECYCLE
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Gère le cycle de vie de l'application Compliance."""
-    logger.info("⚖️ Démarrage EVA Compliance (Le Keeper)...")
+    """GÃ¨re le cycle de vie de l'application Compliance."""
+    logger.info("âš–ï¸ DÃ©marrage EVA Compliance (Le Keeper)...")
 
-    # Redis — tolérant aux pannes au démarrage
+    # Redis â€” tolÃ©rant aux pannes au dÃ©marrage
     try:
         await init_redis()
-        logger.info("✅ Redis connecté")
+        logger.info("âœ… Redis connectÃ©")
     except Exception as e:
-        logger.warning(f"⚠️ Redis non disponible: {e}")
+        logger.warning(f"âš ï¸ Redis non disponible: {e}")
 
     # Services
     app.state.legal = LegalWrapper()
@@ -87,18 +87,18 @@ async def lifespan(app: FastAPI):
     app.state.provision_history: deque[dict[str, Any]] = deque(maxlen=500)
     app.state.compliance_alerts: deque[dict[str, Any]] = deque(maxlen=200)
 
-    # Tâches de fond
+    # TÃ¢ches de fond
     asyncio.create_task(trade_listener(app.state.tax_manager))
     asyncio.create_task(hard_heartbeat())
 
-    logger.info("✅ EVA Compliance actif et à l'écoute du Banker")
+    logger.info("âœ… EVA Compliance actif et Ã  l'Ã©coute du Banker")
     yield
-    logger.info("🛑 Arrêt EVA Compliance")
+    logger.info("ðŸ›‘ ArrÃªt EVA Compliance")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # APPLICATION
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 
 app = FastAPI(
@@ -119,19 +119,19 @@ app.add_middleware(
 app.add_middleware(InternalAuthMiddleware)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TÂCHES DE FOND
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# TÃ‚CHES DE FOND
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 
 async def trade_listener(tax_manager: TaxManager):
-    """Écoute les trades profitables et provisionne les taxes."""
+    """Ã‰coute les trades profitables et provisionne les taxes."""
     redis = get_redis_client()
 
     async def handle_trade(channel: str, message: dict):
-        logger.info(f"⚖️ Signal de profit reçu: {message}")
+        logger.info(f"âš–ï¸ Signal de profit reÃ§u: {message}")
         result = tax_manager.process_trade_result(message)
-        logger.info(f"📝 Résultat provision: {result.get('message', result.get('status'))}")
+        logger.info(f"ðŸ“ RÃ©sultat provision: {result.get('message', result.get('status'))}")
 
         # Enregistrer dans l'historique
         app.state.provision_history.append({
@@ -148,29 +148,32 @@ async def trade_listener(tax_manager: TaxManager):
 
 
 async def hard_heartbeat():
-    """Signal haute fréquence pour l'Orchestrateur Core."""
+    """Signal haute frÃ©quence pour l'Orchestrateur Core."""
     redis = get_redis_client()
     while True:
         try:
             payload = {
                 "status": "online",
                 "ts": datetime.now().timestamp(),
-                "expert": "keeper",
+                "expert": "compliance",
             }
+            # Cle canonique pour l'endpoint /agents/status du Core.
+            await redis.cache_set("eva.compliance.status", payload, ttl_seconds=10)
+            # Compatibilite transitoire avec les anciens consommateurs.
             await redis.cache_set("eva.keeper.status", payload, ttl_seconds=10)
         except Exception as e:
             logger.error(f"Heartbeat error: {e}")
         await asyncio.sleep(1.0)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 
-@app.get("/health", tags=["Système"])
+@app.get("/health", tags=["SystÃ¨me"])
 async def health():
-    """Vérifie la santé du module Compliance / Keeper."""
+    """VÃ©rifie la santÃ© du module Compliance / Keeper."""
     return {
         "status": "online",
         "service": "compliance",
@@ -181,14 +184,14 @@ async def health():
 
 @app.get("/ledger", tags=["Fiscal"])
 async def get_ledger():
-    """Récupère l'état du compte escrow (fonds bloqués pour l'URSSAF)."""
+    """RÃ©cupÃ¨re l'Ã©tat du compte escrow (fonds bloquÃ©s pour l'URSSAF)."""
     tax_manager: TaxManager = app.state.tax_manager
     return tax_manager.get_escrow_status()
 
 
 @app.get("/identity", tags=["Juridique"])
 async def get_identity():
-    """Retourne l'identité juridique publique de l'entité (SIRET, propriétaire)."""
+    """Retourne l'identitÃ© juridique publique de l'entitÃ© (SIRET, propriÃ©taire)."""
     legal: LegalWrapper = app.state.legal
     return legal.get_public_identity()
 
@@ -198,8 +201,8 @@ async def simulate_tax(simulation: TaxSimulation):
     """
     Simulation fiscale prospective.
 
-    Calcule les taxes et cotisations prévisionnelles selon le régime
-    fiscal et l'activité déclarée.
+    Calcule les taxes et cotisations prÃ©visionnelles selon le rÃ©gime
+    fiscal et l'activitÃ© dÃ©clarÃ©e.
     """
     revenue = simulation.annual_revenue
 
@@ -225,7 +228,7 @@ async def simulate_tax(simulation: TaxSimulation):
     cfe = regime["cfe_estimate"]
     taxable_income = round(revenue * regime["ir_base"], 2)
 
-    # IR simulé (barème 2026 simplifié)
+    # IR simulÃ© (barÃ¨me 2026 simplifiÃ©)
     ir = 0.0
     if taxable_income > 11294:
         ir += min(taxable_income - 11294, 28797 - 11294) * 0.11
@@ -259,7 +262,7 @@ async def simulate_tax(simulation: TaxSimulation):
 
 @app.get("/history", tags=["Fiscal"])
 async def get_provision_history(limit: int = Query(default=50, ge=1, le=500)):
-    """Historique détaillé des provisions fiscales."""
+    """Historique dÃ©taillÃ© des provisions fiscales."""
     history = list(app.state.provision_history)[-limit:]
     return {"provisions": history, "total": len(app.state.provision_history)}
 
@@ -267,7 +270,7 @@ async def get_provision_history(limit: int = Query(default=50, ge=1, le=500)):
 @app.get("/report/urssaf", tags=["Fiscal"])
 async def get_urssaf_report():
     """
-    Rapport URSSAF formaté pour déclaration trimestrielle.
+    Rapport URSSAF formatÃ© pour dÃ©claration trimestrielle.
 
     Calcule le CA par trimestre et les cotisations dues.
     """
@@ -289,8 +292,8 @@ async def get_urssaf_report():
 
 @app.get("/alerts", tags=["Compliance"])
 async def get_compliance_alerts(limit: int = Query(default=50, ge=1, le=200)):
-    """Alertes de conformité (seuils URSSAF, rappels déclaratifs)."""
-    # Génération dynamique d'alertes
+    """Alertes de conformitÃ© (seuils URSSAF, rappels dÃ©claratifs)."""
+    # GÃ©nÃ©ration dynamique d'alertes
     alerts = list(app.state.compliance_alerts)[-limit:]
 
     # Ajouter des alertes contextuelles
@@ -299,8 +302,9 @@ async def get_compliance_alerts(limit: int = Query(default=50, ge=1, le=200)):
         alerts.append({
             "severity": "warning",
             "category": "declaration",
-            "message": f"📅 Déclaration URSSAF trimestrielle à effectuer avant le 15/{now.month:02d}/{now.year}",
+            "message": f"ðŸ“… DÃ©claration URSSAF trimestrielle Ã  effectuer avant le 15/{now.month:02d}/{now.year}",
             "timestamp": now.isoformat(),
         })
 
     return {"alerts": alerts, "total": len(alerts)}
+

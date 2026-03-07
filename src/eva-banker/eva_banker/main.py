@@ -397,8 +397,6 @@ async def set_auto_trading(request: AutoTradingRequest):
     return {
         "status": status,
         "active": engine.is_active,
-        "status": status, 
-        "active": engine.is_active,
         "symbols": engine.symbols
     }
 
@@ -745,7 +743,6 @@ async def get_trading_status():
             "daily_drawdown_percent": float(risk.daily_drawdown_percent),
             "trading_allowed": risk.trading_allowed,
             "open_positions": risk.open_positions_count,
-            "anti_tilt_active": risk.anti_tilt_active,
             "anti_tilt_active": risk.anti_tilt_active,
             "news_filter_active": risk.news_filter_active,
         },

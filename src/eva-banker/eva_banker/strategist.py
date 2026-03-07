@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import json
+import os
 from datetime import datetime
 from typing import Dict, Any, Optional
 import uuid
@@ -8,6 +9,7 @@ import uuid
 from shared.redis_client import get_redis_client
 
 from shared.llm_client import LLMClient
+from shared import get_settings
 from eva_banker.services.mt5 import MT5Service
 from shared.indicators import IndicatorFactory
 
@@ -20,9 +22,40 @@ class Strategist:
     """
     def __init__(self, mt5_service: MT5Service):
         self.mt5 = mt5_service
-        self.cortex = LLMClient(model="gemma3:4b") # Default model
+        settings = get_settings()
+        self.cortex_model = self._resolve_cortex_model(settings)
+        self.cortex = LLMClient(model=self.cortex_model)
+        logger.info("Cortex bancaire initialis? avec le mod?le: %s", self.cortex_model)
         self.latest_strategy: Dict[str, Any] = {}
         self.last_update: datetime = datetime.min
+
+    @staticmethod
+    def _resolve_cortex_model(settings) -> str:
+        """
+        R?sout le mod?le LLM du Cortex selon le backend actif.
+
+        Priorit?:
+            1) `BANKER_CORTEX_MODEL` si d?fini.
+            2) Si backend vLLM: `COUNCIL_MODEL_BANKER` si compatible, sinon `vllm_model`.
+            3) Si backend Ollama: `ollama_model`.
+        """
+        direct_model = os.getenv("BANKER_CORTEX_MODEL", "").strip()
+        if direct_model:
+            return direct_model
+
+        if settings.llm_backend == "vllm":
+            candidate = os.getenv("COUNCIL_MODEL_BANKER", settings.council_model_banker).strip()
+            # Les tags de type `modele:tag` sont en g?n?ral des IDs Ollama.
+            if candidate and ":" in candidate and "/" not in candidate:
+                logger.warning(
+                    "COUNCIL_MODEL_BANKER=%s ressemble ? un mod?le Ollama; fallback vers vLLM_MODEL=%s",
+                    candidate,
+                    settings.vllm_model,
+                )
+                return settings.vllm_model
+            return candidate or settings.vllm_model
+
+        return settings.ollama_model
 
     async def analyze_market_context(self, symbol: str) -> Dict[str, Any]:
         """

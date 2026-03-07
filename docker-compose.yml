@@ -4,7 +4,7 @@ services:
     image: redis:7-alpine
     ports:
       - 6379:6379
-    command: redis-server --requirepass devpassword --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: redis-server --requirepass ${REDIS_PASSWORD:-devpassword} --maxmemory 256mb --maxmemory-policy allkeys-lru
     networks:
       - hive-net
     healthcheck:
@@ -12,7 +12,7 @@ services:
         - CMD
         - redis-cli
         - -a
-        - devpassword
+        - ${REDIS_PASSWORD:-devpassword}
         - ping
       interval: 10s
       timeout: 5s
@@ -54,7 +54,7 @@ services:
       - 7474:7474
       - 7687:7687
     environment:
-      - NEO4J_AUTH=neo4j/devpassword
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-devpassword}
       - NEO4J_PLUGINS=["apoc"]
     networks:
       - hive-net
@@ -82,7 +82,7 @@ services:
       retries: 5
     environment:
       - POSTGRES_USER=eva
-      - POSTGRES_PASSWORD=devpassword
+      - POSTGRES_PASSWORD=${TIMESCALE_PASSWORD:-devpassword}
       - POSTGRES_DB=thehive
       - PGHOST=/tmp
     command: postgres -c unix_socket_directories='/tmp'
@@ -120,11 +120,21 @@ services:
       restart_policy:
         condition: on-failure
   vllm:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.5.4
     ports:
       - "8000:8000"
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --model
+      - ${VLLM_MODEL_NAME:-Qwen/Qwen2.5-1.5B-Instruct}
+      - --dtype
+      - half
+      - --gpu-memory-utilization
+      - "0.92"
     environment:
-      - MODEL_NAME=google/gemma-3-4b-it
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
     deploy:
       resources:
@@ -182,16 +192,26 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - REDIS_HOST=host.docker.internal
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=devpassword
-      - QDRANT_HOST=host.docker.internal
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - QDRANT_HOST=${HIVE_QDRANT_HOST:-qdrant}
       - QDRANT_PORT=6333
-      - NEO4J_URI=bolt://host.docker.internal:7687
-      - LLM_BACKEND=vllm
+      - NEO4J_URI=bolt://${HIVE_NEO4J_HOST:-neo4j}:7687
+      - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
+      - VLLM_HOST=${HIVE_VLLM_HOST:-vllm}
+      - VLLM_PORT=${HIVE_VLLM_PORT:-8000}
+      - COUNCIL_VLLM_HOST=${HIVE_VLLM_HOST:-vllm}
+      - COUNCIL_VLLM_PORT=${HIVE_VLLM_PORT:-8000}
+      - COUNCIL_MODEL_GENERAL=${COUNCIL_MODEL_GENERAL:-Qwen/Qwen2.5-1.5B-Instruct}
+      - COUNCIL_MODEL_RESEARCH=${COUNCIL_MODEL_RESEARCH:-Qwen/Qwen2.5-1.5B-Instruct}
+      - COUNCIL_MODEL_BANKER=${COUNCIL_MODEL_BANKER:-Qwen/Qwen2.5-1.5B-Instruct}
+      - COUNCIL_MODEL_CODE=${COUNCIL_MODEL_CODE:-Qwen/Qwen2.5-1.5B-Instruct}
       - ENVIRONMENT=development
-      - OLLAMA_HOST=host.docker.internal
+      - OLLAMA_HOST=${HIVE_OLLAMA_HOST:-host.docker.internal}
       - OLLAMA_PORT=11434
+      - BANKER_API_HOST=${BANKER_API_HOST:-banker}
+      - BANKER_API_PORT=${BANKER_API_PORT:-8100}
     deploy:
       #  GPU removed: core uses vLLM via REST API, not direct CUDA.
       # vLLM needs exclusive GPU access to avoid GetDeviceCount() failures.
@@ -209,12 +229,12 @@ services:
     extra_hosts:
       - host.docker.internal:host-gateway
     environment:
-      - REDIS_HOST=host.docker.internal
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=devpassword
-      - REDIS_URL=redis://:devpassword@host.docker.internal:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-devpassword}@${HIVE_REDIS_HOST:-redis}:6379
       #  MQTT via host IP (Mosquitto Swarm VIP unreachable from overlay containers)
-      - MQTT_HOST=host.docker.internal
+      - MQTT_HOST=${HIVE_MQTT_HOST:-mosquitto}
     volumes:
       - black_box:/mnt/black_box
       - ./data/tablet:/mnt/tablet:ro
@@ -232,9 +252,9 @@ services:
       - 9090:9090
       - 9091:9091
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=devpassword
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
     networks:
       - hive-net
     deploy:
@@ -248,10 +268,10 @@ services:
     ports:
       - 8200:8200
     environment:
-      - REDIS_HOST=host.docker.internal
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=devpassword
-      - LLM_BACKEND=vllm
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:
@@ -269,16 +289,39 @@ services:
     ports:
       - 8300:8300
     environment:
-      - REDIS_HOST=host.docker.internal
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=devpassword
-      - LLM_BACKEND=vllm
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:
       - ./data/tablet:/mnt/tablet:ro
     networks:
       - hive-net
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
+  banker:
+    build:
+      context: .
+      dockerfile: src/eva-banker/Dockerfile
+    ports:
+      - 8100:8100
+    profiles:
+      - with-banker
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    environment:
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - MOCK_MT5=${MOCK_MT5:-true}
+      - PAPER_TRADING=${PAPER_TRADING:-true}
+    networks:
+      - hive-net
+    restart: unless-stopped
     deploy:
       replicas: 2
       restart_policy:
@@ -292,12 +335,16 @@ services:
     extra_hosts:
       - host.docker.internal:host-gateway
     environment:
-      - REDIS_HOST=host.docker.internal
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=devpassword
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
     networks:
       - hive-net
-    deploy: {}
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
   accountant:
     build:
       context: .
@@ -307,9 +354,9 @@ services:
     extra_hosts:
       - host.docker.internal:host-gateway
     environment:
-      - REDIS_HOST=host.docker.internal
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=devpassword
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
     networks:
       - hive-net
     deploy:
@@ -323,8 +370,10 @@ services:
     ports:
       - 8600:8600
     environment:
-      - REDIS_HOST=hive-infra-redis
-      - LLM_BACKEND=vllm
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
     networks:
       - hive-net
     deploy:
@@ -364,8 +413,8 @@ services:
     extra_hosts:
       - host.docker.internal:host-gateway
     environment:
-      - REDIS_HOST=host.docker.internal
-      - REDIS_PASSWORD=devpassword
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
     networks:
       - hive-net
     deploy:
@@ -379,10 +428,10 @@ services:
     ports:
       - 8900:8900
     environment:
-      - REDIS_HOST=host.docker.internal
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=devpassword
-      - LLM_BACKEND=vllm
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:
@@ -398,14 +447,18 @@ services:
     ports:
       - 9000:9000
     environment:
-      - REDIS_HOST=host.docker.internal
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=devpassword
-      - LLM_BACKEND=vllm
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
+      - EVA_BUILDER_LLM_BACKEND=${EVA_BUILDER_LLM_BACKEND:-vllm}
+      - EVA_BUILDER_LLM_URL=${EVA_BUILDER_LLM_URL:-http://vllm:8000/v1/chat/completions}
+      - EVA_BUILDER_LLM_MODEL=${EVA_BUILDER_LLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:
       - hive-net
+    restart: unless-stopped
     deploy:
       replicas: 2
       restart_policy:
@@ -417,17 +470,17 @@ services:
     ports:
       - 9100:9100
     environment:
-      - REDIS_HOST=host.docker.internal
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=devpassword
-      - LLM_BACKEND=vllm
-      - COMFYUI_HOST=host.docker.internal
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
+      - COMFYUI_HOST=${HIVE_COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=8188
-      - TELEGRAM_BOT_TOKEN=6660646226:AAEwerIp1t_i5mToXseSFeic3ryrzTXmF-U
-      - TELEGRAM_CHAT_ID=-1003325793788
-      - TELEGRAM_TOPIC_ID=22
-      - CIVITAI_API_KEY=bd21426b880b6e020418b6109f312c1d
-      - CORP_OWNER=Azazel
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - TELEGRAM_TOPIC_ID=${TELEGRAM_TOPIC_ID:-}
+      - CIVITAI_API_KEY=${CIVITAI_API_KEY:-}
+      - CORP_OWNER=${CORP_OWNER:-Azazel}
       - ENVIRONMENT=production
     extra_hosts:
       - host.docker.internal:host-gateway
@@ -444,10 +497,10 @@ services:
     ports:
       - 9200:9200
     environment:
-      - REDIS_HOST=host.docker.internal
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=devpassword
-      - LLM_BACKEND=vllm
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:
@@ -463,9 +516,9 @@ services:
     ports:
       - 9300:9300
     environment:
-      - REDIS_HOST=host.docker.internal
-      - REDIS_PASSWORD=devpassword
-      - LLM_BACKEND=vllm
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:
@@ -481,9 +534,9 @@ services:
     ports:
       - 9400:9400
     environment:
-      - REDIS_HOST=host.docker.internal
-      - REDIS_PASSWORD=devpassword
-      - LLM_BACKEND=vllm
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:
@@ -498,7 +551,6 @@ services:
     ports:
       - 3030:80
     extra_hosts:
-      - banker:host-gateway
       - host.docker.internal:host-gateway
     networks:
       - hive-net
@@ -545,7 +597,7 @@ services:
     ports:
       - 3000:3000
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
     networks:
       - hive-net
     deploy:
@@ -565,11 +617,11 @@ services:
       dockerfile: src/eva-lab/Dockerfile.trainer
     image: thehive/eva-trainer:latest
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PASSWORD=devpassword
-      - MT5_LOGIN=${MT5_LOGIN:-1512664750}
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - MT5_LOGIN=${MT5_LOGIN:-}
       - MT5_SERVER=${MT5_SERVER:-FTMO-Demo}
-      - MT5_PASSWORD=${MT5_PASSWORD:-changeme}
+      - MT5_PASSWORD=${MT5_PASSWORD:-}
       - CUDA_VISIBLE_DEVICES=0
       - XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
     volumes:
@@ -606,3 +658,6 @@ volumes:
   mosquitto_data: null
   neo4j_data: null
   trainer_models: {}
+
+
+

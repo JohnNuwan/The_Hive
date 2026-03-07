@@ -1,9 +1,9 @@
 """
-Search Service — Moteur de recherche et synthèse.
+Search Service â€” Moteur de recherche et synthÃ¨se.
 
-Fournit les fonctionnalités de base de recherche :
+Fournit les fonctionnalitÃ©s de base de recherche :
 - Recherche web via DuckDuckGo HTML.
-- Synthèse des résultats via LLM.
+- SynthÃ¨se des rÃ©sultats via LLM.
 - Veille de tendances via RSS.
 """
 
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class ResearchQuery(BaseModel):
-    """Requête de recherche."""
+    """RequÃªte de recherche."""
     query: str = Field(..., min_length=3)
     domain: str = Field(default="general", description="Domain: finance, tech, science, crypto, general")
     depth: str = Field(default="quick", description="Depth: quick, deep")
@@ -51,10 +51,10 @@ class ResearchService:
     def __init__(self):
         self.settings = get_settings()
         self.search_count = 0
-        logger.info("🔬 ResearchService initialisé")
+        logger.info("ðŸ”¬ ResearchService initialisÃ©")
 
     async def search(self, request: ResearchQuery) -> dict[str, Any]:
-        """Effectue une recherche et synthétise les résultats."""
+        """Effectue une recherche et synthÃ©tise les rÃ©sultats."""
         import time
         start = time.time()
         self.search_count += 1
@@ -99,42 +99,77 @@ class ResearchService:
                                 "relevance_score": round(1.0 - (i * 0.1), 2),
                             })
         except Exception as e:
-            logger.warning(f"Web search failed: {e}")
+            logger.warning(f"Echec de recherche web: {e}")
         return results
 
     async def _synthesize(self, query: str, results: list[dict[str, Any]]) -> str:
-        """Synthétise les résultats via LLM."""
+        """Synthesise les resultats via le backend LLM configure."""
         if not results:
-            return "Aucun résultat trouvé."
+            return "Aucun resultat trouve."
+
+        summaries = "\n".join(
+            f"- {r.get('title', 'N/A')}: {r.get('summary', 'N/A')}"
+            for r in results[:5]
+        )
+        prompt = (
+            f"Synthese de recherche pour '{query}'.\n\n"
+            f"Resultats:\n{summaries}\n\n"
+            "Produis une synthese concise en francais (3-4 phrases) avec les idees cles."
+        )
+
         try:
-            settings = self.settings
-            ollama_host = getattr(settings, "OLLAMA_HOST", "localhost")
-            ollama_port = getattr(settings, "OLLAMA_PORT", 11434)
-            model = getattr(settings, "DEFAULT_EXPERT_MODEL", "gemma3:4b")
+            llm_backend = getattr(self.settings, "llm_backend", "vllm").strip().lower()
 
-            summaries = "\n".join(
-                f"- {r.get('title', 'N/A')}: {r.get('summary', 'N/A')}"
-                for r in results[:5]
-            )
-            prompt = f"Synthesize these search results for the query '{query}':\n{summaries}\n\nProvide a concise synthesis in 3-4 sentences."
-
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"http://{ollama_host}:{ollama_port}/api/generate",
-                    json={"model": model, "prompt": prompt, "stream": False},
+            if llm_backend == "vllm":
+                host = getattr(self.settings, "vllm_host", "localhost")
+                port = getattr(self.settings, "vllm_port", 8000)
+                model = getattr(
+                    self.settings,
+                    "council_model_research",
+                    getattr(self.settings, "vllm_model", "Qwen/Qwen2.5-1.5B-Instruct"),
                 )
-                if resp.status_code == 200:
-                    return resp.json().get("response", "Synthèse non disponible.")
-        except Exception as e:
-            logger.debug(f"LLM synthesis failed: {e}")
-        return "Synthèse automatique non disponible (LLM offline)."
+
+                payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.2,
+                    "max_tokens": 384,
+                }
+                endpoint = f"http://{host}:{port}/v1/chat/completions"
+
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(endpoint, json=payload)
+                    if resp.status_code == 200:
+                        choices = resp.json().get("choices", [])
+                        if choices:
+                            content = choices[0].get("message", {}).get("content", "")
+                            return content.strip() or "Synthese non disponible."
+            else:
+                host = getattr(self.settings, "ollama_host", "localhost")
+                port = getattr(self.settings, "ollama_port", 11434)
+                model = getattr(self.settings, "ollama_model", "gemma3:4b")
+                endpoint = f"http://{host}:{port}/api/generate"
+
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(
+                        endpoint,
+                        json={"model": model, "prompt": prompt, "stream": False},
+                    )
+                    if resp.status_code == 200:
+                        return resp.json().get("response", "Synthese non disponible.")
+        except Exception as exc:
+            logger.debug("Echec synthese LLM: %s", exc)
+
+        return "Synthese automatique non disponible (LLM indisponible)."
 
     async def get_trends(self, domain: str = "tech") -> dict[str, Any]:
-        """Récupère les tendances actuelles pour un domaine."""
+        """RÃ©cupÃ¨re les tendances actuelles pour un domaine."""
         sources = self.RSS_SOURCES.get(domain, self.RSS_SOURCES.get("tech", []))
         return {
             "domain": domain,
             "sources": sources,
-            "message": f"Veille {domain} — {len(sources)} sources surveillées",
+            "message": f"Veille {domain} â€” {len(sources)} sources surveillÃ©es",
             "timestamp": datetime.now().isoformat(),
         }
+
+

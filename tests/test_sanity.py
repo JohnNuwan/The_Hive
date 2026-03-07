@@ -11,7 +11,7 @@ import httpx
 import json
 from datetime import datetime
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.1.5"
+HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.1.6"
 
 SERVICES = {
     "core":        {"port": 8080, "health": "/health"},

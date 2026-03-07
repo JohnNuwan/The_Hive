@@ -4,10 +4,14 @@
 # RTX 3090 FE — Pause vLLM before training, resume after
 # =============================================================================
 
-LOG_FILE="/var/log/hive_training.log"
+LOG_FILE="/home/aza/The_Hive/hive_training.log"
 PROJECT_DIR="/home/aza/The_Hive"
 IMAGE="thehive/eva-trainer:latest"
-PASS="Kumara-42/600"
+PASS="${HIVE_SUDO_PASSWORD:-${HIVE_SSH_PASSWORD:-}}"
+if [ -z "$PASS" ]; then
+  echo "ERREUR: définir HIVE_SSH_PASSWORD (et optionnel HIVE_SUDO_PASSWORD)." >&2
+  exit 1
+fi
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
 

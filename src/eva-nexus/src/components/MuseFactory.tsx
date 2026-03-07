@@ -24,7 +24,7 @@ type ContentType = 'image' | 'video';
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function MuseFactory() {
-    const MUSE_API = 'http://192.168.1.5:9100';
+    const MUSE_API = 'http://192.168.1.6:9100';
 
     const [niches, setNiches] = useState<Niche[]>([]);
     const [trendScores, setTrendScores] = useState<Record<string, number>>({});
