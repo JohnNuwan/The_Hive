@@ -32,6 +32,7 @@ interface LogEntry {
 }
 
 export default function Dashboard() {
+    const grafanaBaseUrl = `${window.location.protocol}//${window.location.hostname}:3000`
     const [nodes, setNodes] = useState<NodeHealth[]>([])
     const [killSwitch, setKillSwitch] = useState<KillSwitchStatus>({ is_active: false, message: 'LOADING...' })
     const [nemesis, setNemesis] = useState<NemesisStatus>({ total_defeats: 0, known_nemeses: {}, trading_blocked: false, blocked_until: null })
@@ -291,7 +292,7 @@ export default function Dashboard() {
                     <div className="aspect-video bg-black/40 border border-matrix/10 rounded flex flex-col items-center justify-center space-y-3">
                         <span className="text-[10px] text-matrix/60">LIVE LOKI FEED AGGREGATOR</span>
                         <a
-                            href="http://localhost:3000/explore?orgId=1&left=%5B%22now-1h%22,%22now%22,%22Loki%22,%7B%22expr%22:%22%7Bcontainer%3D~%5C%22hive-.*%5C%22%7D%22%7D%5D"
+                            href={`${grafanaBaseUrl}/explore?orgId=1&left=%5B%22now-1h%22,%22now%22,%22Loki%22,%7B%22expr%22:%22%7Bcontainer%3D~%5C%22hive-.*%5C%22%7D%22%7D%5D`}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="cyber-btn text-[9px] px-4 py-1.5"
@@ -305,7 +306,7 @@ export default function Dashboard() {
                     <div className="aspect-video bg-black/40 border border-matrix/10 rounded flex flex-col items-center justify-center space-y-3">
                         <span className="text-[10px] text-matrix/60">NERVOUS SYSTEM THROUGHPUT</span>
                         <a
-                            href="http://localhost:3000/dashboards"
+                            href={`${grafanaBaseUrl}/dashboards`}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="cyber-btn text-[9px] px-4 py-1.5"

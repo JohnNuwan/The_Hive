@@ -1,9 +1,9 @@
-"""
-EVA Lab - Laboratoire d'Expérimentation & Backtesting
-Expert Lab: Arena de combat, backtesting, évolution génétique, World Model.
+﻿"""
+EVA Lab - Laboratoire d'ExpÃ©rimentation & Backtesting
+Expert Lab: Arena de combat, backtesting, Ã©volution gÃ©nÃ©tique, World Model.
 
 Sprint 5 : Shadow Learning + Feature Flag DreamerV3.
-C'est ici que les stratégies naissent, combattent et évoluent.
+C'est ici que les stratÃ©gies naissent, combattent et Ã©voluent.
 """
 
 import asyncio
@@ -24,24 +24,25 @@ from eva_lab.dreamer_model import DreamerModel
 from eva_lab.genetic_updater import GeneticUpdater
 from eva_lab.shadow_learning import ShadowLearningService
 from eva_lab.dreamer_gate import DreamerGate
+from eva_lab.training_utils import get_gnn_model_kwargs
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# MODÈLES API
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# MODÃˆLES API
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class BacktestRequest(BaseModel):
     """
-    Paramètres pour lancer une simulation de backtesting.
+    ParamÃ¨tres pour lancer une simulation de backtesting.
 
     Attributes:
-        strategy_name (str): Nom de la stratégie à tester.
+        strategy_name (str): Nom de la stratÃ©gie Ã  tester.
         symbol (str): Actif financier (ex: XAUUSD).
-        period_months (int): Durée de l'historique en mois.
-        initial_balance (float): Capital de départ simulé.
+        period_months (int): DurÃ©e de l'historique en mois.
+        initial_balance (float): Capital de dÃ©part simulÃ©.
     """
     strategy_name: str = Field(..., min_length=1)
     symbol: str = Field(default="XAUUSD")
@@ -51,27 +52,28 @@ class BacktestRequest(BaseModel):
 
 class ArenaRequest(BaseModel):
     """
-    Requête de duel algorithmique dans l'Arena.
+    RequÃªte de duel algorithmique dans l'Arena.
 
     Attributes:
-        challenger_id (str): ID de la stratégie défiante.
-        champion_id (str): ID de la stratégie en place (défaut: PROD).
+        challenger_id (str): ID de la stratÃ©gie dÃ©fiante.
+        champion_id (str): ID de la stratÃ©gie en place (dÃ©faut: PROD).
     """
     challenger_id: str
     champion_id: str = "CURRENT_PROD"
+    horizon: str = "intraday"
 
 
 class TradeRecordRequest(BaseModel):
     """
-    Requête d'enregistrement d'un trade réel ou simulé.
+    RequÃªte d'enregistrement d'un trade rÃ©el ou simulÃ©.
 
-    Utilisé pour le Shadow Learning (entraînement passif).
+    UtilisÃ© pour le Shadow Learning (entraÃ®nement passif).
 
     Attributes:
-        symbol (str): Actif concerné.
+        symbol (str): Actif concernÃ©.
         action (str): BUY ou SELL.
-        pnl (float): Profit ou perte réalisé.
-        done (bool): Si le trade clôture une séquence (épisode).
+        pnl (float): Profit ou perte rÃ©alisÃ©.
+        done (bool): Si le trade clÃ´ture une sÃ©quence (Ã©pisode).
     """
     symbol: str = "XAUUSD"
     action: str = "BUY"
@@ -82,71 +84,71 @@ class TradeRecordRequest(BaseModel):
     done: bool = False
 
 class GNNPredictRequest(BaseModel):
-    """Requête d'inférence pour le GNN (Multi-Asset correlation)"""
+    """RequÃªte d'infÃ©rence pour le GNN (Multi-Asset correlation)"""
     assets_data: dict[str, list[list[float]]]  # { "XAUUSD": [[...features...], ...], ... }
 
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # LIFECYCLE
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Cycle de vie du Lab — avec Indicateurs de Fonctionnalité (Feature Flags).
+    Cycle de vie du Lab â€” avec Indicateurs de FonctionnalitÃ© (Feature Flags).
 
     Args:
         app (FastAPI): Instance de l'application.
 
     Yields:
-        None: Rend le contrôle après initialisation.
+        None: Rend le contrÃ´le aprÃ¨s initialisation.
     """
     settings = get_settings()
-    logger.info("🧪 Démarrage EVA Lab (Le Colisée)...")
+    logger.info("ðŸ§ª DÃ©marrage EVA Lab (Le ColisÃ©e)...")
 
     try:
         await init_redis()
-        logger.info("✅ Redis connecté")
+        logger.info("âœ… Redis connectÃ©")
     except Exception as e:
-        logger.warning(f"⚠️ Redis non disponible: {e}")
+        logger.warning(f"âš ï¸ Redis non disponible: {e}")
 
-    # ─── Modules classiques ───
+    # â”€â”€â”€ Modules classiques â”€â”€â”€
     app.state.arena = Arena()
     app.state.backtester = Backtester()
     app.state.dreamer = DreamerModel()
     app.state.genetic = GeneticUpdater()
 
-    # ─── Sprint 5 : Feature Flags ───
+    # â”€â”€â”€ Sprint 5 : Feature Flags â”€â”€â”€
     app.state.dreamer_gate = DreamerGate(
         enable_training=settings.enable_dreamer_training,
     )
 
-    # ─── Sprint 5 : Shadow Learning (Apprentissage Fantôme) ───
+    # â”€â”€â”€ Sprint 5 : Shadow Learning (Apprentissage FantÃ´me) â”€â”€â”€
     if settings.enable_shadow_learning:
         app.state.shadow = ShadowLearningService(
             data_dir="data/shadow_learning",
             buffer_size=settings.shadow_learning_buffer_size,
             dreamer_enabled=settings.enable_dreamer_training,
         )
-        # Lancer le flush automatique en tâche de fond
+        # Lancer le flush automatique en tÃ¢che de fond
         asyncio.create_task(
             app.state.shadow.start_auto_flush(
                 interval_seconds=settings.shadow_learning_flush_interval
             )
         )
-        logger.info("📡 Shadow Learning actif — collecte passive DreamerV3")
+        logger.info("ðŸ“¡ Shadow Learning actif â€” collecte passive DreamerV3")
     else:
         app.state.shadow = None
-        logger.info("💤 Shadow Learning désactivé")
+        logger.info("ðŸ’¤ Shadow Learning dÃ©sactivÃ©")
 
-    # ─── GNN / Hydra (MTF Omni-Architecture) ───
+    # â”€â”€â”€ GNN / Hydra (MTF Omni-Architecture) â”€â”€â”€
     try:
         from eva_lab.models.gnn_model import TFTGNNModel
         import torch
         import os
         # MTF Architecture: asset_dim=20 features, temporal_dim=32, hidden_dim=64, 3 classes
-        app.state.gnn_model = TFTGNNModel(asset_dim=20, temporal_dim=32, hidden_dim=64, num_classes=3)
+        app.state.gnn_model = TFTGNNModel(**get_gnn_model_kwargs())
         
         # Load weights if trained
         model_path = "data/models/gnn_master.pth"
@@ -154,34 +156,34 @@ async def lifespan(app: FastAPI):
             try:
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 app.state.gnn_model.load_state_dict(torch.load(model_path, map_location=device))
-                logger.info("🧠 MTF-GNN Loaded (Trained Weights: Scalp + Intraday + Swing).")
+                logger.info("ðŸ§  MTF-GNN Loaded (Trained Weights: Scalp + Intraday + Swing).")
             except Exception as w_e:
                 logger.warning(f"Failed to load GNN weights, running randomly initialized: {w_e}")
         else:
-            logger.info("🧠 MTF-GNN initialized (Untrained - run train_gnn.py to evolve).")
+            logger.info("ðŸ§  MTF-GNN initialized (Untrained - run train_gnn.py to evolve).")
             
         app.state.gnn_model.eval()
     except Exception as e:
-        logger.warning(f"⚠️ Erreur chargement GNN (Stub Mode probable): {e}")
+        logger.warning(f"âš ï¸ Erreur chargement GNN (Stub Mode probable): {e}")
         app.state.gnn_model = None
 
     asyncio.create_task(hard_heartbeat())
     asyncio.create_task(_nightly_training_loop())
 
-    logger.info("✅ EVA Lab opérationnel — les stratégies peuvent combattre")
+    logger.info("âœ… EVA Lab opÃ©rationnel â€” les stratÃ©gies peuvent combattre")
     yield
     
-    # Flush final avant arrêt
+    # Flush final avant arrÃªt
     if app.state.shadow:
         count = app.state.shadow.manual_flush()
-        logger.info(f"💾 Shadow Learning: {count} transitions saved sur arrêt")
+        logger.info(f"ðŸ’¾ Shadow Learning: {count} transitions saved sur arrÃªt")
     
-    logger.info("🛑 Arrêt EVA Lab")
+    logger.info("ðŸ›‘ ArrÃªt EVA Lab")
 
 
 async def hard_heartbeat():
     """
-    Envoie un signal de vie périodique (Heartbeat) à Redis.
+    Envoie un signal de vie pÃ©riodique (Heartbeat) Ã  Redis.
     """
     redis = get_redis_client()
     while True:
@@ -194,9 +196,9 @@ async def hard_heartbeat():
 
 async def _nightly_training_loop():
     """
-    Déclenche l'entraînement des modèles tous les soirs à 23h40.
+    DÃ©clenche l'entraÃ®nement des modÃ¨les tous les soirs Ã  23h40.
     """
-    logger.info("🌙 Planificateur d'entraînement nocturne activé (Cible: 23h40).")
+    logger.info("ðŸŒ™ Planificateur d'entraÃ®nement nocturne activÃ© (Cible: 23h40).")
     while True:
         try:
             now = datetime.now()
@@ -207,15 +209,15 @@ async def _nightly_training_loop():
                 
             wait_seconds = (target - now).total_seconds()
             
-            # Attendre jusqu'à 23h40
+            # Attendre jusqu'Ã  23h40
             await asyncio.sleep(wait_seconds)
             
-            logger.info("🚀 Début de l'entraînement nocturne automatique (23h40)!")
+            logger.info("ðŸš€ DÃ©but de l'entraÃ®nement nocturne automatique (23h40)!")
             import os
             
-            script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "train_global_models.py")
+            script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "train_nightly_stack.py")
             if os.path.exists(script_path):
-                # Utiliser le shell pour hériter de l'environnement venv
+                # Utiliser le shell pour hÃ©riter de l'environnement venv
                 process = await asyncio.create_subprocess_shell(
                     f"python {script_path}",
                     stdout=asyncio.subprocess.PIPE,
@@ -224,31 +226,31 @@ async def _nightly_training_loop():
                 stdout, stderr = await process.communicate()
                 
                 if process.returncode == 0:
-                    logger.info("✅ Entraînement nocturne terminé avec succès.")
+                    logger.info("âœ… EntraÃ®nement nocturne terminÃ© avec succÃ¨s.")
                     redis = get_redis_client()
                     await redis.publish("eva.lab.events", {"action": "TRAINING_COMPLETE", "timestamp": datetime.now().isoformat()})
                 else:
-                    logger.error(f"❌ Échec de l'entraînement nocturne ({process.returncode}): {stderr.decode()}")
+                    logger.error(f"âŒ Ã‰chec de l'entraÃ®nement nocturne ({process.returncode}): {stderr.decode()}")
             else:
-                logger.error(f"❌ Script d'entraînement introuvable: {script_path}")
+                logger.error(f"âŒ Script d'entraÃ®nement introuvable: {script_path}")
                 
-            # Eviter de relancer immédiatement la même minute
+            # Eviter de relancer immÃ©diatement la mÃªme minute
             await asyncio.sleep(60)
             
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error(f"⚠️ Erreur dans le planificateur nocturne: {e}")
+            logger.error(f"âš ï¸ Erreur dans le planificateur nocturne: {e}")
             await asyncio.sleep(3600)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # APPLICATION
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 app = FastAPI(
     title="EVA Lab API",
-    description="Laboratoire d'Expérimentation - THE HIVE (Sprint 5: Shadow Learning)",
+    description="Laboratoire d'ExpÃ©rimentation - THE HIVE (Sprint 5: Shadow Learning)",
     version="0.2.0",
     lifespan=lifespan,
 )
@@ -262,14 +264,14 @@ app.add_middleware(
 )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @app.get("/health")
 async def health():
     """
-    Endpoint de santé basique.
+    Endpoint de santÃ© basique.
 
     Returns:
         dict: Statut online.
@@ -280,13 +282,13 @@ async def health():
 @app.post("/backtest")
 async def run_backtest(request: BacktestRequest):
     """
-    Lance un backtest complet sur des données historiques.
+    Lance un backtest complet sur des donnÃ©es historiques.
 
     Args:
         request (BacktestRequest): Configuration du backtest.
 
     Returns:
-        dict: Résultats détaillés (P&L, Drawdown, Trades).
+        dict: RÃ©sultats dÃ©taillÃ©s (P&L, Drawdown, Trades).
     """
     backtester: Backtester = app.state.backtester
     result = await backtester.run_backtest(
@@ -301,10 +303,10 @@ async def run_backtest(request: BacktestRequest):
 @app.get("/backtest/history")
 async def get_backtest_history():
     """
-    Récupère l'historique des backtests exécutés.
+    RÃ©cupÃ¨re l'historique des backtests exÃ©cutÃ©s.
 
     Returns:
-        dict: Liste des résultats passés.
+        dict: Liste des rÃ©sultats passÃ©s.
     """
     backtester: Backtester = app.state.backtester
     return {"backtests": backtester.get_history()}
@@ -313,16 +315,16 @@ async def get_backtest_history():
 @app.post("/arena/battle")
 async def arena_battle(request: ArenaRequest):
     """
-    Lance un combat de stratégies (Genetic Algorithm).
+    Lance un combat de stratÃ©gies (Genetic Algorithm).
 
     Args:
         request (ArenaRequest): IDs des combattants.
 
     Returns:
-        dict: Résultat du combat et nouveau score ELO.
+        dict: RÃ©sultat du combat et nouveau score ELO.
     """
     arena: Arena = app.state.arena
-    return arena.battle(request.challenger_id, request.champion_id)
+    return arena.battle(request.challenger_id, request.champion_id, request.horizon)
 
 
 @app.get("/arena/history")
@@ -331,7 +333,7 @@ async def arena_history():
     Historique des combats de l'Arena.
 
     Returns:
-        dict: Liste des duels passés.
+        dict: Liste des duels passÃ©s.
     """
     arena: Arena = app.state.arena
     return {"battles": arena.history}
@@ -340,10 +342,10 @@ async def arena_history():
 @app.get("/insights")
 async def get_insights():
     """
-    Obtient des prédictions de marché via le World Model (DreamerV3).
+    Obtient des prÃ©dictions de marchÃ© via le World Model (DreamerV3).
 
     Returns:
-        dict: Prédictions probabilistes (Haiku/JAX).
+        dict: PrÃ©dictions probabilistes (Haiku/JAX).
     """
     dreamer: DreamerModel = app.state.dreamer
     return dreamer.predict_future_market()
@@ -352,28 +354,28 @@ async def get_insights():
 @app.post("/evolve")
 async def trigger_evolution():
     """
-    Déclenche manuellement la boucle d'évolution génétique.
+    DÃ©clenche manuellement la boucle d'Ã©volution gÃ©nÃ©tique.
 
     Returns:
-        dict: Statut de la mise à jour (si une meilleure stratégie a été trouvée).
+        dict: Statut de la mise Ã  jour (si une meilleure stratÃ©gie a Ã©tÃ© trouvÃ©e).
     """
     genetic: GeneticUpdater = app.state.genetic
     return genetic.check_for_updates()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SPRINT 5 ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @app.post("/shadow/record")
 async def record_trade(request: TradeRecordRequest):
     """
     Enregistre un trade dans le buffer d'apprentissage (Shadow Learning).
 
-    Ces données servent à entraîner DreamerV3 si l'indicateur est actif.
+    Ces donnÃ©es servent Ã  entraÃ®ner DreamerV3 si l'indicateur est actif.
 
     Args:
-        request (TradeRecordRequest): Détails du trade.
+        request (TradeRecordRequest): DÃ©tails du trade.
 
     Returns:
         dict: Statut de l'enregistrement et taille du buffer.
@@ -397,10 +399,10 @@ async def record_trade(request: TradeRecordRequest):
 @app.post("/shadow/flush")
 async def flush_shadow():
     """
-    Force l'écriture immédiate du buffer Shadow Learning sur le disque.
+    Force l'Ã©criture immÃ©diate du buffer Shadow Learning sur le disque.
 
     Returns:
-        dict: Nombre de transitions sauvegardées.
+        dict: Nombre de transitions sauvegardÃ©es.
     """
     shadow: ShadowLearningService = app.state.shadow
     if not shadow:
@@ -412,10 +414,10 @@ async def flush_shadow():
 @app.get("/shadow/stats")
 async def shadow_stats():
     """
-    Récupère les statistiques du module Shadow Learning.
+    RÃ©cupÃ¨re les statistiques du module Shadow Learning.
 
     Returns:
-        dict: Métriques de collecte de données.
+        dict: MÃ©triques de collecte de donnÃ©es.
     """
     shadow: ShadowLearningService = app.state.shadow
     if not shadow:
@@ -426,10 +428,10 @@ async def shadow_stats():
 @app.get("/dreamer/status")
 async def dreamer_status():
     """
-    Vérifie l'état de la porte logique DreamerV3 (Feature Flag).
+    VÃ©rifie l'Ã©tat de la porte logique DreamerV3 (Feature Flag).
 
     Returns:
-        dict: État (enabled/disabled) et configuration.
+        dict: Ã‰tat (enabled/disabled) et configuration.
     """
     gate: DreamerGate = app.state.dreamer_gate
     return gate.get_status()
@@ -438,13 +440,13 @@ async def dreamer_status():
 @app.post("/dreamer/predict")
 async def dreamer_predict(observation: dict):
     """
-    Exécute une inférence via le World Model.
+    ExÃ©cute une infÃ©rence via le World Model.
 
     Args:
-        observation (dict): État actuel du marché.
+        observation (dict): Ã‰tat actuel du marchÃ©.
 
     Returns:
-        dict: Prédiction de l'état futur et reward attendu.
+        dict: PrÃ©diction de l'Ã©tat futur et reward attendu.
     """
     gate: DreamerGate = app.state.dreamer_gate
     return gate.run_inference(observation)
@@ -453,12 +455,12 @@ async def dreamer_predict(observation: dict):
 @app.post("/dreamer/train")
 async def dreamer_train():
     """
-    Tente de lancer l'entraînement du modèle DreamerV3.
+    Tente de lancer l'entraÃ®nement du modÃ¨le DreamerV3.
 
-    Bloqué si ENABLE_DREAMER_TRAINING est False.
+    BloquÃ© si ENABLE_DREAMER_TRAINING est False.
 
     Returns:
-        dict: Statut du lancement du job d'entraînement.
+        dict: Statut du lancement du job d'entraÃ®nement.
     """
     gate: DreamerGate = app.state.dreamer_gate
     return gate.start_training(data_dir="data/shadow_learning")
@@ -467,15 +469,15 @@ async def dreamer_train():
 @app.post("/gnn/predict")
 async def gnn_predict(request: GNNPredictRequest):
     """
-    Prédit les biais par horizon temporel via le MTF GNN.
-    Réponse: {scalp, intraday, swing} x {bias, confidence}
+    PrÃ©dit les biais par horizon temporel via le MTF GNN.
+    RÃ©ponse: {scalp, intraday, swing} x {bias, confidence}
     """
     if not hasattr(app.state, "gnn_model") or app.state.gnn_model is None:
         return {
             "scalp": {"bias": "NEUTRAL", "confidence": 0.0},
             "intraday": {"bias": "NEUTRAL", "confidence": 0.0},
             "swing": {"bias": "NEUTRAL", "confidence": 0.0},
-            "reason": "GNN Modèle indisponible"
+            "reason": "GNN ModÃ¨le indisponible"
         }
         
     try:
@@ -566,15 +568,15 @@ async def gnn_predict(request: GNNPredictRequest):
 @app.get("/gnn/graph")
 async def get_gnn_graph(style: str = "cyberpunk"):
     """
-    Expose la topologie complète (Nodes & Edge Index) du MultiAssetGNN.
+    Expose la topologie complÃ¨te (Nodes & Edge Index) du MultiAssetGNN.
     Sert au Dashboard Nexus pour le 'GNN Knowledge Graph'.
     """
     if not hasattr(app.state, "gnn_model") or app.state.gnn_model is None:
         return {"nodes": [], "links": []}
     
     # 1. Obtenir les noeuds (Actifs orbitaux + Noyau Central)
-    # Dans une version pure, les assets sont extraits de l'état GNN.
-    # Ici, nous créons une vue représentative des actifs surveillés par The Hive.
+    # Dans une version pure, les assets sont extraits de l'Ã©tat GNN.
+    # Ici, nous crÃ©ons une vue reprÃ©sentative des actifs surveillÃ©s par The Hive.
     assets = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "AVAX"]
     nodes = []
     
@@ -587,7 +589,7 @@ async def get_gnn_graph(style: str = "cyberpunk"):
         "timestamp": datetime.now().isoformat()
     })
     
-    # Actifs Périphériques
+    # Actifs PÃ©riphÃ©riques
     for asset in assets:
         nodes.append({
             "id": asset,
@@ -603,7 +605,7 @@ async def get_gnn_graph(style: str = "cyberpunk"):
     
     # Liens du noyau vers les actifs (Attention spatiale)
     for asset in assets:
-        # Poids simulé basé sur l'attention du GATConv
+        # Poids simulÃ© basÃ© sur l'attention du GATConv
         weight = random.uniform(0.3, 0.95)
         links.append({
             "source": "macro_core",
@@ -611,7 +613,7 @@ async def get_gnn_graph(style: str = "cyberpunk"):
             "value": weight
         })
         
-    # Corrélations croisées majeures (Liens entre actifs)
+    # CorrÃ©lations croisÃ©es majeures (Liens entre actifs)
     # e.g BTC <-> ETH est toujours fort
     links.append({"source": "BTC", "target": "ETH", "value": 0.88})
     links.append({"source": "SOL", "target": "ETH", "value": 0.72})
@@ -621,17 +623,17 @@ async def get_gnn_graph(style: str = "cyberpunk"):
     return {"nodes": nodes, "links": links}
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # STATS (UPDATED)
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @app.get("/stats")
 async def get_lab_stats():
     """
-    Agrège les statistiques globales du Lab (incluant Sprint 5).
+    AgrÃ¨ge les statistiques globales du Lab (incluant Sprint 5).
 
     Returns:
-        dict: Vue d'ensemble des expériences et entraînements.
+        dict: Vue d'ensemble des expÃ©riences et entraÃ®nements.
     """
     backtester: Backtester = app.state.backtester
     arena: Arena = app.state.arena
@@ -649,4 +651,7 @@ async def get_lab_stats():
         stats["shadow_learning"] = shadow.get_stats()
 
     return stats
+
+
+
 

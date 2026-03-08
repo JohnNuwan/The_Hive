@@ -454,6 +454,14 @@ services:
       - EVA_BUILDER_LLM_BACKEND=${EVA_BUILDER_LLM_BACKEND:-vllm}
       - EVA_BUILDER_LLM_URL=${EVA_BUILDER_LLM_URL:-http://vllm:8000/v1/chat/completions}
       - EVA_BUILDER_LLM_MODEL=${EVA_BUILDER_LLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}
+      - EVA_BUILDER_PUBLIC_API_SOURCE_URL=${EVA_BUILDER_PUBLIC_API_SOURCE_URL:-https://raw.githubusercontent.com/public-apis/public-apis/master/README.md}
+      - EVA_BUILDER_MUTATION_ENABLED=${EVA_BUILDER_MUTATION_ENABLED:-false}
+      - EVA_BUILDER_DEPLOY_ENABLED=${EVA_BUILDER_DEPLOY_ENABLED:-false}
+      - HIVE_SSH_HOST=${HIVE_SERVER_HOST:-192.168.1.6}
+      - HIVE_SSH_USER=${HIVE_SSH_USER:-aza}
+      - HIVE_SSH_PASSWORD=${HIVE_SSH_PASSWORD:-}
+      - HIVE_SUDO_PASSWORD=${HIVE_SUDO_PASSWORD:-}
+      - HIVE_REMOTE_DIR=${HIVE_REMOTE_DIR:-/home/aza/The_Hive}
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:

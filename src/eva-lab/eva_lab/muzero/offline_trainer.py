@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import glob
 import pandas as pd
@@ -202,7 +202,7 @@ class OfflineTrainer:
         logger.info(f"Loaded {self.replay_buffer.size} episodes ({total_steps} steps).")
 
     def train_loop(self, epochs=5000):
-        logger.info("🎓 Starting Offline Training...")
+        logger.info("ðŸŽ“ Starting Offline Training...")
         
         for epoch in range(epochs):
             loss_sum = 0
@@ -236,7 +236,9 @@ class OfflineTrainer:
         logger.info(f"Saved checkpoint to {path}.pkl")
 
 if __name__ == "__main__":
+    epochs = int(os.getenv("DREAMER_EPOCHS", "5000"))
     trainer = OfflineTrainer()
     trainer.load_and_process_data()
-    trainer.train_loop(epochs=5000) # Hunger Mode: Massive heavy training
+    trainer.train_loop(epochs=epochs)
     trainer.save_checkpoint("data/checkpoints/dreamer_pretrained")
+

@@ -369,3 +369,189 @@ export interface AccountantReport {
 export async function getAccountantReport(): Promise<AccountantReport | null> {
     return safeFetch('/api/accountant/report', null)
 }
+
+// ═══ BUILDER ═══
+export interface BuilderHealth {
+    status: string
+    service: string
+    active_pipelines: number
+    builds_completed: number
+    forge_runs: number
+    public_api_entries: number
+    mutation_enabled: boolean
+    deploy_enabled: boolean
+}
+
+export interface BuilderPublicApiEntry {
+    name: string
+    url: string
+    description: string
+    auth: string
+    https: boolean
+    cors: string
+    category: string
+}
+
+export interface BuilderHistoryEntry {
+    action: string
+    service: string
+    status: string
+    details: string
+    timestamp: string
+}
+
+export interface BuilderBuildRequest {
+    prompt: string
+    filename: string
+    language: string
+    auto_validate: boolean
+    use_public_api_catalog: boolean
+    api_context_query?: string
+    api_context_limit?: number
+}
+
+export interface BuilderBuildResponse {
+    status: string
+    message?: string
+    filename?: string
+    project_dir?: string
+    files?: Record<string, string>
+    validation?: {
+        success?: boolean
+        output?: string
+        stderr?: string
+        error?: string | null
+        executed?: boolean
+        reason?: string
+    } | null
+    git_status?: string
+    api_suggestions?: BuilderPublicApiEntry[]
+}
+
+export interface BuilderDeployRequest {
+    service: string
+    target: 'local' | 'proxmox'
+    force_rebuild: boolean
+    dry_run: boolean
+    compose_file?: string | null
+}
+
+export interface BuilderMutationRequest {
+    change_summary: string
+    dry_run: boolean
+}
+
+export interface BuilderPipelineRequest {
+    build: BuilderBuildRequest
+    deploy?: BuilderDeployRequest | null
+    mutation?: BuilderMutationRequest | null
+}
+
+export interface BuilderPipelineResult {
+    build: BuilderBuildResponse
+    deploy: any
+    mutation: any
+}
+
+export async function getBuilderHealth(): Promise<BuilderHealth> {
+    return safeFetch('/api/builder/health', {
+        status: 'offline',
+        service: 'builder',
+        active_pipelines: 0,
+        builds_completed: 0,
+        forge_runs: 0,
+        public_api_entries: 0,
+        mutation_enabled: false,
+        deploy_enabled: false,
+    })
+}
+
+export async function getBuilderHistory(): Promise<{ history: BuilderHistoryEntry[]; total: number }> {
+    return safeFetch('/api/builder/build/history', { history: [], total: 0 })
+}
+
+export async function syncBuilderPublicApiCatalog(): Promise<any> {
+    try {
+        const res = await fetchWithTimeout('/api/builder/catalog/public-apis/sync', {
+            method: 'POST',
+        }, 15000)
+        return await res.json()
+    } catch {
+        return { status: 'error', message: 'Synchronisation du catalogue impossible.' }
+    }
+}
+
+export async function searchBuilderPublicApis(query: string, limit = 6, category?: string): Promise<{ results: BuilderPublicApiEntry[]; total: number }> {
+    const params = new URLSearchParams()
+    if (query.trim()) params.set('query', query.trim())
+    params.set('limit', String(limit))
+    if (category?.trim()) params.set('category', category.trim())
+    return safeFetch(`/api/builder/catalog/public-apis/search?${params.toString()}`, { results: [], total: 0 }, 8000)
+}
+
+export async function buildBuilderProject(request: BuilderBuildRequest): Promise<BuilderBuildResponse> {
+    try {
+        const res = await fetchWithTimeout('/api/builder/factory/build', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(request),
+        }, 60000)
+        return await res.json()
+    } catch {
+        return { status: 'error', message: 'Generation Builder indisponible.' }
+    }
+}
+
+export async function triggerBuilderDeploy(request: BuilderDeployRequest): Promise<any> {
+    try {
+        const res = await fetchWithTimeout('/api/builder/deploy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(request),
+        }, 30000)
+        return await res.json()
+    } catch {
+        return { status: 'error', message: 'Deploiement Builder indisponible.' }
+    }
+}
+
+export async function triggerBuilderMutation(request: BuilderMutationRequest): Promise<any> {
+    try {
+        const res = await fetchWithTimeout('/api/builder/mutation/trigger', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(request),
+        }, 30000)
+        return await res.json()
+    } catch {
+        return { status: 'error', message: 'Mutation Builder indisponible.' }
+    }
+}
+
+export async function runBuilderPipeline(request: BuilderPipelineRequest): Promise<BuilderPipelineResult> {
+    const build = await buildBuilderProject(request.build)
+
+    if (build.status === 'error') {
+        return {
+            build,
+            deploy: { status: 'skipped', reason: 'Build en erreur.' },
+            mutation: { status: 'skipped', reason: 'Build en erreur.' },
+        }
+    }
+
+    const deploy = request.deploy
+        ? await triggerBuilderDeploy(request.deploy)
+        : { status: 'skipped', reason: 'Aucun deploiement demande.' }
+
+    const mutationSummary = request.mutation?.change_summary?.trim() || (
+        `Pipeline Nexus Builder pour ${request.build.filename} (${build.status})`
+    )
+    const mutation = request.mutation
+        ? await triggerBuilderMutation({
+            ...request.mutation,
+            change_summary: mutationSummary,
+        })
+        : { status: 'skipped', reason: 'Aucune mutation demandee.' }
+
+    return { build, deploy, mutation }
+}

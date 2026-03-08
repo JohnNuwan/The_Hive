@@ -1,94 +1,81 @@
-"""
-MuZero V3.1 Configuration — "Hunger Mode" (Pro Trader Edition)
+﻿"""Configuration centralisee pour MuZero et Dreamer cote EVA Lab."""
 
-Ported from Muzero_Pro_Trader → adapted for The Hive eva-lab.
+from __future__ import annotations
 
-Features:
-  - 142-feature observation space (DeepTrinity 136 + pos/pnl/slbe + time/vol)
-  - 5 discrete actions: Hold, Buy, Sell, Split, Close
-  - 11 multi-asset symbols (Forex, Crypto, Indices)
-  - Aggressive reward shaping (doubled bonuses, unchanged penalties)
-  - MCTS with 150 simulations + Dirichlet noise
-"""
-import os
 import logging
+import os
+
+from eva_lab.training_utils import get_horizon_timeframe, resolve_training_symbols
 
 logger = logging.getLogger(__name__)
 
 
 class MuZeroConfigV3:
-    """Hunger Mode V3.1 — chase big wins, fear losses just as much."""
+    """Configuration d'entrainement MuZero adaptee au trading reel."""
 
     def __init__(self, **overrides):
-        # ═══ Network Architecture (EXTREME SCALE) ═══
-        self.observation_shape = (32,)  # Adjusted for current features (Price + Vol + Indicators)
-        self.action_space_size = 5       # Hold, Buy, Sell, Split, Close
+        self.observation_shape = (32,)
+        self.action_space_size = 5
         self.hidden_state_size = 256
         self.network_hidden_dims = [512, 512, 512]
 
-        # ═══ Symbols (Multi-Asset) ═══
-        from shared import get_settings
-        self.symbols = get_settings().banker_symbols
+        self.horizon = os.getenv("MUZERO_HORIZON", "intraday").lower()
+        self.primary_timeframe = get_horizon_timeframe(self.horizon)
+        self.symbols = resolve_training_symbols(
+            required_timeframes={self.primary_timeframe},
+            max_symbols=int(os.getenv("MUZERO_MAX_SYMBOLS", "0")),
+        )
+        if not self.symbols:
+            self.symbols = ["XAUUSD", "EURUSD", "BTCUSD"]
+            logger.warning("Aucun historique compatible detecte. Fallback sur un univers minimal.")
 
-        # ═══ Training — Aggressive (RTX 3090 Optimized) ═══
-        self.batch_size = 32
-        self.learning_rate = 5e-5
-        self.weight_decay = 1e-4
+        self.batch_size = int(os.getenv("MUZERO_BATCH_SIZE", "32"))
+        self.learning_rate = float(os.getenv("MUZERO_LEARNING_RATE", "5e-5"))
+        self.weight_decay = float(os.getenv("MUZERO_WEIGHT_DECAY", "1e-4"))
         self.momentum = 0.9
-        # Sprint 16: Massive increase for global assets training
-        self.training_steps = 500_000 
-        self.checkpoint_interval = 1000
-        self.num_unroll_steps = 5
-        self.td_steps = 10
+        self.training_steps = int(os.getenv("MUZERO_TRAINING_STEPS", "15000"))
+        self.checkpoint_interval = int(os.getenv("MUZERO_CHECKPOINT_INTERVAL", "500"))
+        self.num_unroll_steps = int(os.getenv("MUZERO_NUM_UNROLL_STEPS", "5"))
+        self.td_steps = int(os.getenv("MUZERO_TD_STEPS", "10"))
+        self.max_moves = int(os.getenv("MUZERO_MAX_MOVES", "300"))
 
-        # ═══ MCTS ═══
-        self.num_simulations = 50
+        self.num_simulations = int(os.getenv("MUZERO_NUM_SIMULATIONS", "75"))
         self.discount = 0.99
         self.root_dirichlet_alpha = 0.3
-        self.root_exploration_fraction = 0.50  # Electrochoc V3.1
+        self.root_exploration_fraction = 0.50
         self.pb_c_base = 19_652
         self.pb_c_init = 1.25
 
-        # ═══ Replay Buffer ═══
-        self.window_size = 200_000
-        self.max_moves = 500
+        self.window_size = int(os.getenv("MUZERO_WINDOW_SIZE", "200000"))
 
-        # ═══ Paths ═══
         self.results_path = os.path.join("data", "muzero", "results")
         self.weights_path = os.path.join("data", "muzero", "weights")
 
-        # ═══ Reward Shaping — Hunger Mode V3.1 (DOUBLED) ═══
-        self.quality_trade_bonus = 10.0      # +10 pts per 1% trade
-        self.final_growth_bonus = 50.0       # +50 pts end-of-episode
-        self.final_growth_threshold = 0.10   # 10% growth needed
+        self.quality_trade_bonus = 10.0
+        self.final_growth_bonus = 50.0
+        self.final_growth_threshold = 0.10
+        self.slbe_activation_bonus = 6.0
+        self.split_with_profit_bonus = 10.0
+        self.close_big_winner_bonus = 15.0
+        self.drawdown_time_penalty_rate = 0.2
+        self.max_drawdown_penalty = 10.0
+        self.loss_penalty_multiplier = 2.0
 
-        # SLBE Rewards (DOUBLED)
-        self.slbe_activation_bonus = 6.0     # +6 for activating SLBE
-        self.split_with_profit_bonus = 10.0  # +10 for smart SPLIT
-        self.close_big_winner_bonus = 15.0   # +15 for CLOSE > +2%
-
-        # Time Penalties (INCREASED)
-        self.drawdown_time_penalty_rate = 0.2   # -0.2 per 20 steps
-        self.max_drawdown_penalty = 10.0        # -10 for > 5% DD
-        self.loss_penalty_multiplier = 2.0      # 2x asymmetric penalty
-
-        # ═══ Apply overrides ═══
         for key, value in overrides.items():
             if hasattr(self, key):
                 setattr(self, key, value)
-                logger.info(f"[MuZero:Config] Override {key} = {value}")
+                logger.info("[MuZeroConfig] Override %s=%s", key, value)
             else:
-                logger.warning(f"[MuZero:Config] Unknown key: {key}")
+                logger.warning("[MuZeroConfig] Cle inconnue ignoree: %s", key)
 
     def visit_softmax_temperature(self, trained_steps: int) -> float:
-        """Aggressive temperature decay for exploitation."""
+        """Retourne la temperature d'exploration selon l'avancement du train."""
         if trained_steps < 0.3 * self.training_steps:
             return 1.0
-        elif trained_steps < 0.6 * self.training_steps:
+        if trained_steps < 0.6 * self.training_steps:
             return 0.5
-        else:
-            return 0.1
+        return 0.1
 
     def to_dict(self) -> dict:
-        """Serialize config for logging/archival."""
-        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+        """Serialize la configuration pour archivage et debug."""
+        return {key: value for key, value in self.__dict__.items() if not key.startswith("_")}

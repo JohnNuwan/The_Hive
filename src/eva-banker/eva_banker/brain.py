@@ -1,6 +1,6 @@
-"""
+﻿"""
 Cerveau de l'Expert Banker (The Brain).
-Contient la logique décisionnelle (Manager), l'exécution (Worker) et la boucle d'autonomie.
+Contient la logique dÃ©cisionnelle (Manager), l'exÃ©cution (Worker) et la boucle d'autonomie.
 """
 
 import asyncio
@@ -21,6 +21,7 @@ from shared import (
     symlog,
     calculate_var,
     calculate_cvar,
+    get_settings,
 )
 from eva_banker.services.mt5 import MT5Service
 from eva_banker.skill_library import SkillLibrary, SkilledBehavior
@@ -33,33 +34,33 @@ from eva_banker.services.news_filter import NewsFilterService # Import News Filt
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # MANAGER (DECISION)
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class BankerManager:
     """
     NIVEAU HAUT : Le Manager (Abstract World Model).
-    Planifie les stratégies en utilisant TFT-GNN et la conscience du risque.
+    Planifie les stratÃ©gies en utilisant TFT-GNN et la conscience du risque.
     """
     def __init__(self, library: SkillLibrary):
         self.library = library
-        # Initialisation du modèle (dims fictives pour l'exemple)
+        # Initialisation du modÃ¨le (dims fictives pour l'exemple)
         self.brain = TFTGNNModel(asset_dim=5, temporal_dim=64, hidden_dim=128)
 
     def plan_strategy(self, market_history: dict) -> SkilledBehavior:
         """
-        Analyse le marché via TFT-GNN et injecte VaR/CVaR.
+        Analyse le marchÃ© via TFT-GNN et injecte VaR/CVaR.
         """
-        # 1. Calcul des métriques de risque adaptatives (Inhibiteur interne)
+        # 1. Calcul des mÃ©triques de risque adaptatives (Inhibiteur interne)
         returns = market_history.get("returns", [])
         var = calculate_var(returns)
         cvar = calculate_cvar(returns)
         
-        # 2. Préparation des données pour le modèle (Normalisées via Symlog)
+        # 2. PrÃ©paration des donnÃ©es pour le modÃ¨le (NormalisÃ©es via Symlog)
         price = symlog(market_history.get("price", 0))
         
-        # Si le risque (VaR) est trop élevé, on bascule en mode conservateur
+        # Si le risque (VaR) est trop Ã©levÃ©, on bascule en mode conservateur
         if var < -0.02: # Perte potentielle > 2% attendue
             logger.warning("High VaR detected. Selecting HEDGING skill.")
             return SkilledBehavior.HEDGING
@@ -67,14 +68,14 @@ class BankerManager:
         return SkilledBehavior.SCALPING
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # WORKER (EXECUTION)
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class BankerWorker:
     """
-    NIVEAU BAS : L'Exécutant (Worker).
-    Support de GhostShield pour l'invisibilité HFT.
+    NIVEAU BAS : L'ExÃ©cutant (Worker).
+    Support de GhostShield pour l'invisibilitÃ© HFT.
     """
     def __init__(self, mt5_service: MT5Service, ghost_shield=None):
         self.mt5 = mt5_service
@@ -82,71 +83,97 @@ class BankerWorker:
 
     async def execute_skill(self, skill: SkilledBehavior, order: TradeOrder):
         logger.info(f"Worker executing skill: {skill}")
-        if self.ghost and skill != SkilledBehavior.HEDGING: # Le hedging doit être direct
+        if self.ghost and skill != SkilledBehavior.HEDGING: # Le hedging doit Ãªtre direct
             return await self.ghost.execute_obfuscated_order(order)
         return await self.mt5.execute_skill(skill, order)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # ENGINE (AUTONOMY)
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class AutoTradingEngine:
     """
     Moteur de Trading Automatique ("Weekend Drift").
-    Orchestre la boucle : Analyse -> Planification -> Exécution.
+    Orchestre la boucle : Analyse -> Planification -> ExÃ©cution.
     """
     def __init__(self, manager: BankerManager, worker: BankerWorker, mt5: MT5Service, risk: RiskValidator):
         self.manager = manager
         self.worker = worker
         self.mt5 = mt5
         self.risk = risk
+        self.settings = get_settings()
         self.is_active = False
         self._loop_task = None
         self._daily_report_task = None
-        # The Hive Mind: Multi-Asset Symbols (Sprint 15: Global Universe)
-        from shared import get_settings
-        self.symbols = get_settings().banker_symbols
+        self._news_task = None
+        self.symbols = list(dict.fromkeys(self.settings.banker_symbols))
+        self.risk.register_symbol_universe({symbol: self.mt5.classify_symbol(symbol) or "unknown" for symbol in self.symbols})
         self.latest_decisions = {} # Stores latest analysis per symbol
-        
+        self._symbol_cursor = 0
+        self._last_universe_refresh = None
+        self._dynamic_universe_enabled = self._env_flag("BANKER_DYNAMIC_UNIVERSE", True)
+        self._scan_forex = self._env_flag("BANKER_SCAN_FOREX", True)
+        self._scan_cfd = self._env_flag("BANKER_SCAN_CFD", True)
+        self._scan_crypto = self._env_flag("BANKER_SCAN_CRYPTO", True)
+        self._scan_batch_size = max(1, self._env_int("BANKER_SCAN_BATCH_SIZE", 40))
+        self._universe_refresh_minutes = max(5, self._env_int("BANKER_UNIVERSE_REFRESH_MINUTES", 240))
+        self._universe_max_symbols = max(0, self._env_int("BANKER_UNIVERSE_MAX_SYMBOLS", 0))
+        self._startup_alert_cooldown = timedelta(
+            minutes=max(1, self._env_int("BANKER_STARTUP_ALERT_COOLDOWN_MINUTES", 20))
+        )
+        self._startup_alert_state_file = os.getenv(
+            "BANKER_STARTUP_ALERT_STATE_FILE",
+            os.path.join(os.getcwd(), ".banker_startup_alert"),
+        )
+
         # Sprint 7: The Cortex
         self.cortex = Strategist(mt5_service=mt5)
-        
+
         # Sprint 8.5: Telegram Notification
         from shared.telegram_client import TelegramClient
         self.telegram = TelegramClient()
-        
+
         # Sprint 9: Close Detection & Anti-Spam
         self._known_tickets = set()         # Tickets currently open (for close detection)
         self._last_veto_sent = {}           # symbol -> datetime (anti-spam)
         self._trade_open_info = {}          # ticket -> {symbol, action, entry_price, open_time, comment}
-        
-        # Sprint 10: News Filter 📰
+
+        # Sprint 10: News Filter
         self.news = NewsFilterService(filter_minutes=30)
-        self._news_task = None
 
     async def start(self):
-        """Démarre le pilote automatique"""
+        """Demarre le pilote automatique."""
         if self.is_active:
             return
         self.is_active = True
-        # --- NEW (Sprint 12): State Sync on startup ---
+        await self.refresh_symbol_universe()
         await self._sync_open_positions()
-        
+
         self._loop_task = asyncio.create_task(self._drift_loop())
         self._daily_report_task = asyncio.create_task(self._half_day_report_loop())
         self._news_task = asyncio.create_task(self.news.start_monitoring())
-        logger.info(f"🚀 AUTO-TRADING ENGINE STARTED on {self.symbols}")
-        self.telegram.send_sync(
-            f"🐝 *THE HIVE IS AWAKE*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 Symbols: {', '.join(self.symbols)}\n"
-            f"⚙️ Risk: {self.risk.max_risk_per_trade * 100}%\n"
-            f"🕐 {datetime.now().strftime('%H:%M UTC+1')}"
+        logger.info(
+            "AUTO-TRADING ENGINE STARTED: universe=%s batch=%s",
+            len(self.symbols),
+            len(self.get_symbol_batch(advance=False)),
         )
 
+        if self._should_send_startup_alert():
+            self.telegram.send_sync(
+                f"🐝 *THE HIVE IS AWAKE*\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"📊 Universe: {len(self.symbols)} actifs\n"
+                f"🔎 Batch: {len(self.get_symbol_batch(advance=False))} actifs / cycle\n"
+                f"🧭 Sample: {self._format_symbol_summary()}\n"
+                f"⚙️ Risk: {self.risk.max_risk_per_trade}%\n"
+                f"🕐 {datetime.now().strftime('%H:%M')}"
+            )
+        else:
+            logger.info("Notification de demarrage ignoree par cooldown Telegram.")
+
     async def stop(self):
-        """Arrête le pilote automatique"""
+        """Arrete le pilote automatique."""
         if not self.is_active:
             return
         self.is_active = False
@@ -157,18 +184,120 @@ class AutoTradingEngine:
                     await task
                 except asyncio.CancelledError:
                     pass
-        logger.info("🛑 AUTO-TRADING ENGINE STOPPED")
+        self._loop_task = None
+        self._daily_report_task = None
+        self._news_task = None
+        logger.info("AUTO-TRADING ENGINE STOPPED")
 
-    # ═══════════════════════════════════════════════════════════════════════════
+    @staticmethod
+    def _env_flag(name: str, default: bool = True) -> bool:
+        """Lit un bool depuis l'environnement."""
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        """Lit un entier depuis l'environnement."""
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning("Variable %s invalide (%s). Repli sur %s.", name, raw, default)
+            return default
+
+    async def refresh_symbol_universe(self, force: bool = False) -> list[str]:
+        """Rafraichit l'univers de marche depuis MT5."""
+        if not self._dynamic_universe_enabled:
+            return self.symbols
+
+        now = datetime.now()
+        if (
+            not force
+            and self._last_universe_refresh is not None
+            and (now - self._last_universe_refresh) < timedelta(minutes=self._universe_refresh_minutes)
+        ):
+            return self.symbols
+
+        discovered = await self.mt5.discover_symbols(
+            include_forex=self._scan_forex,
+            include_cfd=self._scan_cfd,
+            include_crypto=self._scan_crypto,
+            max_symbols=self._universe_max_symbols,
+        )
+        if not discovered:
+            logger.warning("Univers dynamique vide. Conservation de la liste precedente.")
+            return self.symbols
+
+        self.symbols = discovered
+        self._last_universe_refresh = now
+        self._symbol_cursor = 0
+        self.risk.register_symbol_universe(
+            {
+                symbol: self.mt5.classify_symbol(symbol) or "unknown"
+                for symbol in self.symbols
+            }
+        )
+        logger.info("Univers de marche mis a jour: %s symboles detectes.", len(self.symbols))
+        return self.symbols
+
+    def get_symbol_batch(self, advance: bool = True) -> list[str]:
+        """Retourne le prochain lot de symboles a scanner."""
+        if not self.symbols:
+            return []
+
+        batch_size = min(self._scan_batch_size, len(self.symbols))
+        start_index = self._symbol_cursor % len(self.symbols)
+        batch = [
+            self.symbols[(start_index + offset) % len(self.symbols)]
+            for offset in range(batch_size)
+        ]
+        if advance:
+            self._symbol_cursor = (start_index + batch_size) % len(self.symbols)
+        return batch
+
+    def _format_symbol_summary(self, max_display: int = 12) -> str:
+        """Formate un apercu court de l'univers pour Telegram."""
+        if not self.symbols:
+            return "aucun symbole"
+        if len(self.symbols) <= max_display:
+            return ", ".join(self.symbols)
+        head = ", ".join(self.symbols[:max_display])
+        return f"{head} ... (+{len(self.symbols) - max_display})"
+
+    def _should_send_startup_alert(self) -> bool:
+        """Evite de reemettre l'alerte de demarrage a chaque restart local."""
+        now = datetime.now()
+        state_path = os.path.abspath(self._startup_alert_state_file)
+        try:
+            if os.path.exists(state_path):
+                previous_raw = open(state_path, "r", encoding="utf-8").read().strip()
+                previous = datetime.fromisoformat(previous_raw)
+                if now - previous < self._startup_alert_cooldown:
+                    return False
+        except Exception as exc:
+            logger.warning("Etat de cooldown Telegram illisible: %s", exc)
+
+        try:
+            with open(state_path, "w", encoding="utf-8") as handle:
+                handle.write(now.isoformat())
+        except Exception as exc:
+            logger.warning("Impossible d'ecrire le cooldown Telegram: %s", exc)
+        return True
+
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # TELEGRAM FORMATTERS (Sprint 9)
-    # ═══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     def _fmt_open_msg(self, symbol: str, action: str, entry_price: float, sl_price: float,
                       rsi: float, atr: float, vwap: float, adx: float, cortex_bias: str, gnn_bias: str, 
                       comment: str, indicators: dict = None) -> str:
-        """Formate un message d'ouverture riche avec indicateurs avancés."""
+        """Formate un message d'ouverture riche avec indicateurs avancÃ©s."""
         sl_dist = abs(entry_price - sl_price)
-        emoji = "🟢" if action == "BUY" else "🔴"
+        emoji = "ðŸŸ¢" if action == "BUY" else "ðŸ”´"
         
         # Format Indicators (Safe Get)
         indicators = indicators or {}
@@ -179,30 +308,30 @@ class AutoTradingEngine:
         res = indicators.get("sr_res", 0.0)
         
         # Visual MACD
-        macd_icon = "📈" if macd > 0 else "📉"
+        macd_icon = "ðŸ“ˆ" if macd > 0 else "ðŸ“‰"
         
         return (
-            f"⚡ *E.V.A | New Position (M1/M15)*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"🔹 *Asset:* {symbol}\n"
-            f"🔹 *Action:* {emoji} {action}\n"
-            f"🔹 *Entry:* {entry_price:.5f}\n"
-            f"🛡️ *S/L:* {sl_price:.5f} ({sl_dist:.2f} pts)\n\n"
+            f"âš¡ *E.V.A | New Position (M1/M15)*\n"
+            f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+            f"ðŸ”¹ *Asset:* {symbol}\n"
+            f"ðŸ”¹ *Action:* {emoji} {action}\n"
+            f"ðŸ”¹ *Entry:* {entry_price:.5f}\n"
+            f"ðŸ›¡ï¸ *S/L:* {sl_price:.5f} ({sl_dist:.2f} pts)\n\n"
             
-            f"📊 *Markets & Signals:*\n"
-            f"  • RSI: {rsi:.1f} | ADX: {adx:.1f}\n"
-            f"  • VWAP: {vwap:.2f}\n"
-            f"  • MACD: {macd_icon} {macd:.4f}\n"
-            f"  • Vol: {rvol:.1f}x (Relative)\n"
-            f"  • BB Position: {bb_pct*100:.1f}%\n"
-            f"  • S/R: {sup:.2f} / {res:.2f}\n\n"
+            f"ðŸ“Š *Markets & Signals:*\n"
+            f"  â€¢ RSI: {rsi:.1f} | ADX: {adx:.1f}\n"
+            f"  â€¢ VWAP: {vwap:.2f}\n"
+            f"  â€¢ MACD: {macd_icon} {macd:.4f}\n"
+            f"  â€¢ Vol: {rvol:.1f}x (Relative)\n"
+            f"  â€¢ BB Position: {bb_pct*100:.1f}%\n"
+            f"  â€¢ S/R: {sup:.2f} / {res:.2f}\n\n"
             
-            f"🧠 *AI Reasoning:*\n"
-            f"  • Cortex: {cortex_bias}\n"
-            f"  • GNN (Proxmox): {gnn_bias}\n"
-            f"  • *Logic:* {comment}\n\n"
+            f"ðŸ§  *AI Reasoning:*\n"
+            f"  â€¢ Cortex: {cortex_bias}\n"
+            f"  â€¢ GNN (Proxmox): {gnn_bias}\n"
+            f"  â€¢ *Logic:* {comment}\n\n"
             
-            f"⏳ {datetime.now().strftime('%H:%M')} | The Hive"
+            f"â³ {datetime.now().strftime('%H:%M')} | The Hive"
         )
 
     def _fmt_close_msg(self, symbol: str, action: str, entry_price: float, exit_price: float,
@@ -215,7 +344,7 @@ class AutoTradingEngine:
         pip_size = 0.1 if "XAU" in symbol else (1.0 if "US30" in symbol or "BTC" in symbol else 0.0001)
         pips_display = pips / pip_size
         
-        emoji = "✅" if profit >= 0 else "❌"
+        emoji = "âœ…" if profit >= 0 else "âŒ"
         pnl_sign = "+" if profit >= 0 else ""
         
         # Duration formatting
@@ -225,37 +354,37 @@ class AutoTradingEngine:
             dur_str = f"{duration_min}min"
         
         return (
-            f"⚡ *E.V.A | Trade Closed*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"🔹 *Asset:* {symbol}\n"
-            f"🔹 *Action:* {action}\n"
-            f"🔹 *Result:* {emoji} {pnl_sign}{pips_display:.1f} pips\n\n"
-            f"💰 *Financials:*\n"
-            f"  • Entry: {entry_price:.5f}\n"
-            f"  • Exit: {exit_price:.5f}\n"
-            f"  • P&L: {pnl_sign}${profit:.2f}\n"
-            f"  • Duration: {dur_str}\n\n"
-            f"🏷️ *Reason:* {reason}\n"
-            f"⏳ {datetime.now().strftime('%H:%M')} | The Hive"
+            f"âš¡ *E.V.A | Trade Closed*\n"
+            f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+            f"ðŸ”¹ *Asset:* {symbol}\n"
+            f"ðŸ”¹ *Action:* {action}\n"
+            f"ðŸ”¹ *Result:* {emoji} {pnl_sign}{pips_display:.1f} pips\n\n"
+            f"ðŸ’° *Financials:*\n"
+            f"  â€¢ Entry: {entry_price:.5f}\n"
+            f"  â€¢ Exit: {exit_price:.5f}\n"
+            f"  â€¢ P&L: {pnl_sign}${profit:.2f}\n"
+            f"  â€¢ Duration: {dur_str}\n\n"
+            f"ðŸ·ï¸ *Reason:* {reason}\n"
+            f"â³ {datetime.now().strftime('%H:%M')} | The Hive"
         )
 
     def _fmt_shepherd_msg(self, symbol: str, action: str, event: str, 
                           new_sl: float, profit_pips: float) -> str:
         """Formate un message Shepherd enrichi."""
         return (
-            f"🛡️ *E.V.A Shepherd | {event}*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"🔹 *Asset:* {symbol} {action}\n"
-            f"🔹 *New S/L:* {new_sl:.5f}\n"
-            f"🔹 *Secured:* +{profit_pips:.1f} pips"
+            f"ðŸ›¡ï¸ *E.V.A Shepherd | {event}*\n"
+            f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+            f"ðŸ”¹ *Asset:* {symbol} {action}\n"
+            f"ðŸ”¹ *New S/L:* {new_sl:.5f}\n"
+            f"ðŸ”¹ *Secured:* +{profit_pips:.1f} pips"
         )
 
-    # ═══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # CLOSE DETECTION (Sprint 9)
-    # ═══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def _detect_closed_positions(self, current_positions: list):
-        """Détecte les positions fermées et envoie une notification."""
+        """DÃ©tecte les positions fermÃ©es et envoie une notification."""
         if current_positions is None:
             # Glitch in MT5 retrieval, abort detection safely
             return
@@ -294,7 +423,7 @@ class AutoTradingEngine:
                     profit = 0.0
                     exit_price = info.get("entry_price", 0.0)
                     duration = (datetime.now() - info["open_time"]).total_seconds() / 60
-                    reason = "Fermé (détails indisponibles)"
+                    reason = "FermÃ© (dÃ©tails indisponibles)"
                 
                 msg = self._fmt_close_msg(
                     symbol=info["symbol"],
@@ -306,9 +435,9 @@ class AutoTradingEngine:
                     reason=reason
                 )
                 self.telegram.send_sync(msg)
-                logger.info(f"📤 Close notification sent for {info['symbol']} #{ticket} (P&L: ${profit:.2f})")
+                logger.info(f"ðŸ“¤ Close notification sent for {info['symbol']} #{ticket} (P&L: ${profit:.2f})")
                 
-                # 🧠 FEEDBACK LOOP: Send real P&L to Lab for micro-training
+                # ðŸ§  FEEDBACK LOOP: Send real P&L to Lab for micro-training
                 asyncio.create_task(self._send_pnl_feedback(
                     symbol=info["symbol"],
                     action=info["action"],
@@ -316,7 +445,7 @@ class AutoTradingEngine:
                     pnl=profit,
                 ))
                 
-                # 🛡️ ANTI-TILT LOOP: Report losses to Nemesis for Self-Healing
+                # ðŸ›¡ï¸ ANTI-TILT LOOP: Report losses to Nemesis for Self-Healing
                 if profit < 0:
                     asyncio.create_task(get_nemesis_system().report_loss(
                         trade_id=str(ticket),
@@ -324,13 +453,13 @@ class AutoTradingEngine:
                         market_context={"symbol": info["symbol"], "action": info["action"], "volatility": 0, "news_event": False, "trend_reversal": False}
                     ))
                 
-                # 💰 ACCOUNTANT LOOP: Send financial event for Drawdown validation
+                # ðŸ’° ACCOUNTANT LOOP: Send financial event for Drawdown validation
                 asyncio.create_task(self._send_pnl_to_accountant(
                     symbol=info["symbol"],
                     profit=profit
                 ))
 
-                # 📸 VIRALIZATION LOOP: Send winning trade to Muse Media Factory (Port 8601)
+                # ðŸ“¸ VIRALIZATION LOOP: Send winning trade to Muse Media Factory (Port 8601)
                 if profit >= 0.5:
                     asyncio.create_task(self._viralize_trade(
                         symbol=info["symbol"],
@@ -346,8 +475,8 @@ class AutoTradingEngine:
         self._known_tickets = current_tickets
 
     async def _sync_open_positions(self):
-        """Peuple l'état au démarrage avec les positions existantes sur MT5 (Sprint 12)."""
-        logger.info("🔄 Syncing existing positions from MT5 state...")
+        """Peuple l'Ã©tat au dÃ©marrage avec les positions existantes sur MT5 (Sprint 12)."""
+        logger.info("ðŸ”„ Syncing existing positions from MT5 state...")
         try:
             positions = await self.mt5.get_open_positions()
             if positions is not None:
@@ -359,36 +488,36 @@ class AutoTradingEngine:
                         "entry_price": float(pos.open_price),
                         "open_time": pos.open_time,
                     }
-                logger.info(f"✅ Synced {len(positions)} existing positions.")
+                logger.info(f"âœ… Synced {len(positions)} existing positions.")
         except Exception as e:
             logger.error(f"Failed to startup-sync positions: {e}")
 
     async def _viralize_trade(self, symbol: str, action: str, pnl: float):
-        """Notifie l'agent The Muse pour générer une image virale d'un gain."""
+        """Notifie l'agent The Muse pour gÃ©nÃ©rer une image virale d'un gain."""
         try:
             payload = {
                 "symbol": symbol,
                 "action": action,
                 "pnl": pnl
             }
-            # Muse run par défaut sur le port 9100 selon le docker-compose
+            # Muse run par dÃ©faut sur le port 9100 selon le docker-compose
             muse_url = f"http://{self.mt5.settings.api_host}:9100/viralize/trade"
             
             async with aiohttp.ClientSession() as session:
                 async with session.post(muse_url, json=payload, timeout=60) as resp:
                     if resp.status == 200:
-                        logger.info(f"✨ Trade Viralization Success for {symbol}")
+                        logger.info(f"âœ¨ Trade Viralization Success for {symbol}")
                     else:
-                        logger.warning(f"⚠️ Muse Viralization Failed: {resp.status} - {await resp.text()}")
+                        logger.warning(f"âš ï¸ Muse Viralization Failed: {resp.status} - {await resp.text()}")
         except Exception as e:
             logger.error(f"Error calling Muse for viralization: {e}")
 
-    # ═══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # DAILY REPORT (Sprint 9)
-    # ═══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def _half_day_report_loop(self):
-        """Envoie un rapport récapitulatif toutes les demi-journées (midi et minuit)."""
+        """Envoie un rapport rÃ©capitulatif toutes les demi-journÃ©es (midi et minuit)."""
         while self.is_active:
             try:
                 now = datetime.now()
@@ -418,15 +547,15 @@ class AutoTradingEngine:
                 await asyncio.sleep(3600)
 
     async def _send_half_day_report(self):
-        """Génère et envoie le rapport de la demi-journée."""
+        """GÃ©nÃ¨re et envoie le rapport de la demi-journÃ©e."""
         try:
             now = datetime.now()
             # Define period:
             if now.hour < 15:
-                period_name = "Matinée"
+                period_name = "MatinÃ©e"
                 period_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             else:
-                period_name = "Après-Midi"
+                period_name = "AprÃ¨s-Midi"
                 period_start = now.replace(hour=12, minute=0, second=0, microsecond=0)
             
             period_end = now
@@ -458,33 +587,33 @@ class AutoTradingEngine:
             dd_pct = getattr(self.risk, "_get_daily_drawdown_percent", lambda: 0.0)()
             
             msg = (
-                f"📈 *E.V.A | Bilan {period_name}*\n"
-                f"━━━━━━━━━━━━━━━━━━━\n"
-                f"📆 Date: {now.strftime('%d/%m/%Y %H:%M')}\n\n"
-                f"📊 *Performances*\n"
-                f"  • P&L: {pnl_sign}${total_pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)\n"
-                f"  • Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)\n"
-                f"  • Balance: ${balance:,.2f}\n"
-                f"  • Drawdown Journée: {dd_pct}%\n\n"
-                f"🏆 *Top / Flop*\n"
-                f"  • Best: {best_str}\n"
-                f"  • Worst: {worst_str}\n\n"
-                f"🛡️ *Sécurité*\n"
-                f"  • Marge Libre: ${summary.get('margin_free', 0):,.2f}\n"
-                f"  • Nemesis (Anti-Tilt): {nemesis_str}\n\n"
-                f"🧠 _The Hive continuously learning._"
+                f"ðŸ“ˆ *E.V.A | Bilan {period_name}*\n"
+                f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+                f"ðŸ“† Date: {now.strftime('%d/%m/%Y %H:%M')}\n\n"
+                f"ðŸ“Š *Performances*\n"
+                f"  â€¢ P&L: {pnl_sign}${total_pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)\n"
+                f"  â€¢ Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)\n"
+                f"  â€¢ Balance: ${balance:,.2f}\n"
+                f"  â€¢ Drawdown JournÃ©e: {dd_pct}%\n\n"
+                f"ðŸ† *Top / Flop*\n"
+                f"  â€¢ Best: {best_str}\n"
+                f"  â€¢ Worst: {worst_str}\n\n"
+                f"ðŸ›¡ï¸ *SÃ©curitÃ©*\n"
+                f"  â€¢ Marge Libre: ${summary.get('margin_free', 0):,.2f}\n"
+                f"  â€¢ Nemesis (Anti-Tilt): {nemesis_str}\n\n"
+                f"ðŸ§  _The Hive continuously learning._"
             )
             
             self.telegram.send_sync(msg)
         except Exception as e:
             logger.error(f"Error generating half-day report: {e}")
 
-    # ═══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # ACCOUNTANT & LAB INTEGRATION (REST API)
-    # ═══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def _send_pnl_to_accountant(self, symbol: str, profit: float):
-        """Envoie le résultat financier à l'Accountant (Port 8500) pour le suivi de la Drawdown"""
+        """Envoie le rÃ©sultat financier Ã  l'Accountant (Port 8500) pour le suivi de la Drawdown"""
         try:
             import aiohttp
             import os
@@ -514,7 +643,7 @@ class AutoTradingEngine:
             logger.warning(f"Failed to reach Accountant: {e}")
 
     async def _send_pnl_feedback(self, symbol: str, action: str, price: float, pnl: float):
-        """Envoie le P&L réel d'une transaction fermée au Lab pour Shadow Learning"""
+        """Envoie le P&L rÃ©el d'une transaction fermÃ©e au Lab pour Shadow Learning"""
         try:
             import aiohttp
             import os
@@ -538,73 +667,70 @@ class AutoTradingEngine:
                          logger.warning(f"Lab returned HTTP {resp.status} for P&L feedback.")
         except Exception as e:
             logger.warning(f"Failed to send P&L feedback to Lab: {e}")
-    # ═══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # MAIN DRIFT LOOP
-    # ═══════════════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def _drift_loop(self):
         """Boucle principale de drift (Multi-Asset)"""
-        logger.info("🌊 Entering Drift Loop (The Hive Mind)...")
+        logger.info("ðŸŒŠ Entering Drift Loop (The Hive Mind)...")
         while self.is_active:
             try:
-                # 1. Vérifier si trading autorisé (Loi 2 + Kill Switch)
+                # 1. VÃ©rifier si trading autorisÃ© (Loi 2 + Kill Switch)
                 status = await self.risk.get_current_status()
                 nemesis = get_nemesis_system()
-                
-                # Fetch Balance and update RiskValidator
+
+                # Balance du compte pour le moteur de risque
                 summary = await self.mt5.get_account_summary()
                 balance = Decimal(str(summary.get("balance", 100000)))
                 self.risk.update_account_balance(balance)
-                
+
+                await self.refresh_symbol_universe()
+
                 if not status.trading_allowed:
-                    logger.warning("Auto-Trading paused: Risk limits hit or Kill-Switch active.")
-                    await asyncio.sleep(60)
-                    continue
-                    
-                if nemesis.should_block_trading():
-                    logger.warning("Auto-Trading paused: Nemesis Meditation Phase Active (Consecutive Losses).")
+                    logger.warning("Auto-Trading pause: limites de risque atteintes.")
                     await asyncio.sleep(60)
                     continue
 
                 if nemesis.should_block_trading():
-                    logger.warning("Auto-Trading paused: Nemesis Meditation Phase Active (Consecutive Losses).")
+                    logger.warning("Auto-Trading pause: phase Nemesis active.")
                     await asyncio.sleep(60)
                     continue
 
-                # 2. Vérifier positions ouvertes (Global Limit)
+                # 2. Verifier positions ouvertes (Global Limit)
                 positions = await self.mt5.get_open_positions()
-                
+                if positions is None:
+                    logger.warning("MT5 indisponible pour la lecture des positions. Nouvelle tentative dans 30s.")
+                    await asyncio.sleep(30)
+                    continue
+
+                self.risk.update_positions_count(len(positions))
+
                 # CLOSE DETECTION (Sprint 9)
                 await self._detect_closed_positions(positions)
-                
-                # THE SHEPHERD (MANAGEMENT) 🐑
-                # Loop through open positions to secure profits (Break-Even & Trailing)
+
+                # THE SHEPHERD (MANAGEMENT)
                 for pos in positions:
                     try:
-                        # Skip if recently opened (avoid noise)
                         if (datetime.now() - pos.open_time).total_seconds() < 60: continue
-                        
+
                         current_price = float(pos.current_price)
                         open_price = float(pos.open_price)
                         sl = float(pos.stop_loss) if pos.stop_loss else 0.0
-                        
-                        # Dynamic trailing thresholds based on asset class (FX vs Gold/Indices)
+
                         is_high_vol = "XAU" in pos.symbol or "BTC" in pos.symbol or "US30" in pos.symbol
-                        be_threshold = 2.5 if is_high_vol else 0.0015 # Room to breathe
+                        be_threshold = 2.5 if is_high_vol else 0.0015
                         trail_activation = 5.0 if is_high_vol else 0.0030
                         trail_distance = 2.0 if is_high_vol else 0.0010
-                        
+
                         if pos.action == TradeAction.BUY:
                             profit = current_price - open_price
-                            # Break-Even Logic
                             if profit > be_threshold and (sl == 0.0 or sl < open_price):
-                                new_sl = open_price + (0.1 if is_high_vol else 0.0001) # Secure small profit
+                                new_sl = open_price + (0.1 if is_high_vol else 0.0001)
                                 await self.mt5.modify_position(pos.ticket, sl=new_sl, tp=0.0)
                                 msg = self._fmt_shepherd_msg(pos.symbol, "BUY", "SECURED", new_sl, profit)
                                 logger.info(msg)
                                 self.telegram.send_sync(msg)
-                            
-                            # Trailing Stop 
                             elif profit > trail_activation:
                                 trailing_sl = current_price - trail_distance
                                 if trailing_sl > sl:
@@ -614,15 +740,12 @@ class AutoTradingEngine:
 
                         elif pos.action == TradeAction.SELL:
                             profit = open_price - current_price
-                            # Break-Even
                             if profit > be_threshold and (sl == 0.0 or sl > open_price):
                                 new_sl = open_price - (0.1 if is_high_vol else 0.0001)
                                 await self.mt5.modify_position(pos.ticket, sl=new_sl, tp=0.0)
                                 msg = self._fmt_shepherd_msg(pos.symbol, "SELL", "SECURED", new_sl, profit)
                                 logger.info(msg)
                                 self.telegram.send_sync(msg)
-                                
-                            # Trailing
                             elif profit > trail_activation:
                                 trailing_sl = current_price + trail_distance
                                 if sl == 0.0 or trailing_sl < sl:
@@ -633,13 +756,21 @@ class AutoTradingEngine:
                     except Exception as e_shepherd:
                         logger.error(f"Shepherd Error on {pos.ticket}: {e_shepherd}")
 
-                if len(positions) >= 12: # Increased global limit for multi-asset (Sprint 15)
+                if len(positions) >= 12:
                     logger.info("Max global positions reached (12). Waiting...")
                     await asyncio.sleep(60)
                     continue
 
+                symbols_to_scan = self.get_symbol_batch()
+                if not symbols_to_scan:
+                    logger.warning("Aucun symbole disponible pour le prochain cycle de scan.")
+                    await asyncio.sleep(60)
+                    continue
+
+                await self.mt5.initialize_symbols(symbols_to_scan)
+
                 # 3. Iterate over symbols (The Hive Mind)
-                for symbol in self.symbols:
+                for symbol in symbols_to_scan:
                     if not self.is_active: break
                     
                     try:
@@ -673,7 +804,7 @@ class AutoTradingEngine:
                                 # 4. Neural Analysis (GNN / Dreamer)
                                 gnn_bias = strat_result.get("gnn_bias", "UNKNOWN")
                             except Exception as e_cortex:
-                                logger.error(f"🧠 Cortex Error: {e_cortex}")
+                                logger.error(f"ðŸ§  Cortex Error: {e_cortex}")
                         else:
                             bias = last_strat.get("bias", "NEUTRAL")
                             gnn_bias = last_strat.get("gnn_bias", "N/A")
@@ -769,7 +900,7 @@ class AutoTradingEngine:
                             bias_color = Fore.GREEN if bias == "BULLISH" else (Fore.RED if bias == "BEARISH" else Fore.LIGHTBLACK_EX)
                             
                             logger.info(
-                                f"🧠 {sym_color}{symbol:<8}{Style.RESET_ALL} | "
+                                f"ðŸ§  {sym_color}{symbol:<8}{Style.RESET_ALL} | "
                                 f"Price: {current_price:<9.2f} | "
                                 f"RSI: {rsi_val:<4.1f} | "
                                 f"ADX: {adx_data['adx'].iloc[-1]:<4.1f} | VWAP: {vwap_val:<9.2f} | "
@@ -823,11 +954,11 @@ class AutoTradingEngine:
                             comment = "Error connecting to Lab"
 
                         if action == TradeAction.BUY and bias == "BEARISH":
-                            logger.info(f"🙅 Cortex VETO: Blocking BUY on {symbol} (Trend is BEARISH on M15)")
+                            logger.info(f"ðŸ™… Cortex VETO: Blocking BUY on {symbol} (Trend is BEARISH on M15)")
                             action = None
                             comment = "Blocked by Cortex (Bearish Trend on M15)"
                         elif action == TradeAction.SELL and bias == "BULLISH":
-                            logger.info(f"🙅 Cortex VETO: Blocking SELL on {symbol} (Trend is BULLISH on M15)")
+                            logger.info(f"ðŸ™… Cortex VETO: Blocking SELL on {symbol} (Trend is BULLISH on M15)")
                             action = None
                             comment = "Blocked by Cortex (Bullish Trend on M15)"
 
@@ -844,13 +975,13 @@ class AutoTradingEngine:
                             console.print(
                                 f"[white]M1/M15[/white] [{sym_color}]{symbol}[/{sym_color}] | "
                                 f"Price: [italic]{current_price:.2f}[/italic] | "
-                                f"RSI: [magenta]{rsi_val:.1f}[/magenta] ➔ "
+                                f"RSI: [magenta]{rsi_val:.1f}[/magenta] âž” "
                                 f"Action: [{act_color}]{act_str}[/{act_color}] ({comment}) | "
                                 f"Context: [{bias_color}]{bias}[/{bias_color}]"
                             )
                         except ImportError:
                             log_msg = f"[M1/M15] {symbol}: Price={current_price:.2f} RSI={rsi_val:.1f} -> Action={action} ({comment}) [Context: {bias}]"
-                            logger.info(f"🧠 {log_msg}")
+                            logger.info(f"ðŸ§  {log_msg}")
 
                         # PUBLISH TO AGENT FEED (UI)
                         redis = get_redis_client()
@@ -933,8 +1064,8 @@ class AutoTradingEngine:
                             if margin_required is not None and account:
                                 free_margin = float(account.get("free_margin", 0.0))
                                 if free_margin < margin_required:
-                                    logger.error(f"❌ MARGIN VETO: {symbol} {action} requires ${margin_required:.2f}, but only ${free_margin:.2f} free.")
-                                    self.telegram.send_sync(f"⚠️ *MARGIN VETO* | {symbol} {action} blocked\nNeed: ${margin_required:.2f} / Free: ${free_margin:.2f}")
+                                    logger.error(f"âŒ MARGIN VETO: {symbol} {action} requires ${margin_required:.2f}, but only ${free_margin:.2f} free.")
+                                    self.telegram.send_sync(f"âš ï¸ *MARGIN VETO* | {symbol} {action} blocked\nNeed: ${margin_required:.2f} / Free: ${free_margin:.2f}")
                                     action = None
                                     comment = "Insufficient Margin"
                             
@@ -944,7 +1075,7 @@ class AutoTradingEngine:
 
                         validation = await self.risk.validate_order(order)
                         if validation["allowed"]:
-                            logger.info(f"🤖 EXEC {symbol}: {action} | {comment}")
+                            logger.info(f"ðŸ¤– EXEC {symbol}: {action} | {comment}")
                             result = await self.worker.execute_skill(skill, order)
                             if result.get("success"):
                                 # --- NEW (Sprint 11): LLM Micro-Reasoning ---
@@ -985,12 +1116,12 @@ class AutoTradingEngine:
                                 
                                 asyncio.create_task(self._record_learning_experience(order, result, features, extended_features, float(current_price)))
                             else:
-                                # ═══ ORDER FAILED — LOG IT ═══
+                                # â•â•â• ORDER FAILED â€” LOG IT â•â•â•
                                 fail_msg = result.get("message", "Unknown error")
                                 fail_code = result.get("retcode", "?")
-                                logger.error(f"❌ ORDER FAILED {symbol} {action}: {fail_msg} (retcode={fail_code})")
+                                logger.error(f"âŒ ORDER FAILED {symbol} {action}: {fail_msg} (retcode={fail_code})")
                                 self.telegram.send_sync(
-                                    f"❌ *ORDER FAILED* | {symbol} {action.value}\n"
+                                    f"âŒ *ORDER FAILED* | {symbol} {action.value}\n"
                                     f"Reason: {fail_msg}\n"
                                     f"SL: {float(sl_price):.2f} | Vol: {float(order.volume)}"
                                 )
@@ -1014,7 +1145,7 @@ class AutoTradingEngine:
                 await asyncio.sleep(60)
 
     async def _record_learning_experience(self, order: TradeOrder, result: dict, features: dict, extended_features: dict, current_price: float):
-        """Envoie les données du trade au Lab pour Shadow Learning (DreamerV3)"""
+        """Envoie les donnÃ©es du trade au Lab pour Shadow Learning (DreamerV3)"""
         try:
             import aiohttp
             from shared.internal_auth import InternalAuth
@@ -1043,7 +1174,7 @@ class AutoTradingEngine:
             async with aiohttp.ClientSession() as session:
                 async with session.post(lab_url, json=payload, headers=headers) as resp:
                     if resp.status == 200:
-                        logger.info(f"🧠 Shadow Learning: Trade recorded in Lab (Ticket {result.get('ticket')})")
+                        logger.info(f"ðŸ§  Shadow Learning: Trade recorded in Lab (Ticket {result.get('ticket')})")
                     else:
                         logger.warning(f"Shadow Learning failed: {resp.status}")
                         
@@ -1051,7 +1182,7 @@ class AutoTradingEngine:
             logger.error(f"Failed to send shadow learning data: {e}")
 
     async def _send_pnl_feedback(self, symbol: str, action: str, price: float, pnl: float):
-        """Envoie le P&L réel au Lab pour micro-training (Sprint 9.5)."""
+        """Envoie le P&L rÃ©el au Lab pour micro-training (Sprint 9.5)."""
         try:
             from shared.internal_auth import InternalAuth
             
@@ -1074,7 +1205,7 @@ class AutoTradingEngine:
                 async with session.post(lab_url, json=payload, headers=headers, timeout=5.0) as resp:
                     if resp.status == 200:
                         result = await resp.json()
-                        logger.info(f"🧠 Shadow Feedback: {symbol} P&L=${pnl:.2f} → Lab trained (loss={result.get('wm_loss', '?')})")
+                        logger.info(f"ðŸ§  Shadow Feedback: {symbol} P&L=${pnl:.2f} â†’ Lab trained (loss={result.get('wm_loss', '?')})")
                     else:
                         logger.warning(f"Shadow Feedback failed: {resp.status}")
                         
@@ -1082,7 +1213,7 @@ class AutoTradingEngine:
             logger.error(f"Failed to send P&L feedback: {e}")
 
     async def _handle_reversal(self, symbol: str, bias: str):
-        """Ferme les positions opposées au nouveau biais (Sprint 12)."""
+        """Ferme les positions opposÃ©es au nouveau biais (Sprint 12)."""
         if bias not in ["BULLISH", "BEARISH"]:
             return
             
@@ -1095,6 +1226,7 @@ class AutoTradingEngine:
                     should_close = True
                 
                 if should_close:
-                    logger.warning(f"🔄 Reversal {symbol}: Closing opposite {info['action']} #{ticket}")
+                    logger.warning(f"ðŸ”„ Reversal {symbol}: Closing opposite {info['action']} #{ticket}")
                     await self.mt5.close_position(ticket)
-                    # Note: notification de fermeture sera envoyée par le loop principal au prochain cycle
+                    # Note: notification de fermeture sera envoyÃ©e par le loop principal au prochain cycle
+

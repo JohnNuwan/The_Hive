@@ -1,175 +1,195 @@
-"""
-Train Global Models (Sprint 16) — THE HIVE EVA-Lab
+﻿"""Entraine MuZero sur historique reel puis execute la selection ADN."""
 
-Ce script orchestre l'entraînement massif du modèle JAX MuZero / DreamerV3 
-sur l'ensemble de l'univers d'actifs globaux (27 symboles).
+from __future__ import annotations
 
-Il effectue les actions suivantes :
-1. Initialize un Replay Buffer partagé.
-2. Itère sur TOUS les symboles actifs pour générer des données synthétiques 
-   via du Self-Play intensif (Phase 1: Exploration & Data Collection).
-3. Lance une phase d'entraînement profond (Deep Training) sur la base de 
-   ce buffer multi-actifs pour apprendre les corrélations (Phase 2).
-4. Évalue et sauvegarde le modèle final (Phase 3).
-"""
-
-import os
-import sys
+import json
 import logging
-import jax
-import numpy as np
+import os
+import shutil
+import sys
 from datetime import datetime
+from pathlib import Path
 
-# Add src to path
-sys.path.append(os.path.join(os.getcwd(), "src", "eva-lab"))
-sys.path.append(os.path.join(os.getcwd(), "src", "shared"))
+import jax
 
+package_root = Path(__file__).resolve().parents[1]
+shared_root = package_root.parent / 'shared'
+for candidate in (package_root, shared_root):
+    candidate_str = str(candidate)
+    if candidate_str not in sys.path:
+        sys.path.insert(0, candidate_str)
+
+from eva_lab.arena import Arena
+from eva_lab.genetic_updater import GeneticUpdater
 from eva_lab.muzero.config import MuZeroConfigV3
-from eva_lab.muzero.jax_agent import JAXMuZeroAgent
 from eva_lab.muzero.environment import TradingEnvironment
+from eva_lab.muzero.jax_agent import JAXMuZeroAgent
+from eva_lab.training_utils import build_inventory_report, build_muzero_market_data, load_history_frame
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
-logger = logging.getLogger("GlobalTrainer")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("eva_lab.train_muzero")
 
 
-def main():
-    logger.info("==================================================")
-    logger.info("🚀 STARTING GLOBAL TRAINING - MUZERO/DREAMERV3 🧠")
-    logger.info("==================================================")
-    logger.info(f"Hardware Devices: {jax.devices()}")
 
-    # 1. Setup global configuration
+def build_environment(symbol: str, config: MuZeroConfigV3) -> TradingEnvironment | None:
+    """Construit l'environnement MuZero a partir de l'historique du symbole."""
+    frame = load_history_frame(symbol, config.primary_timeframe)
+    if frame is None:
+        logger.warning("Historique absent pour %s sur %s.", symbol, config.primary_timeframe)
+        return None
+
+    market_data = build_muzero_market_data(frame.tail(4000))
+    if market_data.shape[0] < 240:
+        logger.warning("Historique insuffisant pour %s sur %s.", symbol, config.primary_timeframe)
+        return None
+
+    max_steps = min(config.max_moves, market_data.shape[0] - 101)
+    return TradingEnvironment(data=market_data, symbol=symbol, config=config, max_steps=max_steps)
+
+
+
+def main() -> dict[str, object]:
+    """Orchestre l'entrainement MuZero d'un horizon strategique."""
     config = MuZeroConfigV3()
-    # 🔥 RTX 3090 FE — Maximum Overnight Training Parameters
-    # training_steps is cumulative (checkpoint resumes from latest)
-    config.training_steps = 50_000    # 50k gradient steps per nightly session
-    config.num_simulations = 200      # Deep MCTS planning (was 50)
-    config.batch_size = 512           # Saturate GPU VRAM (was 32)
-    config.checkpoint_interval = 500  # Checkpoint every 500 steps
-    config.num_unroll_steps = 10      # Longer rollouts for better world model
-    config.td_steps = 20              # Deeper temporal credit assignment
-    
-    symbols = config.symbols
-    num_symbols = len(symbols)
-    logger.info(f"🌍 Univers d'actifs: {num_symbols} symboles détectés.")
-    logger.info(f"📝 Symboles: {symbols}")
-    
-    agent = JAXMuZeroAgent(config)
-    
-    # Try restoring weights to resume training if possible
-    weights_path = os.path.join(config.weights_path, "muzero_global_latest.pkl")
-    if os.path.exists(weights_path):
-        logger.info(f"♻️  Reprise de l'entraînement à partir de: {weights_path}")
-        try:
-            agent.load(weights_path)
-        except Exception as e:
-            logger.warning(f"Impossible de charger les poids existants: {e}")
-            logger.info("Démarrage d'un entraînement de zéro.")
-    
-    # 2. Phase 1: Warming Up Replay Buffer (Massive Self-Play)
-    logger.info("==================================================")
-    logger.info("🎮 PHASE 1: COLLECTE DE DONNEES (SELF-PLAY MULTI-ACTIFS)")
-    logger.info("==================================================")
-    
-    games_per_symbol = 20          # 🔥 Rich replay buffer (was 3)
-    total_games = num_symbols * games_per_symbol
-    games_played = 0
-    
-    logger.info(f"  → {games_per_symbol} games × {num_symbols} symbols = {total_games} episodes")
+    horizon = config.horizon
+    logger.info("Demarrage MuZero horizon=%s | timeframe=%s", horizon, config.primary_timeframe)
+    logger.info("Peripheriques JAX: %s", jax.devices())
+    logger.info("Inventaire historique: %s", build_inventory_report())
+    logger.info("Univers MuZero: %s", config.symbols)
 
-    for symbol in symbols:
-        logger.info(f"📊 Collecte de données pour: {symbol}")
-        # Create a tiny localized environment for this symbol
-        env = TradingEnvironment(symbol=symbol, config=config, max_steps=100)
-        
-        for i in range(games_per_symbol):
-            history = agent.play_game(env, exploration=True)
-            games_played += 1
+    agent = JAXMuZeroAgent(config)
+    weights_dir = Path(config.weights_path)
+    weights_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = Path(config.results_path)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    latest_path = weights_dir / f"muzero_{horizon}_latest.pkl"
+    if latest_path.exists():
+        try:
+            agent.load(str(latest_path))
+            logger.info("Reprise MuZero depuis %s", latest_path)
+        except Exception as exc:
+            logger.warning("Checkpoint MuZero ignore: %s", exc)
+
+    games_per_symbol = int(os.getenv("MUZERO_GAMES_PER_SYMBOL", "8"))
+    valid_symbols: list[str] = []
+    total_games = 0
+
+    logger.info("Phase 1 - collecte historique par self-play guide")
+    for symbol in config.symbols:
+        env = build_environment(symbol, config)
+        if env is None:
+            continue
+        valid_symbols.append(symbol)
+        for game_index in range(games_per_symbol):
+            agent.play_game(env, exploration=True)
+            summary = env.get_summary()
+            total_games += 1
             logger.info(
-                f"  [{games_played}/{total_games}] {symbol} Ep {i+1} "
-                f"| Return: {history.info[-1].get('equity', 0):.2f}$ "
-                f"| Buffer: {agent.replay_buffer.size}"
+                "[%s] %s partie %s/%s | return=%.2f%% | trades=%s | buffer=%s",
+                horizon,
+                symbol,
+                game_index + 1,
+                games_per_symbol,
+                summary.get("return_pct", 0.0),
+                summary.get("total_trades", 0),
+                agent.replay_buffer.size,
             )
 
-    logger.info(f"✅ Replay Buffer rempli avec {agent.replay_buffer.size} transitions multi-actifs.")
+    if not valid_symbols:
+        raise RuntimeError("Aucun symbole valide pour MuZero.")
 
-    # 3. Phase 2: Deep Training Loop
-    logger.info("==================================================")
-    logger.info(f"🏋️ PHASE 2: DEEP TRAINING ({config.training_steps} Steps)")
-    logger.info("==================================================")
-    
+    logger.info("Phase 2 - optimisation profonde (%s steps)", config.training_steps)
     start_time = datetime.now()
-    
+    last_metrics = None
+
     for step in range(1, config.training_steps + 1):
         metrics = agent.train_step()
-        
-        if metrics:
-            if step % 50 == 0:
-                elapsed = (datetime.now() - start_time).total_seconds()
-                speed = step / elapsed if elapsed > 0 else 0
-                logger.info(
-                    f"Epoch {step:05d}/{config.training_steps} "
-                    f"| Loss: {metrics['loss_total']:.4f} "
-                    f"| Policy: {metrics.get('loss_policy', 0):.4f} "
-                    f"| Value: {metrics.get('loss_value', 0):.4f} "
-                    f"| ({speed:.1f} steps/s)"
-                )
-            
-            # Save checkpoints periodically
-            if step % config.checkpoint_interval == 0:
-                ckpt_path = os.path.join(config.weights_path, f"muzero_global_ckpt_{step}.pkl")
-                agent.save(ckpt_path)
-                logger.info(f"💾 Checkpoint sauvegardé: {ckpt_path}")
-        else:
-            logger.warning("Agent did not train (is the buffer empty?)")
+        if metrics is None:
+            logger.warning("MuZero sans batch suffisant, arret a l'etape %s.", step)
             break
+        last_metrics = metrics
 
-    total_time = datetime.now() - start_time
-    logger.info(f"✅ Entraînement Deep Learning complété en {total_time}.")
+        if step % 50 == 0:
+            elapsed = max((datetime.now() - start_time).total_seconds(), 1.0)
+            logger.info(
+                "[%s] step %05d/%05d | loss=%.4f | val=%.4f | rew=%.4f | pol=%.4f | %.2f steps/s",
+                horizon,
+                step,
+                config.training_steps,
+                float(metrics["loss_total"]),
+                float(metrics["loss_val"]),
+                float(metrics["loss_rew"]),
+                float(metrics["loss_pol"]),
+                step / elapsed,
+            )
 
-    # 4. Phase 3: Evaluation and Arena Battle
-    logger.info("==================================================")
-    logger.info("🔬 PHASE 3: EVALUATION & ARENA BATTLE")
-    logger.info("==================================================")
-    
-    # Save Challenger Models
-    challenger_id = f"gen_challenger_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    challenger_path = os.path.join(config.weights_path, f"{challenger_id}.pkl")
-    agent.save(challenger_path)
-    logger.info(f"💾 Modèle Challenger exporté: {challenger_path}")
-    
-    logger.info("🏆 Lancement de l'Arena Darwinienne...")
-    
-    from eva_lab.arena import Arena
-    from eva_lab.genetic_updater import GeneticUpdater
-    import shutil
-    
+        if step % config.checkpoint_interval == 0:
+            checkpoint_path = weights_dir / f"muzero_{horizon}_ckpt_{step}.pkl"
+            agent.save(str(checkpoint_path))
+            logger.info("Checkpoint MuZero sauvegarde: %s", checkpoint_path)
+
+    agent.save(str(latest_path))
+    logger.info("Checkpoint latest mis a jour: %s", latest_path)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    challenger_id = f"gen_{horizon}_{timestamp}"
+    challenger_path = weights_dir / f"{challenger_id}.pkl"
+    agent.save(str(challenger_path))
+
+    logger.info("Phase 3 - arena ADN")
     genetic = GeneticUpdater()
-    arena = Arena()
-    
-    champion_id = genetic.get_champion()
-    
-    # Combat dans l'arène
-    battle_report = arena.battle(challenger_id, champion_id)
-    
+    arena = Arena(weights_dir=config.weights_path)
+    champion_id = genetic.get_champion(horizon=horizon)
+    battle_report = arena.battle(challenger_id, champion_id, horizon=horizon)
+    logger.info("Verdict ADN %s: %s", horizon, battle_report["outcome"])
+
+    challenger_metrics = battle_report["challenger"]["metrics"]
+    registry_metrics = {
+        "win_rate": {horizon: challenger_metrics.get("win_rate", 0.0)},
+        "return_pct": {horizon: challenger_metrics.get("return_pct", 0.0)},
+        "battles_won": {horizon: 1 if battle_report["outcome"] == "VICTORY" else 0},
+        "horizon_accuracy": {horizon: challenger_metrics.get("win_rate", 0.0) / 100.0},
+    }
+    genetic.register_new_generation(
+        gen_id=challenger_id,
+        metrics=registry_metrics,
+        is_champion=battle_report["outcome"] == "VICTORY",
+        horizon=horizon,
+    )
+
+    champion_paths = []
     if battle_report["outcome"] == "VICTORY":
-        logger.info(f"👑 LE CHALLENGER L'EMPORTE ! Enregistrement du nouvel ADN...")
-        genetic.register_new_generation(
-            gen_id=challenger_id,
-            metrics=battle_report["challenger"]["metrics"],
-            is_champion=True
-        )
-        # Faire une copie universelle pour le chargement rapide
-        champion_path = os.path.join(config.weights_path, "muzero_champion.pkl")
-        shutil.copy2(challenger_path, champion_path)
-        logger.info(f"💾 Nouveau Champion déployé: {champion_path}")
-    else:
-        logger.info(f"🗑️ Le Challenger a perdu. L'ADN est rejeté.")
-    logger.info("🎯 GLOBAL TRAINING PROCESS FINISHED.")
-    logger.info("==================================================")
+        horizon_champion = weights_dir / f"muzero_champion_{horizon}.pkl"
+        shutil.copy2(challenger_path, horizon_champion)
+        champion_paths.append(str(horizon_champion))
+        logger.info("Nouveau champion %s deploye: %s", horizon, horizon_champion)
+
+        if horizon == "intraday":
+            legacy_champion = weights_dir / "muzero_champion.pkl"
+            shutil.copy2(challenger_path, legacy_champion)
+            champion_paths.append(str(legacy_champion))
+            logger.info("Champion legacy mis a jour: %s", legacy_champion)
+
+    report_path = results_dir / f"arena_{horizon}_latest.json"
+    report_payload = {
+        "horizon": horizon,
+        "timeframe": config.primary_timeframe,
+        "symbols": valid_symbols,
+        "games_per_symbol": games_per_symbol,
+        "total_games": total_games,
+        "latest_checkpoint": str(latest_path),
+        "challenger_path": str(challenger_path),
+        "champion_paths": champion_paths,
+        "training_metrics": last_metrics,
+        "battle_report": battle_report,
+    }
+    report_path.write_text(json.dumps(report_payload, indent=2, default=float), encoding="utf-8")
+    logger.info("Rapport MuZero ecrit dans %s", report_path)
+    return report_payload
+
 
 if __name__ == "__main__":
-    main()
+    summary = main()
+    logger.info("MuZero termine: %s", summary)
+

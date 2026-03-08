@@ -1,7 +1,7 @@
 [project]
 name = "eva-lab"
 version = "0.1.0"
-description = "Laboratoire de R&D et d'auto-évolution pour E.V.A."
+description = "Laboratoire de R&D et d'auto-evolution pour E.V.A."
 dependencies = [
     "fastapi",
     "uvicorn",
@@ -17,3 +17,7 @@ dependencies = [
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eva_lab*"]
