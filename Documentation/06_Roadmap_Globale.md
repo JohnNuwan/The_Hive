@@ -65,6 +65,10 @@ Ce document trace la trajectoire pour passer d'un simple script Python ÃƒÂ  
 - `eva-builder` sait maintenant synchroniser et exploiter un catalogue d'APIs publiques depuis `public-apis/public-apis` pour enrichir les prompts produit et SaaS.
 - `eva-builder` expose aussi une passerelle de mutation securisee avec `dry-run` par defaut et activation explicite par variable d'environnement.
 - `eva-builder` expose aussi une passerelle de deploiement structuree, en `dry-run` par defaut, pour les cibles `local` et `proxmox`.
+- Le `banker` n'ouvre plus de nouvelles positions tant qu'EVA Lab ne fournit pas un `champion` live valide.
+- Le mode `research-first` est maintenant privilegie: entrainement massif, notifications Telegram des meilleurs candidats, puis seulement bascule vers le live.
+- `eva-nexus` est maintenant recable proprement sur Builder: proxy Docker ajoute, Muse repasse par le proxy local, liens Grafana alignes sur l'hote courant, et cockpit Builder disponible dans Enterprise.
+- Le frontend Nexus passe maintenant `npm run lint` puis `npm run build` localement.
 
 ### Ce qui est en cours
 - `MuZero scalp` est en execution sur GPU.
@@ -73,15 +77,17 @@ Ce document trace la trajectoire pour passer d'un simple script Python ÃƒÂ  
 - La partie trading est donc surtout en attente active de fin d'entrainement et de verification d'artefacts.
 
 ### Ce qu'il reste a faire
-- Finaliser les runs `MuZero` et `DreamerV3`, puis verifier les checkpoints/rapports generes.
+- Finaliser les runs `MuZero` de recherche, puis verifier les checkpoints/rapports generes sur un echantillon suffisant.
 - Rendre `eva-trainer` nativement compatible JAX CUDA sans patch runtime a chaque lancement.
-- Injecter les modeles entraines dans la boucle de decision/execution live du banker.
+- Injecter uniquement les modeles promus par la gate dans la boucle de decision/execution live du banker.
 - Etendre l'historique et l'univers au-dela des `6` symboles actuels.
 - Connecter ensuite les exchanges crypto (`Binance`, `Kraken`, `Coinbase`) au meme pipeline.
 - Finaliser la boucle ADN/evolution/champion-challenger sur resultats reels.
 - Migrer les secrets hors `.env` en clair vers un coffre dedie.
+- Basculer les flux Builder Nexus de `dry-run` vers deploiement/mutation live uniquement apres validation serveur complete.
 
 ### Travail recommande pendant l'attente
 - Priorite 1 deja engagee: `eva-builder`, avec consolidation des services et de la boucle de validation locale pendant que le training tourne.
-- Priorite 2: `eva-nexus`, pour exposer et piloter proprement les factories et les experts.
+- Priorite 2 deja engagee: `eva-nexus`, avec recablage des proxies et cockpit Builder dans Enterprise.
 - Priorite 3: `RLM` seulement en appui, pas comme chantier principal, car sa boucle existe deja.
+

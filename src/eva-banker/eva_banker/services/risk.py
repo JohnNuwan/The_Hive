@@ -213,22 +213,28 @@ class RiskValidator:
         if order.stop_loss_price is None:
             return Decimal("100")
 
-        mock_prices = {
-            "XAUUSD": Decimal("4900.00"),
-            "EURUSD": Decimal("1.0850"),
-            "BTCUSD": Decimal("67000.00"),
-            "ETHUSD": Decimal("3200.00"),
-            "SOLUSD": Decimal("140.00"),
-            "US30.CASH": Decimal("39000.00"),
-            "GBPUSD": Decimal("1.2700"),
-            "USDJPY": Decimal("150.00"),
-            "AUDUSD": Decimal("0.6600"),
-            "XAGUSD": Decimal("23.50"),
-            "US100.CASH": Decimal("18000.00"),
-            "GER40.CASH": Decimal("17000.00"),
-        }
-        current_price = mock_prices.get(order.symbol.upper(), Decimal("100"))
+        if order.entry_price is not None:
+            current_price = Decimal(str(order.entry_price))
+        else:
+            mock_prices = {
+                "XAUUSD": Decimal("4900.00"),
+                "EURUSD": Decimal("1.0850"),
+                "BTCUSD": Decimal("67000.00"),
+                "ETHUSD": Decimal("3200.00"),
+                "SOLUSD": Decimal("140.00"),
+                "US30.CASH": Decimal("39000.00"),
+                "GBPUSD": Decimal("1.2700"),
+                "USDJPY": Decimal("150.00"),
+                "AUDUSD": Decimal("0.6600"),
+                "XAGUSD": Decimal("23.50"),
+                "US100.CASH": Decimal("18000.00"),
+                "GER40.CASH": Decimal("17000.00"),
+            }
+            current_price = mock_prices.get(order.symbol.upper(), Decimal("100"))
+
         sl_distance = abs(current_price - order.stop_loss_price)
+        if sl_distance <= 0:
+            return Decimal("100")
         contract_size = self._get_estimated_contract_size(order.symbol)
         potential_loss = sl_distance * Decimal(str(order.volume)) * contract_size
 
@@ -484,7 +490,7 @@ class RiskValidator:
             float: Taille de lot arrondie et securisee.
         """
         if sl_distance <= 0 or balance <= 0 or risk_percent <= 0:
-            return 0.01
+            return 0.0
 
         risk_amount = balance * (risk_percent / Decimal("100"))
         symbol_upper = symbol.upper()
@@ -501,10 +507,13 @@ class RiskValidator:
 
         try:
             raw_lots = risk_amount / (sl_distance * point_value)
-            lot_size = float(raw_lots.quantize(Decimal("0.01")))
-            return max(0.01, lot_size)
+            if raw_lots <= 0:
+                return 0.0
+
+            lot_size = float(max(raw_lots, Decimal("0")).quantize(Decimal("0.01")))
+            return max(0.0, lot_size)
         except ZeroDivisionError:
-            return 0.01
+            return 0.0
 
     async def get_current_status(self) -> RiskStatus:
         """

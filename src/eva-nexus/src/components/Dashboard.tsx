@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
-import { Activity, ShieldAlert } from 'lucide-react'
+﻿import { useState, useEffect, useRef } from 'react'
+import { ShieldAlert } from 'lucide-react'
 import {
     getAllNodesHealth, getKillSwitchStatus, getNemesisStatus,
     getNewsFilter, getCoreTelemetry, getCoreCircuitBreaker,
@@ -8,20 +8,20 @@ import {
     type NewsFilterStatus, type TelemetryData, type CircuitBreakerStatus
 } from '../services/api'
 
-// ═══ SIMULATED ACTIVITY LOG ═══
+// â•â•â• SIMULATED ACTIVITY LOG â•â•â•
 const SIM_LOGS = [
-    { agent: 'KERNEL', msg: 'Heartbeat received — All systems nominal', type: 'info' },
-    { agent: 'BANKER', msg: 'Risk assessment complete — Exposure: 1.2%', type: 'info' },
-    { agent: 'SENTINEL', msg: 'Network scan — 0 anomalies detected', type: 'success' },
-    { agent: 'NERVOUS', msg: 'Route signal P0 → kernel_action (0.3ms)', type: 'info' },
+    { agent: 'KERNEL', msg: 'Heartbeat received â€” All systems nominal', type: 'info' },
+    { agent: 'BANKER', msg: 'Risk assessment complete â€” Exposure: 1.2%', type: 'info' },
+    { agent: 'SENTINEL', msg: 'Network scan â€” 0 anomalies detected', type: 'success' },
+    { agent: 'NERVOUS', msg: 'Route signal P0 â†’ kernel_action (0.3ms)', type: 'info' },
     { agent: 'QUANT', msg: 'Monte Carlo VaR: $234.56 (10K paths, 8ms)', type: 'info' },
-    { agent: 'CORE', msg: 'LLM routing complete — Expert: Researcher', type: 'info' },
-    { agent: 'KERNEL', msg: 'Constitution integrity verified — Hash: 0xAF3C', type: 'success' },
-    { agent: 'BANKER', msg: 'Drone #3 scaled — Volatility threshold crossed', type: 'warning' },
-    { agent: 'SENTINEL', msg: 'Threat level: GREEN — Perimeter secure', type: 'success' },
+    { agent: 'CORE', msg: 'LLM routing complete â€” Expert: Researcher', type: 'info' },
+    { agent: 'KERNEL', msg: 'Constitution integrity verified â€” Hash: 0xAF3C', type: 'success' },
+    { agent: 'BANKER', msg: 'Drone #3 scaled â€” Volatility threshold crossed', type: 'warning' },
+    { agent: 'SENTINEL', msg: 'Threat level: GREEN â€” Perimeter secure', type: 'success' },
     { agent: 'NERVOUS', msg: 'Swarm heartbeat broadcast (5 agents)', type: 'info' },
-    { agent: 'QUANT', msg: 'Black-Scholes CALL: $12.45 — Greeks calculated', type: 'info' },
-    { agent: 'CORE', msg: 'Memory consolidation — 847 vectors indexed', type: 'info' },
+    { agent: 'QUANT', msg: 'Black-Scholes CALL: $12.45 â€” Greeks calculated', type: 'info' },
+    { agent: 'CORE', msg: 'Memory consolidation â€” 847 vectors indexed', type: 'info' },
 ]
 
 interface LogEntry {
@@ -67,14 +67,21 @@ export default function Dashboard() {
     // Fetch all data
     useEffect(() => {
         const fetchAll = async () => {
-            const [nodesData, ksData, nemData, newsData, telData, cbData, tradData] = await Promise.all([
-                getAllNodesHealth(),
+            const nodesData = await getAllNodesHealth()
+            const bankerOnline = nodesData.some((node) => node.name === 'Banker' && node.status === 'online')
+            const [ksData, nemData, newsData, telData, cbData, tradData] = await Promise.all([
                 getKillSwitchStatus(),
-                getNemesisStatus(),
-                getNewsFilter(),
+                bankerOnline
+                    ? getNemesisStatus()
+                    : Promise.resolve({ total_defeats: 0, known_nemeses: {}, trading_blocked: false, blocked_until: null }),
+                bankerOnline
+                    ? getNewsFilter()
+                    : Promise.resolve({ is_active: false, blocked_until: null, next_high_impact_events: [] }),
                 getCoreTelemetry(),
                 getCoreCircuitBreaker(),
-                getTradingStatus(),
+                bankerOnline
+                    ? getTradingStatus()
+                    : Promise.resolve({ account: { equity: 0 }, positions: [], risk: { daily_drawdown_percent: 0, trading_allowed: false } }),
             ])
             setNodes(nodesData)
             setKillSwitch(ksData)
@@ -99,8 +106,8 @@ export default function Dashboard() {
     }
 
     const nodeIcons: Record<string, string> = {
-        'EVA Core': '🧠', 'Banker': '💰', 'Sentinel': '👁', 'Shadow': '🌑',
-        'Researcher': '🔬', 'Wraith': '👻'
+        'EVA Core': 'ðŸ§ ', 'Banker': 'ðŸ’°', 'Sentinel': 'ðŸ‘', 'Shadow': 'ðŸŒ‘',
+        'Researcher': 'ðŸ”¬', 'Wraith': 'ðŸ‘»'
     }
     const nodeLangs: Record<string, string> = {
         'EVA Core': 'PYTHON', 'Banker': 'PYTHON', 'Sentinel': 'PYTHON',
@@ -109,12 +116,12 @@ export default function Dashboard() {
 
     return (
         <div className="h-full overflow-y-auto p-4 space-y-3 animate-fade-in">
-            {/* ═══ TOP ROW: System Nodes ═══ */}
+            {/* â•â•â• TOP ROW: System Nodes â•â•â• */}
             <div className="grid grid-cols-4 gap-3">
                 {nodes.map((node, i) => (
                     <div key={node.name} className="cyber-panel hud-corners p-3" style={{ animationDelay: `${i * 100}ms` }}>
                         <div className="flex items-center justify-between mb-2">
-                            <span className="text-lg">{nodeIcons[node.name] || '⬡'}</span>
+                            <span className="text-lg">{nodeIcons[node.name] || 'â¬¡'}</span>
                             <div className={node.status === 'online' ? 'status-online' : node.status === 'degraded' ? 'status-warning' : 'status-offline'} />
                         </div>
                         <div className="text-[11px] font-bold text-white/90 tracking-wider">{node.name.toUpperCase()}</div>
@@ -128,7 +135,7 @@ export default function Dashboard() {
                 ))}
             </div>
 
-            {/* ═══ MIDDLE ROW: Kill-Switch / Equity / Nemesis / Circuit Breaker ═══ */}
+            {/* â•â•â• MIDDLE ROW: Kill-Switch / Equity / Nemesis / Circuit Breaker â•â•â• */}
             <div className="grid grid-cols-4 gap-3">
                 {/* System Control (Kill Switch) */}
                 <div className={`cyber-panel hud-corners p-4 transition-all duration-300 ${killSwitch.is_active ? 'border-red-500/50 shadow-[0_0_30px_rgba(239,68,68,0.15)]' : ''}`}>
@@ -157,8 +164,8 @@ export default function Dashboard() {
 
                     <div className="text-[8px] text-center mt-2 font-mono">
                         {killSwitch.is_active
-                            ? <span className="text-red-500 animate-pulse">⚠ TRADING HALTED • SAFETY ENGAGED</span>
-                            : <span className="text-matrix/30">SYSTEMS NOMINAL • TRADING ACTIVE</span>
+                            ? <span className="text-red-500 animate-pulse">âš  TRADING HALTED â€¢ SAFETY ENGAGED</span>
+                            : <span className="text-matrix/30">SYSTEMS NOMINAL â€¢ TRADING ACTIVE</span>
                         }
                     </div>
                 </div>
@@ -167,13 +174,13 @@ export default function Dashboard() {
                 <div className="cyber-panel hud-corners p-4">
                     <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">PORTFOLIO</div>
                     <div className="font-display text-xl font-bold tracking-wider neon-text-cyan mb-1">
-                        ${tradingData.equity > 0 ? tradingData.equity.toLocaleString() : '—'}
+                        ${tradingData.equity > 0 ? tradingData.equity.toLocaleString() : 'â€”'}
                     </div>
                     <div className="flex items-center gap-2">
                         <span className={`text-xs font-bold ${tradingData.pnl >= 0 ? 'text-matrix' : 'text-cyber-pink'}`}>
                             {tradingData.pnl >= 0 ? '+' : ''}{tradingData.pnl.toFixed(2)}$
                         </span>
-                        <span className="text-[9px] text-white/20">•</span>
+                        <span className="text-[9px] text-white/20">â€¢</span>
                         <span className="text-[9px] text-white/40">{tradingData.positions} positions</span>
                     </div>
                 </div>
@@ -189,14 +196,14 @@ export default function Dashboard() {
                         {Object.keys(nemesis.known_nemeses).length > 0
                             ? Object.entries(nemesis.known_nemeses).map(([type, count]) => (
                                 <span key={type} className="text-[8px] px-1.5 py-0.5 bg-cyber-amber/10 border border-cyber-amber/20 text-cyber-amber">
-                                    {type.replace('_', ' ')} ×{count}
+                                    {type.replace('_', ' ')} Ã—{count}
                                 </span>
                             ))
                             : <span className="text-[9px] text-white/20">NO KNOWN THREATS</span>
                         }
                     </div>
                     {nemesis.trading_blocked && (
-                        <div className="mt-2 text-[9px] text-cyber-pink animate-pulse">⚠ TRADING BLOCKED — MEDITATION</div>
+                        <div className="mt-2 text-[9px] text-cyber-pink animate-pulse">âš  TRADING BLOCKED â€” MEDITATION</div>
                     )}
                 </div>
 
@@ -225,7 +232,7 @@ export default function Dashboard() {
                 </div>
             </div>
 
-            {/* ═══ BOTTOM ROW: Telemetry / News / Activity Feed ═══ */}
+            {/* â•â•â• BOTTOM ROW: Telemetry / News / Activity Feed â•â•â• */}
             <div className="grid grid-cols-3 gap-3">
                 {/* Telemetry */}
                 <div className="cyber-panel hud-corners p-4">
@@ -238,9 +245,9 @@ export default function Dashboard() {
                         </div>
                     ) : (
                         <div className="space-y-2">
-                            <TelemetryRow label="UPTIME" value="—" />
-                            <TelemetryRow label="REQUESTS" value="—" />
-                            <TelemetryRow label="ERRORS" value="—" />
+                            <TelemetryRow label="UPTIME" value="â€”" />
+                            <TelemetryRow label="REQUESTS" value="â€”" />
+                            <TelemetryRow label="ERRORS" value="â€”" />
                         </div>
                     )}
                 </div>
@@ -249,7 +256,7 @@ export default function Dashboard() {
                 <div className={`cyber-panel hud-corners p-4 ${newsFilter.is_active ? 'border-cyber-pink/30' : ''}`}>
                     <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">NEWS FILTER</div>
                     <div className={`font-display text-sm font-bold tracking-wider mb-2 ${newsFilter.is_active ? 'neon-text-pink' : 'neon-text'}`}>
-                        {newsFilter.is_active ? '🚫 BLOCKED' : '✓ CLEAR'}
+                        {newsFilter.is_active ? 'ðŸš« BLOCKED' : 'âœ“ CLEAR'}
                     </div>
                     {newsFilter.is_active && newsFilter.blocked_until && (
                         <div className="text-[9px] text-cyber-pink mb-2">Until: {new Date(newsFilter.blocked_until).toLocaleTimeString()}</div>
@@ -285,7 +292,7 @@ export default function Dashboard() {
                 </div>
             </div>
 
-            {/* ═══ NEW ROW: Visual Probes (Grafana) ═══ */}
+            {/* â•â•â• NEW ROW: Visual Probes (Grafana) â•â•â• */}
             <div className="grid grid-cols-2 gap-3">
                 <div className="cyber-panel hud-corners p-4">
                     <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">VISUAL PROBE: SWARM LOGS (LOKI)</div>
@@ -297,7 +304,7 @@ export default function Dashboard() {
                             rel="noopener noreferrer"
                             className="cyber-btn text-[9px] px-4 py-1.5"
                         >
-                            🔗 OPEN EXPLORER
+                            ðŸ”— OPEN EXPLORER
                         </a>
                     </div>
                 </div>
@@ -311,7 +318,7 @@ export default function Dashboard() {
                             rel="noopener noreferrer"
                             className="cyber-btn text-[9px] px-4 py-1.5"
                         >
-                            🔗 OPEN DASHBOARDS
+                            ðŸ”— OPEN DASHBOARDS
                         </a>
                     </div>
                 </div>
@@ -332,9 +339,11 @@ function TelemetryRow({ label, value, color }: { label: string; value: string; c
 }
 
 function formatUptime(seconds: number): string {
-    if (!seconds) return '—'
+    if (!seconds) return 'â€”'
     const h = Math.floor(seconds / 3600)
     const m = Math.floor((seconds % 3600) / 60)
     const s = Math.floor(seconds % 60)
     return `${h}h ${m}m ${s}s`
 }
+
+

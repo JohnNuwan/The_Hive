@@ -136,6 +136,8 @@ services:
       - "0.92"
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
     deploy:
       resources:
         reservations:
@@ -198,6 +200,10 @@ services:
       - QDRANT_HOST=${HIVE_QDRANT_HOST:-qdrant}
       - QDRANT_PORT=6333
       - NEO4J_URI=bolt://${HIVE_NEO4J_HOST:-neo4j}:7687
+      - NEO4J_HOST=${HIVE_NEO4J_HOST:-neo4j}
+      - NEO4J_PORT=7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-devpassword}
       - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
       - VLLM_HOST=${HIVE_VLLM_HOST:-vllm}
       - VLLM_PORT=${HIVE_VLLM_PORT:-8000}
@@ -212,10 +218,14 @@ services:
       - OLLAMA_PORT=11434
       - BANKER_API_HOST=${BANKER_API_HOST:-banker}
       - BANKER_API_PORT=${BANKER_API_PORT:-8100}
+      - SENTINEL_API_HOST=${SENTINEL_API_HOST:-sentinel}
+      - SENTINEL_API_PORT=${SENTINEL_API_PORT:-8200}
+      - LAB_API_HOST=${LAB_API_HOST:-lab}
+      - LAB_API_PORT=${LAB_API_PORT:-8600}
     deploy:
       #  GPU removed: core uses vLLM via REST API, not direct CUDA.
       # vLLM needs exclusive GPU access to avoid GetDeviceCount() failures.
-      replicas: 2
+      replicas: 1
       restart_policy:
         condition: any
     networks:
@@ -233,15 +243,16 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-devpassword}@${HIVE_REDIS_HOST:-redis}:6379
-      #  MQTT via host IP (Mosquitto Swarm VIP unreachable from overlay containers)
-      - MQTT_HOST=${HIVE_MQTT_HOST:-mosquitto}
+      #  MQTT via host.docker.internal pour eviter les soucis de resolution DNS inter-conteneurs.
+      - MQTT_HOST=${HIVE_MQTT_HOST:-host.docker.internal}
+      - MQTT_PORT=${HIVE_MQTT_PORT:-1883}
     volumes:
       - black_box:/mnt/black_box
       - ./data/tablet:/mnt/tablet:ro
     networks:
       - hive-net
     deploy:
-      replicas: 2
+      replicas: 1
       restart_policy:
         condition: any
   nervous:
@@ -374,24 +385,29 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
       - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
+      - CUDA_VISIBLE_DEVICES=
+      - JAX_PLATFORMS=cpu
+      - XLA_PYTHON_CLIENT_PREALLOCATE=false
     networks:
       - hive-net
     deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities:
-                - gpu
-      replicas: 2
-      restart_policy:
-        condition: any
-      placement:
-        constraints:
-          - node.labels.gpu == true
+        resources:
+          reservations:
+            devices:
+              - driver: nvidia
+                count: all
+                capabilities:
+                  - gpu
+        replicas: 1
+        restart_policy:
+          condition: any
+        placement:
+          constraints:
+            - node.labels.gpu == true
     volumes:
       - ./data:/app/eva-lab/data
+      # Monte le code source pour activer les champions live sans rebuild image.
+      - ./src/eva-lab/eva_lab:/app/eva-lab/eva_lab:ro
   quant-lab:
     build:
       context: .
@@ -565,7 +581,7 @@ services:
     volumes:
       - ./src/eva-nexus/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     deploy:
-      replicas: 2
+      replicas: 1
       restart_policy:
         condition: any
   loki:
@@ -630,6 +646,10 @@ services:
       - MT5_LOGIN=${MT5_LOGIN:-}
       - MT5_SERVER=${MT5_SERVER:-FTMO-Demo}
       - MT5_PASSWORD=${MT5_PASSWORD:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - TELEGRAM_TOPIC_ID=${TELEGRAM_TOPIC_ID:-}
+      - TELEGRAM_NOTIFY_TRAINING=${TELEGRAM_NOTIFY_TRAINING:-1}
       - CUDA_VISIBLE_DEVICES=0
       - XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
     volumes:

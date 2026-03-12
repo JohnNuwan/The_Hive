@@ -34,8 +34,116 @@ const TYPE_ICONS: Record<string, string> = {
     error: '❌',
 };
 
+function normalizeAgentName(raw: unknown): string {
+    const value = typeof raw === 'string' ? raw.trim() : '';
+    if (!value) {
+        return 'System';
+    }
+
+    const normalized = value
+        .replace(/[._/-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+    if (normalized.includes('core')) return 'EVA Core';
+    if (normalized.includes('banker')) return 'Banker';
+    if (normalized.includes('sentinel')) return 'Sentinel';
+    if (normalized.includes('compliance')) return 'Compliance';
+    if (normalized.includes('accountant')) return 'Accountant';
+    if (normalized.includes('lab')) return 'Lab';
+    if (normalized.includes('sage')) return 'Sage';
+    if (normalized.includes('researcher')) return 'Researcher';
+    if (normalized.includes('wraith')) return 'Wraith';
+    if (normalized.includes('muse')) return 'Muse';
+    if (normalized.includes('shadow')) return 'Shadow';
+    if (normalized.includes('rwa')) return 'RWA';
+    if (normalized.includes('kernel')) return 'Kernel';
+
+    return normalized
+        .split(' ')
+        .filter(Boolean)
+        .map(segment => segment.charAt(0).toUpperCase() + segment.slice(1))
+        .join(' ');
+}
+
+function normalizeMessageType(raw: unknown): AgentMessage['type'] {
+    const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+    if (value === 'thought' || value === 'action' || value === 'message' || value === 'result' || value === 'error') {
+        return value;
+    }
+    if (['alert', 'critical', 'fatal'].includes(value)) return 'error';
+    if (['event', 'trade', 'order'].includes(value)) return 'action';
+    if (['request', 'analysis', 'reasoning'].includes(value)) return 'thought';
+    if (['response', 'success', 'done'].includes(value)) return 'result';
+    return 'message';
+}
+
+function normalizeTimestamp(raw: unknown): string {
+    const value = typeof raw === 'string' ? raw.trim() : '';
+    if (!value) {
+        return new Date().toISOString();
+    }
+
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) {
+        return parsed.toISOString();
+    }
+
+    const epoch = Number(value);
+    if (!Number.isNaN(epoch)) {
+        const parsedEpoch = new Date(epoch > 1_000_000_000_000 ? epoch : epoch * 1000);
+        if (!Number.isNaN(parsedEpoch.getTime())) {
+            return parsedEpoch.toISOString();
+        }
+    }
+
+    return new Date().toISOString();
+}
+
+function normalizeMessageContent(raw: unknown, fallbackSource: unknown): string {
+    const direct = typeof raw === 'string' ? raw.trim() : '';
+    if (direct) {
+        return direct;
+    }
+    if (typeof fallbackSource === 'string' && fallbackSource.trim()) {
+        return fallbackSource.trim();
+    }
+    return 'Message sans contenu';
+}
+
+function normalizeFeedMessage(input: unknown, createClientId: () => string): AgentMessage {
+    const payload = (input && typeof input === 'object') ? input as Record<string, unknown> : {};
+    const agent = normalizeAgentName(payload.agent ?? payload.source_agent ?? payload.source ?? payload.service);
+    const type = normalizeMessageType(payload.type ?? payload.message_type ?? payload.kind);
+    const timestamp = normalizeTimestamp(payload.timestamp ?? payload.created_at ?? payload.time ?? payload.date);
+    const content = normalizeMessageContent(
+        payload.content ?? payload.message ?? payload.action ?? payload.text ?? payload.summary,
+        typeof input === 'string' ? input : '',
+    );
+    const company = typeof payload.company === 'string' && payload.company.trim() ? payload.company.trim() : 'Hive Swarm';
+    const target = typeof payload.target === 'string' && payload.target.trim()
+        ? normalizeAgentName(payload.target)
+        : typeof payload.target_agent === 'string' && payload.target_agent.trim()
+            ? normalizeAgentName(payload.target_agent)
+            : undefined;
+    const rawId = typeof payload.id === 'string' ? payload.id.trim() : '';
+    const fallbackId = [agent, String(payload.timestamp ?? ''), type, content].join('|');
+
+    return {
+        id: rawId || fallbackId || createClientId(),
+        agent,
+        company,
+        type,
+        content,
+        timestamp,
+        target,
+    };
+}
+
 export default function AgentFeed() {
-    const KERNEL_WS = `ws://${window.location.hostname}:8800/ws/feed`;
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const KERNEL_WS = `${wsProtocol}://${window.location.host}/api/kernel/ws/feed`;
     const KERNEL_API = '/api/kernel';
 
     const [messages, setMessages] = useState<AgentMessage[]>([]);
@@ -46,53 +154,67 @@ export default function AgentFeed() {
     const [msgCount, setMsgCount] = useState(0);
     const feedRef = useRef<HTMLDivElement>(null);
     const wsRef = useRef<WebSocket | null>(null);
+    const pollingRef = useRef<number | null>(null);
+    const reconnectRef = useRef<number | null>(null);
+    const connectRef = useRef<(() => void) | null>(null);
+    const feedUnavailableRef = useRef(false);
 
     const agents = ['ALL', ...Object.keys(AGENT_COLORS)];
     const types = ['ALL', 'thought', 'action', 'message', 'result', 'error'];
 
-    const connect = useCallback(() => {
-        try {
-            // Try WebSocket first, fall back to SSE polling
-            const ws = new WebSocket(KERNEL_WS);
-            wsRef.current = ws;
+    const createClientId = () => {
+        const cryptoApi = globalThis.crypto;
+        if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
+            return cryptoApi.randomUUID();
+        }
+        return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    };
 
-            ws.onopen = () => setConnected(true);
-            ws.onclose = () => {
-                setConnected(false);
-                // Reconnect after 3s
-                setTimeout(connect, 3000);
-            };
-            ws.onerror = () => {
-                ws.close();
-                // Fallback: poll via HTTP
-                startPolling();
-            };
-            ws.onmessage = (event) => {
-                try {
-                    const msg: AgentMessage = JSON.parse(event.data);
-                    let safeId;
-                    try { safeId = crypto.randomUUID(); } catch (e) { safeId = Math.random().toString(36).substr(2, 9); }
-                    setMessages(prev => [...prev.slice(-500), { ...msg, id: safeId }]);
-                    setMsgCount(c => c + 1);
-                } catch { }
-            };
-        } catch {
-            startPolling();
+    const stopPolling = useCallback(() => {
+        if (pollingRef.current !== null) {
+            window.clearInterval(pollingRef.current);
+            pollingRef.current = null;
         }
     }, []);
 
+    const probeFeedAvailability = useCallback(async () => {
+        try {
+            const res = await fetch(`${KERNEL_API}/feed/recent?limit=1`);
+            if (res.status === 404) {
+                feedUnavailableRef.current = true;
+                setConnected(false);
+                stopPolling();
+                return false;
+            }
+        } catch {
+            // Un echec reseau ne prouve pas l'absence de la route; on tente le WebSocket.
+        }
+        return true;
+    }, [KERNEL_API, stopPolling]);
+
     const startPolling = useCallback(() => {
-        // Fallback: poll `/api/kernel/feed/recent` every 2s
-        const interval = setInterval(async () => {
+        if (pollingRef.current !== null) {
+            return;
+        }
+
+        pollingRef.current = window.setInterval(async () => {
             try {
                 const res = await fetch(`${KERNEL_API}/feed/recent?limit=20`);
+                if (res.status === 404) {
+                    feedUnavailableRef.current = true;
+                    setConnected(false);
+                    stopPolling();
+                    return;
+                }
                 if (res.ok) {
                     setConnected(true);
                     const data = await res.json();
                     if (data.messages) {
                         setMessages(prev => {
                             const existingIds = new Set(prev.map(m => m.id));
-                            const newMsgs = data.messages.filter((m: any) => !existingIds.has(m.id));
+                            const newMsgs = data.messages
+                                .map((m: unknown) => normalizeFeedMessage(m, createClientId))
+                                .filter((m: AgentMessage) => !existingIds.has(m.id));
                             if (newMsgs.length === 0) return prev;
                             setMsgCount(c => c + newMsgs.length);
                             return [...prev.slice(-500), ...newMsgs];
@@ -103,13 +225,81 @@ export default function AgentFeed() {
                 setConnected(false);
             }
         }, 2000);
-        return () => clearInterval(interval);
+    }, [KERNEL_API, stopPolling]);
+
+    const scheduleReconnect = useCallback(() => {
+        if (reconnectRef.current !== null || feedUnavailableRef.current) {
+            return;
+        }
+        reconnectRef.current = window.setTimeout(() => {
+            reconnectRef.current = null;
+            connectRef.current?.();
+        }, 3000);
     }, []);
 
+    const connect = useCallback(() => {
+        if (feedUnavailableRef.current) {
+            return;
+        }
+        try {
+            stopPolling();
+            const ws = new WebSocket(KERNEL_WS);
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+                setConnected(true);
+                stopPolling();
+            };
+            ws.onclose = () => {
+                setConnected(false);
+                startPolling();
+                scheduleReconnect();
+            };
+            ws.onerror = () => {
+                ws.close();
+                startPolling();
+            };
+            ws.onmessage = (event) => {
+                try {
+                    const msg = normalizeFeedMessage(JSON.parse(event.data), createClientId);
+                    setMessages(prev => {
+                        if (prev.some(existing => existing.id === msg.id)) {
+                            return prev;
+                        }
+                        setMsgCount(c => c + 1);
+                        return [...prev.slice(-500), msg];
+                    });
+                } catch {
+                    // Certaines trames de feed peuvent etre corrompues; on les ignore sans couper le flux.
+                }
+            };
+        } catch {
+            startPolling();
+            scheduleReconnect();
+        }
+    }, [KERNEL_WS, scheduleReconnect, startPolling, stopPolling]);
+
     useEffect(() => {
-        connect();
-        return () => wsRef.current?.close();
-    }, []);
+        connectRef.current = connect;
+    }, [connect]);
+
+    useEffect(() => {
+        let cancelled = false;
+        void (async () => {
+            const feedAvailable = await probeFeedAvailability();
+            if (!cancelled && feedAvailable) {
+                connect();
+            }
+        })();
+        return () => {
+            cancelled = true;
+            stopPolling();
+            wsRef.current?.close();
+            if (reconnectRef.current !== null) {
+                window.clearTimeout(reconnectRef.current);
+            }
+        };
+    }, [connect, probeFeedAvailability, stopPolling]);
 
     useEffect(() => {
         if (autoScroll && feedRef.current) {
@@ -138,8 +328,11 @@ export default function AgentFeed() {
     };
 
     const formatTime = (ts: string) => {
-        try { return new Date(ts).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
-        catch { return ts; }
+        const parsed = new Date(ts);
+        if (Number.isNaN(parsed.getTime())) {
+            return '--:--:--';
+        }
+        return parsed.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     };
 
     // Demo messages when disconnected

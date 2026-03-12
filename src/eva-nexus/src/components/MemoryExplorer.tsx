@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
-import { getMemoryGraph, safeFetch } from '../services/api'
-import { Database, Search, Filter, Clock, User, Bot, ChevronRight, Binary } from 'lucide-react'
+﻿import { useEffect, useState } from 'react'
+import { safeFetch } from '../services/api'
+import { Database, Search, User, Bot, ChevronRight, Binary } from 'lucide-react'
 
 interface MemoryFragment {
     id: string
@@ -17,7 +17,7 @@ export default function MemoryExplorer() {
     useEffect(() => {
         const loadMemory = async () => {
             try {
-                // Pour l'instant on utilise safeFetch car getMemoryFragments n'est pas encore exporté proprement
+                // Pour l'instant on utilise safeFetch car getMemoryFragments n'est pas encore exportÃ© proprement
                 const data = await safeFetch<MemoryFragment[]>('/api/core/memory/fragments?limit=50', [])
                 setFragments(data)
             } catch (error) {
@@ -44,7 +44,7 @@ export default function MemoryExplorer() {
                     </div>
                     <div>
                         <h2 className="text-lg font-black text-white uppercase tracking-tighter">Memory Explorer</h2>
-                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-[0.2em]">Qdrant Neural Storage • {fragments.length} Fragments</p>
+                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-[0.2em]">Qdrant Neural Storage â€¢ {fragments.length} Fragments</p>
                     </div>
                 </div>
 
@@ -78,7 +78,7 @@ export default function MemoryExplorer() {
                     ) : filtered.length === 0 ? (
                         <div className="flex flex-col items-center justify-center h-full opacity-20 py-20">
                             <Search size={64} className="mb-4" />
-                            <p className="font-black uppercase tracking-widest text-xs">Aucun fragment trouvé</p>
+                            <p className="font-black uppercase tracking-widest text-xs">Aucun fragment trouvÃ©</p>
                         </div>
                     ) : (
                         filtered.map((fragment) => (
@@ -114,3 +114,4 @@ export default function MemoryExplorer() {
         </div>
     )
 }
+

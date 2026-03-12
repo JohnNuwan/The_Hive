@@ -16,7 +16,7 @@ Architecture :
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -45,6 +45,7 @@ from eva_core.services.memory import MemoryService, get_memory_service
 from eva_core.services.prompt_master import PromptMaster
 from eva_core.strategy import StrategyOrchestrator
 from eva_core.self_healing import SelfHealingService
+from eva_core.services.autonomy import AutonomyService
 from eva_core.services.docker_monitor import SystemMonitor
 from eva_core.identity import EVA_CORE_IDENTITY, EVA_GAMIFICATION_PROTOCOL
 
@@ -165,6 +166,11 @@ async def lifespan(app: FastAPI):
     
     # System Monitor (Docker + Hardware)
     app.state.system_monitor = SystemMonitor()
+    app.state.autonomy_service = AutonomyService(
+        settings=settings,
+        system_monitor=app.state.system_monitor,
+        refresh_interval_seconds=settings.autonomy_refresh_interval_seconds,
+    )
     
     # gRPC Client (High Performance Signal Routing)
     app.state.grpc_client = SwarmGRPCClient()
@@ -179,11 +185,19 @@ async def lifespan(app: FastAPI):
 
     # Démarrage de l'orchestrateur de survie Phoenix
     asyncio.create_task(app.state.self_healing.start_monitoring())
+    app.state.autonomy_task = asyncio.create_task(
+        app.state.autonomy_service.start_monitoring(agents_status)
+    )
 
     yield
 
     # Arrêt (Shutdown)
     logger.info("?? Arrêt EVA Core...")
+    autonomy_task = getattr(app.state, "autonomy_task", None)
+    if autonomy_task is not None:
+        autonomy_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await autonomy_task
     redis_client = get_redis_client()
     await redis_client.disconnect()
 
@@ -651,7 +665,7 @@ async def system_status() -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=3.0) as client:
         try:
             response = await client.get(
-                f"{sentinel_url}/system/metrics", 
+                f"{sentinel_url}/system/metrics",
                 headers=get_internal_headers("core")
             )
             if response.status_code == 200:
@@ -661,6 +675,18 @@ async def system_status() -> dict[str, Any]:
                     "metrics": metrics,
                     "sentinel": {"status": "online"}
                 }
+
+            health_response = await client.get(
+                f"{sentinel_url}/health",
+                headers=get_internal_headers("core")
+            )
+            if health_response.status_code == 200:
+                return {
+                    "health": "optimum",
+                    "metrics": {},
+                    "sentinel": {"status": "online"}
+                }
+
             return {"health": "unknown", "sentinel": {"status": "offline"}}
         except Exception as e:
             logger.error(f"Erreur proxy Sentinel: {e}")
@@ -849,12 +875,37 @@ async def trigger_rlm_cycle() -> dict[str, Any]:
         raise HTTPException(500, str(e))
 
 
+@app.get("/intelligence/autonomy/context", tags=["Intelligence"])
+async def autonomy_context(force_refresh: bool = False) -> dict[str, Any]:
+    """
+    Retourne le contexte d'autonomie lecture seule d'EVA.
+
+    Cette vue agrège l'état des agents, des dépendances critiques, du lab,
+    du banker et du monitoring afin de fournir un snapshot exploitable par
+    EVA et par Nexus sans autoriser d'action destructive.
+
+    Args:
+        force_refresh (bool): Si True, régénère immédiatement le snapshot.
+
+    Returns:
+        dict[str, Any]: Snapshot agrégé d'autonomie.
+    """
+    autonomy_service: AutonomyService = app.state.autonomy_service
+    if force_refresh:
+        return await autonomy_service.refresh_snapshot(await agents_status())
+    return autonomy_service.get_snapshot()
+
+
 @app.get("/intelligence/status", tags=["Intelligence"])
 async def intelligence_status() -> dict[str, Any]:
     """
     Retourne l'état des systèmes d'intelligence autonome.
     """
     settings: Settings = app.state.settings
+    autonomy_service: AutonomyService = app.state.autonomy_service
+    autonomy_snapshot = autonomy_service.get_snapshot()
+    posture = autonomy_snapshot.get("posture", {})
+    dependencies = autonomy_snapshot.get("dependencies", {})
     return {
         "war_rooms": {
             "available": ["council", "dojo", "high_court", "quiet_room"],
@@ -872,7 +923,13 @@ async def intelligence_status() -> dict[str, Any]:
             "speculative_decoding": True,
         },
         "hipporag2": {
-            "neo4j_connected": True,
+            "neo4j_connected": bool((dependencies.get("neo4j") or {}).get("ok", False)),
+        },
+        "autonomy": {
+            "status": posture.get("status", "initializing"),
+            "recommended_mode": posture.get("recommended_mode", "research_only"),
+            "blockers": posture.get("blockers", []),
+            "last_snapshot_at": autonomy_snapshot.get("generated_at"),
         },
     }
 

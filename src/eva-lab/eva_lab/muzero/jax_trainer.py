@@ -92,7 +92,12 @@ class MuZeroTrainerJAX:
         return jax.jit(step)
 
     def prepare_batch(self, batch_list: List[tuple]) -> TrainingBatch:
-        """Convertit une liste de jeux en tenseurs JAX pour l'entrainement."""
+        """Convertit une liste de jeux en tenseurs JAX pour l'entrainement.
+
+        Le buffer priorise renvoie actuellement des tuples de la forme
+        ``(game, start_idx, tree_idx)``. Le trainer ne consomme que
+        ``game`` et ``start_idx``.
+        """
         obs_list = []
         action_list = []
         target_v_list = []
@@ -100,7 +105,11 @@ class MuZeroTrainerJAX:
         target_p_list = []
         num_unroll = self.config.num_unroll_steps
 
-        for game, start_idx in batch_list:
+        for sample in batch_list:
+            if len(sample) < 2:
+                raise ValueError("Echantillon MuZero invalide: start_idx manquant.")
+            game = sample[0]
+            start_idx = sample[1]
             obs_list.append(game.observations[start_idx])
             actions = []
             values = []

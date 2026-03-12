@@ -6,8 +6,8 @@ GÃ¨re la connexion et l'exÃ©cution des ordres sur MT5
 import asyncio
 import logging
 import sys
-from datetime import datetime
-from decimal import Decimal
+from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_FLOOR
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
@@ -93,29 +93,155 @@ class MT5Service:
     """
 
     def __init__(self, mock_mode: bool = True, login: int = 0, password: str = "", server: str = ""):
-        self.mock_mode = mock_mode or not MT5_AVAILABLE
+        settings = get_settings()
+        self._explicit_mock_mode = bool(mock_mode)
+        self.mock_mode = self._explicit_mock_mode
         self.is_connected = False
         self._mock_positions: list[Position] = []
         self._mock_balance = Decimal("100000.00")
         self._next_ticket = 12345678
+        self._duplicate_order_cooldown = timedelta(
+            seconds=max(5, settings.mt5_duplicate_order_cooldown_seconds)
+        )
+        self._recent_order_signatures: dict[str, datetime] = {}
+        self._inflight_order_signatures: set[str] = set()
+        self._order_guard_lock = asyncio.Lock()
         # Credentials pour login automatique
         self._login = login
         self._password = password
         self._server = server
-        logger.info(f"MT5Service initialise (mock={self.mock_mode}, login={login}, server={server})")
+        logger.info(
+            "MT5Service initialise (mock_explicite=%s, mock_actif=%s, login=%s, server=%s)",
+            self._explicit_mock_mode,
+            self.mock_mode,
+            login,
+            server,
+        )
+
+    def _live_mode_requested(self) -> bool:
+        """
+        Indique si le service doit fonctionner en mode reel.
+
+        Returns:
+            bool: True si aucun mode mock explicite n'a ete demande.
+        """
+        return not self._explicit_mock_mode
+
+    def _mark_live_disconnected(self, reason: str) -> None:
+        """
+        Marque le service MT5 comme hors ligne sans activer le mock.
+
+        Args:
+            reason (str): Raison principale de la perte de connexion.
+        """
+        self.mock_mode = self._explicit_mock_mode
+        self.is_connected = False
+        logger.error("MT5 hors ligne: %s", reason)
+
+    def _build_order_signature(self, order: TradeOrder) -> str:
+        """
+        Construit une signature stable pour detecter un doublon d'ordre.
+
+        Args:
+            order (TradeOrder): Ordre en preparation d'execution.
+
+        Returns:
+            str: Signature exploitable pour les garde-fous anti-doublon.
+        """
+        return (
+            f"{order.symbol.upper()}:{order.action.value}:"
+            f"{float(order.volume):.4f}:{order.magic_number}"
+        )
+
+    def _prune_recent_order_signatures(self, now: datetime) -> None:
+        """
+        Purge les signatures d'ordres expirees du cache anti-doublon.
+
+        Args:
+            now (datetime): Horodatage courant utilise comme reference.
+        """
+        expired = [
+            signature
+            for signature, timestamp in self._recent_order_signatures.items()
+            if now - timestamp >= self._duplicate_order_cooldown
+        ]
+        for signature in expired:
+            self._recent_order_signatures.pop(signature, None)
+
+    async def _register_order_attempt(self, signature: str) -> dict[str, Any] | None:
+        """
+        Verrouille une signature d'ordre avant envoi vers MT5.
+
+        Args:
+            signature (str): Signature calculee pour l'ordre.
+
+        Returns:
+            dict[str, Any] | None: Un resultat d'echec si l'ordre est bloque,
+                sinon `None` pour autoriser l'execution.
+        """
+        async with self._order_guard_lock:
+            now = datetime.now()
+            self._prune_recent_order_signatures(now)
+
+            if signature in self._inflight_order_signatures:
+                logger.warning("Ordre duplique bloque pendant une execution deja en cours: %s", signature)
+                return {
+                    "success": False,
+                    "message": "Ordre duplique bloque pendant l'execution.",
+                    "retcode": 99001,
+                }
+
+            last_execution = self._recent_order_signatures.get(signature)
+            if last_execution is not None:
+                remaining = self._duplicate_order_cooldown - (now - last_execution)
+                logger.warning(
+                    "Ordre recent duplique bloque: %s (fenetre restante %.1fs)",
+                    signature,
+                    max(0.0, remaining.total_seconds()),
+                )
+                return {
+                    "success": False,
+                    "message": "Ordre recent duplique bloque.",
+                    "retcode": 99002,
+                }
+
+            self._inflight_order_signatures.add(signature)
+        return None
+
+    async def _release_order_attempt(self, signature: str, remember_execution: bool) -> None:
+        """
+        Libere un verrou d'ordre et memorise l'execution si elle a reussi.
+
+        Args:
+            signature (str): Signature calculee pour l'ordre.
+            remember_execution (bool): True si l'ordre a ete execute et doit
+                etre protege pendant la fenetre anti-doublon.
+        """
+        async with self._order_guard_lock:
+            self._inflight_order_signatures.discard(signature)
+            if remember_execution:
+                self._recent_order_signatures[signature] = datetime.now()
 
     async def connect(self) -> bool:
         """Connexion a MT5"""
-        if self.mock_mode:
+        if self._explicit_mock_mode:
+            self.mock_mode = True
             self.is_connected = True
             logger.info("MT5 Mock: connecte")
             return True
 
+        self.mock_mode = False
+
+        if not MT5_AVAILABLE:
+            self._mark_live_disconnected(
+                "MetaTrader 5 est indisponible sur cette machine alors que le mode reel est demande."
+            )
+            return False
+
         try:
             # Initialisation MT5
             if not await asyncio.to_thread(mt5.initialize):
-                logger.error(f"MT5 initialize failed: {mt5.last_error()}")
-                self.mock_mode = True
+                self._mark_live_disconnected(f"Echec d'initialisation MT5: {mt5.last_error()}")
                 return False
 
             # Verifier si le terminal est deja connecte au bon compte
@@ -143,18 +269,23 @@ class MT5Service:
                     else:
                         logger.error(f"MT5 login echoue pour {self._login}@{self._server}: {mt5.last_error()}")
                         await asyncio.to_thread(mt5.shutdown)
-                        self.mock_mode = True
+                        self._mark_live_disconnected(
+                            f"Impossible d'ouvrir la session MT5 {self._login}@{self._server}."
+                        )
                         return False
             elif account_info:
                 logger.info(f"MT5 connecte: compte {account_info.login} sur {account_info.server}")
             else:
-                logger.warning("MT5 initialise mais aucun compte connecte")
+                self._mark_live_disconnected("MT5 initialise mais aucun compte n'est connecte.")
+                await asyncio.to_thread(mt5.shutdown)
+                return False
 
+            self.mock_mode = False
             self.is_connected = True
             return True
         except Exception as e:
             logger.exception(f"Erreur connexion MT5: {e}")
-            self.mock_mode = True
+            self._mark_live_disconnected(str(e))
             return False
 
     async def initialize_symbols(self, symbols: list[str]) -> None:
@@ -385,9 +516,14 @@ class MT5Service:
                 leverage=100,
             )
 
+        if not self.is_connected:
+            logger.warning("MT5: infos compte indisponibles car la connexion est hors ligne.")
+            return None
+
         info = await asyncio.to_thread(mt5.account_info)
         if info is None:
             logger.warning("MT5: Impossible de rÃ©cupÃ©rer les infos du compte (terminal occupÃ© ou dÃ©connectÃ©)")
+            self.is_connected = False
             return None
 
         return AccountBalance(
@@ -407,9 +543,14 @@ class MT5Service:
         if self.mock_mode:
             return self._mock_positions
 
+        if not self.is_connected:
+            logger.warning("MT5: positions indisponibles car la connexion est hors ligne.")
+            return None
+
         positions_data = await asyncio.to_thread(mt5.positions_get)
         if positions_data is None:
             # None indicates a terminal/connection error, not "no positions"
+            self.is_connected = False
             return None
 
         positions = []
@@ -450,6 +591,10 @@ class MT5Service:
         }
         
         result = {}
+
+        if not self.mock_mode and not self.is_connected:
+            logger.warning("MT5: bougies indisponibles pour %s car la connexion est hors ligne.", symbol)
+            return {tf: [] for tf in timeframes}
         
         for tf in timeframes:
             mt5_tf = tf_map.get(tf, tf_map[1])
@@ -522,8 +667,12 @@ class MT5Service:
                 "time": datetime.now().timestamp()
             }
 
+        if not self.is_connected:
+            return {"success": False, "message": f"MT5 hors ligne pour {symbol}"}
+
         tick = await asyncio.to_thread(mt5.symbol_info_tick, symbol)
         if tick is None:
+            self.is_connected = False
             return {"success": False, "message": f"Dernier tick non disponible pour {symbol}"}
 
         return {
@@ -533,106 +682,312 @@ class MT5Service:
             "time": tick.time
         }
 
+    async def get_symbol_volume_constraints(self, symbol: str) -> dict[str, Decimal]:
+        """
+        Retourne les contraintes de volume imposees par le broker pour un symbole.
+
+        Args:
+            symbol (str): Symbole MT5 a inspecter.
+
+        Returns:
+            dict[str, Decimal]: Bornes `min`, `step` et `max` du symbole.
+        """
+        if self.mock_mode or not self.is_connected:
+            return {
+                "min": Decimal("0.01"),
+                "step": Decimal("0.01"),
+                "max": Decimal("1.00"),
+            }
+
+        symbol_info = await asyncio.to_thread(mt5.symbol_info, symbol)
+        if symbol_info is None:
+            logger.warning(
+                "MT5: contraintes de volume indisponibles pour %s, repli sur les bornes par defaut.",
+                symbol,
+            )
+            return {
+                "min": Decimal("0.01"),
+                "step": Decimal("0.01"),
+                "max": Decimal("1.00"),
+            }
+
+        volume_min = Decimal(str(getattr(symbol_info, "volume_min", 0.01) or 0.01))
+        volume_step = Decimal(str(getattr(symbol_info, "volume_step", 0.01) or 0.01))
+        volume_max = Decimal(str(getattr(symbol_info, "volume_max", volume_min) or volume_min))
+
+        if volume_step <= 0:
+            volume_step = Decimal("0.01")
+        if volume_max < volume_min:
+            volume_max = volume_min
+
+        return {
+            "min": volume_min,
+            "step": volume_step,
+            "max": volume_max,
+        }
+
     def _get_deviation(self, symbol: str) -> int:
         """Retourne la dÃ©viation (slippage) recommandÃ©e selon la volatilitÃ© de l'actif."""
         if any(v in symbol.upper() for v in ["XAU", "BTC", "US30", "US100", "GER40"]):
             return 50  # 5 pips pour les actifs volatils
         return 20  # 2 pips par dÃ©faut pour le Forex
 
-    async def execute_order(self, order: TradeOrder) -> dict[str, Any]:
-        """ExÃ©cute un ordre de trading avec gestion des Requotes et Slippage."""
-        if self.mock_mode:
-            return await self._execute_mock_order(order)
+    @staticmethod
+    def _resolve_filling_mode(symbol_info: Any) -> int:
+        """
+        Selectionne un mode de remplissage compatible avec le broker.
 
-        symbol_info = await asyncio.to_thread(mt5.symbol_info, order.symbol)
-        if symbol_info is None:
-            return {"success": False, "message": f"Symbole {order.symbol} non trouvÃ©"}
+        Args:
+            symbol_info (Any): Meta-donnees du symbole MT5.
 
-        deviation = self._get_deviation(order.symbol)
-        
-        # Retry Loop pour gÃ©rer les Requotes/Busy terminal
-        for attempt in range(3):
-            price = await asyncio.to_thread(mt5.symbol_info_tick, order.symbol)
-            if price is None:
-                await asyncio.sleep(0.5)
+        Returns:
+            int: Constante ``ORDER_FILLING_*`` exploitable par MT5.
+        """
+        filling_mode = int(getattr(symbol_info, "filling_mode", 0) or 0)
+        supported_modes = [
+            ("IOC", getattr(mt5, "ORDER_FILLING_IOC", None), getattr(mt5, "SYMBOL_FILLING_IOC", None)),
+            ("RETURN", getattr(mt5, "ORDER_FILLING_RETURN", None), getattr(mt5, "SYMBOL_FILLING_RETURN", None)),
+            ("FOK", getattr(mt5, "ORDER_FILLING_FOK", None), getattr(mt5, "SYMBOL_FILLING_FOK", None)),
+        ]
+        for _, order_mode, symbol_mode in supported_modes:
+            if order_mode is None:
                 continue
-                
-            # --- NEW (Sprint 10): Dynamic Spread Filter ---
-            # Mesure du spread actuel en points (tick_size dÃ©pendant)
-            current_spread = (price.ask - price.bid) / mt5.symbol_info(order.symbol).point
-            
-            # Limites de spread (Valeurs empiriques max)
-            max_spread = 25 # Forex default (2.5 pips)
-            sym = order.symbol.upper()
-            if "XAU" in sym:
-                max_spread = 60 # Gold: 60 points ($0.60)
-            elif "BTC" in sym or "ETH" in sym:
-                max_spread = 1500 # Crypto: 1500 points ($15.00) for BTC
-            elif "US30" in sym or "US100" in sym or "GER40" in sym:
-                max_spread = 150 # Indices: 150 points
-                
-            if current_spread > max_spread:
-                logger.warning(f"âŒ Spread trop Ã©levÃ© sur {order.symbol}: {current_spread:.1f} > {max_spread}. Ordre avortÃ©.")
+            if symbol_mode is None:
+                return order_mode
+            if filling_mode & symbol_mode:
+                return order_mode
+        return getattr(mt5, "ORDER_FILLING_IOC", 1)
+
+    @staticmethod
+    def _normalize_volume(symbol_info: Any, requested_volume: Decimal) -> Decimal:
+        """
+        Normalise un volume selon les bornes et le pas imposes par le broker.
+
+        Args:
+            symbol_info (Any): Meta-donnees du symbole MT5.
+            requested_volume (Decimal): Volume initial demande par le moteur.
+
+        Returns:
+            Decimal: Volume compatible avec ``volume_min`` / ``volume_step`` / ``volume_max``.
+
+        Raises:
+            ValueError: Si les bornes du broker sont incoherentes.
+        """
+        volume_min = Decimal(str(getattr(symbol_info, "volume_min", 0.01) or 0.01))
+        volume_step = Decimal(str(getattr(symbol_info, "volume_step", 0.01) or 0.01))
+        volume_max = Decimal(str(getattr(symbol_info, "volume_max", volume_min) or volume_min))
+
+        if volume_step <= 0:
+            volume_step = Decimal("0.01")
+        if volume_max < volume_min:
+            raise ValueError("Les bornes de volume MT5 sont incoherentes.")
+
+        bounded_volume = min(max(Decimal(str(requested_volume)), volume_min), volume_max)
+        steps = ((bounded_volume - volume_min) / volume_step).to_integral_value(rounding=ROUND_FLOOR)
+        normalized_volume = volume_min + (steps * volume_step)
+        if normalized_volume < volume_min:
+            normalized_volume = volume_min
+        if normalized_volume > volume_max:
+            normalized_volume = volume_max
+
+        precision = max(0, -volume_step.normalize().as_tuple().exponent)
+        quantum = Decimal("1").scaleb(-precision)
+        return normalized_volume.quantize(quantum)
+
+    @staticmethod
+    def _is_order_check_valid(check_result: Any) -> bool:
+        """
+        Indique si ``order_check`` valide la requete courante.
+
+        Args:
+            check_result (Any): Reponse brute de ``mt5.order_check``.
+
+        Returns:
+            bool: ``True`` si la requete peut etre transmise a ``order_send``.
+        """
+        if check_result is None:
+            return False
+        retcode = getattr(check_result, "retcode", None)
+        if retcode in (0, getattr(mt5, "TRADE_RETCODE_DONE", 10009)):
+            return True
+        comment = str(getattr(check_result, "comment", "") or "").strip().lower()
+        return comment == "done"
+
+    async def execute_order(self, order: TradeOrder) -> dict[str, Any]:
+        """
+        Exécute un ordre de trading avec garde-fous de marché et anti-doublon.
+
+        Args:
+            order (TradeOrder): Ordre à transmettre à MetaTrader 5.
+
+        Returns:
+            dict[str, Any]: Résultat d'exécution contenant au minimum
+                `success` et `message`, ainsi que `ticket` ou `retcode`
+                selon le cas.
+        """
+        signature = self._build_order_signature(order)
+        duplicate_block = await self._register_order_attempt(signature)
+        if duplicate_block is not None:
+            return duplicate_block
+
+        order_executed = False
+
+        try:
+            if self.mock_mode:
+                result = await self._execute_mock_order(order)
+                order_executed = bool(result.get("success"))
+                return result
+
+            if not self.is_connected:
                 return {
                     "success": False,
-                    "message": f"Ã‰chec SÃ©curitÃ©: Spread ({current_spread:.1f} pts) > Max autorisÃ© ({max_spread} pts).",
-                    "retcode": 99999, # Code d'erreur interne
+                    "message": "MT5 hors ligne: ordre refuse tant que la connexion n'est pas retablie.",
+                    "retcode": 99010,
                 }
-            # ---------------------------------------------
 
-            order_type = mt5.ORDER_TYPE_BUY if order.action == TradeAction.BUY else mt5.ORDER_TYPE_SELL
-            exec_price = price.ask if order.action == TradeAction.BUY else price.bid
+            symbol_info = await asyncio.to_thread(mt5.symbol_info, order.symbol)
+            if symbol_info is None:
+                return {"success": False, "message": f"Symbole {order.symbol} non trouvÃ©"}
 
-            # Sanitize comment
-            raw_comment = order.comment or "EVA"
-            safe_comment = "".join(c for c in raw_comment if c.isalnum() or c in " -_.")[:31]
-            if not safe_comment: safe_comment = "EVA"
+            deviation = self._get_deviation(order.symbol)
+            point = getattr(symbol_info, "point", 0.0) or 1.0
+            normalized_volume = self._normalize_volume(symbol_info, order.volume)
+            filling_mode = self._resolve_filling_mode(symbol_info)
+            if normalized_volume != Decimal(str(order.volume)):
+                logger.info(
+                    "Volume normalise pour %s: demande=%s, envoye=%s, min=%s, step=%s, max=%s",
+                    order.symbol,
+                    order.volume,
+                    normalized_volume,
+                    getattr(symbol_info, "volume_min", "?"),
+                    getattr(symbol_info, "volume_step", "?"),
+                    getattr(symbol_info, "volume_max", "?"),
+                )
 
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": order.symbol,
-                "volume": float(order.volume),
-                "type": order_type,
-                "price": exec_price,
-                "sl": float(order.stop_loss_price) if order.stop_loss_price else 0.0,
-                "tp": float(order.take_profit_price) if order.take_profit_price else 0.0,
-                "deviation": deviation,
-                "magic": order.magic_number,
-                "comment": safe_comment,
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
-            }
+            # Retry Loop pour gÃ©rer les Requotes/Busy terminal
+            for attempt in range(3):
+                price = await asyncio.to_thread(mt5.symbol_info_tick, order.symbol)
+                if price is None:
+                    await asyncio.sleep(0.5)
+                    continue
 
-            result = await asyncio.to_thread(mt5.order_send, request)
-            
-            if result is None:
-                logger.warning(f"MT5 order_send returned None for {order.symbol} (Attempt {attempt+1})")
-                await asyncio.sleep(0.5)
-                continue
+                # Le filtre de spread doit rester proche de l'envoi reel pour
+                # eviter un ordre valide au calcul mais invalide au moment du deal.
+                current_spread = (price.ask - price.bid) / point
 
-            if result.retcode == mt5.TRADE_RETCODE_DONE:
-                return {
-                    "success": True,
-                    "ticket": result.order,
-                    "message": f"Ordre exÃ©cutÃ©: {order.action.value} {order.volume} {order.symbol} (Att: {attempt+1})",
+                max_spread = 25
+                sym = order.symbol.upper()
+                if "XAU" in sym:
+                    max_spread = 60
+                elif "BTC" in sym or "ETH" in sym:
+                    max_spread = 1500
+                elif "US30" in sym or "US100" in sym or "GER40" in sym:
+                    max_spread = 150
+
+                if current_spread > max_spread:
+                    logger.warning(
+                        "Spread trop eleve sur %s: %.1f > %s. Ordre annule.",
+                        order.symbol,
+                        current_spread,
+                        max_spread,
+                    )
+                    return {
+                        "success": False,
+                        "message": (
+                            f"Echec securite: spread ({current_spread:.1f} pts) > "
+                            f"max autorise ({max_spread} pts)."
+                        ),
+                        "retcode": 99999,
+                    }
+
+                order_type = mt5.ORDER_TYPE_BUY if order.action == TradeAction.BUY else mt5.ORDER_TYPE_SELL
+                exec_price = price.ask if order.action == TradeAction.BUY else price.bid
+
+                raw_comment = order.comment or "EVA"
+                safe_comment = "".join(c for c in raw_comment if c.isalnum() or c in " -_.")[:31]
+                if not safe_comment:
+                    safe_comment = "EVA"
+
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": order.symbol,
+                    "volume": float(normalized_volume),
+                    "type": order_type,
+                    "price": exec_price,
+                    "sl": float(order.stop_loss_price) if order.stop_loss_price else 0.0,
+                    "tp": float(order.take_profit_price) if order.take_profit_price else 0.0,
+                    "deviation": deviation,
+                    "magic": order.magic_number,
+                    "comment": safe_comment,
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": filling_mode,
                 }
-            
-            # Requotes (10004) ou Request Rejected (10006) ou Price Changed (10021)
-            if result.retcode in [10004, 10006, 10021, 10031]:
-                logger.info(f"Retrying order {order.symbol} due to {result.comment} (Retcode: {result.retcode})")
-                if result.retcode == 10031: # No connection
-                    logger.warning("ðŸŒ MT5 Connection lost (10031). Attempting emergency reconnection...")
-                    await self.connect()
-                await asyncio.sleep(1.0)
-                continue
-            else:
+
+                check_result = await asyncio.to_thread(mt5.order_check, request)
+                if not self._is_order_check_valid(check_result):
+                    check_comment = str(getattr(check_result, "comment", "") or "Pre-validation refusee").strip()
+                    logger.warning(
+                        "Pre-validation MT5 refusee pour %s %s: %s (volume=%s)",
+                        order.symbol,
+                        order.action.value,
+                        check_comment,
+                        normalized_volume,
+                    )
+                    return {
+                        "success": False,
+                        "message": (
+                            "Pre-check MT5 refuse: "
+                            f"{check_comment} | volume={normalized_volume} "
+                            f"(min={getattr(symbol_info, 'volume_min', '?')}, "
+                            f"step={getattr(symbol_info, 'volume_step', '?')}, "
+                            f"max={getattr(symbol_info, 'volume_max', '?')})"
+                        ),
+                        "normalized_volume": float(normalized_volume),
+                        "retcode": getattr(check_result, "retcode", 0),
+                    }
+
+                result = await asyncio.to_thread(mt5.order_send, request)
+
+                if result is None:
+                    logger.warning("MT5 order_send a retourne None pour %s (tentative %s)", order.symbol, attempt + 1)
+                    await asyncio.sleep(0.5)
+                    continue
+
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    order_executed = True
+                    return {
+                        "success": True,
+                        "ticket": result.order,
+                        "normalized_volume": float(normalized_volume),
+                        "message": (
+                            f"Ordre execute: {order.action.value} {normalized_volume} "
+                            f"{order.symbol} (tentative {attempt + 1})"
+                        ),
+                    }
+
+                if result.retcode in [10004, 10006, 10021, 10031]:
+                    logger.info(
+                        "Nouvelle tentative sur %s apres %s (retcode %s)",
+                        order.symbol,
+                        result.comment,
+                        result.retcode,
+                    )
+                    if result.retcode == 10031:
+                        logger.warning("Connexion MT5 perdue (10031). Reconnexion d'urgence.")
+                        await self.connect()
+                    await asyncio.sleep(1.0)
+                    continue
+
                 return {
                     "success": False,
                     "message": f"Erreur MT5: {result.comment}",
+                    "normalized_volume": float(normalized_volume),
                     "retcode": result.retcode,
                 }
 
-        return {"success": False, "message": "Ã‰chec de l'ordre aprÃ¨s 3 tentatives (Slippage/Requotes)"}
+            return {"success": False, "message": "Echec de l'ordre apres 3 tentatives (slippage/requotes)"}
+        finally:
+            await self._release_order_attempt(signature, remember_execution=order_executed)
 
     async def close_position(self, ticket: int) -> dict[str, Any]:
         """Ferme une position par son ticket"""
@@ -652,6 +1007,9 @@ class MT5Service:
                 "symbol": pos.symbol
             }
 
+        if not self.is_connected:
+            return {"success": False, "message": "MT5 hors ligne: fermeture impossible."}
+
         position = await asyncio.to_thread(mt5.positions_get, ticket=ticket)
         if not position:
             return {"success": False, "message": f"Position {ticket} non trouvÃ©e"}
@@ -659,6 +1017,8 @@ class MT5Service:
         pos = position[0]
         close_type = mt5.ORDER_TYPE_SELL if pos.type == 0 else mt5.ORDER_TYPE_BUY
         deviation = self._get_deviation(pos.symbol)
+        symbol_info = await asyncio.to_thread(mt5.symbol_info, pos.symbol)
+        filling_mode = self._resolve_filling_mode(symbol_info) if symbol_info else getattr(mt5, "ORDER_FILLING_IOC", 1)
         
         for attempt in range(3):
             price = await asyncio.to_thread(mt5.symbol_info_tick, pos.symbol)
@@ -679,7 +1039,7 @@ class MT5Service:
                 "magic": pos.magic,
                 "comment": "EVA Close",
                 "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
+                "type_filling": filling_mode,
             }
 
             result = await asyncio.to_thread(mt5.order_send, request)
@@ -710,6 +1070,9 @@ class MT5Service:
                 return {"success": True, "message": f"Position {ticket} modified (mock)"}
             return {"success": False, "message": "Position not found"}
 
+        if not self.is_connected:
+            return {"success": False, "message": "MT5 hors ligne: modification impossible."}
+
         request = {
             "action": mt5.TRADE_ACTION_SLTP,
             "position": ticket,
@@ -728,6 +1091,10 @@ class MT5Service:
         if self.mock_mode:
             # Estimation pifomÃ©trique pour le mock
             return volume * 500.0  # $500 de marge par lot
+
+        if not self.is_connected:
+            logger.warning("Calcul de marge impossible sur %s: MT5 hors ligne.", symbol)
+            return None
             
         order_type = mt5.ORDER_TYPE_BUY if action == TradeAction.BUY else mt5.ORDER_TYPE_SELL
         
@@ -791,9 +1158,28 @@ class MT5Service:
         logger.info(f"Executing skill {skill} for {order.symbol}")
         return await self.execute_order(order)
 
-    async def get_deal_history(self, from_dt: datetime, to_dt: datetime) -> list[dict]:
-        """RÃ©cupÃ¨re l'historique des deals (trades fermÃ©s) sur une pÃ©riode."""
+    async def get_deal_history(
+        self,
+        from_dt: datetime,
+        to_dt: datetime,
+        closed_only: bool = True,
+    ) -> list[dict]:
+        """
+        Recupere l'historique des deals MT5 sur une periode.
+
+        Args:
+            from_dt (datetime): Debut de la plage temporelle.
+            to_dt (datetime): Fin de la plage temporelle.
+            closed_only (bool): Si True, ne retourne que les deals de sortie.
+
+        Returns:
+            list[dict]: Liste normalisee des deals MT5.
+        """
         if self.mock_mode:
+            return []
+
+        if not self.is_connected:
+            logger.warning("Historique MT5 indisponible: connexion hors ligne.")
             return []
         
         try:
@@ -801,27 +1187,324 @@ class MT5Service:
             if deals is None:
                 return []
             
+            entry_map = {
+                0: "IN",
+                1: "OUT",
+                2: "INOUT",
+                3: "OUT_BY",
+            }
             result = []
             for deal in deals:
-                if deal.entry == 1:  # DEAL_ENTRY_OUT = fermeture
-                    result.append({
-                        "ticket": deal.ticket,
-                        "order": deal.order,
-                        "position_id": deal.position_id,
-                        "symbol": deal.symbol,
-                        "type": "BUY" if deal.type == 0 else "SELL",
-                        "volume": deal.volume,
-                        "price": deal.price,
-                        "profit": deal.profit,
-                        "swap": deal.swap,
-                        "commission": deal.commission,
-                        "time": datetime.fromtimestamp(deal.time),
-                        "comment": deal.comment,
-                        "magic": deal.magic,
-                    })
+                if closed_only and deal.entry != 1:
+                    continue
+
+                result.append({
+                    "ticket": deal.ticket,
+                    "order": deal.order,
+                    "position_id": deal.position_id,
+                    "symbol": deal.symbol,
+                    "type": "BUY" if deal.type == 0 else "SELL",
+                    "entry": deal.entry,
+                    "entry_label": entry_map.get(deal.entry, f"UNKNOWN_{deal.entry}"),
+                    "volume": deal.volume,
+                    "price": deal.price,
+                    "profit": deal.profit,
+                    "swap": deal.swap,
+                    "commission": deal.commission,
+                    "time": datetime.fromtimestamp(deal.time),
+                    "comment": deal.comment,
+                    "magic": deal.magic,
+                })
             return result
         except Exception as e:
             logger.error(f"Error fetching deal history: {e}")
+            return []
+
+    @staticmethod
+    def _normalize_strategy_label(comment: str | None) -> dict[str, str]:
+        """
+        Normalise le commentaire MT5 pour l'analyse de performance.
+
+        Args:
+            comment (str | None): Commentaire brut issu du deal MT5.
+
+        Returns:
+            dict[str, str]: Libelle exact et famille de strategie associee.
+        """
+        raw_comment = str(comment or "").strip()
+        if not raw_comment:
+            return {"label": "Inconnu", "family": "Inconnu"}
+
+        lowered = raw_comment.lower()
+        if lowered.startswith("eva close"):
+            return {"label": "Cloture systeme", "family": "Systeme"}
+        if "muzero" in lowered:
+            return {"label": raw_comment, "family": "MuZero JAX"}
+        if "dreamer" in lowered:
+            return {"label": raw_comment, "family": "Dreamer V3"}
+        if "gnn" in lowered:
+            return {"label": raw_comment, "family": "GNN"}
+        if "manual" in lowered:
+            return {"label": raw_comment, "family": "Manuel"}
+        return {"label": raw_comment, "family": raw_comment[:32]}
+
+    async def get_strategy_performance(
+        self,
+        from_dt: datetime,
+        to_dt: datetime,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        """
+        Agrège les performances realisees par moteur de decision.
+
+        La methode groupe les deals par ``position_id`` afin de reconstruire
+        chaque trade ferme, puis consolide le PnL net par commentaire
+        d'execution et par famille de strategie.
+
+        Args:
+            from_dt (datetime): Debut de la plage d'analyse.
+            to_dt (datetime): Fin de la plage d'analyse.
+            limit (int): Nombre maximal de strategies retournees.
+
+        Returns:
+            dict[str, Any]: Resume global et details agreges par strategie.
+        """
+        if self.mock_mode:
+            return {
+                "summary": {
+                    "closed_trades": 0,
+                    "net_profit": 0.0,
+                    "win_rate": 0.0,
+                    "from": from_dt.isoformat(),
+                    "to": to_dt.isoformat(),
+                },
+                "by_model": [],
+                "by_family": [],
+                "recent_trades": [],
+            }
+
+        deals = await self.get_deal_history(from_dt, to_dt, closed_only=False)
+        grouped_positions: dict[int, dict[str, Any]] = {}
+
+        for deal in sorted(deals, key=lambda item: item["time"]):
+            position_id = int(deal.get("position_id") or deal.get("order") or deal.get("ticket") or 0)
+            if position_id <= 0:
+                continue
+
+            trade_state = grouped_positions.setdefault(
+                position_id,
+                {
+                    "position_id": position_id,
+                    "symbol": deal.get("symbol"),
+                    "action": None,
+                    "entry_time": None,
+                    "close_time": None,
+                    "entry_price": None,
+                    "exit_price": None,
+                    "entry_comment": "",
+                    "exit_comment": "",
+                    "volume": 0.0,
+                    "profit": 0.0,
+                    "swap": 0.0,
+                    "commission": 0.0,
+                    "magic": deal.get("magic", 0),
+                },
+            )
+
+            entry = int(deal.get("entry", -1))
+            trade_state["symbol"] = trade_state["symbol"] or deal.get("symbol")
+            trade_state["volume"] = max(float(trade_state["volume"]), float(deal.get("volume") or 0.0))
+            trade_state["profit"] += float(deal.get("profit") or 0.0)
+            trade_state["swap"] += float(deal.get("swap") or 0.0)
+            trade_state["commission"] += float(deal.get("commission") or 0.0)
+
+            if entry in (0, 2):
+                if trade_state["entry_time"] is None:
+                    trade_state["entry_time"] = deal["time"]
+                trade_state["entry_price"] = trade_state["entry_price"] or float(deal.get("price") or 0.0)
+                trade_state["action"] = trade_state["action"] or deal.get("type")
+                if deal.get("comment"):
+                    trade_state["entry_comment"] = str(deal["comment"])
+
+            if entry in (1, 2, 3):
+                trade_state["close_time"] = deal["time"]
+                trade_state["exit_price"] = float(deal.get("price") or 0.0)
+                if deal.get("comment"):
+                    trade_state["exit_comment"] = str(deal["comment"])
+
+        closed_trades: list[dict[str, Any]] = []
+        for trade_state in grouped_positions.values():
+            if trade_state["close_time"] is None:
+                continue
+
+            strategy_comment = trade_state["entry_comment"] or trade_state["exit_comment"]
+            if not strategy_comment and trade_state["magic"]:
+                strategy_comment = f"Magic {trade_state['magic']}"
+
+            strategy_info = self._normalize_strategy_label(strategy_comment)
+            net_profit = (
+                float(trade_state["profit"])
+                + float(trade_state["swap"])
+                + float(trade_state["commission"])
+            )
+            closed_trades.append(
+                {
+                    "position_id": trade_state["position_id"],
+                    "symbol": trade_state["symbol"],
+                    "action": trade_state["action"] or "UNKNOWN",
+                    "label": strategy_info["label"],
+                    "family": strategy_info["family"],
+                    "entry_time": trade_state["entry_time"].isoformat() if trade_state["entry_time"] else None,
+                    "close_time": trade_state["close_time"].isoformat() if trade_state["close_time"] else None,
+                    "entry_price": trade_state["entry_price"],
+                    "exit_price": trade_state["exit_price"],
+                    "volume": float(trade_state["volume"]),
+                    "net_profit": net_profit,
+                    "gross_profit": float(trade_state["profit"]),
+                    "swap": float(trade_state["swap"]),
+                    "commission": float(trade_state["commission"]),
+                    "magic": trade_state["magic"],
+                }
+            )
+
+        def aggregate_by(key_name: str) -> list[dict[str, Any]]:
+            buckets: dict[str, dict[str, Any]] = {}
+            for trade in closed_trades:
+                bucket_key = str(trade[key_name] or "Inconnu")
+                bucket = buckets.setdefault(
+                    bucket_key,
+                    {
+                        "label": bucket_key,
+                        "closed_trades": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "net_profit": 0.0,
+                        "gross_profit": 0.0,
+                        "symbols": set(),
+                        "last_closed_at": None,
+                    },
+                )
+                bucket["closed_trades"] += 1
+                bucket["net_profit"] += float(trade["net_profit"])
+                bucket["gross_profit"] += float(trade["gross_profit"])
+                if float(trade["net_profit"]) > 0:
+                    bucket["wins"] += 1
+                elif float(trade["net_profit"]) < 0:
+                    bucket["losses"] += 1
+                bucket["symbols"].add(str(trade["symbol"]))
+                if trade["close_time"]:
+                    bucket["last_closed_at"] = max(
+                        bucket["last_closed_at"] or trade["close_time"],
+                        trade["close_time"],
+                    )
+
+            ranked = []
+            for bucket in buckets.values():
+                closed_count = bucket["closed_trades"]
+                ranked.append(
+                    {
+                        "label": bucket["label"],
+                        "closed_trades": closed_count,
+                        "wins": bucket["wins"],
+                        "losses": bucket["losses"],
+                        "win_rate": round((bucket["wins"] / closed_count) * 100.0, 2) if closed_count else 0.0,
+                        "net_profit": round(bucket["net_profit"], 2),
+                        "avg_profit": round(bucket["net_profit"] / closed_count, 2) if closed_count else 0.0,
+                        "gross_profit": round(bucket["gross_profit"], 2),
+                        "symbols": sorted(bucket["symbols"]),
+                        "last_closed_at": bucket["last_closed_at"],
+                    }
+                )
+            ranked.sort(key=lambda item: (item["net_profit"], item["closed_trades"]), reverse=True)
+            return ranked[: max(1, limit)]
+
+        closed_count = len(closed_trades)
+        wins = sum(1 for trade in closed_trades if float(trade["net_profit"]) > 0)
+        net_profit = round(sum(float(trade["net_profit"]) for trade in closed_trades), 2)
+        recent_trades = sorted(
+            closed_trades,
+            key=lambda item: item["close_time"] or "",
+            reverse=True,
+        )[:10]
+
+        return {
+            "summary": {
+                "closed_trades": closed_count,
+                "wins": wins,
+                "losses": max(0, closed_count - wins),
+                "win_rate": round((wins / closed_count) * 100.0, 2) if closed_count else 0.0,
+                "net_profit": net_profit,
+                "from": from_dt.isoformat(),
+                "to": to_dt.isoformat(),
+            },
+            "by_model": aggregate_by("label"),
+            "by_family": aggregate_by("family"),
+            "recent_trades": recent_trades,
+        }
+
+    async def get_candles_range(
+        self,
+        symbol: str,
+        timeframe: int,
+        from_dt: datetime,
+        to_dt: datetime,
+    ) -> list[dict[str, Any]]:
+        """
+        Recupere des bougies sur une plage temporelle explicite.
+
+        Args:
+            symbol (str): Symbole a charger.
+            timeframe (int): Timeframe MT5 simplifie (1, 5, 15, 60, 1440).
+            from_dt (datetime): Debut de la plage.
+            to_dt (datetime): Fin de la plage.
+
+        Returns:
+            list[dict[str, Any]]: Bougies OHLCV triees chronologiquement.
+        """
+        if self.mock_mode:
+            return []
+
+        tf_map = {
+            1: mt5.TIMEFRAME_M1,
+            5: mt5.TIMEFRAME_M5,
+            15: mt5.TIMEFRAME_M15,
+            60: mt5.TIMEFRAME_H1,
+            1440: mt5.TIMEFRAME_D1,
+        }
+        mt5_tf = tf_map.get(timeframe)
+        if mt5_tf is None:
+            raise ValueError(f"Timeframe non supporte pour MT5: {timeframe}")
+
+        if not await self.ensure_symbol_selected(symbol):
+            return []
+
+        try:
+            rates = await asyncio.to_thread(
+                mt5.copy_rates_range,
+                symbol,
+                mt5_tf,
+                from_dt,
+                to_dt,
+            )
+            if rates is None or len(rates) == 0:
+                return []
+
+            candles: list[dict[str, Any]] = []
+            for rate in rates:
+                candles.append(
+                    {
+                        "time": datetime.fromtimestamp(rate["time"]),
+                        "open": float(rate["open"]),
+                        "high": float(rate["high"]),
+                        "low": float(rate["low"]),
+                        "close": float(rate["close"]),
+                        "tick_volume": float(rate["tick_volume"]),
+                        "spread": float(rate["spread"]),
+                    }
+                )
+            return candles
+        except Exception as exc:
+            logger.error("Erreur recuperation bougies %s sur plage: %s", symbol, exc)
             return []
 
     async def get_account_summary(self) -> dict:

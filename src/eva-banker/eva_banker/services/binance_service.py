@@ -29,12 +29,17 @@ class BinanceService:
             self.exchange.set_sandbox_mode(True)
 
     async def initialize(self):
-        """Charge les marchés (indispensable pour CCXT)"""
+        """Charge les marchés seulement si l'intégration Binance est configurée."""
+        if not self.api_key or not self.api_secret:
+            logger.info("Binance: identifiants absents, initialisation distante ignorée.")
+            return False
         try:
             await self.exchange.load_markets()
             logger.info(f"✅ Crypto Exchange '{self.exchange_id}' initialisé. (Testnet: {self.testnet})")
+            return True
         except Exception as e:
             logger.error(f"Erreur d'initialisation de l'exchange {self.exchange_id}: {e}")
+            return False
 
     async def close(self):
         """Ferme la session aiohttp sous-jacente."""

@@ -12,14 +12,216 @@ mod server;
 mod validator;
 
 use std::path::PathBuf;
+use chrono::{TimeZone, Utc};
+use serde_json::Value;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+use uuid::Uuid;
 
 use crate::kill_switch::KillSwitch;
 use crate::laws::Constitution;
 use crate::server::start_kernel_server;
 use futures::StreamExt;
 use crate::validator::TradeValidator;
+
+fn extract_string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(field) = value.get(*key) {
+            let extracted = match field {
+                Value::String(text) => Some(text.trim().to_string()),
+                Value::Number(number) => Some(number.to_string()),
+                Value::Bool(flag) => Some(flag.to_string()),
+                _ => None,
+            };
+
+            if let Some(text) = extracted {
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+    }
+
+    for container in ["data", "payload", "metadata", "context", "details"] {
+        if let Some(nested) = value.get(container) {
+            if let Some(text) = extract_string_field(nested, keys) {
+                return Some(text);
+            }
+        }
+    }
+
+    None
+}
+
+fn title_case(raw: &str) -> String {
+    raw.split_whitespace()
+        .map(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str().to_lowercase()),
+                None => String::new(),
+            }
+        })
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_agent_name(raw: &str) -> String {
+    let normalized = raw
+        .trim()
+        .replace(['.', '_', '-', '/'], " ")
+        .to_lowercase();
+
+    if normalized.contains("core") {
+        "EVA Core".to_string()
+    } else if normalized.contains("banker") {
+        "Banker".to_string()
+    } else if normalized.contains("sentinel") {
+        "Sentinel".to_string()
+    } else if normalized.contains("compliance") {
+        "Compliance".to_string()
+    } else if normalized.contains("accountant") {
+        "Accountant".to_string()
+    } else if normalized.contains("researcher") {
+        "Researcher".to_string()
+    } else if normalized.contains("wraith") {
+        "Wraith".to_string()
+    } else if normalized.contains("muse") {
+        "Muse".to_string()
+    } else if normalized.contains("shadow") {
+        "Shadow".to_string()
+    } else if normalized.contains("sage") {
+        "Sage".to_string()
+    } else if normalized.contains("lab") {
+        "Lab".to_string()
+    } else if normalized.contains("rwa") {
+        "RWA".to_string()
+    } else if normalized.contains("kernel") {
+        "Kernel".to_string()
+    } else {
+        title_case(&normalized)
+    }
+}
+
+fn infer_agent_from_channel(channel_name: &str) -> String {
+    let parts: Vec<&str> = channel_name
+        .split(|c| matches!(c, '.' | ':' | '/' | '-'))
+        .filter(|part| !part.trim().is_empty())
+        .collect();
+
+    let candidate = if parts.first().is_some_and(|part| part.eq_ignore_ascii_case("eva")) && parts.len() > 1 {
+        parts[1]
+    } else {
+        parts.first().copied().unwrap_or("system")
+    };
+
+    normalize_agent_name(candidate)
+}
+
+fn normalize_feed_type(raw_type: Option<&str>) -> &'static str {
+    match raw_type.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "alert" | "error" | "critical" | "fatal" => "error",
+        "event" | "action" | "trade" | "order" => "action",
+        "request" | "thought" | "analysis" | "reasoning" => "thought",
+        "response" | "result" | "success" | "done" => "result",
+        "" => "message",
+        _ => "message",
+    }
+}
+
+fn normalize_timestamp(raw_timestamp: Option<String>) -> String {
+    if let Some(timestamp) = raw_timestamp {
+        if chrono::DateTime::parse_from_rfc3339(&timestamp).is_ok() {
+            return timestamp;
+        }
+
+        if let Ok(epoch) = timestamp.parse::<i64>() {
+            let parsed = if epoch > 1_000_000_000_000 {
+                Utc.timestamp_millis_opt(epoch).single()
+            } else {
+                Utc.timestamp_opt(epoch, 0).single()
+            };
+
+            if let Some(date) = parsed {
+                return date.to_rfc3339();
+            }
+        }
+    }
+
+    Utc::now().to_rfc3339()
+}
+
+fn normalize_feed_message(channel_name: &str, payload_str: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<Value>(payload_str) {
+        let raw_agent = extract_string_field(
+            &value,
+            &["source_agent", "agent", "source", "sender", "service", "origin", "role"],
+        );
+        let agent = raw_agent
+            .as_deref()
+            .map(normalize_agent_name)
+            .unwrap_or_else(|| infer_agent_from_channel(channel_name));
+
+        let raw_target = extract_string_field(
+            &value,
+            &["target_agent", "target", "recipient", "destination"],
+        );
+        let target = raw_target
+            .as_deref()
+            .map(normalize_agent_name)
+            .filter(|name| !name.is_empty());
+
+        let company = extract_string_field(&value, &["company", "team", "swarm", "domain"])
+            .unwrap_or_else(|| "Hive Swarm".to_string());
+
+        let content = extract_string_field(
+            &value,
+            &["action", "content", "message", "text", "summary", "result", "reason", "description"],
+        )
+        .unwrap_or_else(|| payload_str.to_string());
+
+        let message_type = normalize_feed_type(
+            extract_string_field(
+                &value,
+                &["type", "message_type", "event_type", "level", "kind"],
+            )
+            .as_deref(),
+        );
+
+        let timestamp = normalize_timestamp(extract_string_field(
+            &value,
+            &["timestamp", "created_at", "time", "datetime", "occurred_at", "date"],
+        ));
+
+        let id = extract_string_field(
+            &value,
+            &["id", "event_id", "request_id", "uuid", "trace_id"],
+        )
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+        return serde_json::json!({
+            "id": id,
+            "agent": agent,
+            "company": company,
+            "type": message_type,
+            "content": content,
+            "timestamp": timestamp,
+            "target": target,
+        })
+        .to_string();
+    }
+
+    serde_json::json!({
+        "id": Uuid::new_v4().to_string(),
+        "agent": infer_agent_from_channel(channel_name),
+        "company": "System",
+        "type": "message",
+        "content": payload_str,
+        "timestamp": Utc::now().to_rfc3339(),
+    })
+    .to_string()
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -220,42 +422,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     while let Some(msg) = msg_stream.next().await {
                         let channel_name = String::from(msg.get_channel_name());
                         if let Ok(payload_str) = msg.get_payload::<String>() {
-                            // Map and Broadcast
-                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload_str) {
-                                let mut final_msg = serde_json::json!({
-                                    "id": val.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                                    "agent": val.get("source_agent").and_then(|v| v.as_str()).unwrap_or("Unknown"),
-                                    "company": "Hive Swarm",
-                                    "type": "action",
-                                    "content": val.get("action").and_then(|v| v.as_str()).unwrap_or(""),
-                                    "timestamp": val.get("timestamp").and_then(|v| v.as_str()).unwrap_or(""),
-                                    "target": val.get("target_agent").and_then(|v| v.as_str()),
-                                });
-
-                                if let Some(msg_type) = val.get("type").and_then(|v| v.as_str()) {
-                                    let display_type = match msg_type {
-                                        "alert" => "error",
-                                        "event" => "action",
-                                        "request" => "thought",
-                                        "response" => "result",
-                                        _ => "message",
-                                    };
-                                    if let Some(obj) = final_msg.as_object_mut() {
-                                        obj.insert("type".to_string(), serde_json::json!(display_type));
-                                    }
-                                }
-                                let _ = tx_redis.send(final_msg.to_string());
-                            } else {
-                                let raw_msg = serde_json::json!({
-                                    "id": uuid::Uuid::new_v4().to_string(),
-                                    "agent": channel_name.clone(),
-                                    "company": "System",
-                                    "type": "message",
-                                    "content": payload_str,
-                                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                                });
-                                let _ = tx_redis.send(raw_msg.to_string());
-                            }
+                            let normalized = normalize_feed_message(&channel_name, &payload_str);
+                            let _ = tx_redis.send(normalized);
                         }
                     }
                 });

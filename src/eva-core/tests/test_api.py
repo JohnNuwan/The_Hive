@@ -39,6 +39,19 @@ def client(mock_redis):
     mock_self_healing.start_monitoring = AsyncMock()
 
     mock_system_monitor = MagicMock()
+    mock_autonomy_service = MagicMock()
+    mock_autonomy_service.start_monitoring = AsyncMock()
+    mock_autonomy_service.get_snapshot.return_value = {
+        "generated_at": "2026-03-11T10:00:00",
+        "posture": {
+            "status": "ready",
+            "recommended_mode": "assisted_live",
+            "blockers": [],
+        },
+    }
+    mock_autonomy_service.refresh_snapshot = AsyncMock(
+        return_value=mock_autonomy_service.get_snapshot.return_value
+    )
 
     # Patch all external services and lifespan dependencies
     # Patch the singleton directly to ensure get_redis_client returns the mock
@@ -56,6 +69,7 @@ def client(mock_redis):
          patch("eva_core.main.EVAMQTTClient") as MockMQTT, \
          patch("eva_core.main.StrategyOrchestrator", return_value=mock_strategy_orchestrator), \
          patch("eva_core.main.SelfHealingService") as MockHealing, \
+         patch("eva_core.main.AutonomyService", return_value=mock_autonomy_service), \
          patch("eva_core.main.SystemMonitor", return_value=mock_system_monitor):
 
         # Configure AsyncMocks for awaited methods
@@ -76,6 +90,7 @@ def client(mock_redis):
         app.state.strategy_orchestrator = MagicMock()
         app.state.self_healing = mock_healing_instance
         app.state.system_monitor = MagicMock()
+        app.state.autonomy_service = mock_autonomy_service
 
         with TestClient(app) as c:
             yield c
@@ -100,6 +115,15 @@ def test_agent_status_endpoint(client, auth_headers):
     json_response = response.json()
     assert "core" in json_response
     assert json_response["core"]["status"] == "online"
+
+
+def test_autonomy_context_endpoint(client, auth_headers):
+    """Vérifie que le snapshot d'autonomie est exposé."""
+    response = client.get("/intelligence/autonomy/context", headers=auth_headers)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["posture"]["status"] == "ready"
+    assert payload["posture"]["recommended_mode"] == "assisted_live"
 
 def test_token_generation_and_verification():
     """Verify that a token generated can be verified and contains correct data."""

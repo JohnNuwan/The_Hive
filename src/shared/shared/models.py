@@ -165,6 +165,7 @@ class TradeOrder(BaseModel):
         symbol (str): Paire ou actif (ex: XAUUSD).
         action (TradeAction): Achat ou Vente.
         volume (Decimal): Taille du lot (0.01 à 10.0).
+        entry_price (Decimal | None): Prix d'entree estime au moment de la decision.
         stop_loss_price (Decimal | None): Prix de sortie en perte (Obligatoire).
         take_profit_price (Decimal | None): Prix de sortie en gain (Optionnel).
         order_type (OrderType): Market, Limit, Stop...
@@ -175,6 +176,10 @@ class TradeOrder(BaseModel):
     symbol: str = Field(..., description="Symbole (ex: XAUUSD)")
     action: TradeAction
     volume: Decimal = Field(..., gt=0, le=10)
+    entry_price: Decimal | None = Field(
+        None,
+        description="Prix d'entree estime utilise pour le calcul de risque",
+    )
     stop_loss_price: Decimal | None = Field(None, description="Prix Stop Loss (obligatoire ROE)")
     take_profit_price: Decimal | None = None
     order_type: OrderType = OrderType.MARKET

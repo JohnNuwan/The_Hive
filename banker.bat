@@ -21,8 +21,13 @@ if %errorlevel% neq 0 (
 
 :: Configuration locale du Banker
 if "%HIVE_SERVER_HOST%"=="" set HIVE_SERVER_HOST=192.168.1.6
+if "%HIVE_SSH_USER%"=="" set HIVE_SSH_USER=aza
 if "%REDIS_HOST%"=="" set REDIS_HOST=%HIVE_SERVER_HOST%
 if "%REDIS_PORT%"=="" set REDIS_PORT=6379
+if "%HIVE_TUNNEL_REMOTE_PORT%"=="" set HIVE_TUNNEL_REMOTE_PORT=18100
+if "%HIVE_TUNNEL_RELAY_PORT%"=="" set HIVE_TUNNEL_RELAY_PORT=18101
+set "BANKER_TUNNEL_KEY=%USERPROFILE%\.ssh\the_hive_banker_tunnel"
+set "BANKER_SSH_BIN=%SystemRoot%\System32\OpenSSH\ssh.exe"
 
 set PYTHONPATH=%CD%\src\shared;%CD%\src\eva-banker
 set MOCK_MT5=false
@@ -31,6 +36,8 @@ set PAPER_TRADING=false
 echo Serveur THE HIVE cible: %HIVE_SERVER_HOST%
 echo Redis cible: %REDIS_HOST%:%REDIS_PORT%
 echo API Banker exposee sur ce PC: 0.0.0.0:8100
+echo Tunnel SSH distant: %HIVE_SERVER_HOST%:%HIVE_TUNNEL_REMOTE_PORT%
+echo Relay Nexus distant: %HIVE_SERVER_HOST%:%HIVE_TUNNEL_RELAY_PORT%
 
 :: Ouverture firewall Windows pour accessibilite reseau du banker (si possible)
 netsh advfirewall firewall show rule name="THE_HIVE_BANKER_8100" >nul 2>nul
@@ -38,11 +45,67 @@ if %errorlevel% neq 0 (
     netsh advfirewall firewall add rule name="THE_HIVE_BANKER_8100" dir=in action=allow protocol=TCP localport=8100 >nul 2>nul
 )
 
+:: Initialisation du pont Banker local -> serveur Nexus
+if exist "%BANKER_TUNNEL_KEY%" (
+    call :ensure_server_relay
+    call :start_reverse_tunnel
+) else (
+    echo WARN: cle SSH du tunnel absente: %BANKER_TUNNEL_KEY%
+    echo WARN: Nexus verra le banker comme hors-ligne tant que le tunnel n'est pas provisionne.
+)
+
+call :check_existing_banker
+if %errorlevel% equ 2 (
+    echo INFO: une instance saine de The Banker ecoute deja sur le port 8100.
+    echo INFO: aucun second lancement n'est autorise.
+    exit /b 0
+)
+if %errorlevel% equ 3 (
+    echo ERROR: le port 8100 est deja occupe par un autre processus.
+    exit /b 1
+)
+
 :: Lancement du service
-venv\Scripts\python -m uvicorn eva_banker.main:app --host 0.0.0.0 --port 8100 --env-file .env
+venv\Scripts\python -m uvicorn eva_banker.main:app --host 0.0.0.0 --port 8100 --env-file .env --no-access-log
 
 echo.
 echo [%DATE% %TIME%] Processus Banker arrete.
 echo Redemarrage dans 5 secondes (Ctrl+C pour annuler)...
 timeout /t 5 >nul
 goto start
+
+:check_existing_banker
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+ "$ErrorActionPreference = 'SilentlyContinue';" ^
+ "$conn = Get-NetTCPConnection -LocalPort 8100 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1;" ^
+ "if (-not $conn) { exit 0 }" ^
+ "try { $resp = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8100/health' -TimeoutSec 2; if ($resp.StatusCode -eq 200) { exit 2 } } catch {}" ^
+ "exit 3"
+goto :eof
+
+:ensure_server_relay
+echo Initialisation du relay distant du Banker...
+"%BANKER_SSH_BIN%" -i "%BANKER_TUNNEL_KEY%" -o StrictHostKeyChecking=accept-new %HIVE_SSH_USER%@%HIVE_SERVER_HOST% "bash /home/aza/The_Hive/scripts/start_banker_tunnel_relay.sh 0.0.0.0 %HIVE_TUNNEL_RELAY_PORT% 127.0.0.1 %HIVE_TUNNEL_REMOTE_PORT%" >nul 2>nul
+if %errorlevel% neq 0 (
+    echo WARN: impossible de lancer le relay distant sur le serveur.
+) else (
+    echo Relay distant actif sur le port %HIVE_TUNNEL_RELAY_PORT%.
+)
+goto :eof
+
+:start_reverse_tunnel
+echo Initialisation du reverse tunnel SSH du Banker...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+ "$ErrorActionPreference = 'SilentlyContinue';" ^
+ "$key = '%BANKER_TUNNEL_KEY%';" ^
+ "$ssh = '%BANKER_SSH_BIN%';" ^
+ "$server = '%HIVE_SSH_USER%@%HIVE_SERVER_HOST%';" ^
+ "$remote = '127.0.0.1:%HIVE_TUNNEL_REMOTE_PORT%:127.0.0.1:8100';" ^
+ "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'ssh.exe' -and $_.CommandLine -like '*the_hive_banker_tunnel*' -and $_.CommandLine -like '*127.0.0.1:%HIVE_TUNNEL_REMOTE_PORT%:127.0.0.1:8100*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force };" ^
+ "Start-Process -FilePath $ssh -WindowStyle Hidden -ArgumentList @('-i', $key, '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3', '-o', 'ExitOnForwardFailure=yes', '-N', '-R', $remote, $server) | Out-Null"
+if %errorlevel% neq 0 (
+    echo WARN: echec du demarrage du tunnel SSH.
+) else (
+    echo Tunnel SSH actif vers %HIVE_SERVER_HOST%:%HIVE_TUNNEL_REMOTE_PORT%.
+)
+goto :eof

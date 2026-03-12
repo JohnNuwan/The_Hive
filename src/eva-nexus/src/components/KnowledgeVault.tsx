@@ -1,8 +1,9 @@
-import { useState, useCallback, useRef } from 'react';
+﻿import { useState, useCallback, useRef } from 'react';
 import {
     Upload, FileText, Database, Trash2, CheckCircle,
-    AlertCircle, BookOpen, Search, Loader, ExternalLink
+    AlertCircle, BookOpen, Search, Loader
 } from 'lucide-react';
+import { createClientUuid } from '../services/api';
 
 interface UploadedDoc {
     id: string;
@@ -25,9 +26,7 @@ export default function KnowledgeVault() {
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const uploadFile = async (file: File) => {
-        let safeId;
-        try { safeId = crypto.randomUUID(); } catch (e) { safeId = Math.random().toString(36).substr(2, 9); }
-        const docId = safeId;
+        const docId = createClientUuid();
         const newDoc: UploadedDoc = {
             id: docId,
             name: file.name,
@@ -108,13 +107,13 @@ export default function KnowledgeVault() {
     return (
         <div style={{ display: 'flex', height: '100%', gap: '16px', padding: '16px', background: '#060611', color: '#e0e0e0', fontFamily: "'Inter', sans-serif", overflow: 'hidden' }}>
 
-            {/* LEFT — Upload + List */}
+            {/* LEFT â€” Upload + List */}
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '12px', overflow: 'hidden' }}>
 
                 {/* Header */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Database size={14} color="#00ff41" />
-                    <span style={{ fontSize: '12px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase' }}>Knowledge Vault — RAG Engine</span>
+                    <span style={{ fontSize: '12px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase' }}>Knowledge Vault â€” RAG Engine</span>
                 </div>
 
                 {/* Drop Zone */}
@@ -143,7 +142,7 @@ export default function KnowledgeVault() {
                     />
                     <Upload size={28} color={dragging ? '#00ff41' : '#2a3a4a'} style={{ marginBottom: '10px' }} />
                     <div style={{ fontSize: '14px', fontWeight: 600, color: dragging ? '#00ff41' : '#888' }}>
-                        {dragging ? 'Déposer ici' : 'Glisser des fichiers ou cliquer pour parcourir'}
+                        {dragging ? 'DÃ©poser ici' : 'Glisser des fichiers ou cliquer pour parcourir'}
                     </div>
                     <div style={{ fontSize: '11px', color: '#444', marginTop: '6px' }}>
                         PDF, TXT, DOCX, MD, CSV, JSON, HTML, Python, TypeScript
@@ -155,7 +154,7 @@ export default function KnowledgeVault() {
                     {docs.length === 0 ? (
                         <div style={{ textAlign: 'center', color: '#2a2a3a', padding: '40px', fontSize: '13px' }}>
                             <BookOpen size={32} style={{ marginBottom: '10px', opacity: 0.3 }} />
-                            <div>Aucun document indexé<br />Glissez des fichiers pour alimenter le RAG</div>
+                            <div>Aucun document indexÃ©<br />Glissez des fichiers pour alimenter le RAG</div>
                         </div>
                     ) : (
                         docs.map(doc => (
@@ -185,12 +184,12 @@ export default function KnowledgeVault() {
                 </div>
             </div>
 
-            {/* RIGHT — RAG Search */}
+            {/* RIGHT â€” RAG Search */}
             <div style={{ width: '380px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Search size={14} color="#00ff41" />
-                    <span style={{ fontSize: '12px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase' }}>Requête RAG</span>
+                    <span style={{ fontSize: '12px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase' }}>RequÃªte RAG</span>
                 </div>
 
                 {/* Search Box */}
@@ -222,7 +221,7 @@ export default function KnowledgeVault() {
                     {searchResults.length === 0 && !searching && (
                         <div style={{ textAlign: 'center', color: '#2a2a3a', padding: '30px', fontSize: '12px' }}>
                             <Search size={24} style={{ marginBottom: '8px', opacity: 0.3 }} />
-                            <div>Lancez une requête pour interroger<br />le graphe de connaissance d'EVA</div>
+                            <div>Lancez une requÃªte pour interroger<br />le graphe de connaissance d'EVA</div>
                         </div>
                     )}
                     {searchResults.map((r: any, i: number) => (
@@ -244,7 +243,7 @@ export default function KnowledgeVault() {
                         <span style={{ color: '#aaa' }}>{docs.length}</span>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '4px' }}>
-                        <span style={{ color: '#666' }}>Indexés</span>
+                        <span style={{ color: '#666' }}>IndexÃ©s</span>
                         <span style={{ color: '#00ff41' }}>{docs.filter(d => d.status === 'indexed').length}</span>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
@@ -258,3 +257,4 @@ export default function KnowledgeVault() {
         </div>
     );
 }
+

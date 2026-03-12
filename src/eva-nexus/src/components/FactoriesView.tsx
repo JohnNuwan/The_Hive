@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { checkNodeHealth, type NodeHealth, getAccountantReport } from '../services/api'
+import BuilderWorkbench from './BuilderWorkbench'
 
 // ═══════════════════════════════════════════════════════
 // TYPES
@@ -59,10 +60,14 @@ const FACTORIES: Factory[] = [
         healthUrl: '/api/builder/health',
         port: 8003,
         endpoints: [
+            { label: 'Build', method: 'POST', path: '/factory/build' },
+            { label: 'Catalog Sync', method: 'POST', path: '/catalog/public-apis/sync' },
+            { label: 'Deploy', method: 'POST', path: '/deploy' },
+            { label: 'Mutation', method: 'POST', path: '/mutation/trigger' },
             { label: 'DocGen', method: 'POST', path: '/maintenance/docgen' },
             { label: 'Log Analysis', method: 'GET', path: '/maintenance/logs/analyze' },
         ],
-        metrics: { docs_generated: 0, errors_fixed: 0, deployments: 0 },
+        metrics: { builds: 0, forge: 0, catalog: 0, pipelines: 0 },
         phase: 'ALPHA',
     },
     {
@@ -199,6 +204,7 @@ function FactoryCard({ factory, health }: { factory: Factory; health?: NodeHealt
     const status = health?.status || 'offline'
     const latency = health?.latency ?? -1
     const isOnline = status === 'online'
+    const metrics = getFactoryMetrics(factory, health)
 
     return (
         <div className="cyber-panel hud-corners p-4 flex flex-col gap-3 group">
@@ -224,7 +230,7 @@ function FactoryCard({ factory, health }: { factory: Factory; health?: NodeHealt
 
             {/* Metrics */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                {Object.entries(factory.metrics).map(([key, val]) => (
+                {Object.entries(metrics).map(([key, val]) => (
                     <div key={key} className="p-2 border border-white/[0.03] bg-white/[0.01]">
                         <div className="text-[7px] text-white/15 tracking-wider uppercase">{key.replace(/_/g, ' ')}</div>
                         <div className={`text-[11px] font-bold ${isOnline ? 'text-white/60' : 'text-white/20'}`}>{String(val)}</div>
@@ -258,6 +264,20 @@ function FactoryCard({ factory, health }: { factory: Factory; health?: NodeHealt
             </div>
         </div>
     )
+}
+
+function getFactoryMetrics(factory: Factory, health?: NodeHealth): Record<string, string | number> {
+    if (factory.id !== 'code' || !health?.details) {
+        return factory.metrics
+    }
+
+    const details = health.details as Record<string, unknown>
+    return {
+        builds: Number(details.builds_completed ?? 0),
+        forge: Number(details.forge_runs ?? 0),
+        catalog: Number(details.public_api_entries ?? 0),
+        pipelines: Number(details.active_pipelines ?? 0),
+    }
 }
 
 function SupportAgentRow({ agent, health }: { agent: typeof SUPPORT_AGENTS[0]; health?: NodeHealth }) {
@@ -307,9 +327,11 @@ export default function FactoriesView() {
         results.forEach(r => { map[r.id] = r.health })
         setAgentHealth(map)
 
-        const report = await getAccountantReport()
-        if (report) {
-            setRevenue(report.summary.gross)
+        try {
+            const report = await getAccountantReport()
+            setRevenue(report?.summary?.gross ?? 0)
+        } catch {
+            setRevenue(0)
         }
     }, [])
 
@@ -378,6 +400,8 @@ export default function FactoriesView() {
                     />
                 ))}
             </div>
+
+            <BuilderWorkbench />
 
             {/* Support Agents */}
             <div className="space-y-1 pt-2">

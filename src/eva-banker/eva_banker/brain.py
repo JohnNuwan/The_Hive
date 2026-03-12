@@ -119,8 +119,22 @@ class AutoTradingEngine:
         self._scan_batch_size = max(1, self._env_int("BANKER_SCAN_BATCH_SIZE", 40))
         self._universe_refresh_minutes = max(5, self._env_int("BANKER_UNIVERSE_REFRESH_MINUTES", 240))
         self._universe_max_symbols = max(0, self._env_int("BANKER_UNIVERSE_MAX_SYMBOLS", 0))
+        self._lab_universe_enabled = self._env_flag("BANKER_LIMIT_TO_LAB_UNIVERSE", True)
+        self._lab_universe_refresh_minutes = max(
+            5,
+            self._env_int("BANKER_LAB_UNIVERSE_REFRESH_MINUTES", 30),
+        )
+        self._lab_universe_horizon = self._env_text("BANKER_LAB_UNIVERSE_HORIZON", "intraday").lower()
+        self._live_inference_horizon = self._env_text("BANKER_LIVE_HORIZON", "auto").lower()
+        self._require_valid_champion = self._env_flag("BANKER_REQUIRE_VALID_CHAMPION", True)
         self._startup_alert_cooldown = timedelta(
             minutes=max(1, self._env_int("BANKER_STARTUP_ALERT_COOLDOWN_MINUTES", 20))
+        )
+        self._veto_alert_cooldown = timedelta(
+            minutes=max(1, self._env_int("BANKER_VETO_ALERT_COOLDOWN_MINUTES", 15))
+        )
+        self._symbol_entry_cooldown = timedelta(
+            minutes=max(1, self._env_int("BANKER_SYMBOL_ENTRY_COOLDOWN_MINUTES", 30))
         )
         self._startup_alert_state_file = os.getenv(
             "BANKER_STARTUP_ALERT_STATE_FILE",
@@ -138,6 +152,13 @@ class AutoTradingEngine:
         self._known_tickets = set()         # Tickets currently open (for close detection)
         self._last_veto_sent = {}           # symbol -> datetime (anti-spam)
         self._trade_open_info = {}          # ticket -> {symbol, action, entry_price, open_time, comment}
+        self._last_symbol_entry_at = {}     # symbol -> datetime de la derniere entree executee
+        self._lab_universe_symbols = list(self.symbols)
+        self._lab_universe_source = "local_fallback"
+        self._lab_universe_last_refresh = None
+        self._lab_universe_gate_allowed = False
+        self._lab_universe_selection = "none"
+        self._lab_universe_gate_reason = "unknown"
 
         # Sprint 10: News Filter
         self.news = NewsFilterService(filter_minutes=30)
@@ -209,11 +230,84 @@ class AutoTradingEngine:
             logger.warning("Variable %s invalide (%s). Repli sur %s.", name, raw, default)
             return default
 
+    @staticmethod
+    def _env_text(name: str, default: str) -> str:
+        """Lit une chaine depuis l'environnement avec repli.
+
+        Args:
+            name (str): Nom de la variable d'environnement.
+            default (str): Valeur de repli si la variable est absente.
+
+        Returns:
+            str: Valeur textuelle nettoyee.
+        """
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        cleaned = raw.strip()
+        return cleaned or default
+
+    @staticmethod
+    def _json_safe_value(value):
+        """Convertit une valeur en type JSON natif.
+
+        Args:
+            value: Valeur issue du moteur local, de MT5, de ``numpy`` ou de ``pandas``.
+
+        Returns:
+            object: Valeur compatible avec ``json.dumps``.
+        """
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, UUID):
+            return str(value)
+        if isinstance(value, dict):
+            return {
+                str(key): AutoTradingEngine._json_safe_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [AutoTradingEngine._json_safe_value(item) for item in value]
+        if hasattr(value, "item") and callable(value.item):
+            try:
+                return AutoTradingEngine._json_safe_value(value.item())
+            except Exception:
+                pass
+        if hasattr(value, "isoformat") and callable(value.isoformat):
+            try:
+                return value.isoformat()
+            except Exception:
+                pass
+        return str(value)
+
+    def _resolve_inference_horizon(self, skill: SkilledBehavior | None) -> str:
+        """Choisit l'horizon live le plus adapte a la skill courante.
+
+        Args:
+            skill (SkilledBehavior | None): Skill decidee par le manager.
+
+        Returns:
+            str: Horizon MuZero a transmettre au Lab.
+        """
+        if self._live_inference_horizon != "auto":
+            return self._live_inference_horizon
+
+        if skill == SkilledBehavior.SCALPING:
+            return "scalp"
+        if skill in {SkilledBehavior.HEDGING, SkilledBehavior.ACCUMULATION}:
+            return "swing"
+        return "intraday"
+
     async def refresh_symbol_universe(self, force: bool = False) -> list[str]:
         """Rafraichit l'univers de marche depuis MT5."""
         if not self._dynamic_universe_enabled:
             return self.symbols
 
+        previous_symbols = list(self.symbols)
         now = datetime.now()
         if (
             not force
@@ -232,6 +326,32 @@ class AutoTradingEngine:
             logger.warning("Univers dynamique vide. Conservation de la liste precedente.")
             return self.symbols
 
+        if self._lab_universe_enabled:
+            live_symbols = await self._refresh_lab_live_universe(force=force)
+            if live_symbols:
+                allowed_symbols = set(live_symbols)
+                restricted = [symbol for symbol in discovered if symbol in allowed_symbols]
+                if restricted:
+                    logger.info(
+                        "Univers live restreint par EVA Lab: %s/%s symboles (%s).",
+                        len(restricted),
+                        len(discovered),
+                        self._lab_universe_source,
+                    )
+                    discovered = restricted
+                else:
+                    logger.warning(
+                        "Aucun symbole MT5 ne correspond a l'univers EVA Lab (%s). Conservation de la liste precedente.",
+                        self._lab_universe_source,
+                    )
+                    return previous_symbols
+            elif previous_symbols:
+                logger.warning(
+                    "Univers EVA Lab indisponible. Conservation de la liste precedente (%s symboles).",
+                    len(previous_symbols),
+                )
+                return previous_symbols
+
         self.symbols = discovered
         self._last_universe_refresh = now
         self._symbol_cursor = 0
@@ -243,6 +363,116 @@ class AutoTradingEngine:
         )
         logger.info("Univers de marche mis a jour: %s symboles detectes.", len(self.symbols))
         return self.symbols
+
+    async def _refresh_lab_live_universe(self, force: bool = False) -> list[str]:
+        """Charge l'univers live recommande par EVA Lab.
+
+        Args:
+            force (bool): Force une requete immediate meme si le cache est frais.
+
+        Returns:
+            list[str]: Liste de symboles recommandes pour le live.
+        """
+        if not self._lab_universe_enabled:
+            return self._lab_universe_symbols
+
+        now = datetime.now()
+        if (
+            not force
+            and self._lab_universe_last_refresh is not None
+            and (now - self._lab_universe_last_refresh)
+            < timedelta(minutes=self._lab_universe_refresh_minutes)
+        ):
+            return self._lab_universe_symbols
+
+        lab_host = self._env_text("LAB_HOST", "localhost")
+        lab_port = self._env_int("LAB_PORT", 8600)
+        url = (
+            f"http://{lab_host}:{lab_port}/live/universe"
+            f"?horizon={self._lab_universe_horizon}"
+        )
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=5.0) as response:
+                    if response.status != 200:
+                        logger.warning(
+                            "Univers EVA Lab indisponible (%s). HTTP %s.",
+                            self._lab_universe_horizon,
+                            response.status,
+                        )
+                        return self._lab_universe_symbols
+
+                    payload = await response.json()
+                    live_universe = payload.get("live_universe", {}) or {}
+                    symbols = [
+                        str(symbol).strip()
+                        for symbol in (live_universe.get("symbols", []) or [])
+                        if str(symbol).strip()
+                    ]
+                    self._lab_universe_symbols = list(dict.fromkeys(symbols))
+                    self._lab_universe_source = str(live_universe.get("source") or "unknown")
+                    self._lab_universe_gate_allowed = bool(
+                        (payload.get("promotion_gate", {}) or {}).get("allowed", False)
+                    )
+                    self._lab_universe_selection = str(payload.get("selection") or "none")
+                    self._lab_universe_gate_reason = str(
+                        (payload.get("promotion_gate", {}) or {}).get("reason") or "unknown"
+                    )
+                    self._lab_universe_last_refresh = now
+                    if self._require_valid_champion and not self._lab_universe_gate_allowed:
+                        logger.warning(
+                            "Live gele: aucun champion valide pour %s (%s).",
+                            self._lab_universe_horizon,
+                            self._lab_universe_gate_reason,
+                        )
+                    return self._lab_universe_symbols
+        except Exception as exc:
+            logger.warning("Lecture de l'univers EVA Lab impossible: %s", exc)
+            return self._lab_universe_symbols
+
+    def get_live_universe_status(self) -> dict[str, object]:
+        """Expose l'etat de restriction d'univers utilise par le banker.
+
+        Returns:
+            dict[str, object]: Etat du cache EVA Lab et univers courant.
+        """
+        return {
+            "enabled": self._lab_universe_enabled,
+            "horizon": self._lab_universe_horizon,
+            "source": self._lab_universe_source,
+            "symbols_total": len(self._lab_universe_symbols),
+            "gate_allowed": self._lab_universe_gate_allowed,
+            "selection": self._lab_universe_selection,
+            "gate_reason": self._lab_universe_gate_reason,
+            "require_valid_champion": self._require_valid_champion,
+            "live_entries_allowed": (not self._require_valid_champion) or self._lab_universe_gate_allowed,
+            "last_refresh": (
+                self._lab_universe_last_refresh.isoformat()
+                if self._lab_universe_last_refresh is not None
+                else None
+            ),
+        }
+
+    def _is_live_model_allowed(self, inference_result: dict[str, object] | None) -> tuple[bool, str]:
+        """Valide qu'une prediction provient bien d'un champion live autorise.
+
+        Args:
+            inference_result (dict[str, object] | None): Reponse brute d'EVA Lab.
+
+        Returns:
+            tuple[bool, str]: ``(autorise, raison)`` pour l'execution live.
+        """
+        if not self._require_valid_champion:
+            return True, "validation_desactivee"
+
+        payload = inference_result or {}
+        selection = str(payload.get("selection") or self._lab_universe_selection or "none").lower()
+        if selection in {"champion", "legacy_champion"}:
+            return True, "champion_valide"
+
+        reason = str(payload.get("reason") or self._lab_universe_gate_reason or selection or "unknown")
+        return False, reason
 
     def get_symbol_batch(self, advance: bool = True) -> list[str]:
         """Retourne le prochain lot de symboles a scanner."""
@@ -288,16 +518,127 @@ class AutoTradingEngine:
             logger.warning("Impossible d'ecrire le cooldown Telegram: %s", exc)
         return True
 
+    def _should_send_veto_alert(self, veto_key: str) -> bool:
+        """Applique un cooldown sur les alertes Telegram de veto.
+
+        Args:
+            veto_key (str): Cle logique de l'alerte a limiter.
+
+        Returns:
+            bool: ``True`` si l'alerte peut etre emise immediatement.
+        """
+        now = datetime.now()
+        previous = self._last_veto_sent.get(veto_key)
+        if previous and (now - previous) < self._veto_alert_cooldown:
+            return False
+        self._last_veto_sent[veto_key] = now
+        return True
+
+    @staticmethod
+    def _is_unusable_reasoning(reasoning: str) -> bool:
+        """Detecte un raisonnement LLM inutilisable pour Telegram.
+
+        Args:
+            reasoning (str): Texte de synthese recu.
+
+        Returns:
+            bool: ``True`` si le texte est vide ou correspond a un echec connu.
+        """
+        if not reasoning:
+            return True
+        lowered = reasoning.strip().lower()
+        error_markers = (
+            "llm connection failed",
+            "error:",
+            "llm unreachable",
+            "lab error",
+            "http ",
+            "notfounderror",
+        )
+        return any(marker in lowered for marker in error_markers)
+
+    @staticmethod
+    def _format_bias_label(bias: str) -> str:
+        """
+        Traduit un biais de marche en libelle francais court.
+
+        Args:
+            bias (str): Biais brut (`BULLISH`, `BEARISH`, etc.).
+
+        Returns:
+            str: Libelle francais destine aux messages operateurs.
+        """
+        labels = {
+            "BULLISH": "haussier",
+            "BEARISH": "baissier",
+            "RANGING": "range",
+            "NEUTRAL": "neutre",
+            "UNKNOWN": "indetermine",
+        }
+        return labels.get(str(bias or "").upper(), str(bias or "indetermine").lower())
+
+    def _build_trade_reasoning(
+        self,
+        execution_comment: str,
+        llm_reasoning: str,
+        cortex_bias: str,
+        gnn_bias: str,
+    ) -> dict[str, str]:
+        """Construit la logique d'execution et la synthese Telegram.
+
+        Args:
+            execution_comment (str): Commentaire produit par le moteur de trade.
+            llm_reasoning (str): Synthese LLM optionnelle.
+            cortex_bias (str): Biais cortex courant.
+            gnn_bias (str): Biais GNN courant.
+
+        Returns:
+            dict[str, str]: Dictionnaire contenant :
+                - ``logic``: Commentaire moteur compact.
+                - ``summary``: Phrase de synthese en francais.
+        """
+        base_reason = (execution_comment or "").strip()
+        fallback_summary = (
+            "Le signal reste exploitable: "
+            f"Cortex {self._format_bias_label(cortex_bias)}, "
+            f"GNN {self._format_bias_label(gnn_bias)}, "
+            "execution pilotee par la logique locale."
+        )
+        if self._is_unusable_reasoning(llm_reasoning):
+            return {
+                "logic": base_reason or f"Cortex={cortex_bias} | GNN={gnn_bias}",
+                "summary": fallback_summary,
+            }
+
+        llm_clean = " ".join(str(llm_reasoning).split())
+        return {
+            "logic": base_reason or f"Cortex={cortex_bias} | GNN={gnn_bias}",
+            "summary": llm_clean[:220] if llm_clean else fallback_summary,
+        }
+
+    def _is_symbol_entry_cooling_down(self, symbol: str) -> bool:
+        """Indique si un symbole est encore en cooldown d'entree.
+
+        Args:
+            symbol (str): Symbole a verifier.
+
+        Returns:
+            bool: ``True`` si une entree recente interdit une nouvelle position.
+        """
+        last_entry_at = self._last_symbol_entry_at.get(symbol)
+        if last_entry_at is None:
+            return False
+        return (datetime.now() - last_entry_at) < self._symbol_entry_cooldown
+
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # TELEGRAM FORMATTERS (Sprint 9)
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     def _fmt_open_msg(self, symbol: str, action: str, entry_price: float, sl_price: float,
-                      rsi: float, atr: float, vwap: float, adx: float, cortex_bias: str, gnn_bias: str, 
-                      comment: str, indicators: dict = None) -> str:
-        """Formate un message d'ouverture riche avec indicateurs avancÃ©s."""
+                      rsi: float, atr: float, vwap: float, adx: float, cortex_bias: str, gnn_bias: str,
+                      logic_comment: str, ai_summary: str, indicators: dict = None) -> str:
+        """Formate un message d'ouverture Telegram lisible en ASCII."""
         sl_dist = abs(entry_price - sl_price)
-        emoji = "ðŸŸ¢" if action == "BUY" else "ðŸ”´"
         
         # Format Indicators (Safe Get)
         indicators = indicators or {}
@@ -308,35 +649,33 @@ class AutoTradingEngine:
         res = indicators.get("sr_res", 0.0)
         
         # Visual MACD
-        macd_icon = "ðŸ“ˆ" if macd > 0 else "ðŸ“‰"
+        macd_icon = "UP" if macd > 0 else "DOWN"
         
         return (
-            f"âš¡ *E.V.A | New Position (M1/M15)*\n"
-            f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
-            f"ðŸ”¹ *Asset:* {symbol}\n"
-            f"ðŸ”¹ *Action:* {emoji} {action}\n"
-            f"ðŸ”¹ *Entry:* {entry_price:.5f}\n"
-            f"ðŸ›¡ï¸ *S/L:* {sl_price:.5f} ({sl_dist:.2f} pts)\n\n"
-            
-            f"ðŸ“Š *Markets & Signals:*\n"
-            f"  â€¢ RSI: {rsi:.1f} | ADX: {adx:.1f}\n"
-            f"  â€¢ VWAP: {vwap:.2f}\n"
-            f"  â€¢ MACD: {macd_icon} {macd:.4f}\n"
-            f"  â€¢ Vol: {rvol:.1f}x (Relative)\n"
-            f"  â€¢ BB Position: {bb_pct*100:.1f}%\n"
-            f"  â€¢ S/R: {sup:.2f} / {res:.2f}\n\n"
-            
-            f"ðŸ§  *AI Reasoning:*\n"
-            f"  â€¢ Cortex: {cortex_bias}\n"
-            f"  â€¢ GNN (Proxmox): {gnn_bias}\n"
-            f"  â€¢ *Logic:* {comment}\n\n"
-            
-            f"â³ {datetime.now().strftime('%H:%M')} | The Hive"
+            f"*E.V.A | Nouvelle position (M1/M15)*\n"
+            f"-------------------\n"
+            f"Actif: {symbol}\n"
+            f"Action: {action}\n"
+            f"Entree: {entry_price:.5f}\n"
+            f"SL: {sl_price:.5f} ({sl_dist:.2f} pts)\n\n"
+            f"*Marches & signaux*\n"
+            f"- RSI: {rsi:.1f} | ADX: {adx:.1f}\n"
+            f"- VWAP: {vwap:.2f}\n"
+            f"- MACD: {macd_icon} {macd:.4f}\n"
+            f"- Vol relatif: {rvol:.1f}x\n"
+            f"- Position BB: {bb_pct*100:.1f}%\n"
+            f"- S/R: {sup:.2f} / {res:.2f}\n\n"
+            f"*Analyse IA*\n"
+            f"- Cortex: {cortex_bias}\n"
+            f"- GNN (Proxmox): {gnn_bias}\n"
+            f"- Synthese: {ai_summary}\n"
+            f"- Logique: {logic_comment}\n\n"
+            f"{datetime.now().strftime('%H:%M')} | The Hive"
         )
 
     def _fmt_close_msg(self, symbol: str, action: str, entry_price: float, exit_price: float,
                        profit: float, duration_min: int, reason: str = "SL/TP Hit") -> str:
-        """Formate un message de fermeture riche."""
+        """Formate un message de fermeture Telegram lisible en ASCII."""
         pips = exit_price - entry_price
         if action == "SELL":
             pips = -pips
@@ -344,7 +683,7 @@ class AutoTradingEngine:
         pip_size = 0.1 if "XAU" in symbol else (1.0 if "US30" in symbol or "BTC" in symbol else 0.0001)
         pips_display = pips / pip_size
         
-        emoji = "âœ…" if profit >= 0 else "âŒ"
+        emoji = "WIN" if profit >= 0 else "LOSS"
         pnl_sign = "+" if profit >= 0 else ""
         
         # Duration formatting
@@ -354,29 +693,29 @@ class AutoTradingEngine:
             dur_str = f"{duration_min}min"
         
         return (
-            f"âš¡ *E.V.A | Trade Closed*\n"
-            f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
-            f"ðŸ”¹ *Asset:* {symbol}\n"
-            f"ðŸ”¹ *Action:* {action}\n"
-            f"ðŸ”¹ *Result:* {emoji} {pnl_sign}{pips_display:.1f} pips\n\n"
-            f"ðŸ’° *Financials:*\n"
-            f"  â€¢ Entry: {entry_price:.5f}\n"
-            f"  â€¢ Exit: {exit_price:.5f}\n"
-            f"  â€¢ P&L: {pnl_sign}${profit:.2f}\n"
-            f"  â€¢ Duration: {dur_str}\n\n"
-            f"ðŸ·ï¸ *Reason:* {reason}\n"
-            f"â³ {datetime.now().strftime('%H:%M')} | The Hive"
+            f"*E.V.A | Trade ferme*\n"
+            f"-------------------\n"
+            f"Actif: {symbol}\n"
+            f"Action: {action}\n"
+            f"Resultat: {emoji} {pnl_sign}{pips_display:.1f} pips\n\n"
+            f"*Financier*\n"
+            f"- Entree: {entry_price:.5f}\n"
+            f"- Sortie: {exit_price:.5f}\n"
+            f"- P&L: {pnl_sign}${profit:.2f}\n"
+            f"- Duree: {dur_str}\n\n"
+            f"Raison: {reason}\n"
+            f"{datetime.now().strftime('%H:%M')} | The Hive"
         )
 
     def _fmt_shepherd_msg(self, symbol: str, action: str, event: str, 
                           new_sl: float, profit_pips: float) -> str:
-        """Formate un message Shepherd enrichi."""
+        """Formate un message Shepherd lisible en ASCII."""
         return (
-            f"ðŸ›¡ï¸ *E.V.A Shepherd | {event}*\n"
-            f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
-            f"ðŸ”¹ *Asset:* {symbol} {action}\n"
-            f"ðŸ”¹ *New S/L:* {new_sl:.5f}\n"
-            f"ðŸ”¹ *Secured:* +{profit_pips:.1f} pips"
+            f"*E.V.A Shepherd | {event}*\n"
+            f"-------------------\n"
+            f"Actif: {symbol} {action}\n"
+            f"Nouveau SL: {new_sl:.5f}\n"
+            f"Profit protege: +{profit_pips:.1f} pips"
         )
 
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -443,6 +782,7 @@ class AutoTradingEngine:
                     action=info["action"],
                     price=exit_price,
                     pnl=profit,
+                    ticket=ticket,
                 ))
                 
                 # ðŸ›¡ï¸ ANTI-TILT LOOP: Report losses to Nemesis for Self-Healing
@@ -682,6 +1022,10 @@ class AutoTradingEngine:
 
                 # Balance du compte pour le moteur de risque
                 summary = await self.mt5.get_account_summary()
+                if not summary:
+                    logger.warning("Auto-Trading pause: MT5 hors ligne ou compte indisponible.")
+                    await asyncio.sleep(30)
+                    continue
                 balance = Decimal(str(summary.get("balance", 100000)))
                 self.risk.update_account_balance(balance)
 
@@ -705,6 +1049,11 @@ class AutoTradingEngine:
                     continue
 
                 self.risk.update_positions_count(len(positions))
+                open_symbols = {
+                    position.symbol
+                    for position in positions
+                    if getattr(position, "symbol", None)
+                }
 
                 # CLOSE DETECTION (Sprint 9)
                 await self._detect_closed_positions(positions)
@@ -756,8 +1105,11 @@ class AutoTradingEngine:
                     except Exception as e_shepherd:
                         logger.error(f"Shepherd Error on {pos.ticket}: {e_shepherd}")
 
-                if len(positions) >= 12:
-                    logger.info("Max global positions reached (12). Waiting...")
+                if len(positions) >= self.risk.max_open_positions:
+                    logger.info(
+                        "Nombre maximal de positions atteint (%s). Attente du prochain cycle.",
+                        self.risk.max_open_positions,
+                    )
                     await asyncio.sleep(60)
                     continue
 
@@ -774,6 +1126,20 @@ class AutoTradingEngine:
                     if not self.is_active: break
                     
                     try:
+                        if symbol in open_symbols:
+                            logger.info(
+                                "Signal ignore sur %s: position deja ouverte sur ce symbole.",
+                                symbol,
+                            )
+                            continue
+
+                        if self._is_symbol_entry_cooling_down(symbol):
+                            logger.info(
+                                "Signal ignore sur %s: cooldown d'entree encore actif.",
+                                symbol,
+                            )
+                            continue
+
                         # NEW (Sprint 10) : Night Session Filter (Rollover Trap)
                         if not self.risk.is_within_trading_session(symbol):
                             continue
@@ -832,6 +1198,7 @@ class AutoTradingEngine:
                             
                             
                             rsi_val = IndicatorFactory.rsi(closes, 14).iloc[-1]
+                            ema_200_val = IndicatorFactory.ema(closes, 200).iloc[-1]
                             macd_data = IndicatorFactory.macd(closes)
                             bb_data = IndicatorFactory.bollinger_bands(closes)
                             atr_val = IndicatorFactory.atr(highs, lows, closes, 14).iloc[-1]
@@ -869,6 +1236,7 @@ class AutoTradingEngine:
                             gann_data = IndicatorFactory.gann_angles(highs, lows, 100)
 
                             extended_features = {
+                                "EMA_200": ema_200_val,
                                 "vwap": vwap_val,
                                 "obv": obv_val,
                                 "momentum": momentum_val,
@@ -891,7 +1259,9 @@ class AutoTradingEngine:
                                 "fib_ext_2618": fib_levels.get("fib_ext_2618", 0.0),
                                 "gann_1x1": gann_data["gann_1x1"],
                                 "gann_1x2": gann_data["gann_1x2"],
-                                "gann_2x1": gann_data["gann_2x1"]
+                                "gann_2x1": gann_data["gann_2x1"],
+                                "Return_1": ((closes[-1] - closes[-2]) / closes[-2]) if len(closes) > 1 and closes[-2] else 0.0,
+                                "Spread_Norm": ((tick.get("ask", current_price) - tick.get("bid", current_price)) / current_price) if isinstance(tick, dict) and current_price else 0.0,
                             }
                                 
                             # --- FORMATTED LOGGING ---
@@ -911,13 +1281,58 @@ class AutoTradingEngine:
                             extended_features = {}
 
                         # C. Dreamer Inference
+                        merged_indicators = dict(features)
+                        merged_indicators.update({
+                            "VWAP": extended_features.get("vwap", 0.0),
+                            "OBV": extended_features.get("obv", 0.0),
+                            "Momentum": extended_features.get("momentum", 0.0),
+                            "TRIX": extended_features.get("trix", 0.0),
+                            "Stoch_K": extended_features.get("stoch_k", 50.0),
+                            "Stoch_D": extended_features.get("stoch_d", 50.0),
+                            "CCI": extended_features.get("cci", 0.0),
+                            "ADX": extended_features.get("adx", 0.0),
+                            "ADX_Plus_DI": extended_features.get("adx_plus_di", 0.0),
+                            "ADX_Minus_DI": extended_features.get("adx_minus_di", 0.0),
+                            "Ichi_Tenkan": extended_features.get("ichi_tenkan", current_price),
+                            "Ichi_Kijun": extended_features.get("ichi_kijun", current_price),
+                            "Ichi_Senkou_A": extended_features.get("ichi_senkou_a", current_price),
+                            "Ichi_Senkou_B": extended_features.get("ichi_senkou_b", current_price),
+                            "EMA_200": extended_features.get("EMA_200", current_price),
+                            "Return_1": extended_features.get("Return_1", 0.0),
+                            "Spread_Norm": extended_features.get("Spread_Norm", 0.0),
+                        })
+                        latest_candle = candles[-1] if candles else {}
+                        skill = self.manager.plan_strategy(
+                            {
+                                "price": float(current_price),
+                                "indicators": {"RSI": float(features.get("RSI", 50.0) or 50.0)},
+                            }
+                        )
+                        live_horizon = self._resolve_inference_horizon(skill)
                         observation = {
+                            "symbol": symbol,
+                            "horizon": live_horizon,
                             "price": float(current_price),
-                            "indicators": features
+                            "timestamp": latest_candle.get("time"),
+                            "latest_candle": {
+                                "open": float(latest_candle.get("open", current_price) or current_price),
+                                "high": float(latest_candle.get("high", current_price) or current_price),
+                                "low": float(latest_candle.get("low", current_price) or current_price),
+                                "close": float(latest_candle.get("close", current_price) or current_price),
+                                "tick_volume": float(latest_candle.get("tick_volume", 0.0) or 0.0),
+                                "spread": float((tick.get("ask", current_price) - tick.get("bid", current_price)) if isinstance(tick, dict) else 0.0),
+                            },
+                            "indicators": merged_indicators
                         }
+                        observation = self._json_safe_value(observation)
                         
                         action = None
                         comment = "Hold"
+                        lab_result: dict[str, object] = {}
+                        lab_selection = "none"
+                        lab_selection_policy = "unknown"
+                        live_model_allowed = not self._require_valid_champion
+                        live_block_reason = "aucun"
                         
                         try:
                             from shared.internal_auth import InternalAuth
@@ -928,30 +1343,49 @@ class AutoTradingEngine:
                             async with aiohttp.ClientSession() as session:
                                 async with session.post(lab_url, json=observation, headers={"X-Hive-Internal-Token": token}, timeout=5.0) as resp:
                                     if resp.status == 200:
-                                        result = await resp.json()
-                                        mz_action = result.get("action", 0)
-                                        mz_value = result.get("value", 0.0)
-                                        dreamer_comment = f"Dreamer V3 (v={mz_value:.2f})"
-                                        
+                                        lab_result = await resp.json()
+                                        mz_action = lab_result.get("action", 0)
+                                        mz_value = lab_result.get("value", 0.0)
+                                        model_engine = str(lab_result.get("engine", "Modele")).strip() or "Modele"
+                                        lab_selection = str(lab_result.get("selection") or "none")
+                                        lab_selection_policy = str(
+                                            lab_result.get("selection_policy") or "unknown"
+                                        )
+                                        live_model_allowed, live_block_reason = self._is_live_model_allowed(lab_result)
+                                        dreamer_comment = f"{model_engine} (v={mz_value:.2f})"
+
                                         if mz_action == 1:
                                             action = TradeAction.BUY
                                             comment = f"{dreamer_comment} -> BUY"
                                         elif mz_action == 2:
                                             action = TradeAction.SELL
                                             comment = f"{dreamer_comment} -> SELL"
-                                            
-                                        # Strict neural-network enforcement in production.
-                                        # No Epsilon-Greedy, no Bias fallback loops allowing random entries.
+
+                                        if not live_model_allowed:
+                                            comment = f"Champion requis ({lab_selection})"
+                                        if action is not None and not live_model_allowed:
+                                            logger.info(
+                                                "Entree live refusee sur %s: champion requis (%s / %s).",
+                                                symbol,
+                                                lab_selection,
+                                                live_block_reason,
+                                            )
+                                            action = None
                                     else:
                                         logger.error(f"Dreamer Inference failed: HTTP {resp.status}")
                                         action = None
                                         comment = f"Lab error (HTTP {resp.status})"
                                         
                         except Exception as e_lab:
-                            # If connection to Lab completely fails, DO NOT trade. HOLD explicitly.
-                            logger.error(f"Dreamer Inference failed for {symbol}: {e_lab.__class__.__name__} - {e_lab}. Holding.")
+                            # En cas d'echec reseau ou de serialisation, on force HOLD pour proteger le compte.
+                            logger.error(
+                                "Inference Dreamer impossible pour %s: %s - %s. Passage en attente.",
+                                symbol,
+                                e_lab.__class__.__name__,
+                                e_lab,
+                            )
                             action = None
-                            comment = "Error connecting to Lab"
+                            comment = "Erreur liaison Lab"
 
                         if action == TradeAction.BUY and bias == "BEARISH":
                             logger.info(f"ðŸ™… Cortex VETO: Blocking BUY on {symbol} (Trend is BEARISH on M15)")
@@ -1001,18 +1435,23 @@ class AutoTradingEngine:
                             "macd": features.get("MACD_Hist", 0.0),
                             "vwap": float(vwap_val),
                             "adx": float(adx_data["adx"].iloc[-1]),
-                            "action": str(action) if action else "WAIT",
+                            "live_horizon": live_horizon,
+                            "action": action.value if action else "WAIT",
                             "comment": comment,
-                            "timestamp": datetime.now().isoformat()
+                            "timestamp": datetime.now().isoformat(),
+                            "lab_selection": lab_selection,
+                            "lab_selection_policy": lab_selection_policy,
+                            "live_model_allowed": live_model_allowed,
+                            "live_block_reason": live_block_reason,
                         })
+                        if self._is_unusable_reasoning(str(decision_state.get("raw_thought", ""))):
+                            decision_state["raw_thought"] = comment
                         self.latest_decisions[symbol] = decision_state
 
                         if action is None:
                             continue
 
                         # D. Execution
-                        skill = self.manager.plan_strategy({"price": float(current_price), "indicators": {"RSI": rsi_val}})
-                        
                         atr = features.get("ATR", 0.0)
                         is_high_vol = "XAU" in symbol or "BTC" in symbol or "US30" in symbol
                         
@@ -1043,19 +1482,67 @@ class AutoTradingEngine:
                             sl_distance=sl_dist,
                             symbol=symbol
                         )
-                        
+                        volume_constraints = await self.mt5.get_symbol_volume_constraints(symbol)
+                        broker_min_volume = float(volume_constraints.get("min", Decimal("0.01")))
+
+                        if dynamic_vol <= 0:
+                            logger.info(
+                                "Execution ignoree sur %s: volume calcule nul pour le budget risque courant.",
+                                symbol,
+                            )
+                            if self._should_send_veto_alert("volume_zero"):
+                                self.telegram.send_sync(
+                                    f"*RISK VETO* | {symbol} {action.value if hasattr(action, 'value') else action} bloque\n"
+                                    "Raison: risque autorise insuffisant pour calculer un volume exploitable."
+                                )
+                            action = None
+                            comment = "Risque insuffisant"
+
+                        if action and dynamic_vol < broker_min_volume:
+                            logger.warning(
+                                "Execution ignoree sur %s: volume calcule %.4f inferieur au minimum broker %.4f.",
+                                symbol,
+                                dynamic_vol,
+                                broker_min_volume,
+                            )
+                            if self._should_send_veto_alert("volume_min"):
+                                self.telegram.send_sync(
+                                    f"*BROKER MIN VETO* | {symbol} {action.value if hasattr(action, 'value') else action} bloque\n"
+                                    f"Volume risque: {dynamic_vol:.4f} | Min broker: {broker_min_volume:.4f}"
+                                )
+                            action = None
+                            comment = "Volume minimum broker > risque autorise"
+
+                        if action is None:
+                            continue
+
                         # Safety Caps
-                        final_vol = min(0.10, max(0.01, dynamic_vol))
-                        
+                        final_vol = min(0.10, dynamic_vol)
+
                         safe_comment = comment[:30] if comment else ""
                         order = TradeOrder(
                             symbol=symbol,
                             action=action,
                             volume=Decimal(str(final_vol)),
+                            entry_price=entry_price,
                             stop_loss_price=sl_price,
                             take_profit_price=tp_price,
                             comment=safe_comment
                         )
+                        if action:
+                            current_positions = await self.mt5.get_open_positions()
+                            if current_positions and any(
+                                getattr(position, "symbol", None) == symbol
+                                for position in current_positions
+                            ):
+                                logger.info(
+                                    "Execution ignoree sur %s: une position existe deja juste avant l'envoi.",
+                                    symbol,
+                                )
+                                open_symbols.add(symbol)
+                                action = None
+                                comment = "Position deja ouverte"
+
                         if action:
                             # --- NEW (Sprint 13): Margin Pre-check ---
                             margin_required = await self.mt5.get_margin_required(symbol, action, final_vol) # Use final_vol here
@@ -1064,10 +1551,20 @@ class AutoTradingEngine:
                             if margin_required is not None and account:
                                 free_margin = float(account.get("free_margin", 0.0))
                                 if free_margin < margin_required:
-                                    logger.error(f"âŒ MARGIN VETO: {symbol} {action} requires ${margin_required:.2f}, but only ${free_margin:.2f} free.")
-                                    self.telegram.send_sync(f"âš ï¸ *MARGIN VETO* | {symbol} {action} blocked\nNeed: ${margin_required:.2f} / Free: ${free_margin:.2f}")
+                                    logger.warning(
+                                        "Veto marge pour %s %s: requis=%.2f libre=%.2f",
+                                        symbol,
+                                        action.value if hasattr(action, "value") else action,
+                                        margin_required,
+                                        free_margin,
+                                    )
+                                    if self._should_send_veto_alert("margin"):
+                                        self.telegram.send_sync(
+                                            f"*MARGIN VETO* | {symbol} {action.value if hasattr(action, 'value') else action} bloque\n"
+                                            f"Requis: ${margin_required:.2f} | Libre: ${free_margin:.2f}"
+                                        )
                                     action = None
-                                    comment = "Insufficient Margin"
+                                    comment = "Marge insuffisante"
                             
                         # If action was vetoed by margin check, skip execution
                         if action is None:
@@ -1080,10 +1577,24 @@ class AutoTradingEngine:
                             if result.get("success"):
                                 # --- NEW (Sprint 11): LLM Micro-Reasoning ---
                                 combined_indicators = {**features, **extended_features}
-                                reasoning = await self.cortex.get_micro_reasoning(
-                                    symbol=symbol, 
-                                    action=action.value, 
-                                    indicators=combined_indicators
+                                try:
+                                    reasoning = await self.cortex.get_micro_reasoning(
+                                        symbol=symbol, 
+                                        action=action.value, 
+                                        indicators=combined_indicators
+                                    )
+                                except Exception as exc_reasoning:
+                                    logger.warning(
+                                        "Synthese micro-raisonnement indisponible pour %s: %s",
+                                        symbol,
+                                        exc_reasoning,
+                                    )
+                                    reasoning = ""
+                                telegram_reasoning = self._build_trade_reasoning(
+                                    execution_comment=comment,
+                                    llm_reasoning=reasoning,
+                                    cortex_bias=last_strat.get("cortex_bias", last_strat.get("bias", "UNKNOWN")),
+                                    gnn_bias=last_strat.get("gnn_bias", "UNKNOWN"),
                                 )
                                 
                                 # Rich Telegram OPEN notification (Sprint 9/11)
@@ -1096,9 +1607,10 @@ class AutoTradingEngine:
                                     atr=atr,
                                     vwap=extended_features.get("vwap", float(current_price)),
                                     adx=extended_features.get("adx", 0.0),
-                                    cortex_bias=last_strat.get("cortex_bias", "UNKNOWN"),
+                                    cortex_bias=last_strat.get("cortex_bias", last_strat.get("bias", "UNKNOWN")),
                                     gnn_bias=last_strat.get("gnn_bias", "UNKNOWN"),
-                                    comment=reasoning, # Replace technical comment with LLM Reasoning
+                                    logic_comment=telegram_reasoning["logic"],
+                                    ai_summary=telegram_reasoning["summary"],
                                     indicators=combined_indicators
                                 )
                                 self.telegram.send_sync(open_msg)
@@ -1106,24 +1618,33 @@ class AutoTradingEngine:
                                 # Track this position for close detection
                                 ticket = result.get("ticket", 0)
                                 if ticket:
+                                    now_open = datetime.now()
                                     self._trade_open_info[ticket] = {
                                         "symbol": symbol,
                                         "action": action.value,
                                         "entry_price": float(entry_price),
-                                        "open_time": datetime.now(),
+                                        "open_time": now_open,
                                     }
                                     self._known_tickets.add(ticket)
+                                    self._last_symbol_entry_at[symbol] = now_open
+                                    open_symbols.add(symbol)
                                 
-                                asyncio.create_task(self._record_learning_experience(order, result, features, extended_features, float(current_price)))
+                                asyncio.create_task(self._record_learning_experience(order, result, observation))
                             else:
-                                # â•â•â• ORDER FAILED â€” LOG IT â•â•â•
                                 fail_msg = result.get("message", "Unknown error")
                                 fail_code = result.get("retcode", "?")
-                                logger.error(f"âŒ ORDER FAILED {symbol} {action}: {fail_msg} (retcode={fail_code})")
+                                fail_volume = result.get("normalized_volume", float(order.volume))
+                                logger.error(
+                                    "Ordre refuse pour %s %s: %s (retcode=%s)",
+                                    symbol,
+                                    action.value,
+                                    fail_msg,
+                                    fail_code,
+                                )
                                 self.telegram.send_sync(
-                                    f"âŒ *ORDER FAILED* | {symbol} {action.value}\n"
-                                    f"Reason: {fail_msg}\n"
-                                    f"SL: {float(sl_price):.2f} | Vol: {float(order.volume)}"
+                                    f"*ORDER FAILED* | {symbol} {action.value}\n"
+                                    f"Raison: {fail_msg}\n"
+                                    f"SL: {float(sl_price):.2f} | Vol envoye: {float(fail_volume):.2f}"
                                 )
                         else:
                             logger.warning(f"Rejected {symbol}: {validation['reason']}")
@@ -1144,8 +1665,8 @@ class AutoTradingEngine:
                 logger.error(f"Auto-Trading Loop Error: {e}")
                 await asyncio.sleep(60)
 
-    async def _record_learning_experience(self, order: TradeOrder, result: dict, features: dict, extended_features: dict, current_price: float):
-        """Envoie les donnÃ©es du trade au Lab pour Shadow Learning (DreamerV3)"""
+    async def _record_learning_experience(self, order: TradeOrder, result: dict, observation: dict):
+        """Envoie une observation d'ouverture au Lab pour le Shadow Learning."""
         try:
             import aiohttp
             from shared.internal_auth import InternalAuth
@@ -1153,17 +1674,29 @@ class AutoTradingEngine:
             lab_host = os.getenv("LAB_HOST", "localhost")
             lab_url = f"http://{lab_host}:8600/shadow/record"
             
-            # Fuse core features and extended features for the background DB payload
-            db_indicators = {**features, **extended_features}
+            safe_observation = self._json_safe_value(observation)
+            entry_price = float(safe_observation.get("price", 0.0) or 0.0)
+            ticket = result.get("ticket")
+            episode_id = f"live:{ticket}" if ticket else f"live:{uuid.uuid4()}"
             
             payload = {
                 "symbol": order.symbol,
                 "action": order.action.name,
-                "price": float(order.stop_loss_price) if order.stop_loss_price else 0.0,
+                "price": entry_price,
                 "volume": float(order.volume),
-                "pnl": 0.0, 
-                "indicators": db_indicators,
-                "done": False
+                "pnl": 0.0,
+                "indicators": safe_observation.get("indicators", {}),
+                "observation": safe_observation,
+                "next_observation": safe_observation,
+                "metadata": {
+                    "source": "banker_live",
+                    "episode_id": episode_id,
+                    "ticket": ticket,
+                    "magic": order.magic_number,
+                    "comment": order.comment or "",
+                },
+                "timestamp": datetime.now().isoformat(),
+                "done": False,
             }
             
             token = InternalAuth.generate_token("banker")
@@ -1174,28 +1707,42 @@ class AutoTradingEngine:
             async with aiohttp.ClientSession() as session:
                 async with session.post(lab_url, json=payload, headers=headers) as resp:
                     if resp.status == 200:
-                        logger.info(f"ðŸ§  Shadow Learning: Trade recorded in Lab (Ticket {result.get('ticket')})")
+                        logger.info("Shadow Learning: ouverture enregistree dans Lab (ticket=%s)", ticket)
                     else:
-                        logger.warning(f"Shadow Learning failed: {resp.status}")
+                        logger.warning("Shadow Learning: echec enregistrement ouverture (%s)", resp.status)
                         
         except Exception as e:
-            logger.error(f"Failed to send shadow learning data: {e}")
+            logger.error("Envoi Shadow Learning impossible: %s", e)
 
-    async def _send_pnl_feedback(self, symbol: str, action: str, price: float, pnl: float):
-        """Envoie le P&L rÃ©el au Lab pour micro-training (Sprint 9.5)."""
+    async def _send_pnl_feedback(self, symbol: str, action: str, price: float, pnl: float, ticket: int | None = None):
+        """Envoie le P&L reel d'une cloture au Lab pour alimenter le dataset."""
         try:
             from shared.internal_auth import InternalAuth
             
             lab_host = os.getenv("LAB_HOST", "localhost")
             lab_url = f"http://{lab_host}:8600/shadow/feedback"
+            safe_price = float(price or 0.0)
+            observation = {
+                "price": safe_price,
+                "indicators": {"price_norm": safe_price / 3000.0 if safe_price else 0.0},
+            }
             
             payload = {
                 "symbol": symbol,
                 "action": action,
-                "price": price,
+                "price": safe_price,
+                "volume": 0.0,
                 "pnl": pnl,
-                "indicators": {"price_norm": price / 3000.0},
-                "done": True
+                "indicators": observation["indicators"],
+                "observation": observation,
+                "next_observation": observation,
+                "metadata": {
+                    "source": "banker_live_close",
+                    "episode_id": f"live:{ticket}" if ticket else f"close:{symbol}:{int(datetime.now().timestamp())}",
+                    "ticket": ticket,
+                },
+                "timestamp": datetime.now().isoformat(),
+                "done": True,
             }
             
             token = InternalAuth.generate_token("banker")
@@ -1205,12 +1752,17 @@ class AutoTradingEngine:
                 async with session.post(lab_url, json=payload, headers=headers, timeout=5.0) as resp:
                     if resp.status == 200:
                         result = await resp.json()
-                        logger.info(f"ðŸ§  Shadow Feedback: {symbol} P&L=${pnl:.2f} â†’ Lab trained (loss={result.get('wm_loss', '?')})")
+                        logger.info(
+                            "Shadow Feedback: cloture %s P&L=%.2f enregistree (wm_loss=%s)",
+                            symbol,
+                            pnl,
+                            result.get("wm_loss", "?"),
+                        )
                     else:
-                        logger.warning(f"Shadow Feedback failed: {resp.status}")
+                        logger.warning("Shadow Feedback: echec HTTP %s", resp.status)
                         
         except Exception as e:
-            logger.error(f"Failed to send P&L feedback: {e}")
+            logger.error("Envoi du feedback P&L impossible: %s", e)
 
     async def _handle_reversal(self, symbol: str, bias: str):
         """Ferme les positions opposÃ©es au nouveau biais (Sprint 12)."""

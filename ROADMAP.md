@@ -1,7 +1,7 @@
 ﻿# Ã°Å¸â€”ÂºÃ¯Â¸Â ROADMAP & PROGRESSION : THE HIVE
 
-> **Derniere mise a jour** : 08/03/2026 (entrainement trading nocturne en cours)
-> **Statut Global** : PHASE BETA AVANCEE (banker stable, MuZero GPU en cours, DreamerV3 en file d'attente)
+> **Derniere mise a jour** : 10/03/2026 (mode research-first actif)
+> **Statut Global** : PHASE BETA AVANCEE (live gele sans champion valide, entrainement massif priorise)
 
 ---
 
@@ -22,23 +22,30 @@
 - [x] `eva-builder` sait maintenant synchroniser et rechercher un catalogue d'APIs publiques depuis `public-apis/public-apis`, puis injecter ces suggestions dans les prompts BMAD.
 - [x] `eva-builder` expose maintenant une passerelle de mutation securisee (`dry-run` par defaut, execution reelle derriere `EVA_BUILDER_MUTATION_ENABLED`).
 - [x] `eva-builder` expose aussi une passerelle de deploiement structuree (`dry-run` par defaut, local/proxmox, execution reelle derriere `EVA_BUILDER_DEPLOY_ENABLED`).
+- [x] `eva-nexus` est recable proprement sur Builder: proxies Docker OK, Muse repasse par `/api/muse`, liens Grafana alignes sur l'hote courant, et cockpit Builder ajoute dans l'onglet Enterprise.
+- [x] Frontend Nexus valide par outillage (`npm run lint` + `npm run build`).
+- [x] Le `banker` refuse maintenant les nouvelles entrees si EVA Lab ne confirme pas un `champion` ou `legacy_champion` valide.
+- [x] Le lanceur Proxmox dispose d'un profil `research` pour couper `vLLM`, desactiver Dreamer et pousser un entrainement MuZero massif sur tout l'historique disponible.
+- [x] Les rapports d'entrainement et de nightly remontent maintenant dans Telegram avec metriques Arena et motif de blocage live.
 
 ### En cours / attente active
-- [ ] Fin de `MuZero scalp`, puis `intraday`, puis `swing` sur le serveur de dev.
-- [ ] Lancement automatique de `DreamerV3` une fois les trois horizons MuZero termines.
-- [ ] Verification finale des artefacts nocturnes: checkpoints, rapports arena/ADN, resume JSON, metrics Dreamer.
+- [ ] Produire un premier champion rentable sur un echantillon de validation suffisant.
+- [ ] Elargir l'evaluation Arena a l'univers historique complet sans retomber sur un echantillon trop faible.
+- [ ] Decouper proprement les plages `research` (GPU training) et `live` (inference + execution) pour supprimer le conflit `MuZero` / `vLLM`.
 
 ### Reste a faire
 - [ ] Rendre `eva-trainer` nativement compatible JAX CUDA sans reinstallation runtime a chaque lancement.
-- [ ] Brancher les modeles entraines (`GNN`, `MuZero`, `DreamerV3`) dans la boucle d'execution live du banker.
-- [ ] Etendre l'historique d'entrainement et l'univers au-dela des `6` symboles actuels.
+- [ ] Promouvoir automatiquement un champion uniquement apres validation `win_rate`, `profit_factor`, `drawdown`, `expectancy` et `sample_size`.
+- [ ] Basculer le live du banker sur les champions promus une fois des candidats reellement positifs obtenus.
+- [ ] Etendre l'historique d'entrainement et l'univers au-dela des `6` symboles actuellement bien couverts.
 - [ ] Ajouter les connecteurs exchange crypto (`Binance`, `Kraken`, `Coinbase`) dans le meme pipeline d'univers et d'execution.
 - [ ] Finaliser la boucle champion/challenger + ADN/evolution sur resultats d'entrainement completes.
 - [ ] Sortir les secrets des fichiers `.env` vers un mecanisme securise.
+- [ ] Passer les flux Nexus Builder de `dry-run` a execution live uniquement apres validation serveur et garde-fous SSH/compose.
 
 ### Pendant l'attente trading
 - [x] Chantier `eva-builder` lance: validation locale, nettoyage des services et base SaaS/code renforcee pendant que l'entrainement tourne.
-- [ ] Second chantier utile: `eva-nexus`, pour exposer proprement les factories et le pilotage des experts.
+- [x] Chantier `eva-nexus` lance: proxies corriges, cockpit Builder ajoute et validation frontend faite.
 - [ ] `RLM` n'est pas la priorite immediate: la base existe deja, il sera plus utile apres stabilisation des pipelines Builder/Trading.
 
 ## Ã°Å¸Ââ€”Ã¯Â¸Â FONDATIONS : BRIQUES ALPHA (25%) - Ã¢Å“â€¦ COMPLÃƒâ€°TÃƒâ€°E
@@ -197,6 +204,7 @@
 
 ---
 *Ce document sert de rÃƒÂ©fÃƒÂ©rence officielle pour l'ÃƒÂ©volution de la SingularitÃƒÂ©.*
+
 
 
 

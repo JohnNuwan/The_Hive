@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+﻿import { useState, useEffect, useCallback, useRef } from 'react'
 import { checkNodeHealth, type NodeHealth } from '../services/api'
 
-// ═══════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // TYPES
-// ═══════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 interface OSINTAgent {
     id: string
@@ -35,16 +35,9 @@ interface SecurityAlert {
     source?: string
 }
 
-interface ThreatIntel {
-    target: string
-    is_malicious: boolean
-    reputation_score: number
-    sources: string[]
-}
-
-// ═══════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // AGENT DEFINITIONS
-// ═══════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const OSINT_AGENTS: OSINTAgent[] = [
     {
@@ -52,9 +45,9 @@ const OSINT_AGENTS: OSINTAgent[] = [
         name: 'THE SHADOW',
         codename: 'Expert C',
         expert: 'OSINT & Investigation',
-        icon: '🌑',
+        icon: 'ðŸŒ‘',
         color: 'cyber-purple',
-        description: "Agent OSINT et Recherche Web. Enquêteur et Threat Intel. Effectue des recherches approfondies, du scraping web et de l'analyse de menaces via DuckDuckGo, Brave Search, AlienVault et VirusTotal.",
+        description: "Agent OSINT et Recherche Web. EnquÃªteur et Threat Intel. Effectue des recherches approfondies, du scraping web et de l'analyse de menaces via DuckDuckGo, Brave Search, AlienVault et VirusTotal.",
         capabilities: ['Web Search', 'Entity Recon', 'Threat Intelligence', 'Dark Web Monitoring', 'Social Engineering OSINT'],
         healthUrl: '/api/shadow/health',
         port: 8002,
@@ -65,10 +58,10 @@ const OSINT_AGENTS: OSINTAgent[] = [
         id: 'sentinel',
         name: 'THE SENTINEL',
         codename: 'Expert F',
-        expert: 'Cybersécurité Active',
-        icon: '🛡️',
+        expert: 'CybersÃ©curitÃ© Active',
+        icon: 'ðŸ›¡ï¸',
         color: 'cyber-cyan',
-        description: 'Agent de Sécurité et Monitoring de la Ruche. Surveillance système temps réel, détection intrusions (Wazuh/Suricata), intégrité des fichiers et alertes de sécurité.',
+        description: 'Agent de SÃ©curitÃ© et Monitoring de la Ruche. Surveillance systÃ¨me temps rÃ©el, dÃ©tection intrusions (Wazuh/Suricata), intÃ©gritÃ© des fichiers et alertes de sÃ©curitÃ©.',
         capabilities: ['System Monitoring', 'Intrusion Detection', 'Integrity Checks', 'Vulnerability Scanning', 'Incident Response'],
         healthUrl: '/api/sentinel/health',
         port: 8007,
@@ -79,10 +72,10 @@ const OSINT_AGENTS: OSINTAgent[] = [
         id: 'wraith',
         name: 'THE WRAITH',
         codename: 'Expert D',
-        expert: 'Vision & Analyse Vidéo',
-        icon: '👁️',
+        expert: 'Vision & Analyse VidÃ©o',
+        icon: 'ðŸ‘ï¸',
         color: 'cyber-amber',
-        description: "Agent Vision. Compréhension sémantique vidéo, Skeleton Tracking via V-JEPA et Coral TPU. Analyse de micro-expressions et surveillance caméra intelligente.",
+        description: "Agent Vision. ComprÃ©hension sÃ©mantique vidÃ©o, Skeleton Tracking via V-JEPA et Coral TPU. Analyse de micro-expressions et surveillance camÃ©ra intelligente.",
         capabilities: ['Video Analysis', 'Skeleton Tracking', 'Micro-expression Detection', 'CCTV Monitoring', 'Object Recognition'],
         healthUrl: '/api/wraith/health',
         port: 8012,
@@ -94,9 +87,9 @@ const OSINT_AGENTS: OSINTAgent[] = [
         name: 'THE RESEARCHER',
         codename: 'Expert I',
         expert: 'Optimisation Algorithmique',
-        icon: '🔬',
+        icon: 'ðŸ”¬',
         color: 'matrix',
-        description: 'Agent de Recherche Scientifique. Optimisation algorithmique, analyse de papers (ArXiv), méta-apprentissage. Utilise Galactica pour la compréhension de la littérature scientifique.',
+        description: 'Agent de Recherche Scientifique. Optimisation algorithmique, analyse de papers (ArXiv), mÃ©ta-apprentissage. Utilise Galactica pour la comprÃ©hension de la littÃ©rature scientifique.',
         capabilities: ['ArXiv Analysis', 'Algorithm Optimization', 'Meta-Learning', 'Paper Summarization', 'Experiment Design'],
         healthUrl: '/api/researcher/health',
         port: 8013,
@@ -105,16 +98,16 @@ const OSINT_AGENTS: OSINTAgent[] = [
     },
 ]
 
-// ═══════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SIMULATED DATA
-// ═══════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const MOCK_ALERTS: SecurityAlert[] = [
     { id: 'SA-001', type: 'INTEGRITY_CHECK', severity: 'info', message: 'Kernel binary hash verification: OK', timestamp: new Date(Date.now() - 120000).toISOString(), source: 'Sentinel' },
-    { id: 'SA-002', type: 'PORT_SCAN', severity: 'low', message: 'External port scan detected from 185.220.101.x — blocked by firewall', timestamp: new Date(Date.now() - 300000).toISOString(), source: 'Suricata' },
-    { id: 'SA-003', type: 'AUTH_ATTEMPT', severity: 'medium', message: 'Failed SSH login attempt (3x) from 45.33.32.156 — IP blacklisted', timestamp: new Date(Date.now() - 600000).toISOString(), source: 'Wazuh' },
-    { id: 'SA-004', type: 'SYSTEM_UPDATE', severity: 'info', message: 'ZFS snapshot auto-rotation completed — 12 snapshots retained', timestamp: new Date(Date.now() - 900000).toISOString(), source: 'Phoenix' },
-    { id: 'SA-005', type: 'NETWORK_ANOMALY', severity: 'low', message: 'Unusual outbound traffic pattern detected on port 8443 — monitoring', timestamp: new Date(Date.now() - 1200000).toISOString(), source: 'Suricata' },
+    { id: 'SA-002', type: 'PORT_SCAN', severity: 'low', message: 'External port scan detected from 185.220.101.x â€” blocked by firewall', timestamp: new Date(Date.now() - 300000).toISOString(), source: 'Suricata' },
+    { id: 'SA-003', type: 'AUTH_ATTEMPT', severity: 'medium', message: 'Failed SSH login attempt (3x) from 45.33.32.156 â€” IP blacklisted', timestamp: new Date(Date.now() - 600000).toISOString(), source: 'Wazuh' },
+    { id: 'SA-004', type: 'SYSTEM_UPDATE', severity: 'info', message: 'ZFS snapshot auto-rotation completed â€” 12 snapshots retained', timestamp: new Date(Date.now() - 900000).toISOString(), source: 'Phoenix' },
+    { id: 'SA-005', type: 'NETWORK_ANOMALY', severity: 'low', message: 'Unusual outbound traffic pattern detected on port 8443 â€” monitoring', timestamp: new Date(Date.now() - 1200000).toISOString(), source: 'Suricata' },
 ]
 
 const MOCK_THREAT_FEED: { indicator: string; type: string; risk: string; source: string }[] = [
@@ -124,9 +117,9 @@ const MOCK_THREAT_FEED: { indicator: string; type: string; risk: string; source:
     { indicator: 'phishing-kit-v3.2', type: 'Malware', risk: 'HIGH', source: 'Hybrid Analysis' },
 ]
 
-// ═══════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // COMPONENTS
-// ═══════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 function SeverityBadge({ severity }: { severity: string }) {
     const colors: Record<string, string> = {
@@ -156,7 +149,7 @@ function AgentCard({ agent, health }: { agent: OSINTAgent; health?: NodeHealth }
                     <div className="text-2xl">{agent.icon}</div>
                     <div>
                         <h3 className="font-display text-[11px] font-bold tracking-[0.1em] text-white/70">{agent.name}</h3>
-                        <div className="text-[8px] text-white/15 tracking-[0.2em]">{agent.codename} • {agent.expert}</div>
+                        <div className="text-[8px] text-white/15 tracking-[0.2em]">{agent.codename} â€¢ {agent.expert}</div>
                     </div>
                 </div>
                 <div className="flex flex-col items-end gap-1">
@@ -166,7 +159,7 @@ function AgentCard({ agent, health }: { agent: OSINTAgent; health?: NodeHealth }
                             {isOnline ? 'ONLINE' : 'OFFLINE'}
                         </span>
                     </div>
-                    <span className="text-[7px] text-white/10 tracking-[0.15em]">{agent.phase} • :{agent.port}</span>
+                    <span className="text-[7px] text-white/10 tracking-[0.15em]">{agent.phase} â€¢ :{agent.port}</span>
                 </div>
             </div>
 
@@ -211,7 +204,7 @@ function OSINTSearchBar({ onSearch }: { onSearch: (q: string) => void }) {
 
     return (
         <div className="cyber-panel hud-corners p-4">
-            <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">🔍 OSINT SEARCH — THE SHADOW</div>
+            <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">ðŸ” OSINT SEARCH â€” THE SHADOW</div>
             <div className="flex gap-2">
                 <input
                     ref={inputRef}
@@ -230,9 +223,9 @@ function OSINTSearchBar({ onSearch }: { onSearch: (q: string) => void }) {
                 </button>
             </div>
             <div className="flex gap-3 mt-2 text-[8px] text-white/10">
-                <span>Engines: DuckDuckGo • Brave • Shodan</span>
+                <span>Engines: DuckDuckGo â€¢ Brave â€¢ Shodan</span>
                 <span>|</span>
-                <span>Threat Intel: AlienVault • VirusTotal • NVD</span>
+                <span>Threat Intel: AlienVault â€¢ VirusTotal â€¢ NVD</span>
             </div>
         </div>
     )
@@ -269,7 +262,7 @@ function SecurityAlertsPanel() {
     return (
         <div className="cyber-panel hud-corners p-4">
             <div className="flex items-center justify-between mb-3">
-                <div className="text-[9px] uppercase tracking-[0.2em] text-cyber-pink/50">🚨 SECURITY ALERTS</div>
+                <div className="text-[9px] uppercase tracking-[0.2em] text-cyber-pink/50">ðŸš¨ SECURITY ALERTS</div>
                 <div className="text-[8px] text-white/15 tracking-wider">{MOCK_ALERTS.length} EVENTS</div>
             </div>
             <div className="space-y-2 max-h-[250px] overflow-y-auto">
@@ -296,7 +289,7 @@ function SecurityAlertsPanel() {
 function ThreatFeedPanel() {
     return (
         <div className="cyber-panel hud-corners p-4">
-            <div className="text-[9px] uppercase tracking-[0.2em] text-cyber-amber/50 mb-3">⚠️ THREAT INTELLIGENCE FEED</div>
+            <div className="text-[9px] uppercase tracking-[0.2em] text-cyber-amber/50 mb-3">âš ï¸ THREAT INTELLIGENCE FEED</div>
             <div className="space-y-2">
                 {MOCK_THREAT_FEED.map((threat, i) => (
                     <div key={i} className="flex items-center gap-3 p-2 border border-white/[0.03] bg-white/[0.01]">
@@ -319,14 +312,14 @@ function ThreatFeedPanel() {
 function NetworkMapPanel() {
     return (
         <div className="cyber-panel hud-corners p-4">
-            <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">🌐 NETWORK TOPOLOGY — THE HIVE</div>
+            <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">ðŸŒ NETWORK TOPOLOGY â€” THE HIVE</div>
             <div className="grid grid-cols-3 gap-3">
                 {/* Bastion */}
                 <div className="col-span-3 p-3 border border-cyber-pink/15 bg-cyber-pink/[0.02]">
                     <div className="flex items-center justify-between">
                         <div>
-                            <div className="text-[9px] text-cyber-pink/50 font-bold tracking-wider">CT 400 — THE BASTION</div>
-                            <div className="text-[8px] text-white/15 mt-0.5">Sécurité offensive/défensive • Wazuh • Suricata</div>
+                            <div className="text-[9px] text-cyber-pink/50 font-bold tracking-wider">CT 400 â€” THE BASTION</div>
+                            <div className="text-[8px] text-white/15 mt-0.5">SÃ©curitÃ© offensive/dÃ©fensive â€¢ Wazuh â€¢ Suricata</div>
                         </div>
                         <div className="flex items-center gap-2">
                             <div className="w-1.5 h-1.5 rounded-full bg-matrix shadow-[0_0_4px_rgba(0,255,65,0.3)]" />
@@ -356,8 +349,8 @@ function NetworkMapPanel() {
                 <div className="col-span-3 p-3 border border-cyber-cyan/10 bg-cyber-cyan/[0.01]">
                     <div className="flex items-center justify-between">
                         <div>
-                            <div className="text-[9px] text-cyber-cyan/40 font-bold tracking-wider">CT 500 — THE ARENA</div>
-                            <div className="text-[8px] text-white/15 mt-0.5">Sandbox isolé • Tests • Code non-vérifié</div>
+                            <div className="text-[9px] text-cyber-cyan/40 font-bold tracking-wider">CT 500 â€” THE ARENA</div>
+                            <div className="text-[8px] text-white/15 mt-0.5">Sandbox isolÃ© â€¢ Tests â€¢ Code non-vÃ©rifiÃ©</div>
                         </div>
                         <div className="flex items-center gap-2">
                             <div className="w-1.5 h-1.5 rounded-full bg-cyber-cyan shadow-[0_0_4px_rgba(0,212,255,0.3)]" />
@@ -392,7 +385,7 @@ function PEARadarPanel() {
     return (
         <div className="cyber-panel hud-corners p-4">
             <div className="flex items-center justify-between mb-3">
-                <div className="text-[9px] uppercase tracking-[0.2em] text-white/60 mb-3">📈 LONG-TERM PEA RADAR — THE SAGE</div>
+                <div className="text-[9px] uppercase tracking-[0.2em] text-white/60 mb-3">ðŸ“ˆ LONG-TERM PEA RADAR â€” THE SAGE</div>
                 <button onClick={fetchPEA} disabled={loading} className="cyber-btn-cyan text-[8px] px-2 py-1">
                     {loading ? 'ANALYZING...' : 'RUN LLM ANALYSIS'}
                 </button>
@@ -415,21 +408,21 @@ function PEARadarPanel() {
                                         <p className="text-[8px] text-white/40">{stock.metrics.sector}</p>
                                     </div>
                                     <div className="text-right">
-                                        <div className="text-[10px] font-bold text-white">€{stock.metrics.current_price?.toFixed(2)}</div>
+                                        <div className="text-[10px] font-bold text-white">â‚¬{stock.metrics.current_price?.toFixed(2)}</div>
                                         <div className="text-[8px] text-matrix">Div: {stock.metrics.dividend_yield?.toFixed(2)}%</div>
                                     </div>
                                 </div>
                                 <div className="mt-2 grid grid-cols-3 gap-2 text-[8px]">
                                     <div className="bg-black/40 p-1 border border-matrix/10">P/E: <span className="text-white">{stock.metrics.pe_ratio?.toFixed(1) || 'N/A'}</span></div>
                                     <div className="bg-black/40 p-1 border border-matrix/10">ROE: <span className="text-white">{stock.metrics.roe?.toFixed(1)}%</span></div>
-                                    <div className="bg-black/40 p-1 border border-matrix/10">Target: <span className="text-white">€{stock.metrics.target_mean_price || 'N/A'}</span></div>
+                                    <div className="bg-black/40 p-1 border border-matrix/10">Target: <span className="text-white">â‚¬{stock.metrics.target_mean_price || 'N/A'}</span></div>
                                 </div>
                             </div>
                         ))}
                     </div>
 
                     <div className="p-4 border border-cyber-cyan/20 bg-cyber-cyan/[0.02] flex flex-col">
-                        <div className="text-[9px] uppercase tracking-[0.1em] text-cyber-cyan font-bold mb-2">🧠 L.L.M Strategic Synthesis</div>
+                        <div className="text-[9px] uppercase tracking-[0.1em] text-cyber-cyan font-bold mb-2">ðŸ§  L.L.M Strategic Synthesis</div>
                         <div className="text-[10px] text-white/70 whitespace-pre-wrap leading-relaxed overflow-y-auto custom-scrollbar flex-grow">
                             {peaData.llm_synthesis}
                         </div>
@@ -440,9 +433,9 @@ function PEARadarPanel() {
     )
 }
 
-// ═══════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // MAIN VIEW
-// ═══════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 export default function OSINTView() {
     const [agentHealth, setAgentHealth] = useState<Record<string, NodeHealth>>({})
@@ -485,10 +478,10 @@ export default function OSINTView() {
                 const results = isRecon ? data.web_findings || [] : data.results || []
                 setSearchResults(results)
             } else {
-                setSearchResults([{ title: '⚠ Shadow agent offline', url: '', snippet: 'Unable to reach The Shadow. Deploy the agent first.' }])
+                setSearchResults([{ title: 'âš  Shadow agent offline', url: '', snippet: 'Unable to reach The Shadow. Deploy the agent first.' }])
             }
         } catch {
-            setSearchResults([{ title: '⚠ Connection failed', url: '', snippet: 'Shadow agent is not reachable. Check deployment status.' }])
+            setSearchResults([{ title: 'âš  Connection failed', url: '', snippet: 'Shadow agent is not reachable. Check deployment status.' }])
         } finally {
             setSearching(false)
         }
@@ -525,7 +518,7 @@ export default function OSINTView() {
             <SearchResultsPanel results={searchResults} loading={searching} />
 
             {/* Agents Grid */}
-            <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 px-1">🕵️ INTELLIGENCE AGENTS ({OSINT_AGENTS.length})</div>
+            <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 px-1">ðŸ•µï¸ INTELLIGENCE AGENTS ({OSINT_AGENTS.length})</div>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                 {OSINT_AGENTS.map(agent => (
                     <AgentCard
@@ -550,3 +543,5 @@ export default function OSINTView() {
         </div>
     )
 }
+
+

@@ -23,7 +23,7 @@ class MuZeroConfigV3:
         self.primary_timeframe = get_horizon_timeframe(self.horizon)
         self.symbols = resolve_training_symbols(
             required_timeframes={self.primary_timeframe},
-            max_symbols=int(os.getenv("MUZERO_MAX_SYMBOLS", "0")),
+            max_symbols=int(os.getenv("MUZERO_MAX_SYMBOLS", "12")),
         )
         if not self.symbols:
             self.symbols = ["XAUUSD", "EURUSD", "BTCUSD"]
@@ -33,13 +33,13 @@ class MuZeroConfigV3:
         self.learning_rate = float(os.getenv("MUZERO_LEARNING_RATE", "5e-5"))
         self.weight_decay = float(os.getenv("MUZERO_WEIGHT_DECAY", "1e-4"))
         self.momentum = 0.9
-        self.training_steps = int(os.getenv("MUZERO_TRAINING_STEPS", "15000"))
+        self.training_steps = int(os.getenv("MUZERO_TRAINING_STEPS", "24000"))
         self.checkpoint_interval = int(os.getenv("MUZERO_CHECKPOINT_INTERVAL", "500"))
         self.num_unroll_steps = int(os.getenv("MUZERO_NUM_UNROLL_STEPS", "5"))
         self.td_steps = int(os.getenv("MUZERO_TD_STEPS", "10"))
         self.max_moves = int(os.getenv("MUZERO_MAX_MOVES", "300"))
 
-        self.num_simulations = int(os.getenv("MUZERO_NUM_SIMULATIONS", "75"))
+        self.num_simulations = int(os.getenv("MUZERO_NUM_SIMULATIONS", "100"))
         self.discount = 0.99
         self.root_dirichlet_alpha = 0.3
         self.root_exploration_fraction = 0.50

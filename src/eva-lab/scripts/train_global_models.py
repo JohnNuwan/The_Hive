@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -20,10 +19,12 @@ for candidate in (package_root, shared_root):
         sys.path.insert(0, candidate_str)
 
 from eva_lab.arena import Arena
+from eva_lab.champion_promoter import ChampionPromoter
 from eva_lab.genetic_updater import GeneticUpdater
 from eva_lab.muzero.config import MuZeroConfigV3
 from eva_lab.muzero.environment import TradingEnvironment
 from eva_lab.muzero.jax_agent import JAXMuZeroAgent
+from eva_lab.training_notifier import send_horizon_summary
 from eva_lab.training_utils import build_inventory_report, build_muzero_market_data, load_history_frame
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -71,7 +72,7 @@ def main() -> dict[str, object]:
         except Exception as exc:
             logger.warning("Checkpoint MuZero ignore: %s", exc)
 
-    games_per_symbol = int(os.getenv("MUZERO_GAMES_PER_SYMBOL", "8"))
+    games_per_symbol = int(os.getenv("MUZERO_GAMES_PER_SYMBOL", "12"))
     valid_symbols: list[str] = []
     total_games = 0
 
@@ -143,6 +144,11 @@ def main() -> dict[str, object]:
     champion_id = genetic.get_champion(horizon=horizon)
     battle_report = arena.battle(challenger_id, champion_id, horizon=horizon)
     logger.info("Verdict ADN %s: %s", horizon, battle_report["outcome"])
+    logger.info(
+        "Validation Arena %s: %s",
+        horizon,
+        battle_report.get("validation", {}),
+    )
 
     challenger_metrics = battle_report["challenger"]["metrics"]
     registry_metrics = {
@@ -151,25 +157,23 @@ def main() -> dict[str, object]:
         "battles_won": {horizon: 1 if battle_report["outcome"] == "VICTORY" else 0},
         "horizon_accuracy": {horizon: challenger_metrics.get("win_rate", 0.0) / 100.0},
     }
+    promoter = ChampionPromoter(weights_dir=config.weights_path, results_dir=config.results_path)
+    promotion_result = promoter.promote_muzero_challenger(
+        challenger_path=challenger_path,
+        horizon=horizon,
+        battle_report=battle_report,
+        training_metrics=last_metrics,
+        latest_checkpoint=latest_path,
+        challenger_id=challenger_id,
+    )
+    logger.info("Promotion live %s: %s", horizon, promotion_result.get("status"))
     genetic.register_new_generation(
         gen_id=challenger_id,
         metrics=registry_metrics,
-        is_champion=battle_report["outcome"] == "VICTORY",
+        is_champion=promotion_result.get("status") == "promoted",
         horizon=horizon,
     )
-
-    champion_paths = []
-    if battle_report["outcome"] == "VICTORY":
-        horizon_champion = weights_dir / f"muzero_champion_{horizon}.pkl"
-        shutil.copy2(challenger_path, horizon_champion)
-        champion_paths.append(str(horizon_champion))
-        logger.info("Nouveau champion %s deploye: %s", horizon, horizon_champion)
-
-        if horizon == "intraday":
-            legacy_champion = weights_dir / "muzero_champion.pkl"
-            shutil.copy2(challenger_path, legacy_champion)
-            champion_paths.append(str(legacy_champion))
-            logger.info("Champion legacy mis a jour: %s", legacy_champion)
+    champion_paths = promotion_result.get("champion_paths", [])
 
     report_path = results_dir / f"arena_{horizon}_latest.json"
     report_payload = {
@@ -183,9 +187,11 @@ def main() -> dict[str, object]:
         "champion_paths": champion_paths,
         "training_metrics": last_metrics,
         "battle_report": battle_report,
+        "promotion": promotion_result,
     }
     report_path.write_text(json.dumps(report_payload, indent=2, default=float), encoding="utf-8")
     logger.info("Rapport MuZero ecrit dans %s", report_path)
+    send_horizon_summary(horizon, report_payload, promotion_result)
     return report_payload
 
 

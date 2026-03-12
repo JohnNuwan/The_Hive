@@ -1,26 +1,26 @@
-"""
-Shadow Learning — Collecteur de Données pour DreamerV3
-Part of Sovereign Stack V3.0 — Sprint 5
+﻿"""
+Shadow Learning â€” Collecteur de DonnÃ©es pour DreamerV3
+Part of Sovereign Stack V3.0 â€” Sprint 5
 
 Collecte passivement les transitions (observation, action, reward, next_obs)
-pendant le fonctionnement normal de E.V.A. Ces données sont stockées
-dans un buffer circulaire et flushées périodiquement sur disque au format
+pendant le fonctionnement normal de E.V.A. Ces donnÃ©es sont stockÃ©es
+dans un buffer circulaire et flushÃ©es pÃ©riodiquement sur disque au format
 attendu par DreamerV3/MuZero.
 
-Quand `ENABLE_DREAMER_TRAINING=True` sera activé (RTX 3090), ces données
-pourront être immédiatement consommées pour l'entraînement du World Model.
+Quand `ENABLE_DREAMER_TRAINING=True` sera activÃ© (RTX 3090), ces donnÃ©es
+pourront Ãªtre immÃ©diatement consommÃ©es pour l'entraÃ®nement du World Model.
 
 Architecture :
-    ┌──────────┐  transitions  ┌──────────────┐  flush  ┌─────────┐
-    │  Banker  │──────────────→│ ShadowBuffer │────────→│ .jsonl  │
-    │  Probes  │               │ (circulaire) │         │ (disque)│
-    │  Trades  │               └──────────────┘         └─────────┘
-    └──────────┘                      │
-                                      ▼ (si ENABLE_DREAMER_TRAINING)
-                              ┌──────────────┐
-                              │  WorldModel  │
-                              │  (Training)  │
-                              └──────────────┘
+    â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  transitions  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  flush  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+    â”‚  Banker  â”‚â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â†’â”‚ ShadowBuffer â”‚â”€â”€â”€â”€â”€â”€â”€â”€â†’â”‚ .jsonl  â”‚
+    â”‚  Probes  â”‚               â”‚ (circulaire) â”‚         â”‚ (disque)â”‚
+    â”‚  Trades  â”‚               â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜         â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+    â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜                      â”‚
+                                      â–¼ (si ENABLE_DREAMER_TRAINING)
+                              â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+                              â”‚  WorldModel  â”‚
+                              â”‚  (Training)  â”‚
+                              â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 """
 
 import logging
@@ -35,23 +35,23 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # DATA MODEL
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 
 @dataclass
 class Transition:
-    """Une transition (s, a, r, s') pour l'entraînement du World Model.
+    """Une transition (s, a, r, s') pour l'entraÃ®nement du World Model.
 
     Attributes:
         timestamp: Horodatage ISO de la transition.
         observation: Vecteur d'observation (prix, indicateurs, positions).
-        action: Action prise (BUY, SELL, HOLD, paramètres).
-        reward: Récompense reçue (P&L, drawdown, etc.).
+        action: Action prise (BUY, SELL, HOLD, paramÃ¨tres).
+        reward: RÃ©compense reÃ§ue (P&L, drawdown, etc.).
         next_observation: Observation suivante.
-        metadata: Données additionnelles (symbol, timeframe, etc.).
-        done: True si l'épisode est terminé (session coupée, SL/TP hit).
+        metadata: DonnÃ©es additionnelles (symbol, timeframe, etc.).
+        done: True si l'Ã©pisode est terminÃ© (session coupÃ©e, SL/TP hit).
     """
 
     timestamp: str = ""
@@ -63,17 +63,17 @@ class Transition:
     done: bool = False
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SHADOW BUFFER
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 
 class ShadowBuffer:
     """Buffer circulaire pour stocker les transitions.
 
-    Stocke les transitions en mémoire dans un deque de taille fixe.
+    Stocke les transitions en mÃ©moire dans un deque de taille fixe.
     Quand le buffer est plein, les transitions les plus anciennes sont
-    écrasées (comportement FIFO circulaire).
+    Ã©crasÃ©es (comportement FIFO circulaire).
 
     Usage :
         buffer = ShadowBuffer(max_size=10000)
@@ -85,7 +85,7 @@ class ShadowBuffer:
         """Initialise le buffer.
 
         Args:
-            max_size: Nombre maximum de transitions en mémoire.
+            max_size: Nombre maximum de transitions en mÃ©moire.
         """
         self.max_size = max_size
         self._buffer: deque = deque(maxlen=max_size)
@@ -96,7 +96,7 @@ class ShadowBuffer:
         """Ajoute une transition au buffer.
 
         Args:
-            transition: La transition à stocker.
+            transition: La transition Ã  stocker.
         """
         if not transition.timestamp:
             transition.timestamp = datetime.now().isoformat()
@@ -112,17 +112,17 @@ class ShadowBuffer:
         metadata: Optional[Dict[str, Any]] = None,
         done: bool = False,
     ):
-        """Ajoute une transition à partir de ses composants bruts.
+        """Ajoute une transition Ã  partir de ses composants bruts.
 
-        Raccourci pratique pour ne pas avoir à construire un objet Transition.
+        Raccourci pratique pour ne pas avoir Ã  construire un objet Transition.
 
         Args:
-            observation: État courant.
+            observation: Ã‰tat courant.
             action: Action prise.
-            reward: Récompense reçue.
-            next_observation: État suivant.
-            metadata: Données additionnelles optionnelles.
-            done: Si l'épisode est terminé.
+            reward: RÃ©compense reÃ§ue.
+            next_observation: Ã‰tat suivant.
+            metadata: DonnÃ©es additionnelles optionnelles.
+            done: Si l'Ã©pisode est terminÃ©.
         """
         self.add(Transition(
             observation=observation,
@@ -134,15 +134,15 @@ class ShadowBuffer:
         ))
 
     def flush_to_disk(self, output_dir: str) -> int:
-        """Écrit toutes les transitions du buffer sur disque en format JSONL.
+        """Ã‰crit toutes les transitions du buffer sur disque en format JSONL.
 
-        Chaque flush crée un fichier horodaté. Le buffer est vidé après.
+        Chaque flush crÃ©e un fichier horodatÃ©. Le buffer est vidÃ© aprÃ¨s.
 
         Args:
-            output_dir: Répertoire de sortie pour les fichiers .jsonl.
+            output_dir: RÃ©pertoire de sortie pour les fichiers .jsonl.
 
         Returns:
-            Nombre de transitions écrites.
+            Nombre de transitions Ã©crites.
         """
         if not self._buffer:
             return 0
@@ -164,7 +164,7 @@ class ShadowBuffer:
             self._total_flushed += count
             self._buffer.clear()
             logger.info(
-                f"[ShadowLearning] Flushed {count} transitions → {filepath}"
+                f"[ShadowLearning] Flushed {count} transitions â†’ {filepath}"
             )
         except Exception as e:
             logger.error(f"[ShadowLearning] Flush failed: {e}")
@@ -180,7 +180,7 @@ class ShadowBuffer:
         """Retourne les statistiques du buffer.
 
         Returns:
-            Dictionnaire avec taille, total ajouté, total flushé.
+            Dictionnaire avec taille, total ajoutÃ©, total flushÃ©.
         """
         return {
             "buffer_size": self.size,
@@ -191,18 +191,18 @@ class ShadowBuffer:
         }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SHADOW LEARNING SERVICE
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 
 class ShadowLearningService:
     """Service de collecte passive pour le Shadow Learning.
 
-    Ce service tourne en tâche de fond et :
+    Ce service tourne en tÃ¢che de fond et :
         1. Collecte les transitions (trades, signaux, observations) via `record()`.
         2. Stocke dans un ShadowBuffer circulaire.
-        3. Flush périodiquement sur disque au format JSONL.
+        3. Flush pÃ©riodiquement sur disque au format JSONL.
         4. Quand `ENABLE_DREAMER_TRAINING=True`, alimente aussi le World Model.
 
     Usage :
@@ -220,7 +220,7 @@ class ShadowLearningService:
         """Initialise le service Shadow Learning.
 
         Args:
-            data_dir: Répertoire de stockage des données.
+            data_dir: RÃ©pertoire de stockage des donnÃ©es.
             buffer_size: Taille du buffer circulaire.
             dreamer_enabled: Si True, alimente aussi le World Model.
         """
@@ -243,38 +243,49 @@ class ShadowLearningService:
         volume: float,
         pnl: float,
         indicators: Optional[Dict[str, float]] = None,
+        observation: Optional[Dict[str, Any]] = None,
+        next_observation: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[str] = None,
         done: bool = False,
     ):
         """Enregistre un trade comme transition pour le World Model.
 
-        Convertit les données de trading en format (s, a, r, s').
+        Convertit les donnees de trading en format (s, a, r, s').
 
         Args:
             symbol: Paire de trading (XAUUSD, EURUSD, etc.).
             action: Action (BUY, SELL, HOLD, CLOSE).
-            price: Prix d'exécution.
+            price: Prix d'execution.
             volume: Volume du trade.
-            pnl: Profit/Perte résultant.
+            pnl: Profit/Perte resultant.
             indicators: Indicateurs techniques (RSI, MACD, etc.).
-            done: Si la position est fermée.
+            observation: Observation complete optionnelle.
+            next_observation: Observation suivante optionnelle.
+            metadata: Metadonnees d'episode ou d'origine.
+            timestamp: Horodatage ISO de la transition.
+            done: Si la position est fermee.
         """
-        observation = {
+        current_observation = observation or {
             "price": price,
             "indicators": indicators or {},
         }
+        future_observation = next_observation or current_observation
         action_data = {
             "type": action,
             "volume": volume,
             "symbol": symbol,
         }
-        self.buffer.add_raw(
-            observation=observation,
+        transition = Transition(
+            timestamp=timestamp or "",
+            observation=current_observation,
             action=action_data,
             reward=pnl,
-            next_observation=observation,  # sera mis à jour au tick suivant
-            metadata={"symbol": symbol, "source": "banker"},
+            next_observation=future_observation,
+            metadata={"symbol": symbol, "source": "banker", **(metadata or {})},
             done=done,
         )
+        self.buffer.add(transition)
 
     def record_signal(
         self,
@@ -286,8 +297,8 @@ class ShadowLearningService:
 
         Args:
             signal_type: Type de signal (RSI_DIVERGENCE, NEWS_SPIKE, etc.).
-            confidence: Confiance du signal (0.0 → 1.0).
-            context: Données de contexte du signal.
+            confidence: Confiance du signal (0.0 â†’ 1.0).
+            context: DonnÃ©es de contexte du signal.
         """
         self.buffer.add_raw(
             observation={"signal": signal_type, "confidence": confidence, **context},
@@ -304,13 +315,13 @@ class ShadowLearningService:
         latency_ms: float,
         metrics: Optional[Dict[str, Any]] = None,
     ):
-        """Enregistre une probe système comme observation d'environnement.
+        """Enregistre une probe systÃ¨me comme observation d'environnement.
 
         Args:
             service_name: Nom du service (hive-core, hive-banker, etc.).
-            status: État du service (running, unhealthy, exited).
-            latency_ms: Latence observée en ms.
-            metrics: Métriques additionnelles (CPU, RAM, etc.).
+            status: Ã‰tat du service (running, unhealthy, exited).
+            latency_ms: Latence observÃ©e en ms.
+            metrics: MÃ©triques additionnelles (CPU, RAM, etc.).
         """
         self.buffer.add_raw(
             observation={
@@ -326,10 +337,10 @@ class ShadowLearningService:
         )
 
     async def start_auto_flush(self, interval_seconds: int = 300):
-        """Lance le flush périodique automatique en tâche de fond.
+        """Lance le flush pÃ©riodique automatique en tÃ¢che de fond.
 
         Args:
-            interval_seconds: Intervalle entre les flushes (défaut: 5 min).
+            interval_seconds: Intervalle entre les flushes (dÃ©faut: 5 min).
         """
         logger.info(
             f"[ShadowLearning] Auto-flush started (every {interval_seconds}s)"
@@ -341,10 +352,10 @@ class ShadowLearningService:
                 logger.info(f"[ShadowLearning] Auto-flush: {count} transitions saved")
 
     def manual_flush(self) -> int:
-        """Force un flush immédiat du buffer.
+        """Force un flush immÃ©diat du buffer.
 
         Returns:
-            Nombre de transitions écrites.
+            Nombre de transitions Ã©crites.
         """
         return self.buffer.flush_to_disk(self.data_dir)
 
@@ -361,10 +372,10 @@ class ShadowLearningService:
         }
 
     def count_stored_files(self) -> int:
-        """Compte le nombre de fichiers JSONL stockés sur disque.
+        """Compte le nombre de fichiers JSONL stockÃ©s sur disque.
 
         Returns:
-            Nombre de fichiers .jsonl dans le répertoire de données.
+            Nombre de fichiers .jsonl dans le rÃ©pertoire de donnÃ©es.
         """
         try:
             return len([
@@ -373,3 +384,4 @@ class ShadowLearningService:
             ])
         except FileNotFoundError:
             return 0
+

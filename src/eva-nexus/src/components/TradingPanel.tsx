@@ -1,26 +1,44 @@
-import { useState, useEffect } from 'react'
-import { Wallet, ArrowUpCircle, ArrowDownCircle, ShieldAlert, Activity } from 'lucide-react'
-import { getStatus, getTradingStatus, createOrder, closePosition, toggleAutoTrading } from '../services/api'
+﻿import { useState, useEffect } from 'react'
+import { Wallet, ArrowUpCircle, ShieldAlert, Activity } from 'lucide-react'
+import {
+    checkNodeHealth,
+    createOrder,
+    closePosition,
+    getLabChampionStatus,
+    getModelPerformance,
+    getTradingStatus,
+    toggleAutoTrading,
+    type LabChampionStatus,
+    type ModelPerformanceReport,
+} from '../services/api'
 
 export default function TradingPanel() {
     const [bankerStatus, setBankerStatus] = useState<'online' | 'offline' | 'unknown'>('unknown')
     const [tradingData, setTradingData] = useState<any>(null)
-    const [isLoading, setIsLoading] = useState(true)
+    const [championStatus, setChampionStatus] = useState<LabChampionStatus | null>(null)
+    const [modelPerformance, setModelPerformance] = useState<ModelPerformanceReport | null>(null)
 
     useEffect(() => {
         const fetchData = async () => {
             try {
-                const [statusData, tradingResp] = await Promise.all([
-                    getStatus(),
-                    getTradingStatus()
+                const bankerHealth = await checkNodeHealth('Banker', '/api/banker/health')
+                const currentStatus = bankerHealth.status === 'online' ? 'online' : 'offline'
+                const [tradingResp, championResp, performanceResp] = await Promise.all([
+                    currentStatus === 'online'
+                        ? getTradingStatus()
+                        : Promise.resolve({ account: {}, positions: [], risk: { daily_drawdown_percent: 0, trading_allowed: false }, decisions: {} }),
+                    getLabChampionStatus(),
+                    currentStatus === 'online'
+                        ? getModelPerformance(7, 5)
+                        : Promise.resolve(null),
                 ])
-                setBankerStatus((statusData.banker?.status || 'unknown') as 'online' | 'offline' | 'unknown')
+                setBankerStatus(currentStatus)
                 setTradingData(tradingResp)
-                setIsLoading(false)
+                setChampionStatus(championResp)
+                setModelPerformance(performanceResp)
             } catch (e) {
                 console.error("Error fetching trading data:", e)
                 setBankerStatus('offline')
-                setIsLoading(false)
             }
         }
 
@@ -36,6 +54,9 @@ export default function TradingPanel() {
 
     // Calculation de P&L total latent
     const totalProfit = positions.reduce((acc: number, pos: any) => acc + parseFloat(pos.profit || 0), 0)
+    const realizedProfit = Number(modelPerformance?.summary?.net_profit || 0)
+    const totalPnl = realizedProfit + totalProfit
+    const pnlWindowDays = Number(modelPerformance?.window_days || 7)
 
     const [orderForm, setOrderForm] = useState({ symbol: 'XAUUSD', volume: 0.01, sl: 2000.0, tp: 2100.0 })
     const [actionLoading, setActionLoading] = useState(false)
@@ -58,16 +79,18 @@ export default function TradingPanel() {
         })
         setActionLoading(false)
         // Refresh data immediately
-        const [_, tradingResp] = await Promise.all([getStatus(), getTradingStatus()])
-        setTradingData(tradingResp)
+        if (bankerStatus === 'online') {
+            setTradingData(await getTradingStatus())
+        }
     }
 
     const handleClose = async (ticket: string) => {
         if (!confirm('Close Position #' + ticket + '?')) return
         await closePosition(ticket)
         // Refresh
-        const [_, tradingResp] = await Promise.all([getStatus(), getTradingStatus()])
-        setTradingData(tradingResp)
+        if (bankerStatus === 'online') {
+            setTradingData(await getTradingStatus())
+        }
     }
 
     const handleHold = async () => {
@@ -92,11 +115,12 @@ export default function TradingPanel() {
                         glow="sky"
                     />
                     <StatCard
-                        title="Profit & Pertes"
-                        value={`${totalProfit >= 0 ? '+' : ''}${totalProfit.toFixed(2)} $`}
-                        icon={<ArrowUpCircle className={totalProfit >= 0 ? "text-emerald-400" : "text-red-400"} />}
-                        trend={account.balance ? `${((totalProfit / parseFloat(account.balance)) * 100).toFixed(2)}%` : "0%"}
-                        glow={totalProfit >= 0 ? "emerald" : "amber"}
+                        title="PnL 7j + latent"
+                        value={`${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)} $`}
+                        icon={<ArrowUpCircle className={totalPnl >= 0 ? "text-emerald-400" : "text-red-400"} />}
+                        trend={account.balance ? `${((totalPnl / parseFloat(account.balance)) * 100).toFixed(2)}%` : "0%"}
+                        meta={`${pnlWindowDays}j realise ${formatUsd(realizedProfit)} | Ouvert ${formatUsd(totalProfit)}`}
+                        glow={totalPnl >= 0 ? "emerald" : "amber"}
                     />
                     {/* Dynamic Drawdown Gauge */}
                     <DrawdownGauge
@@ -196,7 +220,7 @@ export default function TradingPanel() {
                     <div className="flex items-center justify-between mb-8">
                         <div>
                             <h4 className="font-black text-xl tracking-tight text-white/90">Positions de la Ruche</h4>
-                            <p className="text-[10px] text-slate-500 uppercase font-bold tracking-[0.2em] mt-1">Surveillance Temps Réel</p>
+                            <p className="text-[10px] text-slate-500 uppercase font-bold tracking-[0.2em] mt-1">Surveillance Temps RÃ©el</p>
                         </div>
                         <div className="flex items-center gap-4">
                             <div className="flex items-center gap-2 px-4 py-2 bg-white/[0.03] rounded-xl border border-white/10 shadow-inner">
@@ -220,7 +244,7 @@ export default function TradingPanel() {
                                     </div>
                                     <div>
                                         <p className="font-black text-base tracking-tight text-white/90">{pos.symbol}</p>
-                                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">Volume: {pos.volume} • Ticket #{pos.ticket}</p>
+                                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">Volume: {pos.volume} â€¢ Ticket #{pos.ticket}</p>
                                     </div>
                                 </div>
                                 <div className="text-right">
@@ -237,6 +261,8 @@ export default function TradingPanel() {
 
             {/* Account Info & Hydra */}
             <div className="flex flex-col gap-6">
+                <ChampionPanel championStatus={championStatus} />
+                <PerformancePanel modelPerformance={modelPerformance} />
                 <div className="glass rounded-[2rem] p-8 border-l-[6px] border-l-indigo-600 shadow-xl">
                     <h4 className="text-[10px] font-black text-indigo-400 uppercase mb-6 tracking-[0.3em]">Flux Prop-Firm Hydra</h4>
                     <div className="space-y-5">
@@ -248,7 +274,7 @@ export default function TradingPanel() {
 
                 <div className="glass rounded-[2rem] p-8 grow shadow-xl relative overflow-hidden">
                     <div className="absolute top-0 right-0 w-24 h-24 bg-sky-500/5 blur-3xl rounded-full" />
-                    <h4 className="font-black text-sm text-white/80 mb-6 uppercase tracking-widest">Score de Sincérité Cognitive</h4>
+                    <h4 className="font-black text-sm text-white/80 mb-6 uppercase tracking-widest">Score de SincÃ©ritÃ© Cognitive</h4>
                     <div className="mt-4">
                         <SincerityGauge score={tradingData?.last_sincerity_score || 0.85} />
                     </div>
@@ -280,7 +306,222 @@ export default function TradingPanel() {
     )
 }
 
-function StatCard({ title, value, icon, trend, glow }: { title: string, value: string, icon: any, trend?: string, glow: string }) {
+
+function ChampionPanel({ championStatus }: { championStatus: LabChampionStatus | null }) {
+    const horizons = ['intraday', 'scalp', 'swing']
+    const nightlyStatus = String(championStatus?.nightly_summary?.status || 'unknown').toUpperCase()
+    const selectionPolicy = championStatus?.selection_policy || 'champion_only'
+    const liveEngine = championStatus?.horizons?.intraday?.engine_label || championStatus?.dreamer_gate?.engine || 'RSI Heuristic'
+    const activeIntradaySelection = championStatus?.horizons?.intraday?.selection || 'none'
+
+    return (
+        <div className="glass rounded-[2rem] p-6 border border-cyan-500/20 shadow-xl relative overflow-hidden">
+            <div className="absolute top-0 right-0 w-24 h-24 bg-cyan-500/10 blur-3xl rounded-full" />
+            <div className="flex items-start justify-between gap-4 mb-5 relative z-10">
+                <div>
+                    <h4 className="text-[10px] font-black text-cyan-300 uppercase tracking-[0.3em]">Model Champions</h4>
+                    <p className="text-[10px] text-slate-500 uppercase font-bold tracking-[0.18em] mt-2">
+                        Politique live: {selectionPolicy}
+                    </p>
+                </div>
+                <div className="text-right">
+                    <div className="text-[9px] text-slate-500 uppercase font-black tracking-[0.2em]">Moteur live</div>
+                    <div className="text-xs font-black text-cyan-300 mt-1">{liveEngine}</div>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 mb-5 relative z-10">
+                <ChampionStat
+                    label="Inference"
+                    value={activeIntradaySelection === 'champion' || activeIntradaySelection === 'legacy_champion' ? 'Champion' : 'Fallback'}
+                    accent={activeIntradaySelection === 'champion' || activeIntradaySelection === 'legacy_champion' ? 'emerald' : 'amber'}
+                />
+                <ChampionStat
+                    label="Nightly"
+                    value={nightlyStatus}
+                    accent={nightlyStatus === 'OK' || nightlyStatus === 'RUNNING' ? 'emerald' : 'amber'}
+                />
+            </div>
+
+            <div className="space-y-3 relative z-10">
+                {horizons.map((horizon) => {
+                    const status = championStatus?.horizons?.[horizon]
+                    const perf = championStatus?.performance_summary?.[horizon]
+                    const gate = status?.promotion_gate
+                    const liveUniverse = status?.live_universe
+                    const arenaReport = status?.arena_report as Record<string, any> | undefined
+                    const battle = arenaReport?.battle_report as Record<string, any> | undefined
+                    const outcome = String(battle?.outcome || 'UNKNOWN')
+                    const checkpointName = formatArtifactName(status?.live_checkpoint?.path)
+                    const winRateValue = typeof gate?.metrics?.win_rate === 'number'
+                        ? `${gate.metrics.win_rate.toFixed(1)}%`
+                        : (typeof perf?.win_rate === 'number' ? `${perf.win_rate.toFixed(1)}%` : '--')
+                    const returnValue = typeof gate?.metrics?.return_pct === 'number'
+                        ? `${gate.metrics.return_pct.toFixed(2)}%`
+                        : (typeof perf?.return_pct === 'number' ? `${perf.return_pct.toFixed(2)}%` : '--')
+                    const profitFactorValue = typeof gate?.metrics?.profit_factor === 'number'
+                        ? gate.metrics.profit_factor.toFixed(2)
+                        : '--'
+                    const gateValue = gate?.allowed ? 'DEPLOY OK' : 'BLOQUE'
+                    const tradesValue = typeof gate?.metrics?.total_trades === 'number'
+                        ? String(gate.metrics.total_trades)
+                        : '--'
+                    const universeValue = liveUniverse?.count
+                        ? `${liveUniverse.count} | ${liveUniverse.source}`
+                        : '--'
+                    const gateReasonValue = gate?.allowed ? 'aucun' : String(gate?.reason || 'inconnu')
+                    const liveChampionValue = status?.live_champion_id || 'Aucun live'
+                    const arenaChampionValue = status?.registry_champion_id || status?.champion_id || 'Aucun arena'
+                    const candidateValue = status?.candidate_id || 'Aucun challenger'
+                    return (
+                        <div key={horizon} className="rounded-2xl bg-black/30 border border-white/5 p-4">
+                            <div className="flex items-center justify-between gap-3">
+                                <div>
+                                    <div className="text-[10px] text-slate-500 uppercase font-black tracking-[0.2em]">{horizon}</div>
+                                    <div className="text-sm font-black text-white/90 mt-1">
+                                        {liveChampionValue}
+                                    </div>
+                                    <div className="text-[10px] text-slate-500 mt-2">
+                                        Arena: {arenaChampionValue}
+                                    </div>
+                                    <div className="text-[10px] text-slate-500 mt-1">
+                                        Challenger: {candidateValue}
+                                    </div>
+                                </div>
+                                <span className={`text-[9px] px-2 py-1 rounded-lg border font-black uppercase tracking-[0.2em] ${selectionBadgeClass(status?.selection)}`}>
+                                    {status?.selection || 'none'}
+                                </span>
+                            </div>
+
+                            <div className="mt-3 grid grid-cols-2 gap-2 text-[10px]">
+                                <MetricPill label="Win Rate" value={winRateValue} />
+                                <MetricPill label="Return" value={returnValue} />
+                                <MetricPill label="Profit Factor" value={profitFactorValue} />
+                                <MetricPill label="Deploy" value={gateValue} />
+                                <MetricPill label="Trades" value={tradesValue} />
+                                <MetricPill label="Univers" value={universeValue} />
+                                <MetricPill label="Blocage" value={gateReasonValue} />
+                                <MetricPill label="Arena" value={outcome} />
+                                <MetricPill label="Live File" value={checkpointName} />
+                            </div>
+                        </div>
+                    )
+                })}
+            </div>
+        </div>
+    )
+}
+
+function PerformancePanel({ modelPerformance }: { modelPerformance: ModelPerformanceReport | null }) {
+    const summary = modelPerformance?.summary
+    const topModel = modelPerformance?.by_model?.[0]
+    const familyRows = modelPerformance?.by_family || []
+
+    return (
+        <div className="glass rounded-[2rem] p-6 border border-emerald-500/20 shadow-xl relative overflow-hidden">
+            <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/10 blur-3xl rounded-full" />
+            <div className="flex items-start justify-between gap-4 mb-5 relative z-10">
+                <div>
+                    <h4 className="text-[10px] font-black text-emerald-300 uppercase tracking-[0.3em]">Performance Live</h4>
+                    <p className="text-[10px] text-slate-500 uppercase font-bold tracking-[0.18em] mt-2">
+                        Trades fermes sur {modelPerformance?.window_days || 7} jours
+                    </p>
+                </div>
+                <div className={`text-right ${summary && summary.net_profit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    <div className="text-[9px] text-slate-500 uppercase font-black tracking-[0.2em]">PnL realise</div>
+                    <div className="text-lg font-black mt-1">{formatUsd(summary?.net_profit || 0)}</div>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3 mb-5 relative z-10">
+                <ChampionStat
+                    label="Trades"
+                    value={String(summary?.closed_trades || 0)}
+                    accent={(summary?.closed_trades || 0) > 0 ? 'emerald' : 'amber'}
+                />
+                <ChampionStat
+                    label="Win Rate"
+                    value={`${Number(summary?.win_rate || 0).toFixed(1)}%`}
+                    accent={Number(summary?.win_rate || 0) >= 50 ? 'emerald' : 'amber'}
+                />
+                <ChampionStat
+                    label="Top Modele"
+                    value={topModel?.label || 'Aucun'}
+                    accent={topModel && topModel.net_profit >= 0 ? 'emerald' : 'amber'}
+                />
+            </div>
+
+            <div className="space-y-3 relative z-10">
+                {familyRows.length === 0 ? (
+                    <div className="rounded-2xl bg-black/30 border border-white/5 p-4 text-[11px] font-black text-slate-500 uppercase tracking-[0.18em]">
+                        Aucun trade ferme sur la fenetre analysee
+                    </div>
+                ) : familyRows.map((row) => (
+                    <div key={row.label} className="rounded-2xl bg-black/30 border border-white/5 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                            <div>
+                                <div className="text-sm font-black text-white/90">{row.label}</div>
+                                <div className="text-[10px] text-slate-500 uppercase font-black tracking-[0.18em] mt-1">
+                                    {row.closed_trades} trades | {row.symbols.join(', ') || '--'}
+                                </div>
+                            </div>
+                            <div className={`text-right ${row.net_profit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                <div className="text-sm font-black">{formatUsd(row.net_profit)}</div>
+                                <div className="text-[10px] font-black mt-1">{row.win_rate.toFixed(1)}% win</div>
+                            </div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    )
+}
+
+function ChampionStat({ label, value, accent }: { label: string; value: string; accent: 'emerald' | 'amber' }) {
+    const accentClass = accent === 'emerald' ? 'text-emerald-400 border-emerald-500/20 bg-emerald-500/5' : 'text-amber-400 border-amber-500/20 bg-amber-500/5'
+    return (
+        <div className={`rounded-xl border p-3 ${accentClass}`}>
+            <div className="text-[9px] uppercase tracking-[0.2em] font-black opacity-70">{label}</div>
+            <div className="text-sm font-black mt-1">{value}</div>
+        </div>
+    )
+}
+
+function MetricPill({ label, value }: { label: string; value: string }) {
+    return (
+        <div className="rounded-xl border border-white/5 bg-white/[0.02] px-3 py-2">
+            <div className="text-[8px] text-slate-500 uppercase font-black tracking-[0.18em]">{label}</div>
+            <div className="text-[11px] font-black text-white/80 mt-1 truncate">{value}</div>
+        </div>
+    )
+}
+
+function selectionBadgeClass(selection?: string) {
+    if (selection === 'blocked_champion' || selection === 'blocked_legacy_champion') {
+        return 'text-red-400 border-red-500/20 bg-red-500/10'
+    }
+    if (selection === 'champion' || selection === 'legacy_champion') {
+        return 'text-emerald-400 border-emerald-500/20 bg-emerald-500/10'
+    }
+    if (selection === 'latest' || selection === 'checkpoint_preview') {
+        return 'text-amber-400 border-amber-500/20 bg-amber-500/10'
+    }
+    return 'text-slate-400 border-white/10 bg-white/[0.03]'
+}
+
+function formatArtifactName(path?: string | null) {
+    if (!path) return '--'
+    const parts = path.split(/[/\\]/)
+    return parts[parts.length - 1] || path
+}
+
+function formatUsd(value: number) {
+    const amount = Number(value || 0)
+    const prefix = amount > 0 ? '+' : ''
+    return `${prefix}${amount.toFixed(2)}$`
+}
+
+function StatCard({ title, value, icon, trend, glow, meta }: { title: string, value: string, icon: any, trend?: string, glow: string, meta?: string }) {
     const glowClass = glow === 'sky' ? 'shadow-sky-500/20' : glow === 'emerald' ? 'shadow-emerald-500/20' : 'shadow-amber-500/20'
     const borderClass = glow === 'sky' ? 'border-sky-500/20' : glow === 'emerald' ? 'border-emerald-500/20' : 'border-amber-500/20'
 
@@ -299,6 +540,11 @@ function StatCard({ title, value, icon, trend, glow }: { title: string, value: s
                     </span>
                 )}
             </div>
+            {meta && (
+                <p className="mt-3 text-[9px] font-black text-slate-500 uppercase tracking-[0.16em]">
+                    {meta}
+                </p>
+            )}
         </div>
     )
 }
@@ -399,7 +645,7 @@ function SentimentItem({ symbol, price, action, rsi, vwap, adx, cortex_bias, gnn
                 <div className="bg-white/[0.02] border border-white/5 rounded-xl p-2 flex flex-col">
                     <span className="text-[8px] text-slate-500 uppercase font-black tracking-widest">ADX (Trend Strength)</span>
                     <span className={`text-xs font-mono font-bold mt-0.5 ${adx && adx > 25 ? 'text-amber-400 drop-shadow-[0_0_5px_rgba(251,191,36,0.5)]' : 'text-slate-400'}`}>
-                        {adx ? adx.toFixed(1) : '---'} {adx && adx > 25 ? '🔥' : ''}
+                        {adx ? adx.toFixed(1) : '---'} {adx && adx > 25 ? 'ðŸ”¥' : ''}
                     </span>
                 </div>
             </div>
@@ -427,7 +673,6 @@ function DrawdownGauge({ drawdown, limit, isLocked }: { drawdown: number, limit:
     const dangerZone = drawdown > (limit * 0.8) // 80% du drawdown max = Danger
     const fatalZone = drawdown >= limit || isLocked
 
-    const glowClass = fatalZone ? 'shadow-red-600/50' : dangerZone ? 'shadow-amber-500/40' : 'shadow-sky-500/20'
     const borderClass = fatalZone ? 'border-red-500/60' : dangerZone ? 'border-amber-500/40' : 'border-sky-500/20'
     const barColor = fatalZone ? 'bg-red-500' : dangerZone ? 'bg-gradient-to-r from-amber-500 to-red-500' : 'bg-gradient-to-r from-sky-500 to-sky-400'
     const iconColor = fatalZone ? 'text-red-500' : dangerZone ? 'text-amber-400' : 'text-sky-400'
@@ -471,3 +716,6 @@ function DrawdownGauge({ drawdown, limit, isLocked }: { drawdown: number, limit:
         </div>
     )
 }
+
+
+

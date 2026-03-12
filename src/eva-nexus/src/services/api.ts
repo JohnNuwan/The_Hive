@@ -10,10 +10,21 @@ function uuidv4() {
     });
 }
 
+export function createClientUuid() {
+    const cryptoApi = globalThis.crypto
+    if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
+        return cryptoApi.randomUUID()
+    }
+    return uuidv4()
+}
+
 
 
 // ═══ AUTH HELPERS ═══
 const TOKEN_KEY = 'hive-auth-token'
+const LOCAL_BANKER_URL = 'http://127.0.0.1:8100'
+const CAN_BROWSER_USE_LOCAL_BANKER = ['127.0.0.1', 'localhost'].includes(window.location.hostname)
+let bankerBaseUrlCache: { value: string; expiresAt: number } | null = null
 
 function getAuthToken(): string | null {
     return localStorage.getItem(TOKEN_KEY)
@@ -148,19 +159,97 @@ export async function safeFetch<T>(url: string, fallback: T, timeout = 3000): Pr
 }
 
 // ═══ HEALTH CHECKS ═══
-export async function checkNodeHealth(name: string, url: string): Promise<NodeHealth> {
+async function probeNodeHealth(name: string, url: string): Promise<NodeHealth> {
     const start = performance.now()
     try {
         const res = await fetchWithTimeout(url)
         const latency = Math.round(performance.now() - start)
         if (res.ok) {
             const details = await res.json().catch(() => ({}))
-            return { name, status: 'online', latency, details }
+            const rawStatus = typeof (details as any)?.status === 'string'
+                ? String((details as any).status).toLowerCase()
+                : typeof (details as any)?.health === 'string'
+                    ? String((details as any).health).toLowerCase()
+                    : 'online'
+
+            const status = rawStatus === 'offline'
+                ? 'offline'
+                : rawStatus === 'degraded' || rawStatus === 'unknown'
+                    ? 'degraded'
+                    : 'online'
+
+            return { name, status, latency, details }
         }
         return { name, status: 'degraded', latency }
     } catch {
         return { name, status: 'offline', latency: -1 }
     }
+}
+
+async function probeLocalBankerHealth(): Promise<NodeHealth> {
+    return probeNodeHealth('Banker', `${LOCAL_BANKER_URL}/health`)
+}
+
+async function resolveBankerBaseUrl(): Promise<string> {
+    const now = Date.now()
+    if (bankerBaseUrlCache && bankerBaseUrlCache.expiresAt > now) {
+        return bankerBaseUrlCache.value
+    }
+
+    const serverHealth = await probeNodeHealth('Banker', '/api/banker/health')
+    if (serverHealth.status === 'online') {
+        bankerBaseUrlCache = { value: '/api/banker', expiresAt: now + 5000 }
+        return '/api/banker'
+    }
+
+    if (!CAN_BROWSER_USE_LOCAL_BANKER) {
+        bankerBaseUrlCache = { value: '/api/banker', expiresAt: now + 3000 }
+        return '/api/banker'
+    }
+
+    const localHealth = await probeLocalBankerHealth()
+    if (localHealth.status === 'online') {
+        bankerBaseUrlCache = { value: LOCAL_BANKER_URL, expiresAt: now + 5000 }
+        return LOCAL_BANKER_URL
+    }
+
+    bankerBaseUrlCache = { value: '/api/banker', expiresAt: now + 3000 }
+    return '/api/banker'
+}
+
+async function safeBankerFetch<T>(path: string, fallback: T, timeout = 3000): Promise<T> {
+    try {
+        const baseUrl = await resolveBankerBaseUrl()
+        return await safeFetch(`${baseUrl}${path}`, fallback, timeout)
+    } catch {
+        return fallback
+    }
+}
+
+export async function checkNodeHealth(name: string, url: string): Promise<NodeHealth> {
+    const primary = await probeNodeHealth(name, url)
+    if (name !== 'Banker' || primary.status === 'online') {
+        return primary
+    }
+
+    if (!CAN_BROWSER_USE_LOCAL_BANKER) {
+        return primary
+    }
+
+    const local = await probeLocalBankerHealth()
+    if (local.status === 'online') {
+        return {
+            ...local,
+            name: 'Banker',
+            details: {
+                ...(local.details || {}),
+                mode: 'hybrid-local',
+                server_status: primary.status,
+            },
+        }
+    }
+
+    return primary
 }
 
 export async function getAllNodesHealth(): Promise<NodeHealth[]> {
@@ -230,12 +319,7 @@ export async function sendChatMessage(message: string, sessionId: string, image?
 }
 
 export async function createSession(): Promise<{ session_id: string }> {
-    let session_id;
-    try {
-        session_id = crypto.randomUUID();
-    } catch (e) {
-        session_id = uuidv4();
-    }
+    const session_id = createClientUuid()
     return safeFetch('/api/core/session', { session_id })
 }
 
@@ -258,7 +342,8 @@ export interface OrderResponse {
 
 export async function createOrder(order: OrderRequest): Promise<OrderResponse> {
     try {
-        const res = await fetchWithTimeout('/api/banker/orders', {
+        const baseUrl = await resolveBankerBaseUrl()
+        const res = await fetchWithTimeout(`${baseUrl}/orders`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(order)
@@ -271,7 +356,8 @@ export async function createOrder(order: OrderRequest): Promise<OrderResponse> {
 
 export async function closePosition(ticket: string | number): Promise<any> {
     try {
-        const res = await fetchWithTimeout(`/api/banker/positions/${ticket}`, {
+        const baseUrl = await resolveBankerBaseUrl()
+        const res = await fetchWithTimeout(`${baseUrl}/positions/${ticket}`, {
             method: 'DELETE'
         })
         return await res.json()
@@ -281,15 +367,15 @@ export async function closePosition(ticket: string | number): Promise<any> {
 }
 
 export async function getBankerTelemetry(): Promise<TelemetryData | null> {
-    return safeFetch('/api/banker/telemetry', null)
+    return safeBankerFetch('/telemetry', null)
 }
 
 export async function getBankerCircuitBreaker(): Promise<CircuitBreakerStatus | null> {
-    return safeFetch('/api/banker/circuit-breaker/status', null)
+    return safeBankerFetch('/circuit-breaker/status', null)
 }
 
 export async function getNemesisStatus(): Promise<NemesisStatus> {
-    return safeFetch('/api/banker/nemesis/status', {
+    return safeBankerFetch('/nemesis/status', {
         total_defeats: 0,
         known_nemeses: {},
         trading_blocked: false,
@@ -298,7 +384,7 @@ export async function getNemesisStatus(): Promise<NemesisStatus> {
 }
 
 export async function getNewsFilter(): Promise<NewsFilterStatus> {
-    return safeFetch('/api/banker/news/filter', {
+    return safeBankerFetch('/news/filter', {
         is_active: false,
         blocked_until: null,
         next_high_impact_events: []
@@ -306,7 +392,7 @@ export async function getNewsFilter(): Promise<NewsFilterStatus> {
 }
 
 export async function getTradingStatus(): Promise<any> {
-    return safeFetch('/api/banker/trading/status', {
+    return safeBankerFetch('/trading/status', {
         account: { equity: 0, balance: 0, margin: 0, currency: 'USD' },
         positions: [],
         risk: { daily_drawdown_percent: 0, trading_allowed: true },
@@ -314,9 +400,77 @@ export async function getTradingStatus(): Promise<any> {
     })
 }
 
+export interface ModelPerformanceRow {
+    label: string
+    closed_trades: number
+    wins: number
+    losses: number
+    win_rate: number
+    net_profit: number
+    avg_profit: number
+    gross_profit: number
+    symbols: string[]
+    last_closed_at: string | null
+}
+
+export interface ModelPerformanceSummary {
+    closed_trades: number
+    wins: number
+    losses: number
+    win_rate: number
+    net_profit: number
+    from: string
+    to: string
+}
+
+export interface ModelPerformanceReport {
+    status: string
+    window_days: number
+    summary: ModelPerformanceSummary
+    by_model: ModelPerformanceRow[]
+    by_family: ModelPerformanceRow[]
+    recent_trades: Array<{
+        position_id: number
+        symbol: string
+        action: string
+        label: string
+        family: string
+        entry_time: string | null
+        close_time: string | null
+        entry_price: number | null
+        exit_price: number | null
+        volume: number
+        net_profit: number
+        gross_profit: number
+        swap: number
+        commission: number
+        magic: number
+    }>
+}
+
+export async function getModelPerformance(days = 7, limit = 5): Promise<ModelPerformanceReport> {
+    return safeBankerFetch(`/performance/models?days=${days}&limit=${limit}`, {
+        status: 'offline',
+        window_days: days,
+        summary: {
+            closed_trades: 0,
+            wins: 0,
+            losses: 0,
+            win_rate: 0,
+            net_profit: 0,
+            from: '',
+            to: '',
+        },
+        by_model: [],
+        by_family: [],
+        recent_trades: [],
+    }, 8000)
+}
+
 export async function toggleAutoTrading(enable: boolean): Promise<any> {
     try {
-        const res = await fetchWithTimeout('/api/banker/trading/auto', {
+        const baseUrl = await resolveBankerBaseUrl()
+        const res = await fetchWithTimeout(`${baseUrl}/trading/auto`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enable })
@@ -328,7 +482,120 @@ export async function toggleAutoTrading(enable: boolean): Promise<any> {
 }
 
 export async function getPropFirmAccounts(): Promise<any[]> {
-    return safeFetch('/api/banker/accounts/propfirm', [])
+    return safeBankerFetch('/accounts/propfirm', [])
+}
+
+// ═══ LAB / CHAMPIONS ═══
+export interface ModelArtifactInfo {
+    path: string | null
+    exists: boolean
+    size_bytes: number | null
+    modified_at: string | null
+}
+
+export interface HorizonChampionStatus {
+    horizon: string
+    champion_id: string | null
+    registry_champion_id?: string | null
+    live_champion_id?: string | null
+    candidate_id?: string | null
+    selection_policy: string
+    engine_label: string
+    selection: string
+    promotion_gate?: {
+        allowed: boolean
+        status: string
+        reason: string
+        checks: Record<string, boolean>
+        thresholds: {
+            require_positive_metrics: boolean
+            min_win_rate: number
+            min_return_pct: number
+            min_profit_factor: number
+            min_total_trades?: number
+            min_eval_games?: number
+            min_eval_symbols?: number
+            min_expectancy_pct?: number
+            max_drawdown_pct?: number
+            min_positive_episode_rate?: number
+        }
+        metrics: {
+            win_rate: number
+            return_pct: number
+            profit_factor: number
+            total_trades?: number
+            evaluation_games?: number
+            evaluation_symbols?: number
+            expectancy_pct?: number
+            max_drawdown_pct?: number
+            positive_episode_rate?: number
+        }
+    } | null
+    live_universe?: {
+        horizon: string
+        symbols: string[]
+        count: number
+        source: string
+        restricted: boolean
+    } | null
+    live_checkpoint: ModelArtifactInfo
+    champion_checkpoint: ModelArtifactInfo
+    latest_model: ModelArtifactInfo
+    latest_checkpoint: ModelArtifactInfo
+    manifest: Record<string, unknown> | null
+    arena_report: Record<string, unknown> | null
+}
+
+export interface ChampionPerformanceSummary {
+    champion: string
+    win_rate: number
+    return_pct: number
+}
+
+export interface LabChampionStatus {
+    status: string
+    selection_policy: string
+    dreamer_gate: {
+        enable_training: boolean
+        training_active: boolean
+        inference_count: number
+        mode: string
+        engine: string
+        muzero_loaded: boolean
+        live_selection_policy: string
+        jax_agents: Record<string, { path?: string; selection?: string; policy?: string }>
+        legacy_agent_loaded: boolean
+    }
+    champions: Record<string, string>
+    registry_champions?: Record<string, string>
+    live_champions?: Record<string, string | null>
+    performance_summary: Record<string, ChampionPerformanceSummary>
+    horizons: Record<string, HorizonChampionStatus>
+    nightly_summary: Record<string, unknown> | null
+}
+
+export async function getLabChampionStatus(): Promise<LabChampionStatus> {
+    return safeFetch('/api/lab/champions/status', {
+        status: 'offline',
+        selection_policy: 'champion_only',
+        dreamer_gate: {
+            enable_training: false,
+            training_active: false,
+            inference_count: 0,
+            mode: 'UNKNOWN',
+            engine: 'RSI Heuristic',
+            muzero_loaded: false,
+            live_selection_policy: 'champion_only',
+            jax_agents: {},
+            legacy_agent_loaded: false,
+        },
+        champions: {},
+        registry_champions: {},
+        live_champions: {},
+        performance_summary: {},
+        horizons: {},
+        nightly_summary: null,
+    }, 8000)
 }
 
 // ═══ MONITORING — REAL DOCKER & SYSTEM DATA ═══
@@ -364,10 +631,61 @@ export interface AccountantReport {
     }
     expenses: any[]
     timestamp: string
+    currency?: string
+    expense_count?: number
+    pnl_entries?: number
 }
 
 export async function getAccountantReport(): Promise<AccountantReport | null> {
-    return safeFetch('/api/accountant/report', null)
+    const fallback: AccountantReport = {
+        summary: {
+            gross: 0,
+            tax: 0,
+            expenses: 0,
+            net: 0,
+        },
+        expenses: [],
+        timestamp: new Date(0).toISOString(),
+        currency: 'EUR',
+        expense_count: 0,
+        pnl_entries: 0,
+    }
+
+    const raw = await safeFetch<Record<string, unknown> | null>('/api/accountant/report', null)
+    if (!raw) {
+        return null
+    }
+
+    if (typeof raw.summary === 'object' && raw.summary !== null) {
+        const summary = raw.summary as Record<string, unknown>
+        return {
+            summary: {
+                gross: Number(summary.gross ?? 0),
+                tax: Number(summary.tax ?? 0),
+                expenses: Number(summary.expenses ?? 0),
+                net: Number(summary.net ?? 0),
+            },
+            expenses: Array.isArray(raw.expenses) ? raw.expenses : [],
+            timestamp: String(raw.timestamp ?? raw.generated_at ?? fallback.timestamp),
+            currency: typeof raw.currency === 'string' ? raw.currency : fallback.currency,
+            expense_count: Number(raw.expense_count ?? 0),
+            pnl_entries: Number(raw.pnl_entries ?? 0),
+        }
+    }
+
+    return {
+        summary: {
+            gross: Number(raw.gross_profit ?? 0),
+            tax: Number(raw.total_taxes ?? 0),
+            expenses: Number(raw.total_expenses ?? 0),
+            net: Number(raw.net_roi ?? 0),
+        },
+        expenses: [],
+        timestamp: String(raw.generated_at ?? fallback.timestamp),
+        currency: typeof raw.currency === 'string' ? raw.currency : fallback.currency,
+        expense_count: Number(raw.expense_count ?? 0),
+        pnl_entries: Number(raw.pnl_entries ?? 0),
+    }
 }
 
 // ═══ BUILDER ═══

@@ -274,7 +274,7 @@ class DreamerTrainerJAX:
         """
         A full DreamerV3 training step (WM + AC).
         """
-        self._rng, rng_wm, rng_ac = jax.random.split(self._rng, 3)
+        self._rng, rng_wm, rng_ac, rng_select = jax.random.split(self._rng, 4)
         
         # 1. Update World Model
         self.params["wm"], self.opt_states["wm"], wm_metrics, aux = self.update_wm_fn(
@@ -284,6 +284,15 @@ class DreamerTrainerJAX:
         # 2. Extract Posteriors for AC
         # metrics["posteriors"] has shape [B*T, StateDim] (detached)
         posteriors = wm_metrics.pop("posteriors") # Consumes memory, pop it
+        max_start_states = int(getattr(self.config, "dreamer_max_start_states", 0))
+        if max_start_states > 0 and posteriors.shape[0] > max_start_states:
+            selected = jax.random.choice(
+                rng_select,
+                posteriors.shape[0],
+                shape=(max_start_states,),
+                replace=False,
+            )
+            posteriors = posteriors[selected]
         
         # 3. Update Actor-Critic
         # We assume AC shares params with WM regarding Encoder/RSSM? 

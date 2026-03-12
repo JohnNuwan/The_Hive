@@ -15,13 +15,13 @@ Architecture :
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
-from datetime import datetime
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -141,6 +141,78 @@ class HealthResponse(BaseHealthResponse):
     paper_trading: bool
 
 
+async def _read_mt5_snapshot(mt5_service: MT5Service) -> tuple[AccountBalance | None, list[Position]]:
+    """
+    Lit un instantane MT5 sans laisser de positions `None`.
+
+    Args:
+        mt5_service (MT5Service): Service MT5 actif.
+
+    Returns:
+        tuple[AccountBalance | None, list[Position]]: Compte courant si disponible
+        et liste de positions ouverte, vide si MT5 ne repond plus.
+    """
+    account = await mt5_service.get_account_info()
+    positions = await mt5_service.get_open_positions()
+    return account, positions or []
+
+
+def _is_mt5_live_offline(mt5_service: MT5Service) -> bool:
+    """
+    Indique si le mode reel MT5 est hors ligne.
+
+    Args:
+        mt5_service (MT5Service): Service MT5 actif.
+
+    Returns:
+        bool: True si aucun mock n'est actif et que la connexion MT5 est perdue.
+    """
+    return not mt5_service.mock_mode and not mt5_service.is_connected
+
+
+async def _cancel_background_tasks(tasks: list[asyncio.Task[Any]]) -> None:
+    """
+    Annule proprement les taches de fond du Banker.
+
+    Args:
+        tasks (list[asyncio.Task[Any]]): Liste des taches a stopper.
+    """
+    active_tasks = [task for task in tasks if task is not None and not task.done()]
+    if not active_tasks:
+        return
+
+    for task in active_tasks:
+        task.cancel()
+
+    results = await asyncio.gather(*active_tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+            logger.warning("Erreur lors de l'arret d'une tache de fond: %s", result)
+
+
+async def _close_optional_service(service_name: str, service: Any) -> None:
+    """
+    Ferme un service s'il expose une methode `close` ou `disconnect`.
+
+    Args:
+        service_name (str): Nom fonctionnel du service.
+        service (Any): Instance a fermer si disponible.
+    """
+    if service is None:
+        return
+
+    closer = getattr(service, "close", None) or getattr(service, "disconnect", None)
+    if not callable(closer):
+        return
+
+    try:
+        result = closer()
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception as exc:
+        logger.warning("Fermeture partielle du service %s: %s", service_name, exc)
+
+
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # LIFECYCLE
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -173,6 +245,7 @@ async def lifespan(app: FastAPI):
     app.state.risk_validator = get_risk_validator()
     app.state.binance_service = BinanceService()
     app.state.tr_service = TradeRepublicService()
+    app.state.background_tasks = []
     
     # CCXT Init
     await app.state.binance_service.initialize()
@@ -212,11 +285,6 @@ async def lifespan(app: FastAPI):
     app.state.swarm = BankerSwarm()
     await app.state.swarm.init_mqtt()
 
-    # TÃ¢ches de fond
-    asyncio.create_task(swarm_listener())
-    asyncio.create_task(hard_heartbeat())
-    asyncio.create_task(app.state.news_filter.start_monitoring())
-
     # Connexion MT5
     mt5_service: MT5Service = app.state.mt5_service
     if await mt5_service.connect():
@@ -229,7 +297,18 @@ async def lifespan(app: FastAPI):
         await app.state.auto_engine.start()
         logger.info("ðŸš€ Auto-Trading Engine Started")
     else:
-        logger.warning("âš ï¸ MT5 en mode mock (Reconnexion possible en arriÃ¨re-plan)")
+        logger.error(
+            "MT5 indisponible: auto-trading non demarre et aucun repli mock n'est autorise en mode reel."
+        )
+
+    app.state.background_tasks = [
+        asyncio.create_task(swarm_listener(), name="banker_swarm_listener"),
+        asyncio.create_task(hard_heartbeat(), name="banker_hard_heartbeat"),
+        asyncio.create_task(
+            app.state.news_filter.start_monitoring(),
+            name="banker_news_filter",
+        ),
+    ]
 
     logger.info("âœ… The Banker (SWARM MODE) READY")
 
@@ -237,21 +316,33 @@ async def lifespan(app: FastAPI):
 
     # ArrÃªt (Shutdown)
     logger.info("ðŸ›‘ ArrÃªt The Banker...")
+    if hasattr(app.state, "news_filter"):
+        app.state.news_filter.stop()
     if hasattr(app.state, 'auto_engine'):
         await app.state.auto_engine.stop()
+    await _cancel_background_tasks(getattr(app.state, "background_tasks", []))
+    await _close_optional_service("binance", getattr(app.state, "binance_service", None))
+    await _close_optional_service(
+        "mqtt",
+        getattr(getattr(app.state, "swarm", None), "mqtt", None),
+    )
+    with suppress(Exception):
+        await get_redis_client().disconnect()
     await mt5_service.disconnect()
 
 
 async def hard_heartbeat():
     """
-    Signal haute frÃ©quence pour le Watchdog Rust (Loi 0) et l'Orchestrateur Core.
+    Signal haute fr?quence pour le Watchdog Rust (Loi 0) et l'Orchestrateur Core.
 
-    Persiste l'Ã©tat dans Redis pour la dÃ©couverte des agents.
-    Inclut dÃ©sormais l'Ã©quitÃ© pour le Kill-Switch financier.
+    Persiste l'?tat dans Redis pour la d?couverte des agents.
+    Inclut d?sormais l'?quit? pour le Kill-Switch financier.
     """
     from shared.redis_client import get_redis_client
+
     redis = get_redis_client()
     mt5_service = app.state.mt5_service
+    redis_unavailable = False
 
     while True:
         try:
@@ -263,59 +354,84 @@ async def hard_heartbeat():
                     "expert": "banker",
                     "equity": float(account.equity),
                     "balance": float(account.balance),
-                    "currency": account.currency
+                    "currency": account.currency,
                 }
-                # Publication Pub/Sub (temps rÃ©el pour le Kernel)
                 await redis.publish("eva.banker.heartbeat", payload)
-                # Persistence (dÃ©couverte)
                 await redis.cache_set("eva.banker.status", payload, ttl_seconds=10)
+                if redis_unavailable:
+                    logger.info("Heartbeat Redis r?tabli.")
+                    redis_unavailable = False
         except Exception as e:
-            logger.error(f"Heartbeat error: {e}")
+            if not redis_unavailable:
+                logger.warning(f"Heartbeat Redis indisponible: {e}")
+                redis_unavailable = True
+            try:
+                await redis.disconnect()
+            except Exception:
+                pass
+            await asyncio.sleep(2.0)
+            continue
 
         await asyncio.sleep(0.3)
 
 
 async def swarm_listener():
     """
-    Ã‰coute les commandes broadcast de l'essaim.
+    ?coute les commandes broadcast de l'essaim.
 
-    Cette tÃ¢che de fond permet au Banker de rÃ©agir aux ordres globaux
-    ou de dÃ©ployer des drones de surveillance.
+    Cette t?che de fond permet au Banker de r?agir aux ordres globaux
+    ou de d?ployer des drones de surveillance.
     """
     from shared.redis_client import get_redis_client
-    redis = get_redis_client()
+
     swarm: BankerSwarm = app.state.swarm
 
     async def handle_swarm(channel, message):
         action = message.get("action")
         command = message.get("command")
-        
+
         if command == "GLOBAL_STOP":
-            logger.critical(f"ðŸ›‘ KILL-SWITCH RECEIVED: {message.get('reason')}")
-            # ArrÃªt du moteur d'exÃ©cution The Hive Mind
+            logger.critical(f"KILL-SWITCH recu: {message.get('reason')}")
             if hasattr(app.state, 'auto_engine') and app.state.auto_engine.is_active:
                 await app.state.auto_engine.stop()
-                
-            # Notification d'urgence
+
             if hasattr(app.state.auto_engine, 'telegram'):
                 app.state.auto_engine.telegram.send_sync(
-                    f"ðŸš¨ *URGENCE : KILL-SWITCH DÃ‰CLENCHÃ‰* ðŸš¨\n"
-                    f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
-                    f"ðŸ‘¤ Par : {message.get('issuer', 'Unknown')}\n"
-                    f"âš ï¸ Raison : {message.get('reason')}\n"
-                    f"â¸ï¸ Le Bot E.V.A est totalement HALTÃ‰."
+                    f"URGENCE: KILL-SWITCH DECLENCHE\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Par: {message.get('issuer', 'Unknown')}\n"
+                    f"Raison: {message.get('reason')}\n"
+                    f"Le Bot E.V.A est totalement HALTE."
                 )
-                
+
         elif action == "SWARM_SURVEILLANCE":
-            # Lancement automatique d'un drone de surveillance
             await swarm.spawn_drone(
                 name="GoldSurveillance",
                 mission="Surveiller XAUUSD avec le Swarm",
                 coro=swarm.run_gold_surveillance(Decimal("2050.0"))
             )
 
-    await redis.subscribe(["eva.all.swarm_command", "eva.banker.swarm_command"], handle_swarm)
-    await redis.listen()
+    redis_unavailable = False
+
+    while True:
+        redis = get_redis_client()
+        try:
+            await redis.subscribe(["eva.all.swarm_command", "eva.banker.swarm_command"], handle_swarm)
+            if redis_unavailable:
+                logger.info("?coute SWARM Redis r?tablie.")
+                redis_unavailable = False
+            await redis.listen()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if not redis_unavailable:
+                logger.warning(f"SWARM Redis indisponible: {e}")
+                redis_unavailable = True
+            try:
+                await redis.disconnect()
+            except Exception:
+                pass
+            await asyncio.sleep(5.0)
 
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -358,7 +474,7 @@ async def health_check() -> HealthResponse:
     mt5_service: MT5Service = app.state.mt5_service
     settings = app.state.settings
     return HealthResponse(
-        status="ok",
+        status="degraded" if _is_mt5_live_offline(mt5_service) else "ok",
         mt5_connected=mt5_service.is_connected,
         paper_trading=settings.paper_trading,
     )
@@ -389,6 +505,11 @@ async def set_auto_trading(request: AutoTradingRequest):
     """
     engine: AutoTradingEngine = app.state.auto_engine
     if request.enable:
+        if _is_mt5_live_offline(app.state.mt5_service):
+            raise HTTPException(
+                status_code=503,
+                detail="MT5 hors ligne: impossible d'activer l'auto-trading en mode reel.",
+            )
         await engine.start()
         status = "STARTED"
     else:
@@ -491,7 +612,7 @@ async def get_positions() -> list[Position]:
         list[Position]: Liste des positions avec P&L latent, Swap et Ticket.
     """
     mt5_service: MT5Service = app.state.mt5_service
-    return await mt5_service.get_open_positions()
+    return await mt5_service.get_open_positions() or []
 
 
 @app.delete("/positions/{ticket}", tags=["Trading"])
@@ -546,7 +667,13 @@ async def get_account_balance() -> AccountBalance:
         AccountBalance: DonnÃ©es financiÃ¨res temps rÃ©el.
     """
     mt5_service: MT5Service = app.state.mt5_service
-    return await mt5_service.get_account_info()
+    account = await mt5_service.get_account_info()
+    if account is None:
+        raise HTTPException(
+            status_code=503,
+            detail="MT5 hors ligne: informations de compte indisponibles.",
+        )
+    return account
 
 
 @app.get("/ticks/{symbol}", tags=["Trading"])
@@ -575,8 +702,16 @@ async def get_risk_status() -> RiskStatus:
     Returns:
         RiskStatus: Rapport complet de conformitÃ© risque.
     """
+    mt5_service: MT5Service = app.state.mt5_service
     risk_validator: RiskValidator = app.state.risk_validator
-    return await risk_validator.get_current_status()
+    account, positions = await _read_mt5_snapshot(mt5_service)
+    if account is not None:
+        risk_validator.update_account_balance(Decimal(str(account.balance)))
+    risk_validator.update_positions_count(len(positions))
+    risk = await risk_validator.get_current_status()
+    if account is None:
+        return risk.model_copy(update={"trading_allowed": False})
+    return risk
 
 
 @app.post("/risk/check", response_model=RiskCheckResponse, tags=["Risque"])
@@ -625,7 +760,7 @@ async def trigger_kill_switch() -> dict[str, str]:
         dict[str, str]: Rapport des fermetures effectuÃ©es.
     """
     mt5_service: MT5Service = app.state.mt5_service
-    positions = await mt5_service.get_open_positions()
+    positions = await mt5_service.get_open_positions() or []
 
     # ExÃ©cution parallÃ¨le pour la vitesse et la robustesse (Loi 2 - Kill Switch)
     tasks = [mt5_service.close_position(pos.ticket) for pos in positions]
@@ -715,18 +850,27 @@ async def get_trading_status():
     mt5_service: MT5Service = app.state.mt5_service
     risk_validator: RiskValidator = app.state.risk_validator
 
-    account = await mt5_service.get_account_info()
-    positions = await mt5_service.get_open_positions()
+    account, positions = await _read_mt5_snapshot(mt5_service)
+    if account is not None:
+        risk_validator.update_account_balance(Decimal(str(account.balance)))
+    risk_validator.update_positions_count(len(positions))
     risk = await risk_validator.get_current_status()
+    if account is None:
+        risk = risk.model_copy(update={"trading_allowed": False})
 
     return {
+        "status": "offline" if account is None else "online",
+        "connection": {
+            "mt5_connected": mt5_service.is_connected,
+            "mock_mode": mt5_service.mock_mode,
+        },
         "account": {
-            "equity": float(account.equity),
-            "balance": float(account.balance),
-            "margin": float(account.margin),
-            "free_margin": float(account.free_margin),
-            "currency": account.currency,
-            "leverage": account.leverage,
+            "equity": float(account.equity) if account is not None else 0.0,
+            "balance": float(account.balance) if account is not None else 0.0,
+            "margin": float(account.margin) if account is not None else 0.0,
+            "free_margin": float(account.free_margin) if account is not None else 0.0,
+            "currency": account.currency if account is not None else "USD",
+            "leverage": account.leverage if account is not None else 0,
         },
         "positions": [
             {
@@ -752,9 +896,40 @@ async def get_trading_status():
             "dynamic": getattr(app.state.auto_engine, "_dynamic_universe_enabled", False),
             "symbols_total": len(app.state.auto_engine.symbols),
             "batch_size": len(app.state.auto_engine.get_symbol_batch(advance=False)),
+            "lab_live": app.state.auto_engine.get_live_universe_status(),
         }
     }
 
+
+
+@app.get("/performance/models", tags=["Trading"])
+async def get_model_performance(
+    days: int = Query(default=7, ge=1, le=90),
+    limit: int = Query(default=5, ge=1, le=20),
+):
+    """
+    Retourne le PnL realise par moteur de decision sur une fenetre glissante.
+
+    Args:
+        days (int): Nombre de jours a analyser.
+        limit (int): Nombre maximal de strategies retournees par classement.
+
+    Returns:
+        dict[str, Any]: Resume global, details par modele et derniers trades clotures.
+    """
+    mt5_service: MT5Service = app.state.mt5_service
+    to_dt = datetime.now()
+    from_dt = to_dt - timedelta(days=days)
+    performance = await mt5_service.get_strategy_performance(
+        from_dt=from_dt,
+        to_dt=to_dt,
+        limit=limit,
+    )
+    return {
+        "status": "ok",
+        "window_days": days,
+        **performance,
+    }
 
 @app.get("/", tags=["SystÃ¨me"])
 async def root():
@@ -827,6 +1002,8 @@ async def get_propfirm_accounts():
     """
     mt5_service: MT5Service = app.state.mt5_service
     account = await mt5_service.get_account_info()
+    if account is None:
+        return []
 
     # En mode lite, on retourne le compte principal comme un "prop firm account"
     return [

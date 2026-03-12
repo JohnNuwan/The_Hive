@@ -6,6 +6,7 @@ Provides real-time system metrics (psutil) and Docker container stats.
 import asyncio
 import logging
 import platform
+import shutil
 import time
 from typing import Any
 
@@ -68,6 +69,8 @@ class SystemMonitor:
 
     def __init__(self):
         self._docker_client = None
+        self._docker_cli_path = shutil.which("docker")
+        self._docker_cli_missing_logged = False
         self._boot_time = time.time()
         self._last_net_io = None
         self._last_net_time = 0.0
@@ -84,6 +87,24 @@ class SystemMonitor:
             except Exception as e:
                 logger.warning(f"⚠️ Docker client init failed: {e}")
                 self._docker_client = None
+
+    @staticmethod
+    def _safe_container_image(container: Any) -> str:
+        """Retourne un nom d'image sans dependre d'un inspect supplementaire."""
+        try:
+            image_name = container.attrs.get("Config", {}).get("Image")
+            if image_name:
+                return str(image_name)
+        except Exception:
+            pass
+
+        try:
+            if container.image.tags:
+                return str(container.image.tags[0])
+        except Exception:
+            pass
+
+        return "unknown"
 
     # ═══════════════════════════════════════════════════════════════════════
     # SYSTEM METRICS
@@ -233,13 +254,18 @@ class SystemMonitor:
             try:
                 return await self._get_containers_sdk()
             except Exception as e:
-                logger.warning(f"Docker SDK failed: {e}")
+                logger.warning(f"Docker SDK indisponible pour le monitor: {e}")
 
         # Method 2: subprocess
         try:
+            if not self._docker_cli_path:
+                if not self._docker_cli_missing_logged:
+                    logger.info("CLI Docker absente dans le conteneur core, repli desactive.")
+                    self._docker_cli_missing_logged = True
+                return []
             return await self._get_containers_subprocess()
         except Exception as e:
-            logger.warning(f"Docker subprocess failed: {e}")
+            logger.debug(f"Sous-processus Docker indisponible: {e}")
 
         return []
 
@@ -348,9 +374,7 @@ class SystemMonitor:
                         "network_tx": tx_bytes,
                         "pids": pids or 0,
                         "image": (
-                            c.image.tags[0]
-                            if c.image.tags
-                            else str(c.image.short_id)
+                            self._safe_container_image(c)
                         ),
                         "uptime": uptime_str,
                     }
@@ -370,7 +394,7 @@ class SystemMonitor:
                         "network_tx": 0,
                         "pids": 0,
                         "image": (
-                            c.image.tags[0] if c.image.tags else "unknown"
+                            self._safe_container_image(c)
                         ),
                         "uptime": "",
                     }
@@ -382,7 +406,7 @@ class SystemMonitor:
         """Fallback: use docker CLI via subprocess."""
         # Get all containers with their status
         proc = await asyncio.create_subprocess_exec(
-            "docker",
+            self._docker_cli_path or "docker",
             "ps",
             "-a",
             "--format",
@@ -425,7 +449,7 @@ class SystemMonitor:
 
         # Get stats for running containers
         proc2 = await asyncio.create_subprocess_exec(
-            "docker",
+            self._docker_cli_path or "docker",
             "stats",
             "--no-stream",
             "--format",

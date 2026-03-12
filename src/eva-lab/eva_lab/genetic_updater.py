@@ -1,146 +1,223 @@
+"""Gere le registre genetique des champions par horizon."""
+
+from __future__ import annotations
+
 import json
-import os
 import logging
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Timeframe horizons for multi-strategy tracking
 HORIZONS = ["scalp", "intraday", "swing"]
 
 
 class GeneticUpdater:
+    """Maintient le registre ADN des generations MuZero.
+
+    Le registre historique a existe sous deux schemas:
+    - un schema legacy avec ``current_champion`` unique
+    - un schema multi-horizon avec ``champions`` par horizon
+
+    Cette classe normalise automatiquement le registre afin que l'Arena,
+    la promotion live et Nexus lisent toujours la meme source de verite.
     """
-    Système de Mémoire Génétique et d'Automutation de l'IA.
-    Archive l'ADN (générations, performances, configurations) de l'Agent.
-    
-    ### MTF Architecture (Sprint 19)
-    Chaque registre stocke maintenant 3 Champions distincts, un par horizon:
-    - scalp:    Optimisé pour les positions courtes (M5 / +1H)
-    - intraday: Optimisé pour les positions journalières (H1 / +1D)
-    - swing:    Optimisé pour les positions longues (D1 / +1W)
-    """
-    
-    def __init__(self, registry_path: str = "data/models_registry.json"):
-        self.registry_path = registry_path
+
+    def __init__(self, registry_path: str = "data/models_registry.json") -> None:
+        """Initialise le registre genetique.
+
+        Args:
+            registry_path (str): Chemin du registre JSON.
+        """
+        self.registry_path = Path(registry_path)
         self._ensure_registry()
 
-    def _ensure_registry(self):
-        """Vérifie que le registre ADN existe, sinon le crée."""
-        dirname = os.path.dirname(self.registry_path)
-        if dirname and not os.path.exists(dirname):
-            os.makedirs(dirname, exist_ok=True)
-            
-        if not os.path.exists(self.registry_path):
-            initial_state = {
-                "version": "2.0-MTF",
-                "description": "Universal Multi-Timeframe Genetic Registry",
-                "champions": {
-                    # One champion per trading horizon
-                    "scalp": "gen_000_baseline",
-                    "intraday": "gen_000_baseline",
-                    "swing": "gen_000_baseline",
-                },
-                "generations": {
-                    "gen_000_baseline": {
-                        "timestamp": datetime.now().isoformat(),
-                        "win_rate": {"scalp": 50.0, "intraday": 50.0, "swing": 50.0},
-                        "return_pct": {"scalp": 0.0, "intraday": 0.0, "swing": 0.0},
-                        "battles_won": {"scalp": 0, "intraday": 0, "swing": 0},
-                        "horizon_accuracy": {"scalp": 0.33, "intraday": 0.33, "swing": 0.33}
-                    }
-                }
-            }
-            with open(self.registry_path, "w", encoding="utf-8") as f:
-                json.dump(initial_state, f, indent=4)
+    def _baseline_generation(self) -> dict[str, Any]:
+        """Construit l'entree baseline compatible multi-horizon.
+
+        Returns:
+            dict[str, Any]: Metriques initiales du champion baseline.
+        """
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "win_rate": {horizon: 50.0 for horizon in HORIZONS},
+            "return_pct": {horizon: 0.0 for horizon in HORIZONS},
+            "battles_won": {horizon: 0 for horizon in HORIZONS},
+            "horizon_accuracy": {horizon: 0.33 for horizon in HORIZONS},
+        }
+
+    def _initial_registry(self) -> dict[str, Any]:
+        """Retourne un registre multi-horizon valide.
+
+        Returns:
+            dict[str, Any]: Registre ADN initialise.
+        """
+        baseline_id = "gen_000_baseline"
+        champions = {horizon: baseline_id for horizon in HORIZONS}
+        return {
+            "version": "2.1-MTF",
+            "description": "Registre genetique multi-horizon THE HIVE",
+            "current_champion": baseline_id,
+            "champions": champions,
+            "generations": {
+                baseline_id: self._baseline_generation(),
+            },
+        }
+
+    def _ensure_registry(self) -> None:
+        """Cree le registre si absent puis force le schema courant."""
+        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.registry_path.exists():
+            self._save_registry(self._initial_registry())
+            return
+
+        registry = self._load_registry()
+        self._save_registry(registry)
+
+    def _load_registry(self) -> dict[str, Any]:
+        """Charge et normalise le registre ADN.
+
+        Returns:
+            dict[str, Any]: Registre multi-horizon normalise.
+        """
+        try:
+            raw_data = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Registre genetique illisible, recreation du baseline: %s", exc)
+            return self._initial_registry()
+
+        baseline_id = "gen_000_baseline"
+        registry = dict(raw_data or {})
+        registry.setdefault("version", "2.1-MTF")
+        registry.setdefault("description", "Registre genetique multi-horizon THE HIVE")
+
+        generations = registry.get("generations")
+        if not isinstance(generations, dict):
+            generations = {}
+        registry["generations"] = generations
+        if baseline_id not in generations:
+            generations[baseline_id] = self._baseline_generation()
+
+        legacy_champion = str(registry.get("current_champion") or baseline_id)
+        champions = registry.get("champions")
+        if not isinstance(champions, dict):
+            champions = {}
+
+        normalized_champions: dict[str, str] = {}
+        for horizon in HORIZONS:
+            champion_id = str(champions.get(horizon) or legacy_champion or baseline_id)
+            normalized_champions[horizon] = champion_id
+        registry["champions"] = normalized_champions
+
+        # Compatibilite legacy: on conserve la clef historique, mais elle suit
+        # desormais le champion intraday au lieu de forcer tout le systeme.
+        registry["current_champion"] = normalized_champions.get("intraday", baseline_id)
+        return registry
+
+    def _save_registry(self, registry: dict[str, Any]) -> None:
+        """Ecrit le registre ADN sur disque.
+
+        Args:
+            registry (dict[str, Any]): Registre normalise a persister.
+        """
+        self.registry_path.write_text(
+            json.dumps(registry, indent=4, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def get_champion(self, horizon: str = "intraday") -> str:
-        """Retourne l'ID du modèle actuellement Champion pour un horizon donné."""
-        with open(self.registry_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Migrate legacy registry format if needed
-        if "current_champion" in data:
-            return data.get("current_champion", "gen_000_baseline")
-        return data.get("champions", {}).get(horizon, "gen_000_baseline")
-    
-    def get_all_champions(self) -> Dict[str, str]:
-        """Retourne tous les Champions par horizon."""
-        with open(self.registry_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if "current_champion" in data:
-            # Legacy support
-            champ = data.get("current_champion", "gen_000_baseline")
-            return {h: champ for h in HORIZONS}
-        return data.get("champions", {h: "gen_000_baseline" for h in HORIZONS})
+        """Retourne le champion ADN courant d'un horizon.
+
+        Args:
+            horizon (str): Horizon cible.
+
+        Returns:
+            str: Identifiant de generation du champion.
+        """
+        registry = self._load_registry()
+        return str(registry["champions"].get(horizon, "gen_000_baseline"))
+
+    def get_all_champions(self) -> dict[str, str]:
+        """Retourne la table des champions ADN par horizon.
+
+        Returns:
+            dict[str, str]: Identifiants de champion par horizon.
+        """
+        registry = self._load_registry()
+        return {horizon: str(registry["champions"].get(horizon, "gen_000_baseline")) for horizon in HORIZONS}
 
     def register_new_generation(
         self,
         gen_id: str,
-        metrics: Dict[str, Any],
+        metrics: dict[str, Any],
         is_champion: bool = False,
-        horizon: Optional[str] = None
-    ):
-        """
-        Enregistre l'ADN d'une nouvelle génération de modèle.
-        
+        horizon: str | None = None,
+    ) -> None:
+        """Enregistre une nouvelle generation MuZero.
+
         Args:
-            gen_id:       Identifiant unique de la génération (ex: gen_042_bullish)
-            metrics:      Dictionnaire de métriques {win_rate, return_pct, battles_won, ...}
-            is_champion:  Si True, ce modèle devient le Champion pour son horizon
-            horizon:      Trading horizon ('scalp', 'intraday', 'swing'). None = tous les horizons.
+            gen_id (str): Identifiant unique de generation.
+            metrics (dict[str, Any]): Metriques de la generation.
+            is_champion (bool): Indique si la generation devient championne.
+            horizon (str | None): Horizon cible. ``None`` signifie tous les horizons.
         """
-        with open(self.registry_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            
-        # Ensure the registry is in the new schema
-        if "champions" not in data:
-            data["champions"] = {h: data.get("current_champion", "gen_000_baseline") for h in HORIZONS}
-            
-        data["generations"][gen_id] = {
+        registry = self._load_registry()
+        registry["generations"][gen_id] = {
             "timestamp": datetime.now().isoformat(),
-            **metrics
+            **metrics,
         }
-        
+
         if is_champion:
             if horizon:
-                old_champion = data["champions"].get(horizon)
-                data["champions"][horizon] = gen_id
-                logger.info(f"🧬 MTF MUTATION [{horizon.upper()}]: Champion {old_champion} → {gen_id} !")
+                previous = registry["champions"].get(horizon, "gen_000_baseline")
+                registry["champions"][horizon] = gen_id
+                logger.info(
+                    "Mutation ADN %s: champion %s -> %s.",
+                    horizon.upper(),
+                    previous,
+                    gen_id,
+                )
             else:
-                # Global champion for all horizons
-                for h in HORIZONS:
-                    data["champions"][h] = gen_id
-                logger.info(f"🧬 MUTATION GLOBALE : Nouveau Champion universel = {gen_id} !")
-            
-        with open(self.registry_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
-            
-    def get_performance_summary(self) -> Dict[str, Any]:
-        """Retourne un résumé des performances par horizon."""
-        with open(self.registry_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        
-        summary = {}
-        champions = data.get("champions", {})
-        
-        for horizon, gen_id in champions.items():
-            gen_data = data.get("generations", {}).get(gen_id, {})
-            wr = gen_data.get("win_rate", {})
-            rp = gen_data.get("return_pct", {})
-            
+                for current_horizon in HORIZONS:
+                    registry["champions"][current_horizon] = gen_id
+                logger.info("Mutation ADN globale: %s devient champion multi-horizon.", gen_id)
+
+            registry["current_champion"] = registry["champions"].get("intraday", gen_id)
+
+        self._save_registry(registry)
+
+    def get_performance_summary(self) -> dict[str, Any]:
+        """Retourne un resume de performance des champions ADN.
+
+        Returns:
+            dict[str, Any]: Metriques de synthese par horizon.
+        """
+        registry = self._load_registry()
+        summary: dict[str, Any] = {}
+
+        for horizon, gen_id in registry["champions"].items():
+            generation = registry["generations"].get(gen_id, {})
+            win_rate = generation.get("win_rate", {})
+            return_pct = generation.get("return_pct", {})
+
             summary[horizon] = {
                 "champion": gen_id,
-                "win_rate": wr.get(horizon, wr) if isinstance(wr, dict) else wr,
-                "return_pct": rp.get(horizon, rp) if isinstance(rp, dict) else rp,
+                "win_rate": win_rate.get(horizon, win_rate) if isinstance(win_rate, dict) else win_rate,
+                "return_pct": return_pct.get(horizon, return_pct) if isinstance(return_pct, dict) else return_pct,
             }
+
         return summary
-            
-    def check_for_updates(self):
-        """Compatibilité avec l'ancienne signature mockée."""
+
+    def check_for_updates(self) -> dict[str, Any]:
+        """Expose une reponse legacy attendue par d'anciens appels.
+
+        Returns:
+            dict[str, Any]: Reponse de compatibilite.
+        """
         return {
             "updates_found": 0,
             "type": "TRADING_STRATEGY",
             "action": "NO_ACTION",
-            "safety_check": "PASSED"
+            "safety_check": "PASSED",
         }

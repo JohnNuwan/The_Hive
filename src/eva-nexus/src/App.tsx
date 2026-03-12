@@ -1,9 +1,8 @@
-import { useState, useEffect } from 'react'
+﻿import { useState, useEffect } from 'react'
 import {
     LayoutDashboard,
     MessageSquare,
     TrendingUp,
-    Shield,
     Settings,
     Activity,
     Cpu,
@@ -34,24 +33,26 @@ import KnowledgeVault from './components/KnowledgeVault'
 import AgentFeed from './components/AgentFeed'
 
 // Services
-import { getStatus } from './services/api'
+import { getAllNodesHealth } from './services/api'
 
 type TabId = 'dashboard' | 'chat' | 'trading' | 'graph' | 'memory' | 'monitoring' | 'osint' | 'factories' | 'admin' | 'settings' | 'muse' | 'knowledge' | 'agentfeed'
 
 function App() {
     const [activeTab, setActiveTab] = useState<TabId>('chat')
     const [systemStatus, setSystemStatus] = useState({ core: 'online', banker: 'online', sentinel: 'online' })
-    const [securityData, setSecurityData] = useState<any>(null)
 
     // WebSocket / Status Poll
     useEffect(() => {
         const fetchStatus = async () => {
             try {
-                const status = await getStatus()
+                const status = await getAllNodesHealth()
+                const core = status.find((node) => node.name === 'EVA Core')?.status || 'offline'
+                const banker = status.find((node) => node.name === 'Banker')?.status || 'offline'
+                const sentinel = status.find((node) => node.name === 'Sentinel')?.status || 'offline'
                 setSystemStatus({
-                    core: status.core?.status || 'online',
-                    banker: status.banker?.status || 'online',
-                    sentinel: status.sentinel?.status || 'online'
+                    core,
+                    banker,
+                    sentinel,
                 })
             } catch (e) {
                 console.error("Status Sync Error", e)
@@ -210,7 +211,7 @@ function App() {
                             <span>System Load: Optimal</span>
                         </div>
                         <div className="hidden md:block px-3 py-1 border border-matrix/5 rounded">
-                            Genesis Phase • {new Date().toLocaleTimeString()}
+                            Genesis Phase â€¢ {new Date().toLocaleTimeString()}
                         </div>
                     </div>
                 </header>
@@ -284,3 +285,4 @@ function StatusBadge({ label, status }: { label: string, status: string }) {
 }
 
 export default App
+

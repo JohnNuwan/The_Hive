@@ -7,6 +7,7 @@ C'est ici que les stratÃ©gies naissent, combattent et Ã©voluent.
 """
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -20,6 +21,7 @@ from shared.redis_client import init_redis, get_redis_client
 
 from eva_lab.arena import Arena
 from eva_lab.backtester import Backtester
+from eva_lab.champion_promoter import ChampionPromoter
 from eva_lab.dreamer_model import DreamerModel
 from eva_lab.genetic_updater import GeneticUpdater
 from eva_lab.shadow_learning import ShadowLearningService
@@ -81,6 +83,10 @@ class TradeRecordRequest(BaseModel):
     volume: float = 0.01
     pnl: float = 0.0
     indicators: Optional[dict] = None
+    observation: Optional[dict] = None
+    next_observation: Optional[dict] = None
+    metadata: Optional[dict] = None
+    timestamp: Optional[str] = None
     done: bool = False
 
 class GNNPredictRequest(BaseModel):
@@ -118,6 +124,7 @@ async def lifespan(app: FastAPI):
     app.state.backtester = Backtester()
     app.state.dreamer = DreamerModel()
     app.state.genetic = GeneticUpdater()
+    app.state.promoter = ChampionPromoter()
 
     # â”€â”€â”€ Sprint 5 : Feature Flags â”€â”€â”€
     app.state.dreamer_gate = DreamerGate(
@@ -391,9 +398,50 @@ async def record_trade(request: TradeRecordRequest):
         volume=request.volume,
         pnl=request.pnl,
         indicators=request.indicators,
+        observation=request.observation,
+        next_observation=request.next_observation,
+        metadata=request.metadata,
+        timestamp=request.timestamp,
         done=request.done,
     )
     return {"status": "recorded", "buffer_size": shadow.buffer.size}
+
+
+@app.post("/shadow/feedback")
+async def record_trade_feedback(request: TradeRecordRequest):
+    """
+    Enregistre une cloture de trade dans le dataset Shadow Learning.
+
+    Args:
+        request (TradeRecordRequest): Etat final du trade cloture.
+
+    Returns:
+        dict: Statut du feedback enregistre.
+    """
+    shadow: ShadowLearningService = app.state.shadow
+    if not shadow:
+        return {"status": "disabled", "reason": "ENABLE_SHADOW_LEARNING=False"}
+
+    metadata = dict(request.metadata or {})
+    metadata.setdefault("source", "banker_feedback")
+    shadow.record_trade(
+        symbol=request.symbol,
+        action=request.action,
+        price=request.price,
+        volume=request.volume,
+        pnl=request.pnl,
+        indicators=request.indicators,
+        observation=request.observation,
+        next_observation=request.next_observation,
+        metadata=metadata,
+        timestamp=request.timestamp,
+        done=True,
+    )
+    return {
+        "status": "feedback_recorded",
+        "buffer_size": shadow.buffer.size,
+        "wm_loss": None,
+    }
 
 
 @app.post("/shadow/flush")
@@ -435,6 +483,78 @@ async def dreamer_status():
     """
     gate: DreamerGate = app.state.dreamer_gate
     return gate.get_status()
+
+
+@app.get("/champions/status")
+async def champion_status():
+    """
+    Retourne l'etat complet des champions live et des promotions.
+
+    Returns:
+        dict: Vue agregée pour Nexus sur les champions MuZero.
+    """
+    promoter: ChampionPromoter = app.state.promoter
+    genetic: GeneticUpdater = app.state.genetic
+    gate: DreamerGate = app.state.dreamer_gate
+
+    horizons = ["scalp", "intraday", "swing"]
+    registry_champions = genetic.get_all_champions()
+    performance_summary = genetic.get_performance_summary()
+    nightly_summary_path = "data/checkpoints/nightly_training_summary.json"
+    nightly_summary = None
+
+    try:
+        with open(nightly_summary_path, "r", encoding="utf-8") as file_obj:
+            nightly_summary = json.load(file_obj)
+    except FileNotFoundError:
+        nightly_summary = None
+    except Exception as exc:
+        logger.warning("Lecture du resume nocturne impossible: %s", exc)
+
+    horizon_status = {
+        horizon: promoter.build_horizon_status(horizon, registry_champions.get(horizon))
+        for horizon in horizons
+    }
+    live_champions = {
+        horizon: status.get("live_champion_id")
+        for horizon, status in horizon_status.items()
+    }
+
+    return {
+        "status": "ok",
+        "selection_policy": promoter.get_live_selection_policy(),
+        "dreamer_gate": gate.get_status(),
+        "champions": registry_champions,
+        "registry_champions": registry_champions,
+        "live_champions": live_champions,
+        "performance_summary": performance_summary,
+        "horizons": horizon_status,
+        "nightly_summary": nightly_summary,
+    }
+
+
+@app.get("/live/universe")
+async def live_universe(horizon: str = Query(default="intraday")):
+    """
+    Retourne l'univers live recommande pour un horizon MuZero.
+
+    Args:
+        horizon (str): Horizon cible (`scalp`, `intraday`, `swing`).
+
+    Returns:
+        dict: Liste de symboles recommandee et metadonnees de restriction.
+    """
+    promoter: ChampionPromoter = app.state.promoter
+    status = promoter.build_horizon_status(horizon)
+    return {
+        "status": "ok",
+        "horizon": horizon.lower(),
+        "selection_policy": promoter.get_live_selection_policy(),
+        "engine_label": status.get("engine_label"),
+        "selection": status.get("selection"),
+        "promotion_gate": status.get("promotion_gate"),
+        "live_universe": status.get("live_universe"),
+    }
 
 
 @app.post("/dreamer/predict")

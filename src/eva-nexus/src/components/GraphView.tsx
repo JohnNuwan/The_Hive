@@ -1,7 +1,7 @@
-import { useEffect, useState, useRef } from 'react'
+﻿import { useEffect, useState, useRef } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
 import { getGNNGraph } from '../services/api'
-import { Loader2, Zap, Share2, Target, Network } from 'lucide-react'
+import { Loader2, Zap, Target, Network } from 'lucide-react'
 
 export default function GraphView() {
     const [data, setData] = useState({ nodes: [], links: [] })
@@ -137,3 +137,4 @@ export default function GraphView() {
         </div>
     )
 }
+

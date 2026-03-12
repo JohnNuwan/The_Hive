@@ -12,15 +12,41 @@ Reference: HippoRAG 2 (Ohio State / UIUC, 2025)
 """
 
 import logging
+import os
 import re
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from neo4j import GraphDatabase, AsyncGraphDatabase
 
 from shared import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_neo4j_connection() -> tuple[str, tuple[str, str]]:
+    """Resout l'URI et l'authentification Neo4j.
+
+    Cette resolution accepte deux conventions de configuration pour eviter
+    les divergences entre execution locale et Docker Compose.
+
+    Returns:
+        tuple[str, tuple[str, str]]: URI finale et couple utilisateur/mot de passe.
+    """
+    settings = get_settings()
+    raw_uri = os.getenv("NEO4J_URI", "").strip()
+    if raw_uri:
+        parsed = urlparse(raw_uri)
+        host = parsed.hostname or settings.neo4j_host
+        port = parsed.port or settings.neo4j_port
+        uri = f"bolt://{host}:{port}"
+    else:
+        uri = f"bolt://{settings.neo4j_host}:{settings.neo4j_port}"
+
+    user = os.getenv("NEO4J_USER", settings.neo4j_user)
+    password = os.getenv("NEO4J_PASSWORD", settings.neo4j_password.get_secret_value())
+    return uri, (user, password)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -134,12 +160,10 @@ class GraphMemoryWithNeo4j:
     """
 
     def __init__(self):
-        settings = get_settings()
-        self.uri = f"bolt://{settings.neo4j_host}:{settings.neo4j_port}"
-        self.auth = (settings.neo4j_user, settings.neo4j_password.get_secret_value())
+        self.uri, self.auth = _resolve_neo4j_connection()
         self.driver = None
         self._indexes_created = False
-        logger.info(f"GraphMemory (HippoRAG 2) initialized targeting {self.uri}")
+        logger.info("GraphMemory (HippoRAG 2) initialise vers %s", self.uri)
 
     async def connect(self):
         """Establishes connection with Neo4j."""

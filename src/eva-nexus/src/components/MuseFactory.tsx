@@ -1,11 +1,11 @@
-import { useState, useEffect } from 'react';
+﻿import { useState, useEffect } from 'react';
 import {
     Zap, Image, Video, Film, TrendingUp,
-    Power, RefreshCw, Lock, Eye, ChevronDown, ChevronUp,
+    RefreshCw, Lock, Eye,
     Clock, Target, Download, PlayCircle
 } from 'lucide-react';
 
-// ─── Types ──────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface Niche {
     id: string;
@@ -21,7 +21,7 @@ interface Niche {
 
 type ContentType = 'image' | 'video';
 
-// ─── Main Component ───────────────────────────────────────────────────────────
+// â”€â”€â”€ Main Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export default function MuseFactory() {
     const MUSE_API = '/api/muse';
@@ -37,8 +37,6 @@ export default function MuseFactory() {
     const [loadingScores, setLoadingScores] = useState(false);
     const [outputUrl, setOutputUrl] = useState<string | null>(null);
     const [outputType, setOutputType] = useState<'image' | 'video'>('image');
-    const [expanded, setExpanded] = useState<string | null>(null);
-    const [autoMode, setAutoMode] = useState(false);
 
     // Load niches from API
     useEffect(() => {
@@ -52,16 +50,16 @@ export default function MuseFactory() {
             .catch(() => {
                 // Fallback hardcoded niches while API loads
                 const fallback: Niche[] = [
-                    { id: 'girlfriend', label: '💕 Girlfriend Experience', description: 'Sweet, intimate, candid', enabled: true, is_nsfw: false, post_interval_hours: 6, recommended_loras: [] },
-                    { id: 'fitness', label: '🏋️ Fitness & Athletic', description: 'Sport, athletic, energetic', enabled: true, is_nsfw: false, post_interval_hours: 8, recommended_loras: [] },
-                    { id: 'dominatrice', label: '⛓️ Dominatrice', description: 'BDSM dominant, latex, leather', enabled: true, is_nsfw: true, post_interval_hours: 12, recommended_loras: [] },
-                    { id: 'soumise', label: '🎀 Douce & Soumise', description: 'Shy, submissive, pastel', enabled: true, is_nsfw: true, post_interval_hours: 10, recommended_loras: [] },
-                    { id: 'pied', label: '🦶 Foot Fetish', description: 'Elegant feet, pedicure, close-up', enabled: true, is_nsfw: false, post_interval_hours: 12, recommended_loras: [] },
-                    { id: 'rousse', label: '🦊 Rousse', description: 'Red hair, freckles, natural', enabled: true, is_nsfw: false, post_interval_hours: 8, recommended_loras: [] },
-                    { id: 'petite', label: '🌸 Petite & Cute', description: 'Small frame, playful, kawaii', enabled: true, is_nsfw: false, post_interval_hours: 8, recommended_loras: [] },
-                    { id: 'milf', label: '👑 MILF & Mature', description: 'Mature, confident, elegant', enabled: true, is_nsfw: false, post_interval_hours: 10, recommended_loras: [] },
-                    { id: 'cosplay', label: '🎮 Cosplay & Anime', description: 'Gaming, anime, costume', enabled: true, is_nsfw: false, post_interval_hours: 12, recommended_loras: [] },
-                    { id: 'furry', label: '🦊 Furry Anthro', description: 'Anthropomorphic art', enabled: true, is_nsfw: false, post_interval_hours: 12, recommended_loras: [] },
+                    { id: 'girlfriend', label: 'ðŸ’• Girlfriend Experience', description: 'Sweet, intimate, candid', enabled: true, is_nsfw: false, post_interval_hours: 6, recommended_loras: [] },
+                    { id: 'fitness', label: 'ðŸ‹ï¸ Fitness & Athletic', description: 'Sport, athletic, energetic', enabled: true, is_nsfw: false, post_interval_hours: 8, recommended_loras: [] },
+                    { id: 'dominatrice', label: 'â›“ï¸ Dominatrice', description: 'BDSM dominant, latex, leather', enabled: true, is_nsfw: true, post_interval_hours: 12, recommended_loras: [] },
+                    { id: 'soumise', label: 'ðŸŽ€ Douce & Soumise', description: 'Shy, submissive, pastel', enabled: true, is_nsfw: true, post_interval_hours: 10, recommended_loras: [] },
+                    { id: 'pied', label: 'ðŸ¦¶ Foot Fetish', description: 'Elegant feet, pedicure, close-up', enabled: true, is_nsfw: false, post_interval_hours: 12, recommended_loras: [] },
+                    { id: 'rousse', label: 'ðŸ¦Š Rousse', description: 'Red hair, freckles, natural', enabled: true, is_nsfw: false, post_interval_hours: 8, recommended_loras: [] },
+                    { id: 'petite', label: 'ðŸŒ¸ Petite & Cute', description: 'Small frame, playful, kawaii', enabled: true, is_nsfw: false, post_interval_hours: 8, recommended_loras: [] },
+                    { id: 'milf', label: 'ðŸ‘‘ MILF & Mature', description: 'Mature, confident, elegant', enabled: true, is_nsfw: false, post_interval_hours: 10, recommended_loras: [] },
+                    { id: 'cosplay', label: 'ðŸŽ® Cosplay & Anime', description: 'Gaming, anime, costume', enabled: true, is_nsfw: false, post_interval_hours: 12, recommended_loras: [] },
+                    { id: 'furry', label: 'ðŸ¦Š Furry Anthro', description: 'Anthropomorphic art', enabled: true, is_nsfw: false, post_interval_hours: 12, recommended_loras: [] },
                 ];
                 setNiches(fallback);
                 setSelectedNiche(fallback[0]);
@@ -151,7 +149,7 @@ export default function MuseFactory() {
     return (
         <div style={{ display: 'flex', height: '100%', gap: '16px', padding: '16px', background: '#060611', color: '#e0e0e0', fontFamily: "'Inter', sans-serif" }}>
 
-            {/* LEFT — Niche Roster */}
+            {/* LEFT â€” Niche Roster */}
             <div style={{ width: '340px', display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto' }}>
 
                 {/* Header */}
@@ -167,7 +165,7 @@ export default function MuseFactory() {
                             style={{ background: 'none', border: '1px solid #1a2a3a', borderRadius: '4px', padding: '4px 8px', color: '#888', cursor: 'pointer', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
                         >
                             <RefreshCw size={10} style={{ animation: loadingScores ? 'spin 1s linear infinite' : 'none' }} />
-                            {loadingScores ? 'Analyse...' : 'Score marché'}
+                            {loadingScores ? 'Analyse...' : 'Score marchÃ©'}
                         </button>
                     </div>
                 </div>
@@ -202,12 +200,12 @@ export default function MuseFactory() {
                 ))}
             </div>
 
-            {/* CENTER — Generator */}
+            {/* CENTER â€” Generator */}
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '12px', overflowY: 'auto' }}>
 
                 <div style={{ fontSize: '12px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Zap size={14} />
-                    Studio — {selectedNiche?.label || 'Sélectionne une niche'}
+                    Studio â€” {selectedNiche?.label || 'SÃ©lectionne une niche'}
                 </div>
 
                 {/* Content Type Toggle */}
@@ -226,7 +224,7 @@ export default function MuseFactory() {
                             }}
                         >
                             {type === 'image' ? <Image size={13} /> : <Film size={13} />}
-                            {type === 'image' ? 'Image' : 'Vidéo (AnimateDiff)'}
+                            {type === 'image' ? 'Image' : 'VidÃ©o (AnimateDiff)'}
                         </button>
                     ))}
                 </div>
@@ -238,7 +236,7 @@ export default function MuseFactory() {
                         value={prompt}
                         onChange={e => setPrompt(e.target.value)}
                         rows={3}
-                        placeholder={selectedNiche?.description || 'Décris le contenu à générer...'}
+                        placeholder={selectedNiche?.description || 'DÃ©cris le contenu Ã  gÃ©nÃ©rer...'}
                         style={{
                             width: '100%', background: '#0a0a1a', border: '1px solid #1a2a3a', borderRadius: '6px',
                             color: '#c0c0c0', padding: '10px 12px', fontSize: '13px', resize: 'vertical',
@@ -263,7 +261,7 @@ export default function MuseFactory() {
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                             <Lock size={13} color={privateMode ? '#ff1493' : '#444'} />
                             <div>
-                                <div style={{ fontSize: '12px', color: privateMode ? '#ff1493' : '#888' }}>Contenu Privé</div>
+                                <div style={{ fontSize: '12px', color: privateMode ? '#ff1493' : '#888' }}>Contenu PrivÃ©</div>
                                 <div style={{ fontSize: '10px', color: '#444' }}>Mode OnlyFans / NSFW</div>
                             </div>
                         </div>
@@ -286,7 +284,7 @@ export default function MuseFactory() {
                             <Eye size={13} color={faceSwap ? '#00bfff' : '#444'} />
                             <div>
                                 <div style={{ fontSize: '12px', color: faceSwap ? '#00bfff' : '#888' }}>ReActor FaceSwap</div>
-                                <div style={{ fontSize: '10px', color: '#444' }}>Injecte l'identité</div>
+                                <div style={{ fontSize: '10px', color: '#444' }}>Injecte l'identitÃ©</div>
                             </div>
                         </div>
                         <div style={{ width: '34px', height: '18px', background: faceSwap ? '#00bfff' : '#1a2a3a', borderRadius: '9px', position: 'relative', transition: 'all 0.2s' }}>
@@ -302,7 +300,7 @@ export default function MuseFactory() {
                         {selectedNiche.recommended_loras.map((l, i) => (
                             <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#666', padding: '2px 0' }}>
                                 <span>{l.filename}</span>
-                                <span style={{ color: '#00ff41' }}>×{l.strength}</span>
+                                <span style={{ color: '#00ff41' }}>Ã—{l.strength}</span>
                             </div>
                         ))}
                     </div>
@@ -323,16 +321,16 @@ export default function MuseFactory() {
                     }}
                 >
                     {loading ? (
-                        <><RefreshCw size={14} style={{ animation: 'spin 1s linear infinite' }} /> Génération en cours...</>
+                        <><RefreshCw size={14} style={{ animation: 'spin 1s linear infinite' }} /> GÃ©nÃ©ration en cours...</>
                     ) : contentType === 'video' ? (
-                        <><PlayCircle size={14} /> Générer Clip Vidéo</>
+                        <><PlayCircle size={14} /> GÃ©nÃ©rer Clip VidÃ©o</>
                     ) : (
-                        <><Zap size={14} /> Générer Image</>
+                        <><Zap size={14} /> GÃ©nÃ©rer Image</>
                     )}
                 </button>
             </div>
 
-            {/* RIGHT — Output */}
+            {/* RIGHT â€” Output */}
             <div style={{ width: '380px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
 
                 <div style={{ fontSize: '12px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -361,7 +359,7 @@ export default function MuseFactory() {
                             ) : (
                                 <>
                                     {contentType === 'video' ? <Video size={40} style={{ marginBottom: '12px' }} /> : <Image size={40} style={{ marginBottom: '12px' }} />}
-                                    <div style={{ fontSize: '12px' }}>En attente de génération</div>
+                                    <div style={{ fontSize: '12px' }}>En attente de gÃ©nÃ©ration</div>
                                 </>
                             )}
                         </div>
@@ -378,7 +376,7 @@ export default function MuseFactory() {
                             color: '#00ff41', textDecoration: 'none', fontSize: '12px'
                         }}
                     >
-                        <Download size={13} /> Télécharger
+                        <Download size={13} /> TÃ©lÃ©charger
                     </a>
                 )}
 
@@ -402,7 +400,7 @@ export default function MuseFactory() {
                                 </div>
                             )}
                             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                                <span style={{ color: '#666' }}>LoRAs chargés</span>
+                                <span style={{ color: '#666' }}>LoRAs chargÃ©s</span>
                                 <span style={{ color: '#aaa' }}>{selectedNiche.recommended_loras.length}</span>
                             </div>
                         </div>
@@ -416,3 +414,4 @@ export default function MuseFactory() {
         </div>
     );
 }
+

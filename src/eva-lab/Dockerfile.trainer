@@ -49,12 +49,17 @@ RUN pip install --no-cache-dir \
 
 # Utilitaires ML
 RUN pip install --no-cache-dir \
-    numpy pandas colorama tqdm \
-    MetaTrader5 \
-    ta-lib-python || true
+    numpy pandas colorama tqdm rich \
+    flax==0.8.4 \
+    orbax-checkpoint==0.5.16 \
+    nest_asyncio==1.6.0
+
+# TA-Lib est optionnel dans cette image: l'entrainement principal repose sur shared.indicators.
+RUN pip install --no-cache-dir ta-lib-python || true
 
 # Code applicatif
 WORKDIR /app
+ENV PYTHONPATH=/app/eva-lab:/app/shared
 
 COPY src/shared /app/shared
 RUN pip install --no-cache-dir /app/shared
@@ -62,8 +67,19 @@ RUN pip install --no-cache-dir /app/shared
 COPY src/eva-lab /app/eva-lab
 RUN pip install --no-cache-dir --no-deps /app/eva-lab
 
-COPY src/eva-banker /app/eva-banker
-RUN pip install --no-cache-dir /app/eva-banker
+# Verrouille la pile JAX en derniere couche pour eviter qu'une dependance
+# transitive remonte vers une version incompatible avec Haiku.
+RUN pip install --no-cache-dir --upgrade --no-deps \
+    jax==0.4.23 \
+    jaxlib==0.4.23+cuda11.cudnn86 \
+    dm-haiku==0.0.11 \
+    optax==0.1.7 \
+    chex==0.1.85 \
+    flax==0.8.4 \
+    orbax-checkpoint==0.5.16 \
+    nest_asyncio==1.6.0 \
+    -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && \
+    python -c "import importlib.metadata as md; import jax, haiku, flax, optax, chex; assert jax.__version__ == '0.4.23'; assert md.version('jaxlib') == '0.4.23+cuda11.cudnn86'; print('Pile JAX verrouillee:', jax.__version__, md.version('jaxlib'), haiku.__version__, flax.__version__, optax.__version__, chex.__version__)"
 
 # Scripts Julia pour les indicateurs
 COPY src/eva-lab/scripts/julia /app/julia_scripts
