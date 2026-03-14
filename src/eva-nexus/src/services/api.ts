@@ -1,8 +1,8 @@
-/**
- * THE HIVE — API Service
+﻿/**
+ * THE HIVE â€” API Service
  */
 
-// ═══ HELPERS ═══
+// â•â•â• HELPERS â•â•â•
 function uuidv4() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
         const r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
@@ -20,7 +20,7 @@ export function createClientUuid() {
 
 
 
-// ═══ AUTH HELPERS ═══
+// â•â•â• AUTH HELPERS â•â•â•
 const TOKEN_KEY = 'hive-auth-token'
 const LOCAL_BANKER_URL = 'http://127.0.0.1:8100'
 const CAN_BROWSER_USE_LOCAL_BANKER = ['127.0.0.1', 'localhost'].includes(window.location.hostname)
@@ -35,7 +35,7 @@ function authHeaders(): Record<string, string> {
     return token ? { 'Authorization': `Bearer ${token}` } : {}
 }
 
-// ═══ TYPES ═══
+// â•â•â• TYPES â•â•â•
 export interface NodeHealth {
     name: string
     status: 'online' | 'offline' | 'degraded'
@@ -129,7 +129,7 @@ export interface ContainerStats {
     uptime: string
 }
 
-// ═══ API HELPERS ═══
+// â•â•â• API HELPERS â•â•â•
 async function fetchWithTimeout(url: string, options: RequestInit = {}, timeout = 3000): Promise<Response> {
     const controller = new AbortController()
     const id = setTimeout(() => controller.abort(), timeout)
@@ -158,7 +158,7 @@ export async function safeFetch<T>(url: string, fallback: T, timeout = 3000): Pr
     }
 }
 
-// ═══ HEALTH CHECKS ═══
+// â•â•â• HEALTH CHECKS â•â•â•
 async function probeNodeHealth(name: string, url: string): Promise<NodeHealth> {
     const start = performance.now()
     try {
@@ -270,7 +270,7 @@ export async function getStatus() {
     })
 }
 
-// ═══ KERNEL ═══
+// â•â•â• KERNEL â•â•â•
 export async function getKillSwitchStatus(): Promise<KillSwitchStatus> {
     return safeFetch('/api/sentinel/health', { is_active: false, message: 'OFFLINE' })
         .then(data => ({
@@ -293,7 +293,7 @@ export async function toggleKillSwitch(action: 'activate' | 'reset'): Promise<Ki
     }
 }
 
-// ═══ CORE ═══
+// â•â•â• CORE â•â•â•
 export async function getCoreTelemetry(): Promise<TelemetryData | null> {
     return safeFetch('/api/core/telemetry', null)
 }
@@ -314,17 +314,29 @@ export async function sendChatMessage(message: string, sessionId: string, image?
         if (!res.ok) throw new Error('Chat failed')
         return await res.json()
     } catch {
-        return { message: '⚠ CONNECTION LOST — Core unreachable. Check system status.' }
+        return { message: 'CONNEXION PERDUE - Core indisponible. Verifie l etat systeme.' }
     }
 }
 
 export async function createSession(): Promise<{ session_id: string }> {
     const session_id = createClientUuid()
-    return safeFetch('/api/core/session', { session_id })
+    try {
+        const res = await fetchWithTimeout('/api/core/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id }),
+        })
+        if (!res.ok) {
+            return { session_id }
+        }
+        return await res.json()
+    } catch {
+        return { session_id }
+    }
 }
 
 
-// ═══ BANKER ═══
+// â•â•â• BANKER â•â•â•
 export interface OrderRequest {
     symbol: string
     action: 'BUY' | 'SELL'
@@ -340,6 +352,64 @@ export interface OrderResponse {
     message: string
 }
 
+export interface TradingConnectionStatus {
+    mt5_connected: boolean
+    mock_mode: boolean
+}
+
+export interface TradingAccountStatus {
+    equity: number
+    balance: number
+    margin: number
+    free_margin: number
+    currency: string
+    leverage: number
+}
+
+export interface TradingRiskStatus {
+    daily_drawdown_percent: number
+    trading_allowed: boolean
+    open_positions: number
+    anti_tilt_active: boolean
+    news_filter_active: boolean
+}
+
+export interface TradingDecisionStatus {
+    price: number
+    action: string
+    rsi: number
+    vwap?: number
+    adx?: number
+    cortex_bias?: string
+    gnn_bias?: string
+    comment?: string
+}
+
+export interface TradingLiveUniverseStatus {
+    horizon?: string
+    symbols?: string[]
+    count?: number
+    source?: string
+    restricted?: boolean
+    selection?: string
+    engine_label?: string
+}
+
+export interface TradingStatusResponse {
+    status: string
+    connection: TradingConnectionStatus
+    account: TradingAccountStatus
+    positions: TradingPosition[]
+    risk: TradingRiskStatus
+    decisions: Record<string, TradingDecisionStatus>
+    universe: {
+        dynamic: boolean
+        symbols_total: number
+        batch_size: number
+        lab_live?: TradingLiveUniverseStatus | null
+    }
+}
+
 export async function createOrder(order: OrderRequest): Promise<OrderResponse> {
     try {
         const baseUrl = await resolveBankerBaseUrl()
@@ -350,7 +420,7 @@ export async function createOrder(order: OrderRequest): Promise<OrderResponse> {
         })
         return await res.json()
     } catch {
-        return { success: false, message: 'ORDER FAILED — CONNECTION LOST' }
+        return { success: false, message: 'ORDRE ECHOUE - CONNEXION PERDUE' }
     }
 }
 
@@ -362,7 +432,7 @@ export async function closePosition(ticket: string | number): Promise<any> {
         })
         return await res.json()
     } catch {
-        return { success: false, message: 'CLOSE FAILED' }
+        return { success: false, message: 'FERMETURE ECHOUEE' }
     }
 }
 
@@ -391,12 +461,26 @@ export async function getNewsFilter(): Promise<NewsFilterStatus> {
     })
 }
 
-export async function getTradingStatus(): Promise<any> {
+export async function getTradingStatus(): Promise<TradingStatusResponse> {
     return safeBankerFetch('/trading/status', {
-        account: { equity: 0, balance: 0, margin: 0, currency: 'USD' },
+        status: 'offline',
+        connection: { mt5_connected: false, mock_mode: false },
+        account: { equity: 0, balance: 0, margin: 0, free_margin: 0, currency: 'USD', leverage: 0 },
         positions: [],
-        risk: { daily_drawdown_percent: 0, trading_allowed: true },
-        decisions: {} // Now expected to contain vwap, adx, cortex_bias, gnn_bias
+        risk: {
+            daily_drawdown_percent: 0,
+            trading_allowed: false,
+            open_positions: 0,
+            anti_tilt_active: false,
+            news_filter_active: false,
+        },
+        decisions: {},
+        universe: {
+            dynamic: false,
+            symbols_total: 0,
+            batch_size: 0,
+            lab_live: null,
+        },
     })
 }
 
@@ -419,6 +503,8 @@ export interface ModelPerformanceSummary {
     losses: number
     win_rate: number
     net_profit: number
+    realized_pnl?: number
+    window_label?: string
     from: string
     to: string
 }
@@ -458,6 +544,8 @@ export async function getModelPerformance(days = 7, limit = 5): Promise<ModelPer
             losses: 0,
             win_rate: 0,
             net_profit: 0,
+            realized_pnl: 0,
+            window_label: `${days}j`,
             from: '',
             to: '',
         },
@@ -485,7 +573,7 @@ export async function getPropFirmAccounts(): Promise<any[]> {
     return safeBankerFetch('/accounts/propfirm', [])
 }
 
-// ═══ LAB / CHAMPIONS ═══
+// â•â•â• LAB / CHAMPIONS â•â•â•
 export interface ModelArtifactInfo {
     path: string | null
     exists: boolean
@@ -574,6 +662,75 @@ export interface LabChampionStatus {
     nightly_summary: Record<string, unknown> | null
 }
 
+export interface TrainingDependencyStatus {
+    name: string
+    ok: boolean
+    state: string
+    host?: string
+    port?: number
+    error?: string
+    container?: string
+    pid?: string | number
+    updated_at?: string
+}
+
+export interface TrainingCurrentStep {
+    name?: string
+    status?: string
+    phase?: string
+    horizon?: string
+    symbol?: string
+    symbol_index?: number
+    symbol_total?: number
+    part_index?: number
+    part_total?: number
+    epoch_current?: number
+    epoch_total?: number
+    training_step_current?: number
+    training_step_total?: number
+    updated_at?: string
+}
+
+export interface TrainingRunPayload {
+    run_id: string | null
+    active: boolean
+    status: string
+    trigger: string | null
+    strategy: string | null
+    reason: string | null
+    skip_reason?: string | null
+    started_at?: string | null
+    updated_at?: string | null
+    finished_at?: string | null
+    step_label?: string
+    has_active_run?: boolean
+    current_step?: TrainingCurrentStep | null
+    completed_steps?: string[]
+    failed_step?: Record<string, unknown> | null
+    launcher?: Record<string, unknown>
+}
+
+export interface TrainingUniverseSummary {
+    history_dir?: string
+    total_symbols: number
+    family_counts: Record<string, number>
+    timeframe_counts: Record<string, number>
+    family_samples: Record<string, string[]>
+    sample_symbols: string[]
+    horizon_universe: Record<string, { timeframe: string; count: number; sample_symbols: string[] }>
+}
+
+export interface TrainingRunStatus {
+    status: string
+    run: TrainingRunPayload
+    dependencies: Record<string, TrainingDependencyStatus>
+    universe: TrainingUniverseSummary
+    logs: string[]
+    nightly_summary: Record<string, unknown> | null
+    status_path?: string
+    log_path?: string
+}
+
 export async function getLabChampionStatus(): Promise<LabChampionStatus> {
     return safeFetch('/api/lab/champions/status', {
         status: 'offline',
@@ -598,7 +755,42 @@ export async function getLabChampionStatus(): Promise<LabChampionStatus> {
     }, 8000)
 }
 
-// ═══ MONITORING — REAL DOCKER & SYSTEM DATA ═══
+export async function getLabTrainingStatus(): Promise<TrainingRunStatus> {
+    return safeFetch('/api/lab/training/status', {
+        status: 'offline',
+        run: {
+            run_id: null,
+            active: false,
+            status: 'idle',
+            trigger: null,
+            strategy: null,
+            reason: null,
+            skip_reason: null,
+            started_at: null,
+            updated_at: null,
+            finished_at: null,
+            current_step: null,
+            completed_steps: [],
+            failed_step: null,
+            launcher: {},
+        },
+        dependencies: {},
+        universe: {
+            total_symbols: 0,
+            family_counts: {},
+            timeframe_counts: {},
+            family_samples: {},
+            sample_symbols: [],
+            horizon_universe: {},
+        },
+        logs: [],
+        nightly_summary: null,
+        status_path: '',
+        log_path: '',
+    }, 8000)
+}
+
+// â•â•â• MONITORING â€” REAL DOCKER & SYSTEM DATA â•â•â•
 export async function getSystemMetrics(): Promise<SystemMetrics | null> {
     return safeFetch('/api/core/system/metrics', null, 5000)
 }
@@ -621,7 +813,7 @@ export async function getGNNGraph() {
     return safeFetch(`/api/core/gnn/graph`, { nodes: [], links: [] })
 }
 
-// ═══ ACCOUNTANT ═══
+// â•â•â• ACCOUNTANT â•â•â•
 export interface AccountantReport {
     summary: {
         gross: number
@@ -688,7 +880,7 @@ export async function getAccountantReport(): Promise<AccountantReport | null> {
     }
 }
 
-// ═══ BUILDER ═══
+// â•â•â• BUILDER â•â•â•
 export interface BuilderHealth {
     status: string
     service: string
@@ -873,3 +1065,4 @@ export async function runBuilderPipeline(request: BuilderPipelineRequest): Promi
 
     return { build, deploy, mutation }
 }
+

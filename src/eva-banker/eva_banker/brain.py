@@ -136,10 +136,14 @@ class AutoTradingEngine:
         self._symbol_entry_cooldown = timedelta(
             minutes=max(1, self._env_int("BANKER_SYMBOL_ENTRY_COOLDOWN_MINUTES", 30))
         )
+        self._drift_interval_seconds = max(15, self._env_int("BANKER_DRIFT_INTERVAL_SECONDS", 60))
+        self._shepherd_min_age_seconds = max(15, self._env_int("BANKER_SHEPHERD_MIN_AGE_SECONDS", 45))
+        self._scalp_stale_minutes = max(3, self._env_int("BANKER_SCALP_STALE_MINUTES", 20))
         self._startup_alert_state_file = os.getenv(
             "BANKER_STARTUP_ALERT_STATE_FILE",
             os.path.join(os.getcwd(), ".banker_startup_alert"),
         )
+        self._pause_log_state = {}
 
         # Sprint 7: The Cortex
         self.cortex = Strategist(mt5_service=mt5)
@@ -246,6 +250,34 @@ class AutoTradingEngine:
             return default
         cleaned = raw.strip()
         return cleaned or default
+
+    def _log_pause_state(
+        self,
+        key: str,
+        message: str,
+        cooldown_seconds: int = 180,
+    ) -> None:
+        """Journalise un etat de pause sans spammer la console.
+
+        Args:
+            key (str): Cle stable identifiant le type de pause.
+            message (str): Message a afficher si le cooldown est expire.
+            cooldown_seconds (int): Delai minimal entre deux logs identiques.
+        """
+        now = datetime.now()
+        last_logged = self._pause_log_state.get(key)
+        if last_logged is None or (now - last_logged).total_seconds() >= cooldown_seconds:
+            logger.warning(message)
+            self._pause_log_state[key] = now
+
+    def _clear_pause_state(self, *keys: str) -> None:
+        """Efface les etats de pause devenus obsoletes.
+
+        Args:
+            *keys (str): Cles de pause a oublier.
+        """
+        for key in keys:
+            self._pause_log_state.pop(key, None)
 
     @staticmethod
     def _json_safe_value(value):
@@ -616,6 +648,69 @@ class AutoTradingEngine:
             "summary": llm_clean[:220] if llm_clean else fallback_summary,
         }
 
+    @staticmethod
+    def _format_horizon_code(horizon: str) -> str:
+        """
+        Retourne un code compact d'horizon pour le commentaire MT5.
+
+        Args:
+            horizon (str): Horizon live utilise par le Lab.
+
+        Returns:
+            str: Code court (`SCP`, `INT`, `SWG` ou `UNK`).
+        """
+        mapping = {
+            "scalp": "SCP",
+            "intraday": "INT",
+            "swing": "SWG",
+        }
+        return mapping.get(str(horizon or "").lower(), "UNK")
+
+    @staticmethod
+    def _format_engine_code(engine_label: str) -> str:
+        """
+        Retourne un code compact de moteur pour le commentaire MT5.
+
+        Args:
+            engine_label (str): Nom complet du moteur d'inference.
+
+        Returns:
+            str: Code court (`MZ`, `DRV`, `RSI` ou `AI`).
+        """
+        lowered = str(engine_label or "").lower()
+        if "muzero" in lowered:
+            return "MZ"
+        if "dreamer" in lowered:
+            return "DRV"
+        if "rsi" in lowered:
+            return "RSI"
+        return "AI"
+
+    def _build_order_comment(
+        self,
+        engine_label: str,
+        live_horizon: str,
+        selection: str,
+        model_value: float = 0.0,
+    ) -> str:
+        """
+        Construit un commentaire MT5 compact et lisible.
+
+        Args:
+            engine_label (str): Nom du moteur de decision.
+            live_horizon (str): Horizon applique a l'inference.
+            selection (str): Type de selection live (`champion`, `fallback`, etc.).
+            model_value (float): Score ou valeur renvoyee par le moteur.
+
+        Returns:
+            str: Commentaire court compatible MT5.
+        """
+        engine_code = self._format_engine_code(engine_label)
+        horizon_code = self._format_horizon_code(live_horizon)
+        selection_code = "CH" if str(selection or "").lower() in {"champion", "legacy_champion"} else "FB"
+        value_code = f"{model_value:.1f}"
+        return f"{engine_code}-{horizon_code}-{selection_code}-v{value_code}"[:31]
+
     def _is_symbol_entry_cooling_down(self, symbol: str) -> bool:
         """Indique si un symbole est encore en cooldown d'entree.
 
@@ -629,6 +724,72 @@ class AutoTradingEngine:
         if last_entry_at is None:
             return False
         return (datetime.now() - last_entry_at) < self._symbol_entry_cooldown
+
+    @staticmethod
+    def _get_symbol_pip_size(symbol: str) -> float:
+        """
+        Retourne la taille de pip de reference pour un symbole.
+
+        Args:
+            symbol (str): Symbole analyse.
+
+        Returns:
+            float: Taille de pip utilisee pour calibrer le Shepherd.
+        """
+        symbol_upper = symbol.upper()
+        if "JPY" in symbol_upper and len("".join(char for char in symbol_upper if char.isalpha())) >= 6:
+            return 0.01
+        if "XAU" in symbol_upper or "XAG" in symbol_upper:
+            return 0.1
+        if any(token in symbol_upper for token in ["US30", "US100", "GER40", ".CASH"]):
+            return 1.0
+        if "BTC" in symbol_upper:
+            return 10.0
+        if "ETH" in symbol_upper:
+            return 1.0
+        return 0.0001
+
+    def _get_shepherd_thresholds(
+        self,
+        symbol: str,
+        open_price: float,
+        current_sl: float,
+        trade_skill: str,
+    ) -> dict[str, float]:
+        """
+        Calibre les seuils de protection des positions ouvertes.
+
+        Args:
+            symbol (str): Symbole de la position.
+            open_price (float): Prix d'ouverture.
+            current_sl (float): Stop loss courant.
+            trade_skill (str): Skill d'origine si connue.
+
+        Returns:
+            dict[str, float]: Seuils `be_threshold`, `trail_activation`,
+                `trail_distance` et `stale_minutes`.
+        """
+        pip_size = self._get_symbol_pip_size(symbol)
+        sl_distance = abs(open_price - current_sl) if current_sl > 0 else 0.0
+        is_scalp = trade_skill.upper() == SkilledBehavior.SCALPING.name
+
+        if is_scalp:
+            be_threshold = max(pip_size * 3.0, sl_distance * 0.25)
+            trail_activation = max(pip_size * 5.0, sl_distance * 0.40)
+            trail_distance = max(pip_size * 2.0, sl_distance * 0.20)
+            stale_minutes = float(self._scalp_stale_minutes)
+        else:
+            be_threshold = max(pip_size * 6.0, sl_distance * 0.35)
+            trail_activation = max(pip_size * 10.0, sl_distance * 0.60)
+            trail_distance = max(pip_size * 4.0, sl_distance * 0.25)
+            stale_minutes = 0.0
+
+        return {
+            "be_threshold": be_threshold,
+            "trail_activation": trail_activation,
+            "trail_distance": trail_distance,
+            "stale_minutes": stale_minutes,
+        }
 
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # TELEGRAM FORMATTERS (Sprint 9)
@@ -841,7 +1002,7 @@ class AutoTradingEngine:
                 "pnl": pnl
             }
             # Muse run par dÃ©faut sur le port 9100 selon le docker-compose
-            muse_url = f"http://{self.mt5.settings.api_host}:9100/viralize/trade"
+            muse_url = f"http://{self.settings.api_host}:9100/viralize/trade"
             
             async with aiohttp.ClientSession() as session:
                 async with session.post(muse_url, json=payload, timeout=60) as resp:
@@ -1016,37 +1177,36 @@ class AutoTradingEngine:
         logger.info("ðŸŒŠ Entering Drift Loop (The Hive Mind)...")
         while self.is_active:
             try:
-                # 1. VÃ©rifier si trading autorisÃ© (Loi 2 + Kill Switch)
-                status = await self.risk.get_current_status()
                 nemesis = get_nemesis_system()
 
-                # Balance du compte pour le moteur de risque
+                # Toujours maintenir la gestion des positions avant de decider si
+                # les nouvelles entrees doivent etre bloquees. Sinon un risque
+                # ou Nemesis actif empeche aussi le Shepherd de securiser/cloturer.
                 summary = await self.mt5.get_account_summary()
                 if not summary:
-                    logger.warning("Auto-Trading pause: MT5 hors ligne ou compte indisponible.")
+                    self._log_pause_state(
+                        "mt5_offline",
+                        "Auto-Trading pause: MT5 hors ligne ou compte indisponible.",
+                        cooldown_seconds=60,
+                    )
                     await asyncio.sleep(30)
                     continue
+                self._clear_pause_state("mt5_offline")
                 balance = Decimal(str(summary.get("balance", 100000)))
                 self.risk.update_account_balance(balance)
 
                 await self.refresh_symbol_universe()
 
-                if not status.trading_allowed:
-                    logger.warning("Auto-Trading pause: limites de risque atteintes.")
-                    await asyncio.sleep(60)
-                    continue
-
-                if nemesis.should_block_trading():
-                    logger.warning("Auto-Trading pause: phase Nemesis active.")
-                    await asyncio.sleep(60)
-                    continue
-
-                # 2. Verifier positions ouvertes (Global Limit)
                 positions = await self.mt5.get_open_positions()
                 if positions is None:
-                    logger.warning("MT5 indisponible pour la lecture des positions. Nouvelle tentative dans 30s.")
+                    self._log_pause_state(
+                        "positions_unavailable",
+                        "MT5 indisponible pour la lecture des positions. Nouvelle tentative dans 30s.",
+                        cooldown_seconds=60,
+                    )
                     await asyncio.sleep(30)
                     continue
+                self._clear_pause_state("positions_unavailable")
 
                 self.risk.update_positions_count(len(positions))
                 open_symbols = {
@@ -1059,51 +1219,164 @@ class AutoTradingEngine:
                 await self._detect_closed_positions(positions)
 
                 # THE SHEPHERD (MANAGEMENT)
+                positions_changed = False
                 for pos in positions:
                     try:
-                        if (datetime.now() - pos.open_time).total_seconds() < 60: continue
+                        age_seconds = (datetime.now() - pos.open_time).total_seconds()
+                        if age_seconds < self._shepherd_min_age_seconds:
+                            continue
 
                         current_price = float(pos.current_price)
                         open_price = float(pos.open_price)
                         sl = float(pos.stop_loss) if pos.stop_loss else 0.0
-
-                        is_high_vol = "XAU" in pos.symbol or "BTC" in pos.symbol or "US30" in pos.symbol
-                        be_threshold = 2.5 if is_high_vol else 0.0015
-                        trail_activation = 5.0 if is_high_vol else 0.0030
-                        trail_distance = 2.0 if is_high_vol else 0.0010
+                        trade_info = self._trade_open_info.get(pos.ticket, {})
+                        trade_skill = str(trade_info.get("skill", "") or "")
+                        thresholds = self._get_shepherd_thresholds(
+                            symbol=pos.symbol,
+                            open_price=open_price,
+                            current_sl=sl,
+                            trade_skill=trade_skill,
+                        )
+                        be_threshold = thresholds["be_threshold"]
+                        trail_activation = thresholds["trail_activation"]
+                        trail_distance = thresholds["trail_distance"]
+                        stale_minutes = thresholds["stale_minutes"]
+                        age_minutes = age_seconds / 60.0
 
                         if pos.action == TradeAction.BUY:
                             profit = current_price - open_price
+                            if stale_minutes > 0 and age_minutes >= stale_minutes and profit <= be_threshold:
+                                close_result = await self.mt5.close_position(pos.ticket)
+                                if close_result.get("success"):
+                                    positions_changed = True
+                                    logger.info(
+                                        "Shepherd: cloture stale BUY sur %s #%s apres %.1f min (profit=%.5f).",
+                                        pos.symbol,
+                                        pos.ticket,
+                                        age_minutes,
+                                        profit,
+                                    )
+                                else:
+                                    logger.warning(
+                                        "Shepherd: echec cloture stale BUY sur %s #%s: %s",
+                                        pos.symbol,
+                                        pos.ticket,
+                                        close_result.get("message", "erreur inconnue"),
+                                    )
+                                continue
                             if profit > be_threshold and (sl == 0.0 or sl < open_price):
-                                new_sl = open_price + (0.1 if is_high_vol else 0.0001)
-                                await self.mt5.modify_position(pos.ticket, sl=new_sl, tp=0.0)
-                                msg = self._fmt_shepherd_msg(pos.symbol, "BUY", "SECURED", new_sl, profit)
-                                logger.info(msg)
-                                self.telegram.send_sync(msg)
+                                new_sl = open_price + max(self._get_symbol_pip_size(pos.symbol), trail_distance * 0.25)
+                                modify_result = await self.mt5.modify_position(pos.ticket, sl=new_sl, tp=0.0)
+                                if modify_result.get("success"):
+                                    msg = self._fmt_shepherd_msg(pos.symbol, "BUY", "SECURED", new_sl, profit)
+                                    logger.info(msg)
+                                    self.telegram.send_sync(msg)
+                                else:
+                                    logger.warning(
+                                        "Shepherd: echec de securisation BUY sur %s #%s: %s",
+                                        pos.symbol,
+                                        pos.ticket,
+                                        modify_result.get("message", "erreur inconnue"),
+                                    )
                             elif profit > trail_activation:
                                 trailing_sl = current_price - trail_distance
                                 if trailing_sl > sl:
-                                    await self.mt5.modify_position(pos.ticket, sl=trailing_sl, tp=0.0)
-                                    msg = self._fmt_shepherd_msg(pos.symbol, "BUY", "TRAILING", trailing_sl, profit)
-                                    logger.debug(msg)
+                                    modify_result = await self.mt5.modify_position(pos.ticket, sl=trailing_sl, tp=0.0)
+                                    if modify_result.get("success"):
+                                        msg = self._fmt_shepherd_msg(pos.symbol, "BUY", "TRAILING", trailing_sl, profit)
+                                        logger.info(msg)
+                                    else:
+                                        logger.warning(
+                                            "Shepherd: echec de trailing BUY sur %s #%s: %s",
+                                            pos.symbol,
+                                            pos.ticket,
+                                            modify_result.get("message", "erreur inconnue"),
+                                        )
 
                         elif pos.action == TradeAction.SELL:
                             profit = open_price - current_price
+                            if stale_minutes > 0 and age_minutes >= stale_minutes and profit <= be_threshold:
+                                close_result = await self.mt5.close_position(pos.ticket)
+                                if close_result.get("success"):
+                                    positions_changed = True
+                                    logger.info(
+                                        "Shepherd: cloture stale SELL sur %s #%s apres %.1f min (profit=%.5f).",
+                                        pos.symbol,
+                                        pos.ticket,
+                                        age_minutes,
+                                        profit,
+                                    )
+                                else:
+                                    logger.warning(
+                                        "Shepherd: echec cloture stale SELL sur %s #%s: %s",
+                                        pos.symbol,
+                                        pos.ticket,
+                                        close_result.get("message", "erreur inconnue"),
+                                    )
+                                continue
                             if profit > be_threshold and (sl == 0.0 or sl > open_price):
-                                new_sl = open_price - (0.1 if is_high_vol else 0.0001)
-                                await self.mt5.modify_position(pos.ticket, sl=new_sl, tp=0.0)
-                                msg = self._fmt_shepherd_msg(pos.symbol, "SELL", "SECURED", new_sl, profit)
-                                logger.info(msg)
-                                self.telegram.send_sync(msg)
+                                new_sl = open_price - max(self._get_symbol_pip_size(pos.symbol), trail_distance * 0.25)
+                                modify_result = await self.mt5.modify_position(pos.ticket, sl=new_sl, tp=0.0)
+                                if modify_result.get("success"):
+                                    msg = self._fmt_shepherd_msg(pos.symbol, "SELL", "SECURED", new_sl, profit)
+                                    logger.info(msg)
+                                    self.telegram.send_sync(msg)
+                                else:
+                                    logger.warning(
+                                        "Shepherd: echec de securisation SELL sur %s #%s: %s",
+                                        pos.symbol,
+                                        pos.ticket,
+                                        modify_result.get("message", "erreur inconnue"),
+                                    )
                             elif profit > trail_activation:
                                 trailing_sl = current_price + trail_distance
                                 if sl == 0.0 or trailing_sl < sl:
-                                    await self.mt5.modify_position(pos.ticket, sl=trailing_sl, tp=0.0)
-                                    msg = self._fmt_shepherd_msg(pos.symbol, "SELL", "TRAILING", trailing_sl, profit)
-                                    logger.debug(msg)
+                                    modify_result = await self.mt5.modify_position(pos.ticket, sl=trailing_sl, tp=0.0)
+                                    if modify_result.get("success"):
+                                        msg = self._fmt_shepherd_msg(pos.symbol, "SELL", "TRAILING", trailing_sl, profit)
+                                        logger.info(msg)
+                                    else:
+                                        logger.warning(
+                                            "Shepherd: echec de trailing SELL sur %s #%s: %s",
+                                            pos.symbol,
+                                            pos.ticket,
+                                            modify_result.get("message", "erreur inconnue"),
+                                        )
 
                     except Exception as e_shepherd:
                         logger.error(f"Shepherd Error on {pos.ticket}: {e_shepherd}")
+
+                if positions_changed:
+                    refreshed_positions = await self.mt5.get_open_positions()
+                    if refreshed_positions is not None:
+                        positions = refreshed_positions
+                        self.risk.update_positions_count(len(positions))
+                        open_symbols = {
+                            position.symbol
+                            for position in positions
+                            if getattr(position, "symbol", None)
+                        }
+
+                status = await self.risk.get_current_status()
+                if not status.trading_allowed:
+                    self._log_pause_state(
+                        "risk_limits",
+                        "Auto-Trading pause: limites de risque atteintes. Shepherd maintenu actif.",
+                        cooldown_seconds=180,
+                    )
+                    await asyncio.sleep(60)
+                    continue
+                self._clear_pause_state("risk_limits")
+
+                if nemesis.should_block_trading():
+                    self._log_pause_state(
+                        "nemesis_active",
+                        "Auto-Trading pause: phase Nemesis active. Shepherd maintenu actif.",
+                        cooldown_seconds=180,
+                    )
+                    await asyncio.sleep(60)
+                    continue
+                self._clear_pause_state("nemesis_active")
 
                 if len(positions) >= self.risk.max_open_positions:
                     logger.info(
@@ -1333,6 +1606,7 @@ class AutoTradingEngine:
                         lab_selection_policy = "unknown"
                         live_model_allowed = not self._require_valid_champion
                         live_block_reason = "aucun"
+                        mt5_order_comment = "EVA"
                         
                         try:
                             from shared.internal_auth import InternalAuth
@@ -1353,6 +1627,12 @@ class AutoTradingEngine:
                                         )
                                         live_model_allowed, live_block_reason = self._is_live_model_allowed(lab_result)
                                         dreamer_comment = f"{model_engine} (v={mz_value:.2f})"
+                                        mt5_order_comment = self._build_order_comment(
+                                            engine_label=model_engine,
+                                            live_horizon=live_horizon,
+                                            selection=lab_selection,
+                                            model_value=float(mz_value or 0.0),
+                                        )
 
                                         if mz_action == 1:
                                             action = TradeAction.BUY
@@ -1443,6 +1723,7 @@ class AutoTradingEngine:
                             "lab_selection_policy": lab_selection_policy,
                             "live_model_allowed": live_model_allowed,
                             "live_block_reason": live_block_reason,
+                            "mt5_comment": mt5_order_comment,
                         })
                         if self._is_unusable_reasoning(str(decision_state.get("raw_thought", ""))):
                             decision_state["raw_thought"] = comment
@@ -1519,7 +1800,6 @@ class AutoTradingEngine:
                         # Safety Caps
                         final_vol = min(0.10, dynamic_vol)
 
-                        safe_comment = comment[:30] if comment else ""
                         order = TradeOrder(
                             symbol=symbol,
                             action=action,
@@ -1527,7 +1807,7 @@ class AutoTradingEngine:
                             entry_price=entry_price,
                             stop_loss_price=sl_price,
                             take_profit_price=tp_price,
-                            comment=safe_comment
+                            comment=mt5_order_comment
                         )
                         if action:
                             current_positions = await self.mt5.get_open_positions()
@@ -1624,6 +1904,7 @@ class AutoTradingEngine:
                                         "action": action.value,
                                         "entry_price": float(entry_price),
                                         "open_time": now_open,
+                                        "skill": skill.value if hasattr(skill, "value") else str(skill),
                                     }
                                     self._known_tickets.add(ticket)
                                     self._last_symbol_entry_at[symbol] = now_open
@@ -1657,7 +1938,7 @@ class AutoTradingEngine:
                         continue
 
                 # 4. Wait (Drift Interval)
-                await asyncio.sleep(300) 
+                await asyncio.sleep(self._drift_interval_seconds) 
 
             except asyncio.CancelledError:
                 break

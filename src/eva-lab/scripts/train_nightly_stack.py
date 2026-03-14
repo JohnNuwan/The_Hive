@@ -11,13 +11,23 @@ from datetime import datetime
 from pathlib import Path
 
 from eva_lab.champion_promoter import ChampionPromoter
-from eva_lab.training_notifier import send_nightly_summary
+from eva_lab.training_notifier import send_nightly_summary, send_training_run_started
+from eva_lab.training_status import (
+    append_training_log,
+    build_training_universe_summary,
+    finalize_training_status,
+    mark_skip_status,
+    mark_step_finished,
+    mark_step_running,
+    reset_training_status,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("eva_lab.nightly_training")
 
 WORKDIR = Path(__file__).resolve().parents[1]
 SUMMARY_PATH = WORKDIR / "data" / "checkpoints" / "nightly_training_summary.json"
+LOCK_PATH = WORKDIR / "data" / "checkpoints" / "nightly_training.lock"
 SHADOW_DIR = WORKDIR / "data" / "shadow_learning"
 
 
@@ -88,19 +98,161 @@ def _hours_since(timestamp: datetime | None) -> float | None:
     return max((datetime.now() - timestamp).total_seconds() / 3600.0, 0.0)
 
 
+def _load_json_file(path: Path) -> dict[str, object] | None:
+    """Charge un fichier JSON si present.
+
+    Args:
+        path (Path): Chemin cible.
+
+    Returns:
+        dict[str, object] | None: Charge utile JSON ou ``None``.
+    """
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Lecture JSON impossible pour %s: %s", path, exc)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _load_previous_summary() -> dict[str, object] | None:
     """Charge le dernier resume nightly si disponible.
 
     Returns:
         dict[str, object] | None: Resume precedent ou ``None``.
     """
-    if not SUMMARY_PATH.exists():
-        return None
+    return _load_json_file(SUMMARY_PATH)
+
+
+def _load_lock_payload() -> dict[str, object] | None:
+    """Charge le verrou actif si present.
+
+    Returns:
+        dict[str, object] | None: Charge utile du verrou ou ``None``.
+    """
+    return _load_json_file(LOCK_PATH)
+
+
+def _write_lock_payload(payload: dict[str, object]) -> None:
+    """Ecrit le verrou de run actif sur disque.
+
+    Args:
+        payload (dict[str, object]): Metadonnees du run actif.
+    """
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LOCK_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _is_lock_stale(payload: dict[str, object] | None) -> bool:
+    """Determine si un verrou parait obsolete.
+
+    Args:
+        payload (dict[str, object] | None): Verrou charge.
+
+    Returns:
+        bool: ``True`` si le verrou doit etre purge.
+    """
+    if not payload:
+        return True
+    started_at = _parse_iso_datetime(payload.get("started_at"))
+    age_hours = _hours_since(started_at)
+    if age_hours is None:
+        return True
+    stale_after_hours = _env_int("TRAINING_RUN_LOCK_MAX_AGE_HOURS", 18)
+    return age_hours >= stale_after_hours
+
+
+def _record_skip_event(reason: str, trigger: str, lock_payload: dict[str, object] | None) -> None:
+    """Ajoute un evenement de skip dans le resume nightly sans ecraser un run actif.
+
+    Args:
+        reason (str): Raison explicite du skip.
+        trigger (str): Origine du lancement (`cron`, `manual`, etc.).
+        lock_payload (dict[str, object] | None): Verrou qui a provoque le skip.
+    """
+    summary = _load_previous_summary() or {}
+    if not summary:
+        summary = {
+            "started_at": datetime.now().isoformat(),
+            "status": "skipped",
+            "strategy": "n/a",
+            "reason": reason,
+            "steps": [],
+        }
+    skip_event = {
+        "trigger": trigger,
+        "reason": reason,
+        "timestamp": datetime.now().isoformat(),
+        "lock": lock_payload or {},
+    }
+    skip_events = list(summary.get("skip_events") or [])
+    skip_events.append(skip_event)
+    summary["skip_events"] = skip_events[-20:]
+    summary["last_skip_event"] = skip_event
+    if summary.get("status") in {None, "skipped"}:
+        summary["status"] = "skipped"
+        summary["reason"] = reason
+        summary["finished_at"] = datetime.now().isoformat()
+    persist_summary(summary)
+    mark_skip_status(reason, trigger, lock_payload)
+
+
+def acquire_run_lock() -> tuple[bool, dict[str, object] | None]:
+    """Acquiert le verrou nightly si possible.
+
+    Returns:
+        tuple[bool, dict[str, object] | None]: Etat d'acquisition et charge utile.
+    """
+    if _env_flag("NIGHTLY_RUN_LOCK_ALREADY_HELD", False):
+        payload = _load_lock_payload() or {
+            "mode": "external",
+            "trigger": os.getenv("TRAINING_RUN_TRIGGER", "external"),
+            "started_at": datetime.now().isoformat(),
+        }
+        return True, payload
+
+    existing_lock = _load_lock_payload()
+    if existing_lock and not _is_lock_stale(existing_lock):
+        return False, existing_lock
+
+    if LOCK_PATH.exists():
+        try:
+            LOCK_PATH.unlink()
+            logger.warning("Verrou nightly obsolete supprime: %s", LOCK_PATH)
+        except OSError as exc:
+            logger.warning("Suppression du verrou nightly impossible: %s", exc)
+            return False, existing_lock
+
+    payload = {
+        "pid": os.getpid(),
+        "trigger": os.getenv("TRAINING_RUN_TRIGGER", "manual"),
+        "started_at": datetime.now().isoformat(),
+        "holder": "train_nightly_stack",
+        "workdir": str(WORKDIR),
+    }
+    _write_lock_payload(payload)
+    return True, payload
+
+
+def release_run_lock(lock_payload: dict[str, object] | None) -> None:
+    """Libere le verrou nightly si le processus en est proprietaire.
+
+    Args:
+        lock_payload (dict[str, object] | None): Charge utile capturee a l'acquisition.
+    """
+    if not lock_payload:
+        return
+    if lock_payload.get("mode") == "external":
+        return
+    current_lock = _load_lock_payload()
+    if current_lock and current_lock.get("pid") != lock_payload.get("pid"):
+        return
     try:
-        return json.loads(SUMMARY_PATH.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.warning("Lecture du resume nightly impossible: %s", exc)
-        return None
+        LOCK_PATH.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Liberation du verrou nightly impossible: %s", exc)
 
 
 def _collect_shadow_learning_stats() -> dict[str, object]:
@@ -346,6 +498,7 @@ def append_step(
         step["error"] = error
     summary.setdefault("steps", []).append(step)
     persist_summary(summary)
+    mark_step_finished(name, status, error)
 
 
 def run_step(name: str, command: list[str], extra_env: dict[str, str] | None = None) -> None:
@@ -366,6 +519,11 @@ def run_step(name: str, command: list[str], extra_env: dict[str, str] | None = N
         env.update(extra_env)
 
     logger.info("Debut etape %s: %s", name, command)
+    mark_step_running(name, phase="demarrage")
+    append_training_log(
+        f"Debut de l'etape {name}.",
+        source="nightly",
+    )
     result = subprocess.run(command, cwd=WORKDIR, env=env, check=False)
     if result.returncode != 0:
         raise RuntimeError(f"Echec de l'etape {name} (code {result.returncode}).")
@@ -379,6 +537,7 @@ def main() -> dict[str, object]:
         dict[str, object]: Resume complet de la sequence nightly.
     """
     decision = decide_training_strategy()
+    trigger = os.getenv("TRAINING_RUN_TRIGGER", "manual")
     summary: dict[str, object] = {
         "started_at": datetime.now().isoformat(),
         "workdir": str(WORKDIR),
@@ -387,23 +546,60 @@ def main() -> dict[str, object]:
         "strategy": decision.get("strategy"),
         "reason": decision.get("reason"),
         "decision": decision,
+        "trigger": trigger,
+        "lock_file": str(LOCK_PATH),
     }
+    run_id = f"nightly_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    lock_payload: dict[str, object] | None = None
+    lock_acquired, lock_payload = acquire_run_lock()
+    if not lock_acquired:
+        logger.warning("Sequence nightly ignoree: verrou deja actif (%s).", lock_payload)
+        _record_skip_event("run_already_active", trigger, lock_payload)
+        return {
+            "status": "skipped",
+            "reason": "run_already_active",
+            "trigger": trigger,
+            "active_lock": lock_payload,
+        }
+
+    summary["lock"] = lock_payload
     persist_summary(summary)
     logger.info(
         "Strategie nightly retenue: %s (%s).",
         summary["strategy"],
         summary["reason"],
     )
+    append_training_log(
+        f"Strategie nightly retenue: {summary['strategy']} ({summary['reason']}).",
+        source="nightly",
+    )
 
     if summary["strategy"] == "skip":
         summary["status"] = "skipped"
         summary["finished_at"] = datetime.now().isoformat()
         persist_summary(summary)
+        mark_skip_status(str(summary["reason"]), trigger, lock_payload)
         send_nightly_summary(summary)
         logger.info("Sequence nightly ignoree: %s", summary["reason"])
+        release_run_lock(lock_payload)
         return summary
 
     apply_training_strategy(decision)
+    universe_summary = build_training_universe_summary()
+    reset_training_status(
+        run_id=run_id,
+        trigger=trigger,
+        strategy=str(summary.get("strategy") or "research"),
+        reason=str(summary.get("reason") or "manual"),
+        universe=universe_summary,
+    )
+    send_training_run_started(
+        run_id=run_id,
+        strategy=str(summary.get("strategy") or "research"),
+        reason=str(summary.get("reason") or "manual"),
+        trigger=trigger,
+        universe=universe_summary,
+    )
 
     run_gnn = _env_flag("RUN_TRAIN_GNN", True)
     run_muzero = _env_flag("RUN_TRAIN_MUZERO", True)
@@ -436,6 +632,7 @@ def main() -> dict[str, object]:
         summary["status"] = "ok"
         summary["finished_at"] = datetime.now().isoformat()
         persist_summary(summary)
+        finalize_training_status("ok", reason=str(summary.get("reason") or "complete"))
         send_nightly_summary(summary)
         logger.info("Resume nocturne ecrit dans %s", SUMMARY_PATH)
         return summary
@@ -445,8 +642,11 @@ def main() -> dict[str, object]:
         summary["error"] = str(exc)
         summary["finished_at"] = datetime.now().isoformat()
         persist_summary(summary)
+        finalize_training_status("error", reason=str(exc))
         send_nightly_summary(summary)
         raise
+    finally:
+        release_run_lock(lock_payload)
 
 
 if __name__ == "__main__":

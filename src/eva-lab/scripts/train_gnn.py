@@ -22,6 +22,7 @@ for candidate in (package_root, shared_root):
         sys.path.insert(0, candidate_str)
 
 from eva_lab.models.gnn_model import TFTGNNModel
+from eva_lab.training_status import append_training_log, mark_step_running
 from eva_lab.training_utils import MTF_HORIZONS, build_inventory_report, get_gnn_model_kwargs, load_history_frame, resolve_training_symbols
 from shared.indicators import IndicatorFactory
 
@@ -181,6 +182,8 @@ def train_gnn() -> dict[str, object]:
     """Execute l'entrainement complet du GNN multi-horizon."""
     inventory = build_inventory_report()
     logger.info("Inventaire historique detecte: %s", inventory)
+    append_training_log("GNN: initialisation de l'entrainement multi-timeframe.", source="gnn")
+    mark_step_running("gnn", phase="initialisation")
 
     symbols = resolve_training_symbols(
         required_timeframes={"M5", "H1", "D1"},
@@ -193,6 +196,10 @@ def train_gnn() -> dict[str, object]:
     dataset, valid_symbols = build_dataset(symbols)
     if not valid_symbols:
         raise RuntimeError("Le dataset GNN est vide apres validation.")
+    append_training_log(
+        f"GNN: {len(valid_symbols)} symboles valides prepares.",
+        source="gnn",
+    )
 
     num_samples = min(
         dataset[symbol][timeframe]["labels"].size(0)
@@ -226,6 +233,13 @@ def train_gnn() -> dict[str, object]:
     }
 
     for epoch in range(EPOCHS):
+        mark_step_running(
+            "gnn",
+            phase="optimisation",
+            epoch_current=epoch + 1,
+            epoch_total=EPOCHS,
+            symbol_total=len(valid_symbols),
+        )
         model.train()
         indices = torch.randperm(num_samples)
         total_loss = 0.0
@@ -296,6 +310,14 @@ def train_gnn() -> dict[str, object]:
             last_metrics["intraday_accuracy"],
             last_metrics["swing_accuracy"],
         )
+        if epoch == 0 or (epoch + 1) % 10 == 0 or epoch + 1 == EPOCHS:
+            append_training_log(
+                "GNN: epoch "
+                f"{epoch + 1}/{EPOCHS} | "
+                f"loss={avg_loss:.4f} | "
+                f"scalp={last_metrics['scalp_accuracy']:.2f}%",
+                source="gnn",
+            )
 
         if CHECKPOINT_EVERY > 0 and (epoch + 1) % CHECKPOINT_EVERY == 0:
             MODEL_DIR.mkdir(parents=True, exist_ok=True)

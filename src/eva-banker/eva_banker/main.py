@@ -342,6 +342,10 @@ async def hard_heartbeat():
 
     redis = get_redis_client()
     mt5_service = app.state.mt5_service
+    heartbeat_interval = max(
+        1.0,
+        float(getattr(app.state.settings, "banker_heartbeat_interval_seconds", 3.0)),
+    )
     redis_unavailable = False
 
     while True:
@@ -369,10 +373,10 @@ async def hard_heartbeat():
                 await redis.disconnect()
             except Exception:
                 pass
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(min(heartbeat_interval, 2.0))
             continue
 
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(heartbeat_interval)
 
 
 async def swarm_listener():
@@ -925,6 +929,10 @@ async def get_model_performance(
         to_dt=to_dt,
         limit=limit,
     )
+    summary = dict(performance.get("summary") or {})
+    summary.setdefault("realized_pnl", summary.get("net_profit", 0.0))
+    summary.setdefault("window_label", f"{days}j")
+    performance["summary"] = summary
     return {
         "status": "ok",
         "window_days": days,

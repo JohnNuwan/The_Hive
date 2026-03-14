@@ -14,6 +14,7 @@ from eva_lab.muzero.dreamer_networks import make_dreamer_networks
 from eva_lab.muzero.dreamer_trainer import DreamerTrainerJAX
 from eva_lab.muzero.replay_buffer import GameHistory, PrioritizedReplayBuffer
 from eva_lab.shadow_dataset import load_shadow_games
+from eva_lab.training_status import append_training_log, mark_step_running
 from shared.indicators import IndicatorFactory
 
 logging.basicConfig(level=logging.INFO)
@@ -64,6 +65,11 @@ class OfflineTrainer:
         """Charge les CSV, calcule les indicateurs et construit les episodes."""
         files = glob.glob(f"{self.data_dir}/*.csv")
         logger.info("Fichiers historiques detectes: %s.", len(files))
+        append_training_log(
+            f"Dreamer: chargement de {len(files)} fichiers historiques.",
+            source="dreamer",
+        )
+        mark_step_running("dreamer_offline", phase="chargement_donnees")
 
         total_steps = 0
         for file in files:
@@ -223,6 +229,10 @@ class OfflineTrainer:
             self.replay_buffer.size,
             total_steps,
         )
+        append_training_log(
+            f"Dreamer: {self.replay_buffer.size} episodes charges pour {total_steps} pas de temps.",
+            source="dreamer",
+        )
 
     def train_loop(self, epochs: int = 5000) -> None:
         """Execute la boucle d'optimisation Dreamer.
@@ -231,8 +241,18 @@ class OfflineTrainer:
             epochs (int): Nombre d'epochs a executer.
         """
         logger.info("Demarrage de l'entrainement hors-ligne DreamerV3...")
+        append_training_log(
+            f"Dreamer: demarrage de l'entrainement sur {epochs} epochs.",
+            source="dreamer",
+        )
 
         for epoch in range(epochs):
+            mark_step_running(
+                "dreamer_offline",
+                phase="optimisation",
+                epoch_current=epoch + 1,
+                epoch_total=epochs,
+            )
             loss_sum = 0.0
             steps = 0
 
@@ -253,6 +273,11 @@ class OfflineTrainer:
 
             avg_loss = loss_sum / steps if steps > 0 else 0.0
             logger.info("Epoch %s/%s - Loss: %.4f", epoch + 1, epochs, avg_loss)
+            if epoch == 0 or (epoch + 1) % 10 == 0 or epoch + 1 == epochs:
+                append_training_log(
+                    f"Dreamer: epoch {epoch + 1}/{epochs} | loss={avg_loss:.4f}",
+                    source="dreamer",
+                )
 
     def save_checkpoint(self, path: str = "checkpoints/offline_v1") -> None:
         """Sauvegarde un checkpoint local Dreamer.

@@ -14,14 +14,13 @@ from start_training_proxmox import (
     LOCAL_ROOT,
     PASS,
     REMOTE_DIR,
+    REMOTE_ENV_LOADER,
     REMOTE_LAUNCH_SCRIPT,
     REMOTE_SCRIPT,
-    SYNC_DIRS,
     SYNC_FILES,
     USER,
     ensure_remote_parent,
     upload_file,
-    upload_tree,
 )
 
 REMOTE_CRON_WRAPPER = f"{REMOTE_DIR}/scripts/run_nightly_training_cron.sh"
@@ -31,13 +30,15 @@ REMOTE_WRAPPER = (
     "#!/usr/bin/env bash\n"
     "set -euo pipefail\n"
     f"cd \"{REMOTE_DIR}\"\n"
-    "if [ -f .env ]; then\n"
-    "  set -a\n"
-    "  . ./.env\n"
-    "  set +a\n"
-    "fi\n"
+    f"{REMOTE_ENV_LOADER}\n"
+    "export TRAINING_RUN_TRIGGER=cron\n"
     f"exec \"{REMOTE_SCRIPT}\"\n"
 )
+
+# Le cron n'a besoin que du code et des scripts de lancement.
+# Synchroniser l'historique complet ici rend l'installation fragile et lente,
+# alors que les donnees sont poussees par le lanceur de training ou le collecteur.
+CRON_SYNC_FILES = tuple(SYNC_FILES)
 
 
 if not PASS:
@@ -59,15 +60,10 @@ def install_cron() -> None:
         print("Connexion SSH etablie.")
         sftp = client.open_sftp()
 
-        for relative_path in SYNC_FILES:
+        for relative_path in CRON_SYNC_FILES:
             local_path = LOCAL_ROOT / relative_path
             remote_path = f"{REMOTE_DIR}/{relative_path.as_posix()}"
             upload_file(sftp, local_path, remote_path)
-
-        for relative_dir in SYNC_DIRS:
-            local_dir = LOCAL_ROOT / relative_dir
-            remote_dir = f"{REMOTE_DIR}/{relative_dir.as_posix()}"
-            upload_tree(sftp, local_dir, remote_dir)
 
         ensure_remote_parent(sftp, REMOTE_SCRIPT)
         with sftp.file(REMOTE_SCRIPT, "w") as remote_file:

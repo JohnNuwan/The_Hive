@@ -24,8 +24,14 @@ from eva_lab.genetic_updater import GeneticUpdater
 from eva_lab.muzero.config import MuZeroConfigV3
 from eva_lab.muzero.environment import TradingEnvironment
 from eva_lab.muzero.jax_agent import JAXMuZeroAgent
-from eva_lab.training_notifier import send_horizon_summary
-from eva_lab.training_utils import build_inventory_report, build_muzero_market_data, load_history_frame
+from eva_lab.training_notifier import send_horizon_summary, send_training_horizon_started
+from eva_lab.training_status import append_training_log, mark_step_running
+from eva_lab.training_utils import (
+    build_inventory_report,
+    build_muzero_market_data,
+    get_horizon_history_bars,
+    load_history_frame,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("eva_lab.train_muzero")
@@ -39,7 +45,8 @@ def build_environment(symbol: str, config: MuZeroConfigV3) -> TradingEnvironment
         logger.warning("Historique absent pour %s sur %s.", symbol, config.primary_timeframe)
         return None
 
-    market_data = build_muzero_market_data(frame.tail(4000))
+    history_bars = get_horizon_history_bars(config.horizon, env_prefix="MUZERO_HISTORY", fallback=4000)
+    market_data = build_muzero_market_data(frame.tail(history_bars))
     if market_data.shape[0] < 240:
         logger.warning("Historique insuffisant pour %s sur %s.", symbol, config.primary_timeframe)
         return None
@@ -53,10 +60,22 @@ def main() -> dict[str, object]:
     """Orchestre l'entrainement MuZero d'un horizon strategique."""
     config = MuZeroConfigV3()
     horizon = config.horizon
+    step_name = f"muzero_{horizon}"
     logger.info("Demarrage MuZero horizon=%s | timeframe=%s", horizon, config.primary_timeframe)
     logger.info("Peripheriques JAX: %s", jax.devices())
     logger.info("Inventaire historique: %s", build_inventory_report())
     logger.info("Univers MuZero: %s", config.symbols)
+    append_training_log(
+        f"MuZero {horizon} demarre sur {len(config.symbols)} symboles.",
+        source="muzero",
+    )
+    send_training_horizon_started(horizon, len(config.symbols))
+    mark_step_running(
+        step_name,
+        phase="initialisation",
+        horizon=horizon,
+        symbol_total=len(config.symbols),
+    )
 
     agent = JAXMuZeroAgent(config)
     weights_dir = Path(config.weights_path)
@@ -77,12 +96,26 @@ def main() -> dict[str, object]:
     total_games = 0
 
     logger.info("Phase 1 - collecte historique par self-play guide")
-    for symbol in config.symbols:
+    for symbol_index, symbol in enumerate(config.symbols, start=1):
         env = build_environment(symbol, config)
         if env is None:
             continue
         valid_symbols.append(symbol)
+        append_training_log(
+            f"MuZero {horizon}: collecte sur {symbol} ({symbol_index}/{len(config.symbols)}).",
+            source="muzero",
+        )
         for game_index in range(games_per_symbol):
+            mark_step_running(
+                step_name,
+                phase="collecte",
+                horizon=horizon,
+                symbol=symbol,
+                symbol_index=symbol_index,
+                symbol_total=len(config.symbols),
+                part_index=game_index + 1,
+                part_total=games_per_symbol,
+            )
             agent.play_game(env, exploration=True)
             summary = env.get_summary()
             total_games += 1
@@ -103,11 +136,28 @@ def main() -> dict[str, object]:
     logger.info("Phase 2 - optimisation profonde (%s steps)", config.training_steps)
     start_time = datetime.now()
     last_metrics = None
+    append_training_log(
+        f"MuZero {horizon}: optimisation profonde sur {config.training_steps} steps.",
+        source="muzero",
+    )
 
     for step in range(1, config.training_steps + 1):
+        mark_step_running(
+            step_name,
+            phase="optimisation",
+            horizon=horizon,
+            symbol_total=len(valid_symbols),
+            training_step_current=step,
+            training_step_total=config.training_steps,
+        )
         metrics = agent.train_step()
         if metrics is None:
             logger.warning("MuZero sans batch suffisant, arret a l'etape %s.", step)
+            append_training_log(
+                f"MuZero {horizon}: arret anticipe a l'etape {step} faute de batch suffisant.",
+                level="WARNING",
+                source="muzero",
+            )
             break
         last_metrics = metrics
 
@@ -124,6 +174,12 @@ def main() -> dict[str, object]:
                 float(metrics["loss_pol"]),
                 step / elapsed,
             )
+            append_training_log(
+                "MuZero "
+                f"{horizon}: step {step}/{config.training_steps} | "
+                f"loss={float(metrics['loss_total']):.4f}",
+                source="muzero",
+            )
 
         if step % config.checkpoint_interval == 0:
             checkpoint_path = weights_dir / f"muzero_{horizon}_ckpt_{step}.pkl"
@@ -139,6 +195,19 @@ def main() -> dict[str, object]:
     agent.save(str(challenger_path))
 
     logger.info("Phase 3 - arena ADN")
+    append_training_log(
+        f"MuZero {horizon}: lancement de l'arena ADN.",
+        source="muzero",
+    )
+    mark_step_running(
+        step_name,
+        phase="arena",
+        horizon=horizon,
+        symbol_total=len(valid_symbols),
+        part_total=games_per_symbol,
+        training_step_current=config.training_steps if last_metrics is not None else None,
+        training_step_total=config.training_steps,
+    )
     genetic = GeneticUpdater()
     arena = Arena(weights_dir=config.weights_path)
     champion_id = genetic.get_champion(horizon=horizon)
@@ -167,6 +236,13 @@ def main() -> dict[str, object]:
         challenger_id=challenger_id,
     )
     logger.info("Promotion live %s: %s", horizon, promotion_result.get("status"))
+    append_training_log(
+        "MuZero "
+        f"{horizon}: arena={battle_report.get('outcome')} | "
+        f"promotion={promotion_result.get('status')} | "
+        f"gate={promotion_result.get('reason') or promotion_result.get('promotion_gate', {}).get('reason') or 'aucun'}",
+        source="muzero",
+    )
     genetic.register_new_generation(
         gen_id=challenger_id,
         metrics=registry_metrics,

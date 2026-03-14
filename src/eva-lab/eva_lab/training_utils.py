@@ -18,28 +18,118 @@ GNN_ASSET_DIM = 20
 GNN_TEMPORAL_DIM = 64
 GNN_HIDDEN_DIM = 128
 GNN_NUM_CLASSES = 3
+FOREX_CODES = {
+    "AUD",
+    "CAD",
+    "CHF",
+    "CNH",
+    "EUR",
+    "GBP",
+    "JPY",
+    "NZD",
+    "USD",
+}
+CRYPTO_BASES = {
+    "AAVE",
+    "AAV",
+    "ADA",
+    "ALGO",
+    "AVAX",
+    "BNB",
+    "BTC",
+    "DOGE",
+    "DOT",
+    "ETH",
+    "LINK",
+    "LTC",
+    "SOL",
+    "UNI",
+    "XRP",
+}
+CRYPTO_QUOTES = ("USDT", "USDC", "USD", "EUR", "BTC", "ETH")
+METAL_CODES = ("XAU", "XAG", "XPT", "XPD")
+INDEX_TOKENS = (
+    ".CASH",
+    "US30",
+    "US100",
+    "US500",
+    "GER40",
+    "UK100",
+    "NAS100",
+    "SPX500",
+    "USTEC",
+)
+CORE_FAMILIES = ("crypto", "forex", "index_cfd", "metal")
+SECONDARY_FAMILIES = ("cfd_other", "equity_cfd", "unknown")
+
+
+def _env_int(name: str, default: int) -> int:
+    """Lit un entier depuis l'environnement avec repli robuste.
+
+    Args:
+        name (str): Nom de la variable a lire.
+        default (int): Valeur de repli.
+
+    Returns:
+        int: Valeur entiere exploitable.
+    """
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        logger.warning("Valeur entiere invalide pour %s=%s. Repli=%s.", name, raw_value, default)
+        return default
 
 MTF_HORIZONS: dict[str, dict[str, Any]] = {
     "M5": {
         "minutes": 5,
-        "count": 2000,
+        "count": _env_int("TRAINING_HISTORY_M5_BARS", 12000),
         "seq_len": 20,
         "future": 12,
         "strategy": "scalp",
     },
     "H1": {
         "minutes": 60,
-        "count": 2000,
+        "count": _env_int("TRAINING_HISTORY_H1_BARS", 12000),
         "seq_len": 20,
         "future": 24,
         "strategy": "intraday",
     },
     "D1": {
         "minutes": 1440,
-        "count": 1000,
+        "count": _env_int("TRAINING_HISTORY_D1_BARS", 1800),
         "seq_len": 15,
         "future": 7,
         "strategy": "swing",
+    },
+}
+
+SUPPORTED_TIMEFRAMES: dict[str, dict[str, Any]] = {
+    "M1": {
+        "minutes": 1,
+        "count": _env_int("TRAINING_HISTORY_M1_BARS", 30000),
+    },
+    "M5": {
+        "minutes": 5,
+        "count": _env_int("TRAINING_HISTORY_M5_BARS", 12000),
+    },
+    "M15": {
+        "minutes": 15,
+        "count": _env_int("TRAINING_HISTORY_M15_BARS", 15000),
+    },
+    "H1": {
+        "minutes": 60,
+        "count": _env_int("TRAINING_HISTORY_H1_BARS", 12000),
+    },
+    "D1": {
+        "minutes": 1440,
+        "count": _env_int("TRAINING_HISTORY_D1_BARS", 1800),
+    },
+    "W1": {
+        "minutes": 10080,
+        "count": _env_int("TRAINING_HISTORY_W1_BARS", 520),
     },
 }
 
@@ -119,11 +209,181 @@ def _can_build_timeframe(available: set[str], timeframe: str) -> bool:
     """
     if timeframe in available:
         return True
+    if timeframe == "M5":
+        return "M1" in available
+    if timeframe == "M15":
+        return "M5" in available or "M1" in available
     if timeframe == "H1":
-        return "M5" in available
+        return "M15" in available or "M5" in available or "M1" in available
     if timeframe == "D1":
-        return "H1" in available or "M5" in available
+        return "H1" in available or "M15" in available or "M5" in available or "M1" in available
+    if timeframe == "W1":
+        return (
+            "D1" in available
+            or "H1" in available
+            or "M15" in available
+            or "M5" in available
+            or "M1" in available
+        )
     return False
+
+
+def classify_training_symbol(symbol: str) -> str:
+    """Classe un symbole d'entrainement dans une famille de marche.
+
+    Args:
+        symbol (str): Symbole brut issu des historiques.
+
+    Returns:
+        str: Famille retenue pour l'equilibrage de l'univers.
+    """
+    symbol_upper = symbol.upper()
+    alnum_symbol = "".join(char for char in symbol_upper if char.isalnum())
+
+    if any(alnum_symbol.startswith(code) for code in METAL_CODES):
+        return "metal"
+
+    if _looks_like_crypto_symbol(alnum_symbol):
+        return "crypto"
+
+    if _looks_like_forex_symbol(alnum_symbol):
+        return "forex"
+
+    if any(token in symbol_upper for token in INDEX_TOKENS):
+        return "index_cfd"
+
+    if symbol_upper.endswith(".CASH"):
+        return "equity_cfd"
+
+    if any(char.isdigit() for char in symbol_upper):
+        return "cfd_other"
+
+    if 1 <= len(alnum_symbol) <= 6 and alnum_symbol.isalpha():
+        return "equity_cfd"
+
+    return "unknown"
+
+
+def _looks_like_crypto_symbol(symbol: str) -> bool:
+    """Retourne ``True`` si le symbole ressemble a une paire crypto.
+
+    Args:
+        symbol (str): Symbole normalise.
+
+    Returns:
+        bool: ``True`` si une structure crypto probable est detectee.
+    """
+    for quote in CRYPTO_QUOTES:
+        if symbol.endswith(quote) and len(symbol) > len(quote):
+            base = symbol[: -len(quote)]
+            if base in CRYPTO_BASES and base not in FOREX_CODES:
+                return True
+    return False
+
+
+def _looks_like_forex_symbol(symbol: str) -> bool:
+    """Retourne ``True`` si le symbole ressemble a une paire Forex.
+
+    Args:
+        symbol (str): Symbole normalise.
+
+    Returns:
+        bool: ``True`` si le motif correspond a une paire Forex.
+    """
+    if len(symbol) < 6:
+        return False
+    base = symbol[:3]
+    quote = symbol[3:6]
+    if base in METAL_CODES:
+        return False
+    return base in FOREX_CODES and quote in FOREX_CODES
+
+
+def _symbol_priority(symbol: str) -> tuple[int, str]:
+    """Retourne une priorite stable pour les symboles preferes.
+
+    Args:
+        symbol (str): Symbole a ordonner.
+
+    Returns:
+        tuple[int, str]: Cle d'ordre stable.
+    """
+    preferred_prefix = {
+        "BTCUSD": 0,
+        "ETHUSD": 1,
+        "EURUSD": 2,
+        "GBPUSD": 3,
+        "USDJPY": 4,
+        "XAUUSD": 5,
+        "US30.CASH": 6,
+        "US100.CASH": 7,
+        "US500.CASH": 8,
+        "GER40.CASH": 9,
+        "UK100.CASH": 10,
+        "XAGUSD": 11,
+    }
+    return preferred_prefix.get(symbol.upper(), 999), symbol
+
+
+def _sort_symbols_by_family(symbols: list[str]) -> dict[str, list[str]]:
+    """Trie les symboles par famille d'actifs.
+
+    Args:
+        symbols (list[str]): Symboles candidats.
+
+    Returns:
+        dict[str, list[str]]: Mapping ``famille -> symboles tries``.
+    """
+    families: dict[str, list[str]] = {family: [] for family in (*CORE_FAMILIES, *SECONDARY_FAMILIES)}
+    for symbol in symbols:
+        family = classify_training_symbol(symbol)
+        families.setdefault(family, []).append(symbol)
+
+    for family_symbols in families.values():
+        family_symbols.sort(key=_symbol_priority)
+    return families
+
+
+def _pick_balanced_symbols(symbols: list[str], max_symbols: int) -> list[str]:
+    """Construit un univers equilibre entre familles d'actifs.
+
+    Args:
+        symbols (list[str]): Symboles entrainables.
+        max_symbols (int): Nombre maximal de symboles a retenir.
+
+    Returns:
+        list[str]: Univers equilibre et dedoublonne.
+    """
+    families = _sort_symbols_by_family(symbols)
+    selected: list[str] = []
+
+    while len(selected) < max_symbols:
+        added = False
+        for family in CORE_FAMILIES:
+            family_symbols = families.get(family, [])
+            if family_symbols:
+                selected.append(family_symbols.pop(0))
+                added = True
+                if len(selected) >= max_symbols:
+                    return selected
+
+        if not added:
+            break
+
+    while len(selected) < max_symbols:
+        added = False
+        for family in SECONDARY_FAMILIES:
+            family_symbols = families.get(family, [])
+            if family_symbols:
+                selected.append(family_symbols.pop(0))
+                added = True
+                if len(selected) >= max_symbols:
+                    return selected
+
+        if not added:
+            break
+
+    return selected
 
 
 def resolve_training_symbols(
@@ -153,18 +413,9 @@ def resolve_training_symbols(
         if all(_can_build_timeframe(available, timeframe) for timeframe in required):
             symbols.append(symbol)
 
-    preferred_prefix = {
-        "BTCUSD": 0,
-        "ETHUSD": 1,
-        "XAUUSD": 2,
-        "EURUSD": 3,
-        "GBPUSD": 4,
-        "USDJPY": 5,
-        "US30.cash": 6,
-    }
-    symbols.sort(key=lambda item: (preferred_prefix.get(item, 999), item))
+    symbols.sort(key=lambda item: (classify_training_symbol(item), _symbol_priority(item)))
     if max_symbols > 0:
-        return symbols[:max_symbols]
+        return _pick_balanced_symbols(symbols, max_symbols)
     return symbols
 
 
@@ -188,8 +439,27 @@ def load_history_frame(
     if direct_path.exists():
         return _read_history_frame(direct_path)
 
-    if timeframe == "H1":
+    if timeframe == "M5":
+        source_path = history_dir / f"{symbol}_M1.csv"
+        if source_path.exists():
+            return _resample_ohlcv(_read_history_frame(source_path), "5min")
+
+    if timeframe == "M15":
         source_path = history_dir / f"{symbol}_M5.csv"
+        if source_path.exists():
+            return _resample_ohlcv(_read_history_frame(source_path), "15min")
+        source_path = history_dir / f"{symbol}_M1.csv"
+        if source_path.exists():
+            return _resample_ohlcv(_read_history_frame(source_path), "15min")
+
+    if timeframe == "H1":
+        source_path = history_dir / f"{symbol}_M15.csv"
+        if source_path.exists():
+            return _resample_ohlcv(_read_history_frame(source_path), "1H")
+        source_path = history_dir / f"{symbol}_M5.csv"
+        if source_path.exists():
+            return _resample_ohlcv(_read_history_frame(source_path), "1H")
+        source_path = history_dir / f"{symbol}_M1.csv"
         if source_path.exists():
             return _resample_ohlcv(_read_history_frame(source_path), "1H")
 
@@ -197,9 +467,32 @@ def load_history_frame(
         source_path = history_dir / f"{symbol}_H1.csv"
         if source_path.exists():
             return _resample_ohlcv(_read_history_frame(source_path), "1D")
+        source_path = history_dir / f"{symbol}_M15.csv"
+        if source_path.exists():
+            return _resample_ohlcv(_read_history_frame(source_path), "1D")
         source_path = history_dir / f"{symbol}_M5.csv"
         if source_path.exists():
             return _resample_ohlcv(_read_history_frame(source_path), "1D")
+        source_path = history_dir / f"{symbol}_M1.csv"
+        if source_path.exists():
+            return _resample_ohlcv(_read_history_frame(source_path), "1D")
+
+    if timeframe == "W1":
+        source_path = history_dir / f"{symbol}_D1.csv"
+        if source_path.exists():
+            return _resample_ohlcv(_read_history_frame(source_path), "1W")
+        source_path = history_dir / f"{symbol}_H1.csv"
+        if source_path.exists():
+            return _resample_ohlcv(_read_history_frame(source_path), "1W")
+        source_path = history_dir / f"{symbol}_M15.csv"
+        if source_path.exists():
+            return _resample_ohlcv(_read_history_frame(source_path), "1W")
+        source_path = history_dir / f"{symbol}_M5.csv"
+        if source_path.exists():
+            return _resample_ohlcv(_read_history_frame(source_path), "1W")
+        source_path = history_dir / f"{symbol}_M1.csv"
+        if source_path.exists():
+            return _resample_ohlcv(_read_history_frame(source_path), "1W")
 
     return None
 
@@ -352,6 +645,46 @@ def get_horizon_timeframe(horizon: str) -> str:
         str: Timeframe associe.
     """
     return HORIZON_TO_TIMEFRAME.get(horizon.lower(), "H1")
+
+
+def get_timeframe_history_bars(
+    timeframe: str,
+    env_prefix: str = "TRAINING_HISTORY",
+    fallback: int | None = None,
+) -> int:
+    """Retourne le budget de bougies a consommer pour un timeframe.
+
+    Args:
+        timeframe (str): Timeframe cible (ex: ``M5``, ``H1``, ``D1``).
+        env_prefix (str): Prefixe des variables d'environnement.
+        fallback (int | None): Valeur de repli si le timeframe est inconnu.
+
+    Returns:
+        int: Nombre de bougies a charger.
+    """
+    timeframe_key = timeframe.upper()
+    default_value = fallback if fallback is not None else int(SUPPORTED_TIMEFRAMES.get(timeframe_key, {}).get("count", 0))
+    env_name = f"{env_prefix.upper()}_{timeframe_key}_BARS"
+    return _env_int(env_name, default_value)
+
+
+def get_horizon_history_bars(
+    horizon: str,
+    env_prefix: str = "TRAINING_HISTORY",
+    fallback: int | None = None,
+) -> int:
+    """Retourne le budget de bougies a utiliser pour un horizon strategique.
+
+    Args:
+        horizon (str): Horizon ``scalp``, ``intraday`` ou ``swing``.
+        env_prefix (str): Prefixe des variables d'environnement.
+        fallback (int | None): Valeur de repli si necessaire.
+
+    Returns:
+        int: Nombre de bougies a charger pour l'horizon.
+    """
+    timeframe = get_horizon_timeframe(horizon)
+    return get_timeframe_history_bars(timeframe, env_prefix=env_prefix, fallback=fallback)
 
 
 def build_inventory_report(data_dir: str | os.PathLike[str] | None = None) -> dict[str, list[str]]:

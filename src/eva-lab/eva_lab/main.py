@@ -9,8 +9,10 @@ C'est ici que les stratÃ©gies naissent, combattent et Ã©voluent.
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, Query
@@ -26,10 +28,107 @@ from eva_lab.dreamer_model import DreamerModel
 from eva_lab.genetic_updater import GeneticUpdater
 from eva_lab.shadow_learning import ShadowLearningService
 from eva_lab.dreamer_gate import DreamerGate
+from eva_lab.training_status import (
+    build_training_universe_summary,
+    load_nightly_summary,
+    load_training_status,
+    tail_training_log,
+)
 from eva_lab.training_utils import get_gnn_model_kwargs
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """
+    Lit un booleen simple depuis l'environnement.
+
+    Args:
+        name (str): Nom de la variable.
+        default (bool): Valeur de repli si absente.
+
+    Returns:
+        bool: Valeur booleenne normalisee.
+    """
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _probe_tcp_dependency(name: str, host: str, port: int) -> dict[str, Any]:
+    """
+    Teste une dependance TCP simple depuis le conteneur Lab.
+
+    Args:
+        name (str): Nom logique de la dependance.
+        host (str): Hote cible.
+        port (int): Port cible.
+
+    Returns:
+        dict[str, Any]: Etat minimal de disponibilite.
+    """
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=1.5)
+        writer.close()
+        await writer.wait_closed()
+        return {"name": name, "ok": True, "state": "online", "host": host, "port": port}
+    except Exception as exc:
+        return {
+            "name": name,
+            "ok": False,
+            "state": "offline",
+            "host": host,
+            "port": port,
+            "error": str(exc),
+        }
+
+
+async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str, Any]:
+    """
+    Agrege les dependances utiles a la lecture du run.
+
+    Args:
+        run_status (dict[str, Any]): Statut courant du training.
+
+    Returns:
+        dict[str, Any]: Dependances enrichies pour Nexus.
+    """
+    launcher = dict(run_status.get("launcher") or {})
+    dependencies = dict(run_status.get("dependencies") or {})
+
+    vllm_host = os.getenv("VLLM_API_HOST", "vllm")
+    redis_host = os.getenv("REDIS_HOST", "redis")
+    neo4j_host = os.getenv("NEO4J_HOST", "neo4j")
+    mqtt_host = os.getenv("HIVE_MQTT_HOST", "mosquitto")
+
+    vllm_state = str(launcher.get("vllm_state") or "").lower()
+    if vllm_state == "stopped_for_training":
+        dependencies["vllm"] = {
+            "name": "vllm",
+            "ok": False,
+            "state": "stopped_for_training",
+            "host": vllm_host,
+            "port": 8000,
+        }
+    else:
+        dependencies["vllm"] = await _probe_tcp_dependency("vllm", vllm_host, 8000)
+
+    dependencies["redis"] = await _probe_tcp_dependency("redis", redis_host, 6379)
+    dependencies["neo4j"] = await _probe_tcp_dependency("neo4j", neo4j_host, 7687)
+    dependencies["mosquitto"] = await _probe_tcp_dependency("mosquitto", mqtt_host, 1883)
+
+    trainer_container = launcher.get("trainer_container")
+    trainer_running = bool(run_status.get("active")) or bool(trainer_container)
+    dependencies["trainer"] = {
+        "name": "trainer",
+        "ok": trainer_running,
+        "state": "running" if trainer_running else "idle",
+        "container": trainer_container,
+        "pid": launcher.get("remote_pid"),
+    }
+    return dependencies
 
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -175,7 +274,10 @@ async def lifespan(app: FastAPI):
         app.state.gnn_model = None
 
     asyncio.create_task(hard_heartbeat())
-    asyncio.create_task(_nightly_training_loop())
+    if _env_flag("ENABLE_LAB_INTERNAL_NIGHTLY_SCHEDULER", False):
+        asyncio.create_task(_nightly_training_loop())
+    else:
+        logger.info("Planificateur nightly interne desactive; le cron Debian reste prioritaire.")
 
     logger.info("âœ… EVA Lab opÃ©rationnel â€” les stratÃ©gies peuvent combattre")
     yield
@@ -220,8 +322,6 @@ async def _nightly_training_loop():
             await asyncio.sleep(wait_seconds)
             
             logger.info("ðŸš€ DÃ©but de l'entraÃ®nement nocturne automatique (23h40)!")
-            import os
-            
             script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "train_nightly_stack.py")
             if os.path.exists(script_path):
                 # Utiliser le shell pour hÃ©riter de l'environnement venv
@@ -530,6 +630,45 @@ async def champion_status():
         "performance_summary": performance_summary,
         "horizons": horizon_status,
         "nightly_summary": nightly_summary,
+    }
+
+
+@app.get("/training/status")
+async def training_status(limit: int = Query(default=30, ge=1, le=100)):
+    """
+    Retourne l'etat detaille du run d'entrainement en lecture seule.
+
+    Args:
+        limit (int): Nombre maximal de lignes de log partage a retourner.
+
+    Returns:
+        dict: Progression courante, dependances et resume d'univers.
+    """
+    run_status = load_training_status()
+    nightly_summary = load_nightly_summary()
+    universe_summary = run_status.get("universe") or build_training_universe_summary()
+    dependencies = await _collect_training_dependencies(run_status)
+
+    current_step = run_status.get("current_step") or {}
+    step_parts = [
+        str(current_step.get("name") or "").strip(),
+        str(current_step.get("phase") or "").strip(),
+        str(current_step.get("horizon") or "").strip(),
+        str(current_step.get("symbol") or "").strip(),
+    ]
+    run_view = dict(run_status)
+    run_view["step_label"] = " | ".join(part for part in step_parts if part)
+    run_view["has_active_run"] = bool(run_status.get("active"))
+
+    return {
+        "status": "ok",
+        "run": run_view,
+        "dependencies": dependencies,
+        "universe": universe_summary,
+        "logs": tail_training_log(limit),
+        "nightly_summary": nightly_summary,
+        "status_path": str(Path("data/checkpoints/training_status.json")),
+        "log_path": str(Path("data/checkpoints/training_run.log")),
     }
 
 

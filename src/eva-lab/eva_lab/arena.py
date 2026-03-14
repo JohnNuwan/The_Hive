@@ -15,6 +15,7 @@ from eva_lab.muzero.environment import TradingEnvironment
 from eva_lab.muzero.jax_agent import JAXMuZeroAgent
 from eva_lab.training_utils import (
     build_muzero_market_data,
+    get_horizon_history_bars,
     get_horizon_timeframe,
     load_history_frame,
     resolve_training_symbols,
@@ -201,7 +202,10 @@ class Arena:
             logger.warning("Arena: historique absent pour %s sur %s.", symbol, timeframe)
             return None
 
-        history_bars = self._read_int_env("ARENA_HISTORY_BARS", 6000)
+        history_bars = self._read_int_env(
+            "ARENA_HISTORY_BARS",
+            get_horizon_history_bars(horizon, env_prefix="ARENA_HISTORY", fallback=6000),
+        )
         market_data = build_muzero_market_data(frame.tail(history_bars))
         if market_data.shape[0] < 240:
             logger.warning("Arena: historique insuffisant pour %s sur %s.", symbol, timeframe)

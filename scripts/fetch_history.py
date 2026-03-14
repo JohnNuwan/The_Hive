@@ -12,10 +12,25 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import MetaTrader5 as mt5
 import pandas as pd
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - dependance optionnelle en CLI.
+    load_dotenv = None
+
+try:
+    import psycopg2
+    from psycopg2.extras import execute_values
+except ImportError:  # pragma: no cover - dependance optionnelle pour la persistence TimescaleDB.
+    psycopg2 = None
+    execute_values = None
+
+if load_dotenv is not None:
+    load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("fetch_history")
@@ -29,9 +44,14 @@ CRYPTO_TOKENS = {
 }
 INDEX_HINTS = {"US30", "US500", "USTEC", "NAS100", "GER40", "UK100", "JP225", "FRA40", "SPX500", "AUS200"}
 TIMEFRAMES: dict[str, tuple[int, int]] = {
-    "M5": (mt5.TIMEFRAME_M5, int(os.getenv("HISTORY_M5_BARS", "50000"))),
-    "H1": (mt5.TIMEFRAME_H1, int(os.getenv("HISTORY_H1_BARS", "10000"))),
+    "M1": (mt5.TIMEFRAME_M1, int(os.getenv("HISTORY_M1_BARS", "100000"))),
+    "M5": (mt5.TIMEFRAME_M5, int(os.getenv("HISTORY_M5_BARS", "120000"))),
+    "M15": (mt5.TIMEFRAME_M15, int(os.getenv("HISTORY_M15_BARS", "40000"))),
+    "H1": (mt5.TIMEFRAME_H1, int(os.getenv("HISTORY_H1_BARS", "30000"))),
+    "D1": (mt5.TIMEFRAME_D1, int(os.getenv("HISTORY_D1_BARS", "2500"))),
+    "W1": (mt5.TIMEFRAME_W1, int(os.getenv("HISTORY_W1_BARS", "1040"))),
 }
+TIMESCALE_BATCH_SIZE = int(os.getenv("HISTORY_TIMESCALE_BATCH_SIZE", "5000"))
 
 
 @dataclass
@@ -47,6 +67,144 @@ class SymbolCandidate:
     name: str
     category: str
     reason: str
+
+
+class TimescaleWriter:
+    """Persiste les bougies OHLC dans TimescaleDB en mode best-effort.
+
+    Cette ecriture est volontairement optionnelle pour conserver un collecteur
+    robuste: si TimescaleDB est absent ou mal configure, l'export CSV continue.
+    """
+
+    def __init__(self, enabled: bool) -> None:
+        """Initialise l'ecrivain TimescaleDB.
+
+        Args:
+            enabled (bool): Active l'ecriture en base si ``True``.
+        """
+        self.enabled = bool(enabled)
+        self._disabled_reason: str | None = None
+        if not self.enabled:
+            return
+        if psycopg2 is None or execute_values is None:
+            self.enabled = False
+            self._disabled_reason = "psycopg2 indisponible"
+            logger.warning(
+                "Persistence TimescaleDB desactivee: %s. Les CSV restent la source de secours.",
+                self._disabled_reason,
+            )
+
+    def write_ohlc(self, symbol: str, timeframe_name: str, frame: pd.DataFrame) -> None:
+        """Persiste un DataFrame OHLC dans TimescaleDB.
+
+        Args:
+            symbol (str): Symbole exporte.
+            timeframe_name (str): Timeframe logique.
+            frame (pd.DataFrame): Bougies OHLCV a inserer.
+        """
+        if not self.enabled:
+            return
+        if frame.empty:
+            return
+
+        rows = self._build_rows(symbol, timeframe_name, frame)
+        if not rows:
+            return
+
+        try:
+            with psycopg2.connect(self._build_dsn()) as connection:
+                with connection.cursor() as cursor:
+                    execute_values(
+                        cursor,
+                        """
+                        INSERT INTO market_ohlc (
+                            time,
+                            symbol,
+                            timeframe,
+                            open,
+                            high,
+                            low,
+                            close,
+                            tick_volume,
+                            real_volume,
+                            spread
+                        )
+                        VALUES %s
+                        ON CONFLICT (symbol, timeframe, time) DO UPDATE SET
+                            open = EXCLUDED.open,
+                            high = EXCLUDED.high,
+                            low = EXCLUDED.low,
+                            close = EXCLUDED.close,
+                            tick_volume = EXCLUDED.tick_volume,
+                            real_volume = EXCLUDED.real_volume,
+                            spread = EXCLUDED.spread
+                        """,
+                        rows,
+                        page_size=TIMESCALE_BATCH_SIZE,
+                    )
+                connection.commit()
+            logger.info(
+                "TimescaleDB mis a jour: %s [%s] (%s lignes).",
+                symbol,
+                timeframe_name,
+                len(rows),
+            )
+        except Exception as exc:  # pragma: no cover - depend du service externe.
+            self.enabled = False
+            self._disabled_reason = str(exc)
+            logger.warning(
+                "Ecriture TimescaleDB desactivee apres echec sur %s [%s]: %s",
+                symbol,
+                timeframe_name,
+                exc,
+            )
+
+    @staticmethod
+    def _build_rows(symbol: str, timeframe_name: str, frame: pd.DataFrame) -> list[tuple[Any, ...]]:
+        """Construit la liste de tuples a inserer.
+
+        Args:
+            symbol (str): Symbole source.
+            timeframe_name (str): Timeframe associe.
+            frame (pd.DataFrame): DataFrame normalise.
+
+        Returns:
+            list[tuple[Any, ...]]: Lignes SQL prêtes a inserer.
+        """
+        rows: list[tuple[Any, ...]] = []
+        for row in frame.itertuples(index=False):
+            rows.append(
+                (
+                    row.time.to_pydatetime(),
+                    symbol,
+                    timeframe_name,
+                    float(row.open),
+                    float(row.high),
+                    float(row.low),
+                    float(row.close),
+                    int(getattr(row, "tick_volume", 0) or 0),
+                    int(getattr(row, "real_volume", 0) or 0),
+                    int(getattr(row, "spread", 0) or 0),
+                )
+            )
+        return rows
+
+    @staticmethod
+    def _build_dsn() -> str:
+        """Construit la chaine de connexion PostgreSQL.
+
+        Returns:
+            str: DSN de connexion TimescaleDB.
+        """
+        host = os.getenv("TIMESCALE_HOST", "localhost")
+        port = os.getenv("TIMESCALE_PORT", "5432")
+        database = os.getenv("TIMESCALE_DB", "thehive")
+        user = os.getenv("TIMESCALE_USER", "eva")
+        password = os.getenv("TIMESCALE_PASSWORD", "")
+        return (
+            f"host={host} port={port} dbname={database} "
+            f"user={user} password={password}"
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,6 +231,11 @@ def parse_args() -> argparse.Namespace:
         help="Pause entre deux requetes MT5 en millisecondes.",
     )
     parser.add_argument(
+        "--timeframes",
+        default=os.getenv("HISTORY_TIMEFRAMES", ",".join(TIMEFRAMES.keys())),
+        help="Timeframes a exporter, separes par des virgules (ex: M5,H1,D1).",
+    )
+    parser.add_argument(
         "--max-forex",
         type=int,
         default=int(os.getenv("HISTORY_MAX_FOREX", "28")),
@@ -95,6 +258,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=int(os.getenv("HISTORY_MAX_METALS", "6")),
         help="Nombre max de symboles metaux.",
+    )
+    parser.add_argument(
+        "--write-timescale",
+        action="store_true",
+        default=os.getenv("HISTORY_WRITE_TIMESCALE", "0").strip().lower() in {"1", "true", "yes", "on"},
+        help="Ecrit aussi les bougies dans TimescaleDB en plus des CSV.",
     )
     return parser.parse_args()
 
@@ -289,7 +458,13 @@ def select_target_symbols(args: argparse.Namespace) -> list[SymbolCandidate]:
     return deduped
 
 
-def fetch_data(symbol: str, timeframe_name: str, timeframe_value: int, count: int) -> Path | None:
+def fetch_data(
+    symbol: str,
+    timeframe_name: str,
+    timeframe_value: int,
+    count: int,
+    timescale_writer: TimescaleWriter | None = None,
+) -> Path | None:
     """Recupere les bougies MT5 et ecrit le CSV local.
 
     Args:
@@ -297,6 +472,7 @@ def fetch_data(symbol: str, timeframe_name: str, timeframe_value: int, count: in
         timeframe_name (str): Nom logique du timeframe.
         timeframe_value (int): Constante MT5 du timeframe.
         count (int): Nombre de bougies a demander.
+        timescale_writer (TimescaleWriter | None): Ecrivain TimescaleDB optionnel.
 
     Returns:
         Path | None: Fichier CSV ecrit ou ``None`` si echec.
@@ -306,7 +482,7 @@ def fetch_data(symbol: str, timeframe_name: str, timeframe_value: int, count: in
         logger.warning("Selection MT5 impossible pour %s: %s", symbol, mt5.last_error())
         return None
 
-    rates = mt5.copy_rates_from_pos(symbol, timeframe_value, 0, count)
+    rates = _copy_rates_chunked(symbol, timeframe_value, count)
     if rates is None:
         logger.warning("Historique indisponible pour %s [%s]: %s", symbol, timeframe_name, mt5.last_error())
         return None
@@ -321,7 +497,55 @@ def fetch_data(symbol: str, timeframe_name: str, timeframe_value: int, count: in
     output_path = OUTPUT_DIR / f"{symbol}_{timeframe_name}.csv"
     frame.to_csv(output_path, index=False)
     logger.info("CSV ecrit: %s (%s lignes)", output_path, len(frame))
+    if timescale_writer is not None:
+        timescale_writer.write_ohlc(symbol, timeframe_name, frame)
     return output_path
+
+
+def _copy_rates_chunked(symbol: str, timeframe_value: int, count: int) -> object | None:
+    """Recupere un historique MT5 par paquets pour eviter les limites broker.
+
+    Args:
+        symbol (str): Symbole a recuperer.
+        timeframe_value (int): Constante MT5 du timeframe.
+        count (int): Nombre total de bougies souhaite.
+
+    Returns:
+        object | None: Tableau ``rates`` concatene ou ``None`` si aucun lot n'est disponible.
+    """
+    chunk_size = max(1000, int(os.getenv("HISTORY_FETCH_CHUNK_SIZE", "40000")))
+    frames: list[pd.DataFrame] = []
+    offset = 0
+
+    while offset < count:
+        request_size = min(chunk_size, count - offset)
+        chunk = mt5.copy_rates_from_pos(symbol, timeframe_value, offset, request_size)
+        if chunk is None:
+            if offset == 0:
+                return None
+            logger.warning(
+                "Historique partiel pour %s [%s]: arret a %s bougies (%s).",
+                symbol,
+                timeframe_value,
+                offset,
+                mt5.last_error(),
+            )
+            break
+        chunk_frame = pd.DataFrame(chunk)
+        if chunk_frame.empty:
+            break
+        frames.append(chunk_frame)
+        fetched = len(chunk_frame)
+        offset += fetched
+        if fetched < request_size:
+            break
+
+    if not frames:
+        return None
+
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.drop_duplicates(subset=["time"]).sort_values("time")
+    return merged.to_records(index=False)
 
 
 def write_inventory(selected: Iterable[SymbolCandidate], generated_files: list[Path]) -> None:
@@ -331,16 +555,20 @@ def write_inventory(selected: Iterable[SymbolCandidate], generated_files: list[P
         selected (Iterable[SymbolCandidate]): Symboles retenus.
         generated_files (list[Path]): Fichiers CSV ecrits.
     """
+    selected_list = list(selected)
+    existing_files = sorted(OUTPUT_DIR.glob("*.csv"))
     inventory = {
         "generated_at": pd.Timestamp.utcnow().isoformat(),
         "symbols": [
             {"name": item.name, "category": item.category, "reason": item.reason}
-            for item in selected
+            for item in selected_list
         ],
-        "files": [str(path) for path in generated_files],
+        "files": [str(path) for path in existing_files],
+        "files_generated_this_run": [str(path) for path in generated_files],
         "counts": {
-            "symbols": len(list(selected)),
-            "files": len(generated_files),
+            "symbols": len(selected_list),
+            "files": len(existing_files),
+            "files_generated_this_run": len(generated_files),
         },
     }
     INVENTORY_PATH.write_text(json.dumps(inventory, indent=2), encoding="utf-8")
@@ -355,6 +583,7 @@ def main() -> int:
     """
     args = parse_args()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    timescale_writer = TimescaleWriter(enabled=args.write_timescale)
 
     if not mt5.initialize():
         logger.error("Initialisation MT5 impossible: %s", mt5.last_error())
@@ -367,6 +596,16 @@ def main() -> int:
             logger.error("Aucun symbole retenu pour l'univers d'entrainement.")
             return 2
 
+        requested_timeframes = [
+            item.strip().upper()
+            for item in str(args.timeframes).split(",")
+            if item.strip()
+        ]
+        invalid_timeframes = [item for item in requested_timeframes if item not in TIMEFRAMES]
+        if invalid_timeframes:
+            logger.error("Timeframes inconnus: %s", ", ".join(invalid_timeframes))
+            return 3
+
         logger.info("Univers historique retenu: %s symboles", len(selected))
         by_category: dict[str, int] = defaultdict(int)
         for item in selected:
@@ -376,8 +615,15 @@ def main() -> int:
 
         generated_files: list[Path] = []
         for candidate in selected:
-            for timeframe_name, (timeframe_value, count) in TIMEFRAMES.items():
-                output_path = fetch_data(candidate.name, timeframe_name, timeframe_value, count)
+            for timeframe_name in requested_timeframes:
+                timeframe_value, count = TIMEFRAMES[timeframe_name]
+                output_path = fetch_data(
+                    candidate.name,
+                    timeframe_name,
+                    timeframe_value,
+                    count,
+                    timescale_writer=timescale_writer,
+                )
                 if output_path is not None:
                     generated_files.append(output_path)
                 time.sleep(max(args.sleep_ms, 0) / 1000.0)

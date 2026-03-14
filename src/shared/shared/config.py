@@ -135,6 +135,9 @@ class Settings(BaseSettings):
     mt5_password: SecretStr = Field(default=SecretStr(""))
     mt5_server: str = ""
     mt5_duplicate_order_cooldown_seconds: int = 20
+    mt5_reconnect_cooldown_seconds: int = 15
+    mt5_warning_cooldown_seconds: int = 30
+    banker_heartbeat_interval_seconds: float = 3.0
     banker_ghost_fragmentation_enabled: bool = False
     banker_ghost_fragmentation_min_volume: float = 0.20
 

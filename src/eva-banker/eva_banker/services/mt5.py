@@ -106,6 +106,16 @@ class MT5Service:
         self._recent_order_signatures: dict[str, datetime] = {}
         self._inflight_order_signatures: set[str] = set()
         self._order_guard_lock = asyncio.Lock()
+        self._reconnect_lock = asyncio.Lock()
+        self._reconnect_cooldown = timedelta(
+            seconds=max(5, getattr(settings, "mt5_reconnect_cooldown_seconds", 15))
+        )
+        self._warning_cooldown = timedelta(
+            seconds=max(10, getattr(settings, "mt5_warning_cooldown_seconds", 30))
+        )
+        self._last_reconnect_attempt: datetime | None = None
+        self._last_offline_warning: datetime | None = None
+        self._last_disconnect_reason: str | None = None
         # Credentials pour login automatique
         self._login = login
         self._password = password
@@ -134,9 +144,90 @@ class MT5Service:
         Args:
             reason (str): Raison principale de la perte de connexion.
         """
+        was_connected = self.is_connected
         self.mock_mode = self._explicit_mock_mode
         self.is_connected = False
-        logger.error("MT5 hors ligne: %s", reason)
+        if was_connected or reason != self._last_disconnect_reason:
+            self._log_offline_warning("MT5 hors ligne: %s", reason)
+        self._last_disconnect_reason = reason
+
+    def _should_emit_offline_warning(self) -> bool:
+        """
+        Indique si un nouveau warning hors ligne peut etre emis.
+
+        Returns:
+            bool: True si le cooldown de warning est ecoule.
+        """
+        now = datetime.now()
+        if self._last_offline_warning is None:
+            self._last_offline_warning = now
+            return True
+        if now - self._last_offline_warning >= self._warning_cooldown:
+            self._last_offline_warning = now
+            return True
+        return False
+
+    def _log_offline_warning(self, message: str, *args: Any) -> None:
+        """
+        Emet un warning hors ligne avec anti-spam.
+
+        Args:
+            message (str): Message a journaliser.
+            *args (Any): Arguments de formatage du logger.
+        """
+        if self._should_emit_offline_warning():
+            logger.warning(message, *args)
+
+    async def _ensure_live_connection(self, reason: str, *, force: bool = False) -> bool:
+        """
+        Tente de retablir automatiquement la connexion MT5 si elle est perdue.
+
+        Args:
+            reason (str): Contexte de la tentative de reconnexion.
+            force (bool): Ignore temporairement le cooldown de reconnexion.
+
+        Returns:
+            bool: True si la connexion est de nouveau disponible.
+        """
+        if self.mock_mode or self.is_connected:
+            return True
+        if not self._live_mode_requested():
+            return False
+
+        async with self._reconnect_lock:
+            if self.mock_mode or self.is_connected:
+                return True
+
+            now = datetime.now()
+            if (
+                not force
+                and self._last_reconnect_attempt is not None
+                and now - self._last_reconnect_attempt < self._reconnect_cooldown
+            ):
+                self._log_offline_warning(
+                    "MT5: reconnexion automatique en attente (%s).",
+                    reason,
+                )
+                return False
+
+            self._last_reconnect_attempt = now
+            logger.warning("MT5: tentative de reconnexion automatique (%s).", reason)
+            if MT5_AVAILABLE:
+                try:
+                    await asyncio.to_thread(mt5.shutdown)
+                except Exception:
+                    pass
+            connected = await self.connect()
+            if connected:
+                self._last_offline_warning = None
+                logger.info("MT5: reconnexion automatique reussie (%s).", reason)
+                return True
+
+            self._log_offline_warning(
+                "MT5: echec de reconnexion automatique (%s).",
+                reason,
+            )
+            return False
 
     def _build_order_signature(self, order: TradeOrder) -> str:
         """
@@ -282,6 +373,10 @@ class MT5Service:
 
             self.mock_mode = False
             self.is_connected = True
+            if self._last_disconnect_reason:
+                logger.info("MT5: connexion retablie sur le compte %s.", account_info.login)
+            self._last_disconnect_reason = None
+            self._last_offline_warning = None
             return True
         except Exception as e:
             logger.exception(f"Erreur connexion MT5: {e}")
@@ -516,16 +611,23 @@ class MT5Service:
                 leverage=100,
             )
 
-        if not self.is_connected:
-            logger.warning("MT5: infos compte indisponibles car la connexion est hors ligne.")
+        if not self.is_connected and not await self._ensure_live_connection("lecture des informations compte"):
+            self._log_offline_warning("MT5: infos compte indisponibles car la connexion est hors ligne.")
             return None
 
         info = await asyncio.to_thread(mt5.account_info)
         if info is None:
-            logger.warning("MT5: Impossible de rÃ©cupÃ©rer les infos du compte (terminal occupÃ© ou dÃ©connectÃ©)")
-            self.is_connected = False
-            return None
+            self._mark_live_disconnected("Informations compte indisponibles depuis le terminal.")
+            if not await self._ensure_live_connection("lecture des informations compte apres echec", force=True):
+                return None
+            info = await asyncio.to_thread(mt5.account_info)
+            if info is None:
+                self._mark_live_disconnected(
+                    "Informations compte toujours indisponibles apres reconnexion."
+                )
+                return None
 
+        self.is_connected = True
         return AccountBalance(
             login=info.login,
             server=info.server,
@@ -538,21 +640,34 @@ class MT5Service:
             leverage=info.leverage,
         )
 
-    async def get_open_positions(self) -> list[Position]:
-        """RÃ©cupÃ¨re les positions ouvertes"""
+    async def get_open_positions(self) -> Optional[list[Position]]:
+        """RÃ©cupÃ¨re les positions ouvertes.
+
+        Returns:
+            Optional[list[Position]]: Liste des positions si la lecture MT5
+            est disponible. Renvoie ``None`` en cas de rupture de connexion
+            pour eviter de confondre un incident reseau avec une absence
+            reelle de position.
+        """
         if self.mock_mode:
             return self._mock_positions
 
-        if not self.is_connected:
-            logger.warning("MT5: positions indisponibles car la connexion est hors ligne.")
+        if not self.is_connected and not await self._ensure_live_connection("lecture des positions"):
+            self._log_offline_warning("MT5: positions indisponibles car la connexion est hors ligne.")
             return None
 
         positions_data = await asyncio.to_thread(mt5.positions_get)
         if positions_data is None:
             # None indicates a terminal/connection error, not "no positions"
-            self.is_connected = False
-            return None
+            self._mark_live_disconnected("Lecture des positions indisponible depuis le terminal.")
+            if not await self._ensure_live_connection("lecture des positions apres echec", force=True):
+                return None
+            positions_data = await asyncio.to_thread(mt5.positions_get)
+            if positions_data is None:
+                self._mark_live_disconnected("Positions toujours indisponibles apres reconnexion.")
+                return None
 
+        self.is_connected = True
         positions = []
         for pos in positions_data:
             positions.append(
@@ -574,10 +689,10 @@ class MT5Service:
             )
         return positions
 
-    async def get_mtf_candles(self, symbol: str, timeframes: list[int] = [5, 60, 1440], count: int = 100) -> dict[int, list[dict]]:
+    async def get_mtf_candles(self, symbol: str, timeframes: list[int] = [5, 15, 60, 1440], count: int = 100) -> dict[int, list[dict]]:
         """
         RÃ©cupÃ¨re les bougies OMNI-STATE (Multi-Timeframe) synchronisÃ©es.
-        Renvoie un dictionnaire: {5: [candles_m5], 60: [candles_h1], 1440: [candles_d1]}
+        Renvoie un dictionnaire: {5: [candles_m5], 15: [candles_m15], 60: [candles_h1], 1440: [candles_d1]}
         """
         import random
         from datetime import datetime
@@ -587,13 +702,18 @@ class MT5Service:
             5: 5 if self.mock_mode else mt5.TIMEFRAME_M5, 
             15: 15 if self.mock_mode else mt5.TIMEFRAME_M15,
             60: 60 if self.mock_mode else mt5.TIMEFRAME_H1,
-            1440: 1440 if self.mock_mode else mt5.TIMEFRAME_D1
+            1440: 1440 if self.mock_mode else mt5.TIMEFRAME_D1,
+            10080: 10080 if self.mock_mode else mt5.TIMEFRAME_W1,
         }
         
         result = {}
 
-        if not self.mock_mode and not self.is_connected:
-            logger.warning("MT5: bougies indisponibles pour %s car la connexion est hors ligne.", symbol)
+        if (
+            not self.mock_mode
+            and not self.is_connected
+            and not await self._ensure_live_connection(f"lecture des bougies {symbol}")
+        ):
+            self._log_offline_warning("MT5: bougies indisponibles pour %s car la connexion est hors ligne.", symbol)
             return {tf: [] for tf in timeframes}
         
         for tf in timeframes:
@@ -667,12 +787,13 @@ class MT5Service:
                 "time": datetime.now().timestamp()
             }
 
-        if not self.is_connected:
+        if not self.is_connected and not await self._ensure_live_connection(f"lecture du tick {symbol}"):
             return {"success": False, "message": f"MT5 hors ligne pour {symbol}"}
 
         tick = await asyncio.to_thread(mt5.symbol_info_tick, symbol)
         if tick is None:
             self.is_connected = False
+            await self._ensure_live_connection(f"lecture du tick {symbol} apres echec", force=True)
             return {"success": False, "message": f"Dernier tick non disponible pour {symbol}"}
 
         return {
@@ -692,7 +813,13 @@ class MT5Service:
         Returns:
             dict[str, Decimal]: Bornes `min`, `step` et `max` du symbole.
         """
-        if self.mock_mode or not self.is_connected:
+        if self.mock_mode:
+            return {
+                "min": Decimal("0.01"),
+                "step": Decimal("0.01"),
+                "max": Decimal("1.00"),
+            }
+        if not self.is_connected and not await self._ensure_live_connection(f"lecture des contraintes {symbol}"):
             return {
                 "min": Decimal("0.01"),
                 "step": Decimal("0.01"),
@@ -838,7 +965,7 @@ class MT5Service:
                 order_executed = bool(result.get("success"))
                 return result
 
-            if not self.is_connected:
+            if not self.is_connected and not await self._ensure_live_connection(f"execution ordre {order.symbol}"):
                 return {
                     "success": False,
                     "message": "MT5 hors ligne: ordre refuse tant que la connexion n'est pas retablie.",
@@ -1007,7 +1134,7 @@ class MT5Service:
                 "symbol": pos.symbol
             }
 
-        if not self.is_connected:
+        if not self.is_connected and not await self._ensure_live_connection(f"fermeture position {ticket}"):
             return {"success": False, "message": "MT5 hors ligne: fermeture impossible."}
 
         position = await asyncio.to_thread(mt5.positions_get, ticket=ticket)
@@ -1070,21 +1197,39 @@ class MT5Service:
                 return {"success": True, "message": f"Position {ticket} modified (mock)"}
             return {"success": False, "message": "Position not found"}
 
-        if not self.is_connected:
+        if not self.is_connected and not await self._ensure_live_connection(f"modification position {ticket}"):
             return {"success": False, "message": "MT5 hors ligne: modification impossible."}
+
+        position = await asyncio.to_thread(mt5.positions_get, ticket=ticket)
+        if not position:
+            return {"success": False, "message": f"Position {ticket} introuvable pour modification."}
+
+        pos = position[0]
+        current_sl = float(getattr(pos, "sl", 0.0) or 0.0)
+        current_tp = float(getattr(pos, "tp", 0.0) or 0.0)
 
         request = {
             "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": pos.symbol,
             "position": ticket,
-            "sl": float(sl),
-            "tp": float(tp),
+            "sl": float(sl) if sl > 0 else current_sl,
+            "tp": float(tp) if tp > 0 else current_tp,
+            "magic": getattr(pos, "magic", 0),
         }
-        
+
         result = await asyncio.to_thread(mt5.order_send, request)
+        if result is None:
+            return {"success": False, "message": f"MT5 n'a retourne aucune reponse pour la modification de {ticket}."}
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             return {"success": False, "message": f"Erreur modification: {result.comment}"}
-            
-        return {"success": True, "message": f"Position {ticket} modified SL={sl} TP={tp}"}
+
+        return {
+            "success": True,
+            "message": (
+                f"Position {ticket} modifiee "
+                f"SL={request['sl']:.5f} TP={request['tp']:.5f}"
+            ),
+        }
 
     async def get_margin_required(self, symbol: str, action: TradeAction, volume: float) -> Optional[float]:
         """Estime la marge requise pour un ordre (Sprint 13)."""
@@ -1092,8 +1237,8 @@ class MT5Service:
             # Estimation pifomÃ©trique pour le mock
             return volume * 500.0  # $500 de marge par lot
 
-        if not self.is_connected:
-            logger.warning("Calcul de marge impossible sur %s: MT5 hors ligne.", symbol)
+        if not self.is_connected and not await self._ensure_live_connection(f"calcul de marge {symbol}"):
+            self._log_offline_warning("Calcul de marge impossible sur %s: MT5 hors ligne.", symbol)
             return None
             
         order_type = mt5.ORDER_TYPE_BUY if action == TradeAction.BUY else mt5.ORDER_TYPE_SELL
@@ -1178,8 +1323,8 @@ class MT5Service:
         if self.mock_mode:
             return []
 
-        if not self.is_connected:
-            logger.warning("Historique MT5 indisponible: connexion hors ligne.")
+        if not self.is_connected and not await self._ensure_live_connection("lecture de l'historique MT5"):
+            self._log_offline_warning("Historique MT5 indisponible: connexion hors ligne.")
             return []
         
         try:
@@ -1470,6 +1615,7 @@ class MT5Service:
             15: mt5.TIMEFRAME_M15,
             60: mt5.TIMEFRAME_H1,
             1440: mt5.TIMEFRAME_D1,
+            10080: mt5.TIMEFRAME_W1,
         }
         mt5_tf = tf_map.get(timeframe)
         if mt5_tf is None:
