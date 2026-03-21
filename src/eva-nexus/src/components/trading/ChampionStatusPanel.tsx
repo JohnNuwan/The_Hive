@@ -1,4 +1,4 @@
-﻿import type { HorizonChampionStatus, LabChampionStatus } from '../../services/api'
+import type { HorizonChampionStatus, LabChampionStatus } from '../../services/api'
 import { MetricPill, PanelShell, StatusBadge } from './TradingShared'
 
 interface ChampionOfflineMetrics {
@@ -31,28 +31,41 @@ function metricValue(value?: number, suffix = '') {
 
 export default function ChampionStatusPanel({ championStatus }: { championStatus: LabChampionStatus | null }) {
     const horizons = ['scalp', 'intraday', 'swing']
+    const engineEntries = championStatus?.engines
+        ? Object.entries(championStatus.engines).flatMap(([engine, engineHorizons]) =>
+            horizons.map((horizon) => ({
+                engine,
+                horizon,
+                status: engineHorizons?.[horizon],
+            }))
+        )
+        : horizons.map((horizon) => ({
+            engine: 'muzero',
+            horizon,
+            status: championStatus?.horizons?.[horizon],
+        }))
 
     return (
         <PanelShell
             title="Champions"
-            subtitle="Candidat, champion live et gate de promotion"
+            subtitle="Candidat, champion live et gate de promotion par moteur"
             accent="cyan"
             aside={<StatusBadge label={String(championStatus?.selection_policy || 'champion_only')} tone="cyan" />}
         >
             <div className="space-y-4">
-                {horizons.map((horizon) => {
-                    const status = championStatus?.horizons?.[horizon]
+                {engineEntries.map(({ engine, horizon, status }) => {
                     const gate = status?.promotion_gate
                     const metrics = (gate?.metrics || {}) as ChampionOfflineMetrics
                     const liveUniverse = status?.live_universe
                     return (
-                        <div key={horizon} className="rounded-2xl border border-white/5 bg-black/20 p-4">
+                        <div key={`${engine}-${horizon}`} className="rounded-2xl border border-white/5 bg-black/20 p-4">
                             <div className="flex items-start justify-between gap-3">
                                 <div>
-                                    <div className="text-[9px] text-slate-500 uppercase font-black tracking-[0.2em]">{horizon}</div>
+                                    <div className="text-[9px] text-slate-500 uppercase font-black tracking-[0.2em]">{engine} | {horizon}</div>
                                     <div className="mt-1 text-sm font-black text-white/90">Live: {status?.live_champion_id || 'Aucun'}</div>
                                     <div className="mt-1 text-[10px] text-slate-500">Candidat: {status?.candidate_id || 'Aucun'}</div>
                                     <div className="mt-1 text-[10px] text-slate-500">Registre: {status?.registry_champion_id || 'Aucun'}</div>
+                                    <div className="mt-1 text-[10px] text-slate-500">Famille: {status?.family || '--'}</div>
                                 </div>
                                 <div className="flex flex-col items-end gap-2">
                                     <StatusBadge label={String(status?.selection || 'aucun')} tone={selectionTone(status?.selection) as any} />
@@ -79,4 +92,3 @@ export default function ChampionStatusPanel({ championStatus }: { championStatus
         </PanelShell>
     )
 }
-

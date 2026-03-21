@@ -13,7 +13,7 @@
     *   Load Average du système.
     *   Demandes de ressources des autres experts (via Orchestrator).
 *   **Sorties** :
-    *   `AllocationMatrix` : Qui a droit au GPU ?
+    *   `AllocationMatrix` : Qui a droit au GPU -
     *   `PowerDirective` : Ajustement du voltage et des fréquences.
 
 ## 3. Système Prompt (Core Logic)

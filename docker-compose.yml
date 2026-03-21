@@ -330,11 +330,21 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
       - MOCK_MT5=${MOCK_MT5:-true}
       - PAPER_TRADING=${PAPER_TRADING:-true}
+      - LAB_HOST=${LAB_HOST:-lab}
+      - LAB_PORT=${LAB_PORT:-8600}
+      - BANKER_LIVE_INFERENCE_URL=${BANKER_LIVE_INFERENCE_URL:-http://live-inference:8610}
+      - BANKER_LIVE_INFERENCE_TIMEOUT_SECONDS=${BANKER_LIVE_INFERENCE_TIMEOUT_SECONDS:-5}
+      - BANKER_TRAINING_COMPAT_MODE=${BANKER_TRAINING_COMPAT_MODE:-disabled}
+      - BANKER_CPU_LIVE_SYMBOLS=${BANKER_CPU_LIVE_SYMBOLS:-EURUSD,GBPUSD,USDJPY,XAUUSD}
+      - BANKER_CPU_LIVE_MAX_VOLUME=${BANKER_CPU_LIVE_MAX_VOLUME:-0.01}
+      - BANKER_REQUIRE_VALID_CHAMPION=${BANKER_REQUIRE_VALID_CHAMPION:-true}
+      - BANKER_LIMIT_TO_LAB_UNIVERSE=${BANKER_LIMIT_TO_LAB_UNIVERSE:-true}
+      - BANKER_LAB_UNIVERSE_HORIZON=${BANKER_LAB_UNIVERSE_HORIZON:-scalp}
     networks:
       - hive-net
     restart: unless-stopped
     deploy:
-      replicas: 2
+      replicas: 1
       restart_policy:
         condition: any
   substrate:
@@ -408,6 +418,34 @@ services:
       - ./data:/app/eva-lab/data
       # Monte le code source pour activer les champions live sans rebuild image.
       - ./src/eva-lab/eva_lab:/app/eva-lab/eva_lab:ro
+  live-inference:
+    build:
+      context: .
+      dockerfile: src/eva-lab/Dockerfile
+    ports:
+      - 8610:8610
+    environment:
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - CUDA_VISIBLE_DEVICES=
+      - JAX_PLATFORMS=cpu
+      - XLA_PYTHON_CLIENT_PREALLOCATE=false
+      - MUZERO_LIVE_SELECTION_POLICY=${MUZERO_LIVE_SELECTION_POLICY:-champion_only}
+    command: ["uvicorn", "eva_lab.live_inference_main:app", "--host", "0.0.0.0", "--port", "8610"]
+    networks:
+      - hive-net
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/eva-lab/data
+      - ./src/eva-lab/eva_lab:/app/eva-lab/eva_lab:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8610/health', timeout=3)"
+      interval: 20s
+      timeout: 5s
+      retries: 3
   quant-lab:
     build:
       context: .
@@ -548,7 +586,7 @@ services:
     networks:
       - hive-net
     deploy:
-      replicas: 2
+      replicas: 1
       restart_policy:
         condition: any
   wraith:

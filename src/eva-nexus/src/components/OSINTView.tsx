@@ -1,9 +1,30 @@
-﻿import { useState, useEffect, useCallback, useRef } from 'react'
-import { checkNodeHealth, type NodeHealth } from '../services/api'
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
+import {
+    Activity,
+    AlertTriangle,
+    BookOpen,
+    Globe2,
+    Radar,
+    Shield,
+    Siren,
+} from 'lucide-react'
 
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// TYPES
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+import {
+    checkNodeHealth,
+    getResearchPeaAnalysis,
+    getResearcherTrends,
+    getSentinelAlerts,
+    getShadowAlerts,
+    getShadowMonitors,
+    getShadowThreatHistory,
+    reconShadow,
+    searchShadow,
+    type NodeHealth,
+    type ResearchResult,
+    type ShadowAlert,
+    type ShadowMonitor,
+    type ShadowThreatAnalysis,
+} from '../services/api'
 
 interface OSINTAgent {
     id: string
@@ -11,7 +32,6 @@ interface OSINTAgent {
     codename: string
     expert: string
     icon: string
-    color: string
     description: string
     capabilities: string[]
     healthUrl: string
@@ -20,35 +40,15 @@ interface OSINTAgent {
     phase: string
 }
 
-interface SearchResult {
-    title: string
-    url: string
-    snippet: string
-}
-
-interface SecurityAlert {
-    id: string
-    type: string
-    severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
-    message: string
-    timestamp: string
-    source?: string
-}
-
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// AGENT DEFINITIONS
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
 const OSINT_AGENTS: OSINTAgent[] = [
     {
         id: 'shadow',
         name: 'THE SHADOW',
         codename: 'Expert C',
-        expert: 'OSINT & Investigation',
-        icon: 'ðŸŒ‘',
-        color: 'cyber-purple',
-        description: "Agent OSINT et Recherche Web. EnquÃªteur et Threat Intel. Effectue des recherches approfondies, du scraping web et de l'analyse de menaces via DuckDuckGo, Brave Search, AlienVault et VirusTotal.",
-        capabilities: ['Web Search', 'Entity Recon', 'Threat Intelligence', 'Dark Web Monitoring', 'Social Engineering OSINT'],
+        expert: 'OSINT et investigation',
+        icon: 'SH',
+        description: 'Agent OSINT et recherche web. Veille, recherche, recon et collecte de signaux ouverts.',
+        capabilities: ['Recherche web', 'Reconnaissance', 'Threat intelligence', 'Veille', 'Personas'],
         healthUrl: '/api/shadow/health',
         port: 8002,
         model: 'Dolphin-Qwen',
@@ -58,11 +58,10 @@ const OSINT_AGENTS: OSINTAgent[] = [
         id: 'sentinel',
         name: 'THE SENTINEL',
         codename: 'Expert F',
-        expert: 'CybersÃ©curitÃ© Active',
-        icon: 'ðŸ›¡ï¸',
-        color: 'cyber-cyan',
-        description: 'Agent de SÃ©curitÃ© et Monitoring de la Ruche. Surveillance systÃ¨me temps rÃ©el, dÃ©tection intrusions (Wazuh/Suricata), intÃ©gritÃ© des fichiers et alertes de sÃ©curitÃ©.',
-        capabilities: ['System Monitoring', 'Intrusion Detection', 'Integrity Checks', 'Vulnerability Scanning', 'Incident Response'],
+        expert: 'Cybersecurite active',
+        icon: 'SN',
+        description: 'Surveillance, alertes securite, integrite, audit et quarantaine.',
+        capabilities: ['Monitoring', 'Detection', 'Integrite', 'Audit', 'Quarantaine'],
         healthUrl: '/api/sentinel/health',
         port: 8007,
         model: 'Cyber-Llama',
@@ -72,68 +71,51 @@ const OSINT_AGENTS: OSINTAgent[] = [
         id: 'wraith',
         name: 'THE WRAITH',
         codename: 'Expert D',
-        expert: 'Vision & Analyse VidÃ©o',
-        icon: 'ðŸ‘ï¸',
-        color: 'cyber-amber',
-        description: "Agent Vision. ComprÃ©hension sÃ©mantique vidÃ©o, Skeleton Tracking via V-JEPA et Coral TPU. Analyse de micro-expressions et surveillance camÃ©ra intelligente.",
-        capabilities: ['Video Analysis', 'Skeleton Tracking', 'Micro-expression Detection', 'CCTV Monitoring', 'Object Recognition'],
+        expert: 'Vision et analyse video',
+        icon: 'WR',
+        description: 'Agent vision pour micro-expressions, CCTV et analyse visuelle.',
+        capabilities: ['Video', 'Tracking', 'Micro-expressions', 'CCTV', 'Reconnaissance objets'],
         healthUrl: '/api/wraith/health',
         port: 8012,
-        model: 'V-JEPA (Vision)',
+        model: 'V-JEPA',
         phase: 'SKELETON',
     },
     {
         id: 'researcher',
         name: 'THE RESEARCHER',
         codename: 'Expert I',
-        expert: 'Optimisation Algorithmique',
-        icon: 'ðŸ”¬',
-        color: 'matrix',
-        description: 'Agent de Recherche Scientifique. Optimisation algorithmique, analyse de papers (ArXiv), mÃ©ta-apprentissage. Utilise Galactica pour la comprÃ©hension de la littÃ©rature scientifique.',
-        capabilities: ['ArXiv Analysis', 'Algorithm Optimization', 'Meta-Learning', 'Paper Summarization', 'Experiment Design'],
+        expert: 'Recherche scientifique',
+        icon: 'RS',
+        description: 'Agent de veille academique, arXiv et synthese de recherche.',
+        capabilities: ['arXiv', 'Synthese', 'Veille', 'Papiers', 'Recherche'],
         healthUrl: '/api/researcher/health',
         port: 8013,
         model: 'Galactica',
-        phase: 'SKELETON',
+        phase: 'ALPHA',
     },
 ]
 
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// SIMULATED DATA
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-const MOCK_ALERTS: SecurityAlert[] = [
-    { id: 'SA-001', type: 'INTEGRITY_CHECK', severity: 'info', message: 'Kernel binary hash verification: OK', timestamp: new Date(Date.now() - 120000).toISOString(), source: 'Sentinel' },
-    { id: 'SA-002', type: 'PORT_SCAN', severity: 'low', message: 'External port scan detected from 185.220.101.x â€” blocked by firewall', timestamp: new Date(Date.now() - 300000).toISOString(), source: 'Suricata' },
-    { id: 'SA-003', type: 'AUTH_ATTEMPT', severity: 'medium', message: 'Failed SSH login attempt (3x) from 45.33.32.156 â€” IP blacklisted', timestamp: new Date(Date.now() - 600000).toISOString(), source: 'Wazuh' },
-    { id: 'SA-004', type: 'SYSTEM_UPDATE', severity: 'info', message: 'ZFS snapshot auto-rotation completed â€” 12 snapshots retained', timestamp: new Date(Date.now() - 900000).toISOString(), source: 'Phoenix' },
-    { id: 'SA-005', type: 'NETWORK_ANOMALY', severity: 'low', message: 'Unusual outbound traffic pattern detected on port 8443 â€” monitoring', timestamp: new Date(Date.now() - 1200000).toISOString(), source: 'Suricata' },
-]
-
-const MOCK_THREAT_FEED: { indicator: string; type: string; risk: string; source: string }[] = [
-    { indicator: '185.220.101.0/24', type: 'IP Range', risk: 'HIGH', source: 'AlienVault OTX' },
-    { indicator: 'malware-c2.example.com', type: 'Domain', risk: 'CRITICAL', source: 'VirusTotal' },
-    { indicator: 'CVE-2026-1234', type: 'Vulnerability', risk: 'MEDIUM', source: 'NVD' },
-    { indicator: 'phishing-kit-v3.2', type: 'Malware', risk: 'HIGH', source: 'Hybrid Analysis' },
-]
-
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// COMPONENTS
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-function SeverityBadge({ severity }: { severity: string }) {
-    const colors: Record<string, string> = {
-        critical: 'bg-cyber-pink/20 border-cyber-pink/30 text-cyber-pink',
-        high: 'bg-cyber-pink/10 border-cyber-pink/20 text-cyber-pink/70',
-        medium: 'bg-cyber-amber/10 border-cyber-amber/20 text-cyber-amber/70',
-        low: 'bg-cyber-cyan/10 border-cyber-cyan/20 text-cyber-cyan/50',
-        info: 'bg-white/[0.03] border-white/10 text-white/30',
+function formatDate(value?: string | null) {
+    if (!value) {
+        return 'indisponible'
     }
-    return (
-        <span className={`px-2 py-0.5 text-[7px] tracking-[0.15em] border ${colors[severity] || colors.info}`}>
-            {severity.toUpperCase()}
-        </span>
-    )
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) {
+        return 'indisponible'
+    }
+    return date.toLocaleString('fr-FR', {
+        hour: '2-digit',
+        minute: '2-digit',
+        day: '2-digit',
+        month: '2-digit',
+    })
+}
+
+function cleanMessage(value: string) {
+    return (value || '')
+        .replace(/[^\x20-\x7E]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
 }
 
 function AgentCard({ agent, health }: { agent: OSINTAgent; health?: NodeHealth }) {
@@ -143,405 +125,258 @@ function AgentCard({ agent, health }: { agent: OSINTAgent; health?: NodeHealth }
 
     return (
         <div className="cyber-panel hud-corners p-4 flex flex-col gap-3">
-            {/* Header */}
             <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3">
-                    <div className="text-2xl">{agent.icon}</div>
+                    <div className="text-sm font-bold text-white/60 w-7">{agent.icon}</div>
                     <div>
                         <h3 className="font-display text-[11px] font-bold tracking-[0.1em] text-white/70">{agent.name}</h3>
-                        <div className="text-[8px] text-white/15 tracking-[0.2em]">{agent.codename} â€¢ {agent.expert}</div>
+                        <div className="text-[8px] text-white/15 tracking-[0.2em]">{agent.codename} - {agent.expert}</div>
                     </div>
                 </div>
                 <div className="flex flex-col items-end gap-1">
                     <div className="flex items-center gap-2">
                         <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-matrix shadow-[0_0_6px_rgba(0,255,65,0.5)]' : 'bg-white/10'}`} />
-                        <span className={`text-[8px] tracking-wider ${isOnline ? 'neon-text' : 'text-white/20'}`}>
-                            {isOnline ? 'ONLINE' : 'OFFLINE'}
-                        </span>
+                        <span className={`text-[8px] tracking-wider ${isOnline ? 'neon-text' : 'text-white/20'}`}>{isOnline ? 'ONLINE' : 'OFFLINE'}</span>
                     </div>
-                    <span className="text-[7px] text-white/10 tracking-[0.15em]">{agent.phase} â€¢ :{agent.port}</span>
+                    <span className="text-[7px] text-white/10 tracking-[0.15em]">{agent.phase} - :{agent.port}</span>
                 </div>
             </div>
 
-            {/* Description */}
             <p className="text-[10px] text-white/25 leading-relaxed">{agent.description}</p>
 
-            {/* Model */}
-            <div className="flex items-center gap-2">
-                <span className="text-[8px] text-white/15 tracking-wider">MODEL:</span>
-                <span className="px-2 py-0.5 text-[9px] border border-white/[0.05] bg-white/[0.01] text-white/40">{agent.model}</span>
-            </div>
-
-            {/* Capabilities */}
             <div className="flex flex-wrap gap-1.5">
-                {agent.capabilities.map((cap, i) => (
-                    <span key={i} className="px-2 py-0.5 text-[8px] border border-matrix/10 bg-matrix/[0.03] text-matrix/40 tracking-wider">
-                        {cap}
+                {agent.capabilities.map((capability) => (
+                    <span key={capability} className="px-2 py-0.5 text-[8px] border border-matrix/10 bg-matrix/[0.03] text-matrix/40 tracking-wider">
+                        {capability}
                     </span>
                 ))}
             </div>
 
-            {/* Status */}
             <div className="flex items-center justify-between pt-2 border-t border-white/[0.03]">
-                <span className="text-[8px] text-white/15 tracking-wider">
-                    {isOnline ? `LATENCY: ${latency}ms` : 'AWAITING DEPLOYMENT'}
-                </span>
-                {isOnline && <span className="text-[8px] neon-text tracking-wider">OPERATIONAL</span>}
+                <span className="text-[8px] text-white/15 tracking-wider">{isOnline ? `LATENCE ${latency}ms` : 'INDISPONIBLE'}</span>
+                <span className="text-[8px] text-white/20 tracking-wider">{agent.model}</span>
             </div>
         </div>
     )
 }
 
-function OSINTSearchBar({ onSearch }: { onSearch: (q: string) => void }) {
-    const [query, setQuery] = useState('')
-    const inputRef = useRef<HTMLInputElement>(null)
-
-    const handleSubmit = () => {
-        if (query.trim()) {
-            onSearch(query.trim())
-        }
-    }
-
+function DataPanel({ title, icon, children }: { title: string; icon: ReactNode; children: ReactNode }) {
     return (
         <div className="cyber-panel hud-corners p-4">
-            <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">ðŸ” OSINT SEARCH â€” THE SHADOW</div>
-            <div className="flex gap-2">
-                <input
-                    ref={inputRef}
-                    type="text"
-                    value={query}
-                    onChange={e => setQuery(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && handleSubmit()}
-                    placeholder="> Enter search query or target for recon..."
-                    className="cyber-input flex-1"
-                />
-                <button onClick={handleSubmit} className="cyber-btn-cyan shrink-0">
-                    SEARCH
-                </button>
-                <button onClick={() => { if (query.trim()) onSearch(`recon:${query.trim()}`) }} className="cyber-btn shrink-0">
-                    RECON
-                </button>
+            <div className="flex items-center gap-2 text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">
+                {icon}
+                <span>{title}</span>
             </div>
-            <div className="flex gap-3 mt-2 text-[8px] text-white/10">
-                <span>Engines: DuckDuckGo â€¢ Brave â€¢ Shodan</span>
-                <span>|</span>
-                <span>Threat Intel: AlienVault â€¢ VirusTotal â€¢ NVD</span>
-            </div>
+            {children}
         </div>
     )
 }
-
-function SearchResultsPanel({ results, loading }: { results: SearchResult[]; loading: boolean }) {
-    if (loading) {
-        return (
-            <div className="cyber-panel p-4 text-center">
-                <div className="text-[10px] text-matrix/50 animate-pulse tracking-wider">SEARCHING DEEP WEB...</div>
-            </div>
-        )
-    }
-
-    if (results.length === 0) return null
-
-    return (
-        <div className="cyber-panel hud-corners p-4">
-            <div className="text-[9px] uppercase tracking-[0.2em] text-cyber-cyan/40 mb-3">SEARCH RESULTS ({results.length})</div>
-            <div className="space-y-2 max-h-[200px] overflow-y-auto">
-                {results.map((r, i) => (
-                    <div key={i} className="p-2 border border-white/[0.03] bg-white/[0.01] hover:bg-white/[0.02] transition-colors">
-                        <div className="text-[10px] text-cyber-cyan/60 truncate">{r.title}</div>
-                        <div className="text-[8px] text-matrix/25 truncate">{r.url}</div>
-                        {r.snippet && <div className="text-[9px] text-white/20 mt-1">{r.snippet}</div>}
-                    </div>
-                ))}
-            </div>
-        </div>
-    )
-}
-
-function SecurityAlertsPanel() {
-    return (
-        <div className="cyber-panel hud-corners p-4">
-            <div className="flex items-center justify-between mb-3">
-                <div className="text-[9px] uppercase tracking-[0.2em] text-cyber-pink/50">ðŸš¨ SECURITY ALERTS</div>
-                <div className="text-[8px] text-white/15 tracking-wider">{MOCK_ALERTS.length} EVENTS</div>
-            </div>
-            <div className="space-y-2 max-h-[250px] overflow-y-auto">
-                {MOCK_ALERTS.map(alert => (
-                    <div key={alert.id} className="flex items-start gap-3 p-2 border border-white/[0.03] bg-white/[0.01]">
-                        <SeverityBadge severity={alert.severity} />
-                        <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                                <span className="text-[9px] text-white/40">{alert.type}</span>
-                                {alert.source && <span className="text-[7px] text-matrix/25 tracking-wider">{alert.source}</span>}
-                            </div>
-                            <div className="text-[10px] text-white/25 mt-0.5">{alert.message}</div>
-                        </div>
-                        <div className="text-[8px] text-white/10 shrink-0">
-                            {new Date(alert.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-                        </div>
-                    </div>
-                ))}
-            </div>
-        </div>
-    )
-}
-
-function ThreatFeedPanel() {
-    return (
-        <div className="cyber-panel hud-corners p-4">
-            <div className="text-[9px] uppercase tracking-[0.2em] text-cyber-amber/50 mb-3">âš ï¸ THREAT INTELLIGENCE FEED</div>
-            <div className="space-y-2">
-                {MOCK_THREAT_FEED.map((threat, i) => (
-                    <div key={i} className="flex items-center gap-3 p-2 border border-white/[0.03] bg-white/[0.01]">
-                        <span className={`text-[8px] tracking-wider px-2 py-0.5 border shrink-0 ${threat.risk === 'CRITICAL' ? 'border-cyber-pink/30 text-cyber-pink/70 bg-cyber-pink/10' :
-                                threat.risk === 'HIGH' ? 'border-cyber-pink/20 text-cyber-pink/50 bg-cyber-pink/5' :
-                                    'border-cyber-amber/20 text-cyber-amber/50 bg-cyber-amber/5'
-                            }`}>{threat.risk}</span>
-                        <div className="flex-1 min-w-0">
-                            <div className="text-[10px] text-white/40 truncate font-bold">{threat.indicator}</div>
-                            <div className="text-[8px] text-white/15">{threat.type}</div>
-                        </div>
-                        <span className="text-[8px] text-white/10 shrink-0">{threat.source}</span>
-                    </div>
-                ))}
-            </div>
-        </div>
-    )
-}
-
-function NetworkMapPanel() {
-    return (
-        <div className="cyber-panel hud-corners p-4">
-            <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 mb-3">ðŸŒ NETWORK TOPOLOGY â€” THE HIVE</div>
-            <div className="grid grid-cols-3 gap-3">
-                {/* Bastion */}
-                <div className="col-span-3 p-3 border border-cyber-pink/15 bg-cyber-pink/[0.02]">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <div className="text-[9px] text-cyber-pink/50 font-bold tracking-wider">CT 400 â€” THE BASTION</div>
-                            <div className="text-[8px] text-white/15 mt-0.5">SÃ©curitÃ© offensive/dÃ©fensive â€¢ Wazuh â€¢ Suricata</div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                            <div className="w-1.5 h-1.5 rounded-full bg-matrix shadow-[0_0_4px_rgba(0,255,65,0.3)]" />
-                            <span className="text-[7px] text-matrix/40">MONITORING</span>
-                        </div>
-                    </div>
-                </div>
-
-                {/* VMs */}
-                <div className="p-3 border border-matrix/15 bg-matrix/[0.02]">
-                    <div className="text-[9px] neon-text font-bold tracking-wider">VM 100</div>
-                    <div className="text-[8px] text-white/20 mt-0.5">THE BRAIN</div>
-                    <div className="text-[7px] text-white/10 mt-1">FastAPI Orchestrator</div>
-                </div>
-                <div className="p-3 border border-cyber-cyan/15 bg-cyber-cyan/[0.02]">
-                    <div className="text-[9px] neon-text-cyan font-bold tracking-wider">VM 101</div>
-                    <div className="text-[8px] text-white/20 mt-0.5">THE COUNCIL</div>
-                    <div className="text-[7px] text-white/10 mt-1">GPU RTX 3090 Inference</div>
-                </div>
-                <div className="p-3 border border-cyber-amber/15 bg-cyber-amber/[0.02]">
-                    <div className="text-[9px] neon-text-amber font-bold tracking-wider">VM 200</div>
-                    <div className="text-[8px] text-white/20 mt-0.5">TRADING FLOOR</div>
-                    <div className="text-[7px] text-white/10 mt-1">Hydra 20x MT5</div>
-                </div>
-
-                {/* Arena */}
-                <div className="col-span-3 p-3 border border-cyber-cyan/10 bg-cyber-cyan/[0.01]">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <div className="text-[9px] text-cyber-cyan/40 font-bold tracking-wider">CT 500 â€” THE ARENA</div>
-                            <div className="text-[8px] text-white/15 mt-0.5">Sandbox isolÃ© â€¢ Tests â€¢ Code non-vÃ©rifiÃ©</div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                            <div className="w-1.5 h-1.5 rounded-full bg-cyber-cyan shadow-[0_0_4px_rgba(0,212,255,0.3)]" />
-                            <span className="text-[7px] text-cyber-cyan/40">ISOLATED</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    )
-}
-
-function PEARadarPanel() {
-    const [peaData, setPeaData] = useState<any>(null)
-    const [loading, setLoading] = useState(false)
-
-    const fetchPEA = async () => {
-        setLoading(true)
-        try {
-            const res = await fetch('/api/researcher/analysis/pea')
-            if (res.ok) {
-                const data = await res.json()
-                setPeaData(data)
-            }
-        } catch (e) {
-            console.error("PEA Fetch Error", e)
-        } finally {
-            setLoading(false)
-        }
-    }
-
-    return (
-        <div className="cyber-panel hud-corners p-4">
-            <div className="flex items-center justify-between mb-3">
-                <div className="text-[9px] uppercase tracking-[0.2em] text-white/60 mb-3">ðŸ“ˆ LONG-TERM PEA RADAR â€” THE SAGE</div>
-                <button onClick={fetchPEA} disabled={loading} className="cyber-btn-cyan text-[8px] px-2 py-1">
-                    {loading ? 'ANALYZING...' : 'RUN LLM ANALYSIS'}
-                </button>
-            </div>
-
-            {!peaData && !loading && (
-                <div className="text-center p-4 border border-white/[0.03] bg-white/[0.01]">
-                    <span className="text-[9px] text-white/30 tracking-widest">AWAITING ANALYSIS TRIGGER</span>
-                </div>
-            )}
-
-            {peaData && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar">
-                        {peaData.analysis.map((stock: any, i: number) => (
-                            <div key={i} className="p-3 border border-matrix/20 bg-matrix/[0.02]">
-                                <div className="flex justify-between items-start">
-                                    <div>
-                                        <h4 className="text-[11px] font-bold text-white neon-text-subtle">{stock.metrics.company_name} <span className="text-[9px] text-matrix/50">({stock.metrics.symbol})</span></h4>
-                                        <p className="text-[8px] text-white/40">{stock.metrics.sector}</p>
-                                    </div>
-                                    <div className="text-right">
-                                        <div className="text-[10px] font-bold text-white">â‚¬{stock.metrics.current_price?.toFixed(2)}</div>
-                                        <div className="text-[8px] text-matrix">Div: {stock.metrics.dividend_yield?.toFixed(2)}%</div>
-                                    </div>
-                                </div>
-                                <div className="mt-2 grid grid-cols-3 gap-2 text-[8px]">
-                                    <div className="bg-black/40 p-1 border border-matrix/10">P/E: <span className="text-white">{stock.metrics.pe_ratio?.toFixed(1) || 'N/A'}</span></div>
-                                    <div className="bg-black/40 p-1 border border-matrix/10">ROE: <span className="text-white">{stock.metrics.roe?.toFixed(1)}%</span></div>
-                                    <div className="bg-black/40 p-1 border border-matrix/10">Target: <span className="text-white">â‚¬{stock.metrics.target_mean_price || 'N/A'}</span></div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-
-                    <div className="p-4 border border-cyber-cyan/20 bg-cyber-cyan/[0.02] flex flex-col">
-                        <div className="text-[9px] uppercase tracking-[0.1em] text-cyber-cyan font-bold mb-2">ðŸ§  L.L.M Strategic Synthesis</div>
-                        <div className="text-[10px] text-white/70 whitespace-pre-wrap leading-relaxed overflow-y-auto custom-scrollbar flex-grow">
-                            {peaData.llm_synthesis}
-                        </div>
-                    </div>
-                </div>
-            )}
-        </div>
-    )
-}
-
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// MAIN VIEW
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 export default function OSINTView() {
     const [agentHealth, setAgentHealth] = useState<Record<string, NodeHealth>>({})
-    const [searchResults, setSearchResults] = useState<SearchResult[]>([])
+    const [searchResults, setSearchResults] = useState<ResearchResult[]>([])
     const [searching, setSearching] = useState(false)
+    const [query, setQuery] = useState('')
+    const [alerts, setAlerts] = useState<Array<ShadowAlert & { origin: string }>>([])
+    const [threats, setThreats] = useState<ShadowThreatAnalysis[]>([])
+    const [monitors, setMonitors] = useState<ShadowMonitor[]>([])
+    const [peaData, setPeaData] = useState<Record<string, unknown> | null>(null)
+    const [trends, setTrends] = useState<string[]>([])
 
-    const fetchHealth = useCallback(async () => {
-        const results = await Promise.all(
-            OSINT_AGENTS.map(async (agent) => {
-                const h = await checkNodeHealth(agent.name, agent.healthUrl)
-                return { id: agent.id, health: h }
-            })
-        )
-        const map: Record<string, NodeHealth> = {}
-        results.forEach(r => { map[r.id] = r.health })
-        setAgentHealth(map)
+    const fetchState = useCallback(async () => {
+        const [healthResults, shadowAlertPayload, sentinelAlertPayload, threatPayload, monitorPayload, trendPayload] = await Promise.all([
+            Promise.all(OSINT_AGENTS.map(async (agent) => ({ id: agent.id, health: await checkNodeHealth(agent.name, agent.healthUrl) }))),
+            getShadowAlerts(8),
+            getSentinelAlerts(8),
+            getShadowThreatHistory(),
+            getShadowMonitors(),
+            getResearcherTrends('tech'),
+        ])
+
+        const nextHealth: Record<string, NodeHealth> = {}
+        healthResults.forEach((result) => {
+            nextHealth[result.id] = result.health
+        })
+        setAgentHealth(nextHealth)
+
+        const mergedAlerts = [
+            ...(shadowAlertPayload.alerts || []).map((alert) => ({ ...alert, origin: 'shadow' })),
+            ...(sentinelAlertPayload.alerts || []).map((alert) => ({ ...alert, origin: 'sentinel' })),
+        ]
+            .sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')))
+            .slice(0, 10)
+        setAlerts(mergedAlerts)
+        setThreats((threatPayload.analyses || []).slice().reverse().slice(0, 8))
+        setMonitors(monitorPayload.monitors || [])
+        setTrends(trendPayload.sources || [])
     }, [])
 
     useEffect(() => {
-        fetchHealth()
-        const interval = setInterval(fetchHealth, 8000)
+        void fetchState()
+        const interval = setInterval(() => {
+            void fetchState()
+        }, 10000)
         return () => clearInterval(interval)
-    }, [fetchHealth])
+    }, [fetchState])
 
-    const handleSearch = async (query: string) => {
-        setSearching(true)
-        setSearchResults([])
-        try {
-            const isRecon = query.startsWith('recon:')
-            const q = isRecon ? query.slice(6) : query
-            const endpoint = isRecon ? `/api/shadow/recon?target=${encodeURIComponent(q)}` : `/api/shadow/search?q=${encodeURIComponent(q)}`
-
-            const controller = new AbortController()
-            const timeout = setTimeout(() => controller.abort(), 10000)
-            const res = await fetch(endpoint, { signal: controller.signal })
-            clearTimeout(timeout)
-
-            if (res.ok) {
-                const data = await res.json()
-                const results = isRecon ? data.web_findings || [] : data.results || []
-                setSearchResults(results)
-            } else {
-                setSearchResults([{ title: 'âš  Shadow agent offline', url: '', snippet: 'Unable to reach The Shadow. Deploy the agent first.' }])
-            }
-        } catch {
-            setSearchResults([{ title: 'âš  Connection failed', url: '', snippet: 'Shadow agent is not reachable. Check deployment status.' }])
-        } finally {
-            setSearching(false)
+    const handleSearch = async (isRecon: boolean) => {
+        if (!query.trim()) {
+            return
         }
+        setSearching(true)
+        if (isRecon) {
+            const report = await reconShadow(query.trim())
+            const findings = Array.isArray(report.web_findings) ? report.web_findings : []
+            setSearchResults(findings as ResearchResult[])
+        } else {
+            const result = await searchShadow(query.trim(), 8)
+            setSearchResults(result.results || [])
+        }
+        setSearching(false)
     }
 
-    const onlineCount = OSINT_AGENTS.filter(a => agentHealth[a.id]?.status === 'online').length
-    const threatLevel = onlineCount >= 2 ? 'GREEN' : onlineCount >= 1 ? 'YELLOW' : 'UNKNOWN'
-    const threatColor = threatLevel === 'GREEN' ? 'neon-text' : threatLevel === 'YELLOW' ? 'neon-text-amber' : 'text-white/30'
+    const handlePea = async () => {
+        setPeaData(await getResearchPeaAnalysis())
+    }
+
+    const onlineCount = useMemo(
+        () => OSINT_AGENTS.filter((agent) => agentHealth[agent.id]?.status === 'online').length,
+        [agentHealth],
+    )
 
     return (
         <div className="h-full overflow-y-auto p-4 space-y-4 animate-fade-in">
-            {/* Header Stats */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <div className="cyber-panel hud-corners p-4">
-                    <div className="text-[8px] text-white/20 tracking-wider mb-1">AGENTS INTEL ACTIFS</div>
+                    <div className="text-[8px] text-white/20 tracking-wider mb-1">AGENTS INTEL</div>
                     <div className="text-xl font-bold neon-text">{onlineCount}<span className="text-white/20 text-sm">/{OSINT_AGENTS.length}</span></div>
                 </div>
                 <div className="cyber-panel hud-corners p-4">
-                    <div className="text-[8px] text-white/20 tracking-wider mb-1">THREAT LEVEL</div>
-                    <div className={`text-xl font-bold ${threatColor}`}>{threatLevel}</div>
+                    <div className="text-[8px] text-white/20 tracking-wider mb-1">ALERTES VIVES</div>
+                    <div className="text-xl font-bold neon-text-cyan">{alerts.length}</div>
                 </div>
                 <div className="cyber-panel hud-corners p-4">
-                    <div className="text-[8px] text-white/20 tracking-wider mb-1">ALERTS (24H)</div>
-                    <div className="text-xl font-bold neon-text-cyan">{MOCK_ALERTS.length}</div>
+                    <div className="text-[8px] text-white/20 tracking-wider mb-1">THREATS TRACEES</div>
+                    <div className="text-xl font-bold neon-text-amber">{threats.length}</div>
                 </div>
                 <div className="cyber-panel hud-corners p-4">
-                    <div className="text-[8px] text-white/20 tracking-wider mb-1">THREAT FEEDS</div>
-                    <div className="text-xl font-bold neon-text-amber">{MOCK_THREAT_FEED.length}</div>
+                    <div className="text-[8px] text-white/20 tracking-wider mb-1">MONITORS ACTIFS</div>
+                    <div className="text-xl font-bold text-white/60">{monitors.filter((item) => item.status === 'active').length}</div>
                 </div>
             </div>
 
-            {/* Search */}
-            <OSINTSearchBar onSearch={handleSearch} />
-            <SearchResultsPanel results={searchResults} loading={searching} />
-
-            {/* Agents Grid */}
-            <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 px-1">ðŸ•µï¸ INTELLIGENCE AGENTS ({OSINT_AGENTS.length})</div>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                {OSINT_AGENTS.map(agent => (
-                    <AgentCard
-                        key={agent.id}
-                        agent={agent}
-                        health={agentHealth[agent.id]}
+            <div className="cyber-panel hud-corners p-4 space-y-3">
+                <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40">Recherche OSINT - The Shadow</div>
+                <div className="flex gap-2">
+                    <input
+                        type="text"
+                        value={query}
+                        onChange={(event) => setQuery(event.target.value)}
+                        onKeyDown={(event) => event.key === 'Enter' && void handleSearch(false)}
+                        placeholder="> cible, sujet, domaine, organisation..."
+                        className="cyber-input flex-1"
                     />
+                    <button onClick={() => void handleSearch(false)} className="cyber-btn-cyan shrink-0" disabled={searching}>CHERCHER</button>
+                    <button onClick={() => void handleSearch(true)} className="cyber-btn shrink-0" disabled={searching}>RECON</button>
+                </div>
+                <div className="space-y-2 max-h-[220px] overflow-y-auto custom-scrollbar">
+                    {searchResults.length === 0 ? (
+                        <div className="text-[10px] text-white/20 border border-dashed border-white/10 p-4">
+                            Aucune recherche en cours. Les resultats The Shadow apparaitront ici.
+                        </div>
+                    ) : (
+                        searchResults.map((result, index) => (
+                            <a key={`${result.title}-${index}`} href={result.url} target="_blank" rel="noreferrer" className="block p-3 border border-white/[0.03] bg-white/[0.01] hover:bg-white/[0.02]">
+                                <div className="text-[10px] text-cyber-cyan/60 truncate">{result.title}</div>
+                                <div className="text-[8px] text-matrix/25 truncate">{result.url}</div>
+                                <div className="text-[9px] text-white/20 mt-1">{cleanMessage(result.summary)}</div>
+                            </a>
+                        ))
+                    )}
+                </div>
+            </div>
+
+            <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40 px-1">AGENTS INTELLIGENCE ({OSINT_AGENTS.length})</div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                {OSINT_AGENTS.map((agent) => (
+                    <AgentCard key={agent.id} agent={agent} health={agentHealth[agent.id]} />
                 ))}
             </div>
 
-            {/* Security & Threat Intel */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                <SecurityAlertsPanel />
-                <ThreatFeedPanel />
+                <DataPanel title="Alertes fusionnees" icon={<Siren size={14} />}>
+                    <div className="space-y-2 max-h-[260px] overflow-y-auto custom-scrollbar">
+                        {alerts.length === 0 ? (
+                            <div className="text-[10px] text-white/20 border border-dashed border-white/10 p-4">Aucune alerte remontee.</div>
+                        ) : (
+                            alerts.map((alert, index) => (
+                                <div key={`${alert.timestamp}-${index}`} className="flex items-start gap-3 p-2 border border-white/[0.03] bg-white/[0.01]">
+                                    <AlertTriangle size={14} className="text-cyber-pink mt-0.5" />
+                                    <div className="flex-1 min-w-0">
+                                        <div className="text-[9px] text-white/40 uppercase tracking-[0.15em]">{alert.origin} | {alert.severity || alert.category || 'info'}</div>
+                                        <div className="text-[10px] text-white/25 mt-1">{cleanMessage(alert.message)}</div>
+                                    </div>
+                                    <div className="text-[8px] text-white/10 shrink-0">{formatDate(alert.timestamp)}</div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </DataPanel>
+
+                <DataPanel title="Renseignement menace" icon={<Radar size={14} />}>
+                    <div className="space-y-2 max-h-[260px] overflow-y-auto custom-scrollbar">
+                        {threats.length === 0 ? (
+                            <div className="text-[10px] text-white/20 border border-dashed border-white/10 p-4">Aucune analyse d'IoC disponible.</div>
+                        ) : (
+                            threats.map((threat) => (
+                                <div key={`${threat.indicator}-${threat.analyzed_at}`} className="flex items-center gap-3 p-2 border border-white/[0.03] bg-white/[0.01]">
+                                    <Shield size={14} className="text-cyber-amber" />
+                                    <div className="flex-1 min-w-0">
+                                        <div className="text-[10px] text-white/45 font-bold truncate">{threat.indicator}</div>
+                                        <div className="text-[8px] text-white/15">{threat.type} | score {threat.threat_score}</div>
+                                    </div>
+                                    <span className="text-[8px] text-cyber-amber/60 uppercase tracking-[0.15em]">{threat.severity}</span>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </DataPanel>
             </div>
 
-            {/* PEA Analysis */}
-            <PEARadarPanel />
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                <DataPanel title="Veille active" icon={<Activity size={14} />}>
+                    <div className="space-y-2 max-h-[220px] overflow-y-auto custom-scrollbar">
+                        {monitors.length === 0 ? (
+                            <div className="text-[10px] text-white/20 border border-dashed border-white/10 p-4">Aucune cible de veille active.</div>
+                        ) : (
+                            monitors.map((monitor) => (
+                                <div key={monitor.id} className="border border-white/[0.03] bg-white/[0.01] p-3">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div className="text-[10px] font-bold text-white/60">{monitor.keyword}</div>
+                                        <span className="text-[8px] text-matrix/50 uppercase tracking-[0.15em]">{monitor.status}</span>
+                                    </div>
+                                    <div className="text-[8px] text-white/20 mt-1">{monitor.category} | intervalle {monitor.interval_minutes} min | hits {monitor.hits || 0}</div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </DataPanel>
 
-            {/* Network Map */}
-            <NetworkMapPanel />
+                <DataPanel title="Veille Researcher" icon={<BookOpen size={14} />}>
+                    <div className="space-y-2 mb-3">
+                        {trends.slice(0, 5).map((source) => (
+                            <div key={source} className="flex items-center gap-2 text-[10px] text-white/30">
+                                <Globe2 size={12} className="text-cyber-cyan/60" />
+                                <span>{source}</span>
+                            </div>
+                        ))}
+                    </div>
+                    <button onClick={handlePea} className="cyber-btn-cyan text-[9px] px-3 py-2 mb-3">ANALYSE PEA</button>
+                    <div className="border border-white/[0.03] bg-white/[0.01] p-3 text-[10px] text-white/30 min-h-[120px]">
+                        {peaData ? String(peaData.message || 'Analyse disponible.') : 'Le module PEA est accessible en lecture. Declenche une analyse pour verifier son etat courant.'}
+                    </div>
+                </DataPanel>
+            </div>
         </div>
     )
 }
-
-

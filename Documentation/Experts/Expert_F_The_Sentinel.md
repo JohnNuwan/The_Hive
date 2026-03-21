@@ -12,7 +12,7 @@
 
 ## 3. Capacités Défensives
 *   **IP Ban** : Bannissement automatique (iptables/Fail2Ban) après 3 tentatives SSH échouées.
-*   **Anomaly Detection** : "Pourquoi le processus Python du Trading essaie de contacter une IP en Russie ?" -> KILL & ALERT.
+*   **Anomaly Detection** : "Pourquoi le processus Python du Trading essaie de contacter une IP en Russie -" -> KILL & ALERT.
 
 ## 4. Capacités Offensives (The Red Teamer)
 *   *Zone* : Uniquement dans CT 500 (Arena).

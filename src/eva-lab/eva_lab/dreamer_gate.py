@@ -36,6 +36,8 @@ class DreamerGate:
         self._jax_inference_agents: dict[str, object] = {}
         self._jax_inference_meta: dict[str, dict[str, object]] = {}
         self._promoter = ChampionPromoter()
+        self._ensemble_min_edge = float(os.getenv("ENSEMBLE_MIN_EDGE", "0.15"))
+        self._ensemble_requires_double_validation = True
 
         if enable_training:
             logger.info("[DreamerGate] Mode shadow training actif.")
@@ -67,28 +69,47 @@ class DreamerGate:
                 self._muzero_agent = None
         return self._muzero_agent
 
-    def _resolve_inference_checkpoint(self, horizon: str) -> tuple[Path | None, dict[str, object]]:
+    def _resolve_inference_checkpoint(
+        self,
+        horizon: str,
+        selection_policy_override: str | None = None,
+        engine: str = "muzero",
+    ) -> tuple[Path | None, dict[str, object]]:
         """Retourne le checkpoint JAX autorise pour l'inference live.
 
         Args:
             horizon (str): Horizon cible.
+            selection_policy_override (str | None): Politique de selection a imposer.
+            engine (str): Moteur de prediction cible.
 
         Returns:
             tuple[object | None, dict[str, object]]: Chemin retenu et metadonnees.
         """
-        return self._promoter.resolve_live_checkpoint(horizon)
+        return self._promoter.resolve_live_checkpoint(
+            horizon,
+            selection_policy=selection_policy_override,
+            engine=engine,
+        )
 
-    def _get_muzero_inference_agent(self, horizon: str):
+    def _get_muzero_inference_agent(
+        self,
+        horizon: str,
+        selection_policy_override: str | None = None,
+    ):
         """Charge a la demande un agent MuZero JAX pour l'inference live.
 
         Args:
             horizon (str): Horizon de prediction.
+            selection_policy_override (str | None): Politique de selection a imposer.
 
         Returns:
             object | None: Agent JAX charge, sinon ``None``.
         """
         horizon = (horizon or "intraday").lower()
-        checkpoint_path, selection_meta = self._resolve_inference_checkpoint(horizon)
+        checkpoint_path, selection_meta = self._resolve_inference_checkpoint(
+            horizon,
+            selection_policy_override=selection_policy_override,
+        )
         checkpoint_mtime = checkpoint_path.stat().st_mtime if checkpoint_path else None
         meta = self._jax_inference_meta.get(horizon)
 
@@ -97,6 +118,7 @@ class DreamerGate:
             and meta.get("path") == str(checkpoint_path)
             and meta.get("mtime") == checkpoint_mtime
             and meta.get("selection") == selection_meta.get("selection")
+            and meta.get("policy") == selection_meta.get("policy")
         ):
             return self._jax_inference_agents.get(horizon)
 
@@ -104,7 +126,7 @@ class DreamerGate:
             self._jax_inference_agents.pop(horizon, None)
             self._jax_inference_meta[horizon] = selection_meta
             logger.warning(
-                "[DreamerGate] Aucun checkpoint live promu pour %s. Fallback heuristique actif.",
+                "[DreamerGate] Aucun checkpoint live promu pour %s. Aucun agent JAX charge.",
                 horizon,
             )
             return None
@@ -134,6 +156,263 @@ class DreamerGate:
             self._jax_inference_agents.pop(horizon, None)
             self._jax_inference_meta.pop(horizon, None)
             return None
+
+    @staticmethod
+    def _build_model_version(
+        checkpoint_meta: dict[str, object],
+        checkpoint_path: str | None,
+    ) -> str | None:
+        """Construit une version de modele lisible pour le live.
+
+        Args:
+            checkpoint_meta (dict[str, object]): Metadonnees de selection live.
+            checkpoint_path (str | None): Checkpoint effectivement retenu.
+
+        Returns:
+            str | None: Version lisible du modele, sinon ``None``.
+        """
+        manifest = checkpoint_meta.get("manifest", {}) or {}
+        version = str(manifest.get("challenger_id") or "").strip()
+        if version:
+            return version
+        if checkpoint_path:
+            return Path(str(checkpoint_path)).stem
+        return None
+
+    def _build_blocked_live_response(
+        self,
+        *,
+        observation: dict,
+        horizon: str,
+        checkpoint_meta: dict[str, object],
+        reason: str,
+        prediction: str = "NO_CHAMPION_DEPLOYED",
+        engine: str = "muzero",
+        model_status: str = "blocked",
+        service: str = "live_inference_cpu",
+    ) -> dict[str, object]:
+        """Construit une reponse live bloquee sans fallback heuristique.
+
+        Args:
+            observation (dict): Observation brute fournie au gate.
+            horizon (str): Horizon live vise.
+            checkpoint_meta (dict[str, object]): Metadonnees de selection live.
+            reason (str): Raison detaillee du blocage.
+            prediction (str): Etiquette de prediction a remonter.
+
+        Returns:
+            dict[str, object]: Charge utile stable pour le banker live.
+        """
+        normalized_engine = self._promoter.normalize_engine_name(engine)
+        checkpoint_path = checkpoint_meta.get("path")
+        model_version = self._build_model_version(checkpoint_meta, checkpoint_path)
+        return {
+            "action": 0,
+            "prediction": prediction,
+            "confidence": 1.0,
+            "policy": [],
+            "value": 0.0,
+            "price_input": float(observation.get("price", 0.0) or 0.0),
+            "engine": self._promoter.get_engine_label(normalized_engine, variant="champion"),
+            "engine_name": normalized_engine,
+            "horizon": horizon,
+            "checkpoint": checkpoint_path,
+            "selection": checkpoint_meta.get("selection"),
+            "selection_policy": checkpoint_meta.get("policy"),
+            "manifest": checkpoint_meta.get("manifest"),
+            "simulations": 0,
+            "mode": "training" if self._training_active else "inference_only",
+            "inference_count": self._inference_count,
+            "reason": reason,
+            "service": service,
+            "device": "cpu",
+            "model_status": model_status,
+            "model_version": model_version,
+        }
+
+    @staticmethod
+    def _normalize_action_label(action_id: object, fallback: object = None) -> str:
+        """Normalise une action numerique en libelle stable.
+
+        Args:
+            action_id (object): Identifiant brut du moteur.
+            fallback (object): Libelle secondaire eventuel.
+
+        Returns:
+            str: Action normalisee (`BUY`, `SELL`, `HOLD`).
+        """
+        action_map = {
+            0: "HOLD",
+            1: "BUY",
+            2: "SELL",
+        }
+        try:
+            normalized_id = int(action_id)
+        except (TypeError, ValueError):
+            normalized_id = None
+        if normalized_id in action_map:
+            return action_map[normalized_id]
+        candidate = str(fallback or "").strip().upper()
+        return candidate or "HOLD"
+
+    def _build_action_scores(self, result: dict[str, object]) -> dict[str, float]:
+        """Transforme une prediction moteur en scores normalises.
+
+        Args:
+            result (dict[str, object]): Reponse d'un moteur live.
+
+        Returns:
+            dict[str, float]: Scores `BUY`, `SELL`, `HOLD` exploitables par l'ensemble.
+        """
+        confidence = max(0.0, min(float(result.get("confidence", 0.0) or 0.0), 1.0))
+        action_label = self._normalize_action_label(result.get("action"), result.get("prediction"))
+        scores = {"BUY": 0.0, "SELL": 0.0, "HOLD": 0.0}
+        if action_label in {"BUY", "SELL"}:
+            scores[action_label] = confidence
+            scores["HOLD"] = max(0.0, 1.0 - confidence)
+        else:
+            scores["HOLD"] = max(confidence, 0.5)
+        return scores
+
+    def _run_live_inference_for_engine(
+        self,
+        observation: dict[str, object],
+        *,
+        engine: str,
+        strict_live: bool = True,
+    ) -> dict[str, object]:
+        """Execute une inference live pour un moteur cible.
+
+        Args:
+            observation (dict[str, object]): Observation live brute.
+            engine (str): Moteur cible (`muzero` ou `dreamer`).
+            strict_live (bool): Indique si le chemin doit respecter les contraintes live CPU.
+
+        Returns:
+            dict[str, object]: Prediction brute ou blocage explicite.
+        """
+        normalized_engine = self._promoter.normalize_engine_name(engine)
+        horizon = str(observation.get("horizon", "scalp") or "scalp").lower()
+        selection_policy = ChampionPromoter.normalize_live_selection_policy(
+            observation.get("selection_policy"),
+            default="champion_only",
+        )
+        checkpoint_meta: dict[str, object] = {
+            "selection": "none",
+            "policy": selection_policy,
+            "manifest": {},
+            "path": None,
+        }
+
+        if strict_live and horizon != "scalp":
+            return self._build_blocked_live_response(
+                observation=observation,
+                horizon=horizon,
+                checkpoint_meta=checkpoint_meta,
+                reason="Le live CPU unifie ne supporte que l'horizon scalp.",
+                prediction="UNSUPPORTED_HORIZON",
+                engine=normalized_engine,
+                model_status="blocked",
+                service="live_inference_cpu",
+            )
+
+        if strict_live and selection_policy != "champion_only":
+            checkpoint_meta["selection"] = "blocked_policy"
+            return self._build_blocked_live_response(
+                observation=observation,
+                horizon=horizon,
+                checkpoint_meta=checkpoint_meta,
+                reason="Le live CPU exige champion_only.",
+                prediction="INVALID_SELECTION_POLICY",
+                engine=normalized_engine,
+                model_status="blocked",
+                service="live_inference_cpu",
+            )
+
+        if normalized_engine == "muzero":
+            agent = self._get_muzero_inference_agent(
+                horizon,
+                selection_policy_override="champion_only" if strict_live else selection_policy,
+            )
+            checkpoint_meta = self._jax_inference_meta.get(horizon, {})
+            checkpoint_path = checkpoint_meta.get("path")
+            model_version = self._build_model_version(checkpoint_meta, checkpoint_path)
+            if agent is not None:
+                try:
+                    result = agent.infer_action(observation)
+                    return {
+                        "action": result["action"],
+                        "prediction": result["action_name"],
+                        "confidence": result["confidence"],
+                        "policy": result["policy"],
+                        "value": result["value"],
+                        "price_input": observation.get("price", 0.0),
+                        "engine": "MuZero JAX Live CPU",
+                        "engine_name": "muzero",
+                        "horizon": horizon,
+                        "checkpoint": checkpoint_path,
+                        "selection": checkpoint_meta.get("selection"),
+                        "selection_policy": "champion_only" if strict_live else checkpoint_meta.get("policy"),
+                        "manifest": checkpoint_meta.get("manifest"),
+                        "simulations": result["simulations"],
+                        "mode": "training" if self._training_active else "inference_only",
+                        "inference_count": self._inference_count,
+                        "service": "live_inference_cpu" if strict_live else "dreamer_predict",
+                        "device": "cpu" if strict_live else "jax_default",
+                        "model_status": "live",
+                        "model_version": model_version,
+                    }
+                except Exception as exc:
+                    logger.warning("[DreamerGate] Inference live MuZero impossible pour %s: %s", horizon, exc)
+                    return self._build_blocked_live_response(
+                        observation=observation,
+                        horizon=horizon,
+                        checkpoint_meta=checkpoint_meta,
+                        reason=f"Inference MuZero impossible: {exc}",
+                        prediction="INFERENCE_ERROR",
+                        engine=normalized_engine,
+                        model_status="error",
+                        service="live_inference_cpu" if strict_live else "dreamer_predict",
+                    )
+
+            return self._build_blocked_live_response(
+                observation=observation,
+                horizon=horizon,
+                checkpoint_meta=checkpoint_meta,
+                reason="Aucun champion MuZero valide n'est autorise pour le live CPU.",
+                engine=normalized_engine,
+                model_status="blocked",
+                service="live_inference_cpu" if strict_live else "dreamer_predict",
+            )
+
+        checkpoint_path, checkpoint_meta = self._resolve_inference_checkpoint(
+            horizon,
+            selection_policy_override="champion_only" if strict_live else selection_policy,
+            engine="dreamer",
+        )
+        checkpoint_meta = dict(checkpoint_meta or {})
+        checkpoint_meta["path"] = str(checkpoint_path) if checkpoint_path is not None else None
+        if checkpoint_path is None:
+            return self._build_blocked_live_response(
+                observation=observation,
+                horizon=horizon,
+                checkpoint_meta=checkpoint_meta,
+                reason="Aucun champion DreamerV3 valide n'est disponible.",
+                engine="dreamer",
+                model_status="blocked",
+                service="dreamer_predict",
+            )
+
+        return self._build_blocked_live_response(
+            observation=observation,
+            horizon=horizon,
+            checkpoint_meta=checkpoint_meta,
+            reason="Le runtime DreamerV3 live n'est pas encore active dans cette usine.",
+            prediction="DREAMER_RUNTIME_UNAVAILABLE",
+            engine="dreamer",
+            model_status="unavailable",
+            service="dreamer_predict",
+        )
 
     def can_train(self) -> bool:
         """Indique si le shadow training est autorise.
@@ -264,6 +543,10 @@ class DreamerGate:
                     "simulations": result["simulations"],
                     "mode": "training" if self._training_active else "inference_only",
                     "inference_count": self._inference_count,
+                    "service": "dreamer_predict",
+                    "device": "jax_default",
+                    "model_status": "live" if checkpoint_path else "fallback",
+                    "model_version": self._build_model_version(checkpoint_meta, checkpoint_path),
                 }
             except Exception as exc:
                 logger.warning("[DreamerGate] Inference JAX en echec, fallback heuristique: %s", exc)
@@ -279,6 +562,8 @@ class DreamerGate:
                 "action": 0,
                 "prediction": "NO_CHAMPION_DEPLOYED",
                 "confidence": 1.0,
+                "policy": [],
+                "value": 0.0,
                 "price_input": float(observation.get("price", 0.0) or 0.0),
                 "engine": "Champion bloque",
                 "horizon": horizon,
@@ -289,6 +574,13 @@ class DreamerGate:
                 "mode": "training" if self._training_active else "inference_only",
                 "inference_count": self._inference_count,
                 "reason": "Aucun champion positif n'est autorise en live.",
+                "service": "dreamer_predict",
+                "device": "jax_default",
+                "model_status": "blocked",
+                "model_version": self._build_model_version(
+                    checkpoint_meta,
+                    checkpoint_meta.get("path"),
+                ),
             }
 
         price = float(observation.get("price", 0.0) or 0.0)
@@ -312,12 +604,137 @@ class DreamerGate:
             "action": action_int,
             "prediction": prediction,
             "confidence": confidence,
+            "policy": [],
+            "value": 0.0,
             "price_input": price,
             "rsi_input": rsi,
             "engine": "RSI Heuristic (fallback)",
             "horizon": horizon,
             "mode": "training" if self._training_active else "inference_only",
             "inference_count": self._inference_count,
+            "service": "dreamer_predict",
+            "device": "cpu",
+            "model_status": "fallback",
+            "model_version": None,
+        }
+
+    def run_live_inference(self, observation: dict) -> dict[str, object]:
+        """Execute une inference live stricte pour le service CPU dedie.
+
+        Ce chemin refuse tout horizon autre que ``scalp`` et interdit toute
+        politique de selection autre que ``champion_only``.
+
+        Args:
+            observation (dict): Observation live envoyee par le banker.
+
+        Returns:
+            dict[str, object]: Prediction brute du champion live ou blocage propre.
+        """
+        self._inference_count += 1
+        return self._run_live_inference_for_engine(observation, engine="muzero", strict_live=True)
+
+    def run_ensemble_inference(self, observation: dict[str, object]) -> dict[str, object]:
+        """Arbitre une prediction finale entre MuZero et DreamerV3.
+
+        Args:
+            observation (dict[str, object]): Observation live brute du banker.
+
+        Returns:
+            dict[str, object]: Sous-decisions, scores et decision finale.
+        """
+        self._inference_count += 1
+        muzero_result = self._run_live_inference_for_engine(observation, engine="muzero", strict_live=True)
+        dreamer_result = self._run_live_inference_for_engine(observation, engine="dreamer", strict_live=True)
+
+        muzero_live = str(muzero_result.get("model_status") or "").lower() == "live"
+        dreamer_live = str(dreamer_result.get("model_status") or "").lower() == "live"
+        governance_mode = "ensemble_50_50"
+        degraded_reason = None
+
+        if not (muzero_live and dreamer_live):
+            governance_mode = "degraded_muzero_only"
+            degraded_reason = (
+                str(dreamer_result.get("reason") or "dreamer_indisponible")
+                if not dreamer_live
+                else str(muzero_result.get("reason") or "muzero_indisponible")
+            )
+            final_result = dict(muzero_result)
+            final_result["governance"] = {
+                "mode": governance_mode,
+                "degraded_fallback_reason": degraded_reason,
+                "requires_double_validation": self._ensemble_requires_double_validation,
+                "muzero": muzero_result,
+                "dreamer": dreamer_result,
+                "scores": {
+                    "muzero": self._build_action_scores(muzero_result),
+                    "dreamer": self._build_action_scores(dreamer_result),
+                },
+            }
+            final_result["engine"] = "Ensemble 50/50"
+            final_result["engine_name"] = "ensemble"
+            final_result["selection"] = "degraded_muzero_only"
+            final_result["selection_policy"] = "champion_only"
+            final_result["ensemble_mode"] = governance_mode
+            final_result["degraded_fallback_reason"] = degraded_reason
+            final_result["model_status"] = "degraded"
+            return final_result
+
+        muzero_scores = self._build_action_scores(muzero_result)
+        dreamer_scores = self._build_action_scores(dreamer_result)
+        final_scores = {
+            action: round((muzero_scores[action] + dreamer_scores[action]) / 2.0, 6)
+            for action in ("BUY", "SELL", "HOLD")
+        }
+        best_action = max(final_scores, key=final_scores.get)
+        sorted_scores = sorted(final_scores.values(), reverse=True)
+        score_gap = sorted_scores[0] - sorted_scores[1] if len(sorted_scores) >= 2 else sorted_scores[0]
+        disagreement = (
+            self._normalize_action_label(muzero_result.get("action"), muzero_result.get("prediction"))
+            != self._normalize_action_label(dreamer_result.get("action"), dreamer_result.get("prediction"))
+        )
+        if disagreement or score_gap < self._ensemble_min_edge:
+            best_action = "HOLD"
+        action_to_id = {"HOLD": 0, "BUY": 1, "SELL": 2}
+        return {
+            "action": action_to_id[best_action],
+            "prediction": best_action,
+            "confidence": final_scores.get(best_action, 0.0),
+            "policy": [],
+            "value": max(
+                float(muzero_result.get("value", 0.0) or 0.0),
+                float(dreamer_result.get("value", 0.0) or 0.0),
+            ),
+            "price_input": float(observation.get("price", 0.0) or 0.0),
+            "engine": "Ensemble 50/50",
+            "engine_name": "ensemble",
+            "horizon": str(observation.get("horizon", "scalp") or "scalp").lower(),
+            "checkpoint": None,
+            "selection": "ensemble_50_50",
+            "selection_policy": "champion_only",
+            "manifest": None,
+            "simulations": int(muzero_result.get("simulations", 0) or 0),
+            "mode": "training" if self._training_active else "inference_only",
+            "inference_count": self._inference_count,
+            "service": "live_inference_cpu",
+            "device": "cpu",
+            "model_status": "ensemble",
+            "model_version": None,
+            "ensemble_mode": governance_mode,
+            "degraded_fallback_reason": None,
+            "governance": {
+                "mode": governance_mode,
+                "degraded_fallback_reason": None,
+                "requires_double_validation": self._ensemble_requires_double_validation,
+                "score_gap": round(score_gap, 6),
+                "disagreement": disagreement,
+                "muzero": muzero_result,
+                "dreamer": dreamer_result,
+                "scores": {
+                    "muzero": muzero_scores,
+                    "dreamer": dreamer_scores,
+                    "final": final_scores,
+                },
+            },
         }
 
     def get_status(self) -> dict:
@@ -344,4 +761,13 @@ class DreamerGate:
             "live_selection_policy": self._promoter.get_live_selection_policy(),
             "jax_agents": jax_agents,
             "legacy_agent_loaded": self._muzero_agent is not None,
+            "live_cpu_supported_horizons": ["scalp"],
+            "live_cpu_selection_policy": "champion_only",
+            "ensemble_mode": "vote_50_50",
+            "ensemble_min_edge": self._ensemble_min_edge,
+            "double_validation_required": self._ensemble_requires_double_validation,
+            "dreamer_pipeline": {
+                "status": "shadow_orchestrated",
+                "live_runtime": "degraded_until_promoted",
+            },
         }

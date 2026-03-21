@@ -1,4 +1,4 @@
-﻿import type { ModelPerformanceReport } from '../../services/api'
+import type { ModelPerformanceReport } from '../../services/api'
 import { MetricPill, MetricTile, PanelShell, formatPercent, formatUsd } from './TradingShared'
 
 export default function LivePerformancePanel({

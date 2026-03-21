@@ -5,6 +5,8 @@ Contient la logique dÃ©cisionnelle (Manager), l'exÃ©cution (Worker) et la bo
 
 import asyncio
 import logging
+import math
+from collections import Counter, deque
 from decimal import Decimal
 from uuid import UUID
 from datetime import datetime, timedelta
@@ -16,8 +18,13 @@ import uuid
 from shared.redis_client import get_redis_client
 
 from shared import (
+    ConnectorMode,
+    ExecutionEventEnvelope,
+    RuntimeMode,
     TradeAction,
     TradeOrder,
+    TradingContextEnvelope,
+    TradingDecisionEnvelope,
     symlog,
     calculate_var,
     calculate_cvar,
@@ -110,6 +117,8 @@ class AutoTradingEngine:
         self.symbols = list(dict.fromkeys(self.settings.banker_symbols))
         self.risk.register_symbol_universe({symbol: self.mt5.classify_symbol(symbol) or "unknown" for symbol in self.symbols})
         self.latest_decisions = {} # Stores latest analysis per symbol
+        self._decision_audit_limit = max(50, self._env_int("BANKER_DECISION_AUDIT_LIMIT", 200))
+        self._decision_audit = deque(maxlen=self._decision_audit_limit)
         self._symbol_cursor = 0
         self._last_universe_refresh = None
         self._dynamic_universe_enabled = self._env_flag("BANKER_DYNAMIC_UNIVERSE", True)
@@ -126,7 +135,33 @@ class AutoTradingEngine:
         )
         self._lab_universe_horizon = self._env_text("BANKER_LAB_UNIVERSE_HORIZON", "intraday").lower()
         self._live_inference_horizon = self._env_text("BANKER_LIVE_HORIZON", "auto").lower()
+        self._live_inference_url = self._env_text("BANKER_LIVE_INFERENCE_URL", "")
+        self._live_inference_timeout_seconds = max(
+            1,
+            self._env_int("BANKER_LIVE_INFERENCE_TIMEOUT_SECONDS", 5),
+        )
         self._require_valid_champion = self._env_flag("BANKER_REQUIRE_VALID_CHAMPION", True)
+        self._training_compat_mode = self._normalize_training_compat_mode(
+            self._env_text("BANKER_TRAINING_COMPAT_MODE", "disabled")
+        )
+        self._cpu_live_mode = self._training_compat_mode == "cpu_live"
+        self._cpu_live_symbols = self._parse_symbol_allowlist(
+            self._env_text(
+                "BANKER_CPU_LIVE_SYMBOLS",
+                "EURUSD,GBPUSD,USDJPY,XAUUSD",
+            )
+        )
+        self._cpu_live_max_volume = max(
+            0.01,
+            self._env_float("BANKER_CPU_LIVE_MAX_VOLUME", 0.10),
+        )
+        self._ensemble_enabled = self._env_flag("BANKER_ENSEMBLE_ENABLED", False)
+        self._ensemble_min_edge = max(0.0, self._env_float("BANKER_ENSEMBLE_MIN_EDGE", 0.15))
+        if self._cpu_live_mode:
+            # Le mode de compatibilite garde un chemin live minimal et stable
+            # pendant qu'un gros run GPU monopolise `vLLM` et les ressources Lab.
+            self._live_inference_horizon = "scalp"
+            self._lab_universe_horizon = "scalp"
         self._startup_alert_cooldown = timedelta(
             minutes=max(1, self._env_int("BANKER_STARTUP_ALERT_COOLDOWN_MINUTES", 20))
         )
@@ -163,9 +198,25 @@ class AutoTradingEngine:
         self._lab_universe_gate_allowed = False
         self._lab_universe_selection = "none"
         self._lab_universe_gate_reason = "unknown"
+        self._lab_universe_family = "mixed"
+        self._lab_universe_dataset_id = None
+        self._lab_universe_feature_profile = None
+        self._lab_universe_live_champion_id = None
+        self._lab_universe_live_champion_id_muzero = None
+        self._lab_universe_live_champion_id_dreamer = None
+        self._lab_universe_top_symbols: list[str] = []
+        self._lab_universe_top_symbols_by_engine: dict[str, list[str]] = {
+            "muzero": [],
+            "dreamer": [],
+        }
 
         # Sprint 10: News Filter
         self.news = NewsFilterService(filter_minutes=30)
+
+        if self._cpu_live_mode:
+            logger.info(
+                "Mode de compatibilite training actif: cpu_live (scalp uniquement, champion_only exige, Cortex non obligatoire)."
+            )
 
     async def start(self):
         """Demarre le pilote automatique."""
@@ -235,6 +286,26 @@ class AutoTradingEngine:
             return default
 
     @staticmethod
+    def _env_float(name: str, default: float) -> float:
+        """Lit un flottant depuis l'environnement.
+
+        Args:
+            name (str): Nom de la variable d'environnement.
+            default (float): Valeur de repli si la variable est absente.
+
+        Returns:
+            float: Valeur numerique retenue.
+        """
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            logger.warning("Variable %s invalide (%s). Repli sur %s.", name, raw, default)
+            return default
+
+    @staticmethod
     def _env_text(name: str, default: str) -> str:
         """Lit une chaine depuis l'environnement avec repli.
 
@@ -250,6 +321,47 @@ class AutoTradingEngine:
             return default
         cleaned = raw.strip()
         return cleaned or default
+
+    @staticmethod
+    def _normalize_training_compat_mode(raw_mode: str) -> str:
+        """Normalise le mode de compatibilite training/live.
+
+        Args:
+            raw_mode (str): Valeur brute issue de l'environnement.
+
+        Returns:
+            str: Mode retenu (`disabled` ou `cpu_live`).
+        """
+        normalized = str(raw_mode or "").strip().lower()
+        if normalized in {"", "off", "none", "false", "0"}:
+            return "disabled"
+        if normalized == "cpu_live":
+            return normalized
+        logger.warning(
+            "Mode de compatibilite training inconnu (%s). Repli sur disabled.",
+            raw_mode,
+        )
+        return "disabled"
+
+    @staticmethod
+    def _parse_symbol_allowlist(raw_value: str) -> list[str]:
+        """Normalise une liste de symboles separes par des virgules.
+
+        Args:
+            raw_value (str): Valeur brute issue de l'environnement.
+
+        Returns:
+            list[str]: Liste dedoublonnee de symboles.
+        """
+        symbols: list[str] = []
+        seen: set[str] = set()
+        for chunk in str(raw_value or "").split(","):
+            symbol = chunk.strip().upper()
+            if not symbol or symbol in seen:
+                continue
+            symbols.append(symbol)
+            seen.add(symbol)
+        return symbols
 
     def _log_pause_state(
         self,
@@ -289,12 +401,15 @@ class AutoTradingEngine:
         Returns:
             object: Valeur compatible avec ``json.dumps``.
         """
-        if value is None or isinstance(value, (str, int, float, bool)):
+        if value is None or isinstance(value, (str, int, bool)):
             return value
+        if isinstance(value, float):
+            return value if math.isfinite(value) else 0.0
         if isinstance(value, datetime):
             return value.isoformat()
         if isinstance(value, Decimal):
-            return float(value)
+            decimal_value = float(value)
+            return decimal_value if math.isfinite(decimal_value) else 0.0
         if isinstance(value, UUID):
             return str(value)
         if isinstance(value, dict):
@@ -316,6 +431,39 @@ class AutoTradingEngine:
                 pass
         return str(value)
 
+    @staticmethod
+    def _normalize_live_timestamp(value) -> str | None:
+        """Normalise l'horodatage envoye au service d'inference live.
+
+        Le service FastAPI attend une chaine ISO. MT5 peut cependant fournir
+        un entier Unix ou un objet datetime selon la source des bougies.
+
+        Args:
+            value: Horodatage brut issu de la derniere bougie.
+
+        Returns:
+            str | None: Horodatage ISO serialisable, ou ``None`` si absent.
+        """
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, (int, float)):
+            if not math.isfinite(float(value)):
+                return None
+            try:
+                return datetime.utcfromtimestamp(float(value)).isoformat() + "Z"
+            except Exception:
+                return str(value)
+        if hasattr(value, "isoformat") and callable(value.isoformat):
+            try:
+                return value.isoformat()
+            except Exception:
+                return str(value)
+        return str(value)
+
     def _resolve_inference_horizon(self, skill: SkilledBehavior | None) -> str:
         """Choisit l'horizon live le plus adapte a la skill courante.
 
@@ -325,6 +473,9 @@ class AutoTradingEngine:
         Returns:
             str: Horizon MuZero a transmettre au Lab.
         """
+        if self._cpu_live_mode:
+            return "scalp"
+
         if self._live_inference_horizon != "auto":
             return self._live_inference_horizon
 
@@ -333,6 +484,45 @@ class AutoTradingEngine:
         if skill in {SkilledBehavior.HEDGING, SkilledBehavior.ACCUMULATION}:
             return "swing"
         return "intraday"
+
+    def _resolve_live_inference_url(self) -> str:
+        """Construit l'URL d'inference live a appeler.
+
+        Returns:
+            str: URL HTTP complete de prediction live.
+        """
+        explicit_url = self._live_inference_url.strip()
+        if explicit_url:
+            normalized = explicit_url.rstrip("/")
+            if (
+                normalized.endswith("/predict/live")
+                or normalized.endswith("/dreamer/predict")
+                or normalized.endswith("/predict/ensemble")
+            ):
+                return normalized
+            if self._ensemble_enabled:
+                return f"{normalized}/predict/ensemble"
+            if self._cpu_live_mode:
+                return f"{normalized}/predict/live"
+            return f"{normalized}/dreamer/predict"
+
+        lab_host = self._env_text("LAB_HOST", "localhost")
+        lab_port = self._env_int("LAB_PORT", 8600)
+        if self._ensemble_enabled:
+            return f"http://{lab_host}:{lab_port}/predict/ensemble"
+        if self._cpu_live_mode:
+            return f"http://{lab_host}:{lab_port}/predict/live"
+        return f"http://{lab_host}:{lab_port}/dreamer/predict"
+
+    def _resolve_legacy_inference_url(self) -> str:
+        """Construit l'URL legacy d'inference MuZero/Dreamer.
+
+        Returns:
+            str: URL HTTP complete du chemin legacy.
+        """
+        lab_host = self._env_text("LAB_HOST", "localhost")
+        lab_port = self._env_int("LAB_PORT", 8600)
+        return f"http://{lab_host}:{lab_port}/dreamer/predict"
 
     async def refresh_symbol_universe(self, force: bool = False) -> list[str]:
         """Rafraichit l'univers de marche depuis MT5."""
@@ -384,6 +574,23 @@ class AutoTradingEngine:
                 )
                 return previous_symbols
 
+        if self._cpu_live_mode and self._cpu_live_symbols:
+            allowed_cpu_symbols = set(self._cpu_live_symbols)
+            restricted_cpu = [symbol for symbol in discovered if symbol.upper() in allowed_cpu_symbols]
+            if restricted_cpu:
+                logger.info(
+                    "Mode cpu_live: univers restreint aux majeurs valides (%s/%s symboles).",
+                    len(restricted_cpu),
+                    len(discovered),
+                )
+                discovered = restricted_cpu
+            else:
+                logger.warning(
+                    "Mode cpu_live: aucun symbole courant ne correspond a l'allowlist %s.",
+                    self._cpu_live_symbols,
+                )
+                return previous_symbols
+
         self.symbols = discovered
         self._last_universe_refresh = now
         self._symbol_cursor = 0
@@ -419,9 +626,10 @@ class AutoTradingEngine:
 
         lab_host = self._env_text("LAB_HOST", "localhost")
         lab_port = self._env_int("LAB_PORT", 8600)
+        horizon = "scalp" if self._cpu_live_mode else self._lab_universe_horizon
         url = (
             f"http://{lab_host}:{lab_port}/live/universe"
-            f"?horizon={self._lab_universe_horizon}"
+            f"?horizon={horizon}&engine=muzero"
         )
 
         try:
@@ -430,7 +638,7 @@ class AutoTradingEngine:
                     if response.status != 200:
                         logger.warning(
                             "Univers EVA Lab indisponible (%s). HTTP %s.",
-                            self._lab_universe_horizon,
+                            horizon,
                             response.status,
                         )
                         return self._lab_universe_symbols
@@ -444,6 +652,32 @@ class AutoTradingEngine:
                     ]
                     self._lab_universe_symbols = list(dict.fromkeys(symbols))
                     self._lab_universe_source = str(live_universe.get("source") or "unknown")
+                    self._lab_universe_family = str(payload.get("family") or "mixed")
+                    self._lab_universe_dataset_id = str(payload.get("dataset_id") or "").strip() or None
+                    self._lab_universe_feature_profile = (
+                        str(payload.get("feature_profile") or "").strip() or None
+                    )
+                    self._lab_universe_live_champion_id = (
+                        str(payload.get("live_champion_id") or "").strip() or None
+                    )
+                    self._lab_universe_live_champion_id_muzero = (
+                        str(payload.get("live_champion_id_muzero") or "").strip() or None
+                    )
+                    self._lab_universe_live_champion_id_dreamer = (
+                        str(payload.get("live_champion_id_dreamer") or "").strip() or None
+                    )
+                    top_symbols_by_engine = dict(payload.get("top_live_symbols_by_engine") or {})
+                    self._lab_universe_top_symbols_by_engine = {
+                        "muzero": list(dict.fromkeys(top_symbols_by_engine.get("muzero") or [])),
+                        "dreamer": list(dict.fromkeys(top_symbols_by_engine.get("dreamer") or [])),
+                    }
+                    self._lab_universe_top_symbols = list(
+                        dict.fromkeys(
+                            (payload.get("top_live_symbols") or [])
+                            or self._lab_universe_top_symbols_by_engine.get("muzero", [])
+                            or self._lab_universe_symbols[:5]
+                        )
+                    )
                     self._lab_universe_gate_allowed = bool(
                         (payload.get("promotion_gate", {}) or {}).get("allowed", False)
                     )
@@ -455,7 +689,7 @@ class AutoTradingEngine:
                     if self._require_valid_champion and not self._lab_universe_gate_allowed:
                         logger.warning(
                             "Live gele: aucun champion valide pour %s (%s).",
-                            self._lab_universe_horizon,
+                            horizon,
                             self._lab_universe_gate_reason,
                         )
                     return self._lab_universe_symbols
@@ -471,20 +705,281 @@ class AutoTradingEngine:
         """
         return {
             "enabled": self._lab_universe_enabled,
-            "horizon": self._lab_universe_horizon,
+            "horizon": "scalp" if self._cpu_live_mode else self._lab_universe_horizon,
             "source": self._lab_universe_source,
+            "live_family": self._lab_universe_family,
+            "live_champion_id": self._lab_universe_live_champion_id,
+            "live_champion_id_muzero": self._lab_universe_live_champion_id_muzero,
+            "live_champion_id_dreamer": self._lab_universe_live_champion_id_dreamer,
+            "feature_profile": self._lab_universe_feature_profile,
+            "dataset_id": self._lab_universe_dataset_id,
             "symbols_total": len(self._lab_universe_symbols),
+            "live_top_symbols": list(self._lab_universe_top_symbols),
+            "live_top_symbols_by_engine": {
+                engine: list(symbols)
+                for engine, symbols in self._lab_universe_top_symbols_by_engine.items()
+            },
+            "cpu_live_symbols": list(self._cpu_live_symbols),
             "gate_allowed": self._lab_universe_gate_allowed,
             "selection": self._lab_universe_selection,
             "gate_reason": self._lab_universe_gate_reason,
             "require_valid_champion": self._require_valid_champion,
             "live_entries_allowed": (not self._require_valid_champion) or self._lab_universe_gate_allowed,
+            "training_compat_mode": self._training_compat_mode,
+            "cpu_live_mode": self._cpu_live_mode,
+            "ensemble_enabled": self._ensemble_enabled,
+            "cortex_required": not self._cpu_live_mode,
             "last_refresh": (
                 self._lab_universe_last_refresh.isoformat()
                 if self._lab_universe_last_refresh is not None
                 else None
             ),
         }
+
+    def get_runtime_mode_status(self) -> dict[str, object]:
+        """Retourne le mode runtime actif du banker.
+
+        Returns:
+            dict[str, object]: Etat du chemin live local.
+        """
+        return {
+            "runtime_mode": self._resolve_runtime_mode().value,
+            "training_compat_mode": self._training_compat_mode,
+            "cpu_live_mode": self._cpu_live_mode,
+            "allowed_horizons": ["scalp"] if self._cpu_live_mode else ["auto"],
+            "cortex_required": not self._cpu_live_mode,
+            "gnn_mode": "consultatif" if self._cpu_live_mode else "fusionne",
+            "selection_policy_required": "champion_only" if self._cpu_live_mode else "default",
+            "live_inference_url": self._resolve_live_inference_url(),
+            "live_inference_timeout_seconds": self._live_inference_timeout_seconds,
+            "cpu_live_symbols": list(self._cpu_live_symbols),
+            "cpu_live_max_volume": self._cpu_live_max_volume,
+            "ensemble_enabled": self._ensemble_enabled,
+            "ensemble_mode": "vote_50_50" if self._ensemble_enabled else "muzero_only",
+            "ensemble_min_edge": self._ensemble_min_edge,
+        }
+
+    def get_execution_mechanics_status(self) -> dict[str, object]:
+        """Expose les regles d'execution qui encadrent le live local.
+
+        Returns:
+            dict[str, object]: Parametres de volume, stale close et cooldown.
+        """
+        max_open_positions = int(getattr(self.risk, "max_open_positions", 0) or 0)
+        return {
+            "max_open_positions": max_open_positions,
+            "symbol_entry_cooldown_minutes": int(self._symbol_entry_cooldown.total_seconds() / 60),
+            "scalp_stale_minutes": self._scalp_stale_minutes,
+            "cpu_live_max_volume": self._cpu_live_max_volume,
+            "cpu_live_symbols": list(self._cpu_live_symbols),
+            "live_family": self._lab_universe_family,
+            "live_champion_id": self._lab_universe_live_champion_id,
+            "live_champion_id_muzero": self._lab_universe_live_champion_id_muzero,
+            "live_champion_id_dreamer": self._lab_universe_live_champion_id_dreamer,
+            "live_top_symbols": list(self._lab_universe_top_symbols),
+            "live_top_symbols_by_engine": {
+                engine: list(symbols)
+                for engine, symbols in self._lab_universe_top_symbols_by_engine.items()
+            },
+            "live_inference_horizon": self._live_inference_horizon,
+            "selection_policy_required": "champion_only" if self._cpu_live_mode else "default",
+            "ensemble_enabled": self._ensemble_enabled,
+            "ensemble_mode": "vote_50_50" if self._ensemble_enabled else "muzero_only",
+            "ensemble_min_edge": self._ensemble_min_edge,
+        }
+
+    def _resolve_runtime_mode(self) -> RuntimeMode:
+        """Retourne le mode runtime canonique du banker.
+
+        Returns:
+            RuntimeMode: Mode de fonctionnement actuellement impose.
+        """
+        if not self.is_active:
+            return RuntimeMode.MAINTENANCE
+        if self._cpu_live_mode:
+            return RuntimeMode.TRAINING_CPU_LIVE
+        return RuntimeMode.DEMO_LIVE
+
+    def _build_event_connectors(self, decision_state: dict[str, object] | None = None) -> dict[str, object]:
+        """Construit un instantane minimal des connecteurs utiles au live.
+
+        Args:
+            decision_state (dict[str, object] | None): Etat de decision courant.
+
+        Returns:
+            dict[str, object]: Modes de connecteurs exposes pour EVA Core.
+        """
+        state = decision_state or {}
+        live_model_allowed = bool(state.get("live_model_allowed", False))
+        model_status = str(state.get("model_status") or "").lower()
+        gnn_confidence = float(state.get("gnn_confidence") or 0.0)
+
+        live_inference_mode = ConnectorMode.LIVE
+        if model_status in {"blocked", "error", "unavailable"}:
+            live_inference_mode = ConnectorMode.PAPER
+
+        gnn_mode = ConnectorMode.DISABLED if gnn_confidence <= 0.0 else ConnectorMode.LIVE
+        mt5_mode = ConnectorMode.LIVE if getattr(self.mt5, "is_connected", False) and not getattr(self.mt5, "mock_mode", False) else ConnectorMode.PAPER
+
+        return {
+            "mt5": {
+                "mode": mt5_mode.value,
+                "connected": bool(getattr(self.mt5, "is_connected", False)),
+            },
+            "live_inference": {
+                "mode": live_inference_mode.value,
+                "allowed": live_model_allowed,
+                "url": self._resolve_live_inference_url(),
+                "ensemble_mode": state.get("ensemble_mode"),
+                "degraded_fallback_reason": state.get("degraded_fallback_reason"),
+            },
+            "gnn": {
+                "mode": gnn_mode.value,
+                "role": "consultatif" if self._cpu_live_mode else "fusionne",
+            },
+            "vllm": {
+                "mode": ConnectorMode.DISABLED.value if self._cpu_live_mode else ConnectorMode.LIVE.value,
+            },
+        }
+
+    async def _publish_envelope_snapshot(
+        self,
+        channel: str,
+        cache_key: str,
+        envelope,
+        ttl_seconds: int = 900,
+    ) -> None:
+        """Publie et met en cache une enveloppe de facon defensive.
+
+        Args:
+            channel (str): Canal Pub/Sub Redis cible.
+            cache_key (str): Cle de cache associee.
+            envelope: Modele Pydantic a serialiser.
+            ttl_seconds (int): Duree de vie du cache.
+        """
+        try:
+            redis = get_redis_client()
+            payload = self._json_safe_value(envelope.model_dump())
+            await redis.cache_set(cache_key, payload, ttl_seconds=ttl_seconds)
+            await redis.publish(channel, payload)
+        except Exception as exc:
+            logger.debug("Publication Redis ignoree sur %s: %s", channel, exc)
+
+    async def _publish_trading_context_event(
+        self,
+        symbol: str,
+        horizon: str,
+        decision_state: dict[str, object],
+    ) -> None:
+        """Publie le contexte de marche interprete pour un symbole.
+
+        Args:
+            symbol (str): Symbole analyse.
+            horizon (str): Horizon MuZero retenu.
+            decision_state (dict[str, object]): Etat de decision courant.
+        """
+        envelope = TradingContextEnvelope(
+            runtime_mode=self._resolve_runtime_mode(),
+            symbol=symbol,
+            horizon=horizon,
+            market_state={
+                "price": decision_state.get("price"),
+                "rsi": decision_state.get("rsi"),
+                "adx": decision_state.get("adx"),
+                "vwap": decision_state.get("vwap"),
+                "cortex_bias": decision_state.get("cortex_bias"),
+                "gnn_bias": decision_state.get("gnn_bias"),
+                "final_bias": decision_state.get("final_bias"),
+                "bias_strength": decision_state.get("bias_strength"),
+                "comment": decision_state.get("comment"),
+            },
+            connectors=self._build_event_connectors(decision_state),
+            metadata={"selection": decision_state.get("selection"), "checkpoint": decision_state.get("checkpoint")},
+        )
+        await self._publish_envelope_snapshot(
+            channel="eva.trading.context",
+            cache_key=f"eva:state:trading:context:{symbol.upper()}",
+            envelope=envelope,
+        )
+
+    async def _publish_trading_decision_event(
+        self,
+        symbol: str,
+        horizon: str,
+        decision_state: dict[str, object],
+    ) -> None:
+        """Publie la decision brute puis filtree du banker.
+
+        Args:
+            symbol (str): Symbole analyse.
+            horizon (str): Horizon MuZero retenu.
+            decision_state (dict[str, object]): Etat de decision courant.
+        """
+        envelope = TradingDecisionEnvelope(
+            runtime_mode=self._resolve_runtime_mode(),
+            symbol=symbol,
+            horizon=horizon,
+            raw_model_action=str(decision_state.get("raw_model_action") or "HOLD"),
+            post_veto_action=str(decision_state.get("post_veto_action") or "HOLD"),
+            selection=str(decision_state.get("selection") or "none"),
+            checkpoint=str(decision_state.get("checkpoint") or "") or None,
+            final_bias=str(decision_state.get("final_bias") or "NEUTRAL"),
+            veto_reason=str(decision_state.get("veto_reason") or "") or None,
+            engine=str(decision_state.get("engine_name") or "") or None,
+            ensemble_mode=str(decision_state.get("ensemble_mode") or "") or None,
+            degraded_fallback_reason=str(decision_state.get("degraded_fallback_reason") or "") or None,
+            connectors=self._build_event_connectors(decision_state),
+            payload=self._json_safe_value(decision_state),
+            metadata={"symbol_family": self.mt5.classify_symbol(symbol) or "unknown"},
+        )
+        await self._publish_envelope_snapshot(
+            channel="eva.trading.decision",
+            cache_key=f"eva:state:trading:decision:{symbol.upper()}",
+            envelope=envelope,
+        )
+
+    async def _publish_execution_event(
+        self,
+        symbol: str,
+        action: str,
+        stage: str,
+        allowed: bool,
+        reason: str | None = None,
+        volume: float | None = None,
+        spread_points: float | None = None,
+        ticket: int | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        """Publie un evenement d'execution ou de refus.
+
+        Args:
+            symbol (str): Symbole concerne.
+            action (str): Action demandee.
+            stage (str): Etape du pipeline d'execution.
+            allowed (bool): Indique si l'etape passe.
+            reason (str | None): Motif principal.
+            volume (float | None): Volume concerne.
+            spread_points (float | None): Spread releve.
+            ticket (int | None): Ticket retourne par MT5.
+            payload (dict[str, object] | None): Metadonnees additionnelles.
+        """
+        envelope = ExecutionEventEnvelope(
+            runtime_mode=self._resolve_runtime_mode(),
+            symbol=symbol,
+            action=action,
+            stage=stage,
+            allowed=allowed,
+            reason=reason,
+            volume=volume,
+            spread_points=spread_points,
+            ticket=ticket,
+            payload=self._json_safe_value(payload or {}),
+        )
+        await self._publish_envelope_snapshot(
+            channel="eva.trading.execution",
+            cache_key=f"eva:state:trading:execution:{symbol.upper()}",
+            envelope=envelope,
+        )
 
     def _is_live_model_allowed(self, inference_result: dict[str, object] | None) -> tuple[bool, str]:
         """Valide qu'une prediction provient bien d'un champion live autorise.
@@ -499,12 +994,186 @@ class AutoTradingEngine:
             return True, "validation_desactivee"
 
         payload = inference_result or {}
+        selection_policy = str(payload.get("selection_policy") or "").lower()
+        if self._cpu_live_mode and selection_policy != "champion_only":
+            return False, f"selection_policy_invalide:{selection_policy or 'unknown'}"
+
+        model_status = str(payload.get("model_status") or "").lower()
+        if model_status == "blocked":
+            reason = str(payload.get("reason") or "modele_bloque")
+            return False, reason
+
         selection = str(payload.get("selection") or self._lab_universe_selection or "none").lower()
         if selection in {"champion", "legacy_champion"}:
             return True, "champion_valide"
 
+        if selection in {"ensemble_50_50", "degraded_muzero_only"}:
+            governance = dict(payload.get("governance") or {})
+            muzero_payload = dict(governance.get("muzero") or {})
+            muzero_selection = str(muzero_payload.get("selection") or "").lower()
+            muzero_status = str(muzero_payload.get("model_status") or "").lower()
+            if muzero_selection in {"champion", "legacy_champion"} and muzero_status == "live":
+                if selection == "ensemble_50_50":
+                    return True, "ensemble_valide"
+                return True, "degraded_muzero_valide"
+
         reason = str(payload.get("reason") or self._lab_universe_gate_reason or selection or "unknown")
         return False, reason
+
+    @staticmethod
+    def _trade_action_label(action: TradeAction | None) -> str:
+        """Retourne un libelle stable pour une action de trading.
+
+        Args:
+            action (TradeAction | None): Action interne eventuelle.
+
+        Returns:
+            str: Libelle ``BUY``, ``SELL`` ou ``HOLD``.
+        """
+        if action is None:
+            return "HOLD"
+        return str(getattr(action, "value", action))
+
+    @staticmethod
+    def _model_action_label(action_id: object, fallback: object = None) -> str:
+        """Normalise un identifiant d'action MuZero en libelle lisible.
+
+        Args:
+            action_id (object): Identifiant brut retourne par le modele.
+            fallback (object): Libelle secondaire fourni par EVA Lab.
+
+        Returns:
+            str: Libelle d'action stable.
+        """
+        action_map = {
+            0: "HOLD",
+            1: "BUY",
+            2: "SELL",
+            3: "SPLIT",
+            4: "CLOSE",
+        }
+        try:
+            normalized_id = int(action_id)
+        except (TypeError, ValueError):
+            normalized_id = None
+
+        if normalized_id in action_map:
+            return action_map[normalized_id]
+
+        candidate = str(fallback or "").strip().upper()
+        return candidate or "UNKNOWN"
+
+    def _apply_context_veto(
+        self,
+        action: TradeAction | None,
+        decision_context: dict[str, object] | None,
+    ) -> tuple[TradeAction | None, str | None]:
+        """Applique un veto contextuel symetrique sur une action live.
+
+        Le veto est reserve aux cas ou le biais oppose est directionnel,
+        explicite et suffisamment fort. Un contexte ``NEUTRAL`` ou ``RANGING``
+        ne bloque jamais une entree a lui seul.
+
+        Args:
+            action (TradeAction | None): Action brute issue du modele.
+            decision_context (dict[str, object] | None): Contexte fusionne
+                ``Cortex + GNN`` calcule sur le symbole.
+
+        Returns:
+            tuple[TradeAction | None, str | None]: Action retenue et motif de veto.
+        """
+        if action is None:
+            return None, None
+
+        final_bias = str((decision_context or {}).get("bias") or "NEUTRAL").upper()
+        bias_strength = str((decision_context or {}).get("bias_strength") or "weak").lower()
+
+        if final_bias not in {"BULLISH", "BEARISH"}:
+            return action, None
+
+        if bias_strength == "weak":
+            return action, None
+
+        if action == TradeAction.BUY and final_bias == "BEARISH":
+            return None, "veto_biais_baissier_confirme"
+
+        if action == TradeAction.SELL and final_bias == "BULLISH":
+            return None, "veto_biais_haussier_confirme"
+
+        return action, None
+
+    def _record_decision_audit(self, audit_event: dict[str, object]) -> None:
+        """Enregistre un evenement de decision dans la fenetre glissante.
+
+        Args:
+            audit_event (dict[str, object]): Evenement normalise a conserver.
+        """
+        self._decision_audit.append(self._json_safe_value(audit_event))
+
+    def get_decision_audit_snapshot(self) -> dict[str, object]:
+        """Construit un resume glissant de la chaine de decision live.
+
+        Returns:
+            dict[str, object]: Compteurs globaux et repartition par symbole.
+        """
+        raw_counts: Counter[str] = Counter()
+        post_counts: Counter[str] = Counter()
+        ensemble_modes: Counter[str] = Counter()
+        degraded_fallbacks: Counter[str] = Counter()
+        per_symbol: dict[str, dict[str, object]] = {}
+
+        for event in list(self._decision_audit):
+            symbol = str(event.get("symbol") or "UNKNOWN")
+            raw_action = str(event.get("raw_model_action") or "HOLD")
+            post_action = str(event.get("post_veto_action") or "HOLD")
+            ensemble_mode = str(event.get("ensemble_mode") or "none")
+            degraded_reason = str(event.get("degraded_fallback_reason") or "").strip()
+
+            raw_counts[raw_action] += 1
+            post_counts[post_action] += 1
+            ensemble_modes[ensemble_mode] += 1
+            if degraded_reason:
+                degraded_fallbacks[degraded_reason] += 1
+
+            symbol_state = per_symbol.setdefault(
+                symbol,
+                {
+                    "events": 0,
+                    "raw_counts": Counter(),
+                    "post_counts": Counter(),
+                    "ensemble_modes": Counter(),
+                },
+            )
+            symbol_state["events"] = int(symbol_state["events"]) + 1
+            symbol_state["raw_counts"][raw_action] += 1
+            symbol_state["post_counts"][post_action] += 1
+            symbol_state["ensemble_modes"][ensemble_mode] += 1
+
+        formatted_symbols = {}
+        for symbol, symbol_state in per_symbol.items():
+            formatted_symbols[symbol] = {
+                "events": int(symbol_state["events"]),
+                "raw_counts": dict(symbol_state["raw_counts"]),
+                "post_counts": dict(symbol_state["post_counts"]),
+                "ensemble_modes": dict(symbol_state["ensemble_modes"]),
+            }
+
+        recent_events = list(self._decision_audit)[-10:]
+        return {
+            "window_size": len(self._decision_audit),
+            "limit": self._decision_audit_limit,
+            "raw_counts": dict(raw_counts),
+            "post_counts": dict(post_counts),
+            "ensemble_modes": dict(ensemble_modes),
+            "degraded_fallbacks": dict(degraded_fallbacks),
+            "ensemble_decision_stats": {
+                "enabled": self._ensemble_enabled,
+                "mode_counts": dict(ensemble_modes),
+                "degraded_fallbacks": dict(degraded_fallbacks),
+            },
+            "symbols": formatted_symbols,
+            "recent": recent_events,
+        }
 
     def get_symbol_batch(self, advance: bool = True) -> list[str]:
         """Retourne le prochain lot de symboles a scanner."""
@@ -1585,8 +2254,13 @@ class AutoTradingEngine:
                         observation = {
                             "symbol": symbol,
                             "horizon": live_horizon,
+                            "training_compat_mode": self._training_compat_mode,
+                            "cortex_required": not self._cpu_live_mode,
+                            "gnn_mode": "consultatif" if self._cpu_live_mode else "fusionne",
                             "price": float(current_price),
-                            "timestamp": latest_candle.get("time"),
+                            "timestamp": self._normalize_live_timestamp(
+                                latest_candle.get("time")
+                            ),
                             "latest_candle": {
                                 "open": float(latest_candle.get("open", current_price) or current_price),
                                 "high": float(latest_candle.get("high", current_price) or current_price),
@@ -1607,74 +2281,167 @@ class AutoTradingEngine:
                         live_model_allowed = not self._require_valid_champion
                         live_block_reason = "aucun"
                         mt5_order_comment = "EVA"
+                        raw_model_action_id = 0
+                        raw_model_action = "HOLD"
+                        raw_policy = []
+                        raw_model_confidence = 0.0
+                        raw_model_value = 0.0
+                        raw_prediction = "HOLD"
+                        checkpoint_path = None
+                        model_version = None
+                        model_status = "unknown"
+                        veto_reason = None
                         
                         try:
                             from shared.internal_auth import InternalAuth
-                            lab_host = os.getenv("LAB_HOST", "localhost")
-                            lab_url = f"http://{lab_host}:8600/dreamer/predict"
+                            observation["selection_policy"] = (
+                                "champion_only"
+                                if self._cpu_live_mode
+                                else str(os.getenv("MUZERO_LIVE_SELECTION_POLICY", "champion_only"))
+                            )
                             token = InternalAuth.generate_token("banker")
+                            candidate_urls = [self._resolve_live_inference_url()]
+                            if (
+                                self._cpu_live_mode
+                                and not self._live_inference_url.strip()
+                            ):
+                                candidate_urls.append(self._resolve_legacy_inference_url())
                             
                             async with aiohttp.ClientSession() as session:
-                                async with session.post(lab_url, json=observation, headers={"X-Hive-Internal-Token": token}, timeout=5.0) as resp:
-                                    if resp.status == 200:
-                                        lab_result = await resp.json()
-                                        mz_action = lab_result.get("action", 0)
-                                        mz_value = lab_result.get("value", 0.0)
-                                        model_engine = str(lab_result.get("engine", "Modele")).strip() or "Modele"
-                                        lab_selection = str(lab_result.get("selection") or "none")
-                                        lab_selection_policy = str(
-                                            lab_result.get("selection_policy") or "unknown"
-                                        )
-                                        live_model_allowed, live_block_reason = self._is_live_model_allowed(lab_result)
-                                        dreamer_comment = f"{model_engine} (v={mz_value:.2f})"
-                                        mt5_order_comment = self._build_order_comment(
-                                            engine_label=model_engine,
-                                            live_horizon=live_horizon,
-                                            selection=lab_selection,
-                                            model_value=float(mz_value or 0.0),
-                                        )
-
-                                        if mz_action == 1:
-                                            action = TradeAction.BUY
-                                            comment = f"{dreamer_comment} -> BUY"
-                                        elif mz_action == 2:
-                                            action = TradeAction.SELL
-                                            comment = f"{dreamer_comment} -> SELL"
-
-                                        if not live_model_allowed:
-                                            comment = f"Champion requis ({lab_selection})"
-                                        if action is not None and not live_model_allowed:
-                                            logger.info(
-                                                "Entree live refusee sur %s: champion requis (%s / %s).",
-                                                symbol,
-                                                lab_selection,
-                                                live_block_reason,
+                                for url_index, lab_url in enumerate(candidate_urls):
+                                    async with session.post(
+                                        lab_url,
+                                        json=observation,
+                                        headers={"X-Hive-Internal-Token": token},
+                                        timeout=self._live_inference_timeout_seconds,
+                                    ) as resp:
+                                        if resp.status == 404 and url_index + 1 < len(candidate_urls):
+                                            logger.warning(
+                                                "Endpoint %s absent. Repli ponctuel vers %s.",
+                                                lab_url,
+                                                candidate_urls[url_index + 1],
                                             )
-                                            action = None
-                                    else:
-                                        logger.error(f"Dreamer Inference failed: HTTP {resp.status}")
+                                            continue
+
+                                        if resp.status == 200:
+                                            lab_result = await resp.json()
+                                            raw_model_action_id = int(lab_result.get("action", 0) or 0)
+                                            raw_model_value = float(lab_result.get("value", 0.0) or 0.0)
+                                            raw_model_confidence = float(
+                                                lab_result.get("confidence", 0.0) or 0.0
+                                            )
+                                            raw_policy = self._json_safe_value(
+                                                lab_result.get("policy", []) or []
+                                            )
+                                            checkpoint_path = lab_result.get("checkpoint")
+                                            raw_prediction = str(
+                                                lab_result.get("prediction") or "HOLD"
+                                            )
+                                            raw_model_action = self._model_action_label(
+                                                raw_model_action_id,
+                                                raw_prediction,
+                                            )
+                                            model_engine = str(lab_result.get("engine", "Modele")).strip() or "Modele"
+                                            engine_name = str(lab_result.get("engine_name") or "").strip() or None
+                                            model_version = lab_result.get("model_version")
+                                            model_status = str(lab_result.get("model_status") or "unknown")
+                                            lab_selection = str(lab_result.get("selection") or "none")
+                                            lab_selection_policy = str(
+                                                lab_result.get("selection_policy") or "unknown"
+                                            )
+                                            governance = dict(lab_result.get("governance") or {})
+                                            ensemble_mode = str(
+                                                lab_result.get("ensemble_mode")
+                                                or governance.get("mode")
+                                                or ""
+                                            ).strip() or None
+                                            degraded_fallback_reason = str(
+                                                lab_result.get("degraded_fallback_reason")
+                                                or governance.get("degraded_fallback_reason")
+                                                or ""
+                                            ).strip() or None
+                                            muzero_decision = self._json_safe_value(governance.get("muzero") or {})
+                                            dreamer_decision = self._json_safe_value(governance.get("dreamer") or {})
+                                            ensemble_scores = self._json_safe_value(governance.get("scores") or {})
+                                            live_model_allowed, live_block_reason = self._is_live_model_allowed(lab_result)
+                                            dreamer_comment = f"{model_engine} (v={raw_model_value:.2f})"
+                                            mt5_order_comment = self._build_order_comment(
+                                                engine_label=model_engine,
+                                                live_horizon=live_horizon,
+                                                selection=lab_selection,
+                                                model_value=raw_model_value,
+                                            )
+
+                                            if raw_model_action_id == 1:
+                                                action = TradeAction.BUY
+                                                comment = f"{dreamer_comment} -> BUY"
+                                            elif raw_model_action_id == 2:
+                                                action = TradeAction.SELL
+                                                comment = f"{dreamer_comment} -> SELL"
+
+                                            if not live_model_allowed:
+                                                comment = f"Champion requis ({lab_selection})"
+                                            if action is not None and not live_model_allowed:
+                                                logger.info(
+                                                    "Entree live refusee sur %s: champion requis (%s / %s).",
+                                                    symbol,
+                                                    lab_selection,
+                                                    live_block_reason,
+                                                )
+                                                action = None
+                                            if (
+                                                action is not None
+                                                and self._cpu_live_mode
+                                                and lab_selection_policy != "champion_only"
+                                            ):
+                                                logger.info(
+                                                    "Entree live refusee sur %s: cpu_live exige champion_only (recu=%s).",
+                                                    symbol,
+                                                    lab_selection_policy,
+                                                )
+                                                action = None
+                                                live_model_allowed = False
+                                                live_block_reason = (
+                                                    f"selection_policy_invalide:{lab_selection_policy or 'unknown'}"
+                                                )
+                                                comment = "Mode cpu_live: champion_only requis"
+                                            break
+
+                                        error_payload = (await resp.text()).strip()
+                                        if len(error_payload) > 500:
+                                            error_payload = f"{error_payload[:497]}..."
+                                        logger.error(
+                                            "Inference live en echec via %s: HTTP %s - %s",
+                                            lab_url,
+                                            resp.status,
+                                            error_payload or "reponse vide",
+                                        )
                                         action = None
-                                        comment = f"Lab error (HTTP {resp.status})"
+                                        comment = f"Erreur inference live (HTTP {resp.status})"
+                                        break
                                         
                         except Exception as e_lab:
                             # En cas d'echec reseau ou de serialisation, on force HOLD pour proteger le compte.
                             logger.error(
-                                "Inference Dreamer impossible pour %s: %s - %s. Passage en attente.",
+                                "Inference live impossible pour %s: %s - %s. Passage en attente.",
                                 symbol,
                                 e_lab.__class__.__name__,
                                 e_lab,
                             )
                             action = None
-                            comment = "Erreur liaison Lab"
+                            comment = "Erreur service inference live"
 
-                        if action == TradeAction.BUY and bias == "BEARISH":
-                            logger.info(f"ðŸ™… Cortex VETO: Blocking BUY on {symbol} (Trend is BEARISH on M15)")
-                            action = None
-                            comment = "Blocked by Cortex (Bearish Trend on M15)"
-                        elif action == TradeAction.SELL and bias == "BULLISH":
-                            logger.info(f"ðŸ™… Cortex VETO: Blocking SELL on {symbol} (Trend is BULLISH on M15)")
-                            action = None
-                            comment = "Blocked by Cortex (Bullish Trend on M15)"
+                        action, veto_reason = self._apply_context_veto(action, last_strat)
+                        if veto_reason is not None:
+                            logger.info(
+                                "Veto contextuel sur %s: action=%s biais_final=%s force=%s raison=%s",
+                                symbol,
+                                raw_model_action,
+                                last_strat.get("bias", "NEUTRAL"),
+                                last_strat.get("bias_strength", "weak"),
+                                veto_reason,
+                            )
+                            comment = f"Bloque par contexte ({veto_reason})"
 
                         # FORCE LOGGING for user visibility (via rich)
                         try:
@@ -1717,8 +2484,42 @@ class AutoTradingEngine:
                             "adx": float(adx_data["adx"].iloc[-1]),
                             "live_horizon": live_horizon,
                             "action": action.value if action else "WAIT",
+                            "raw_model_action_id": raw_model_action_id,
+                            "raw_model_action": raw_model_action,
+                            "raw_prediction": raw_prediction,
+                            "raw_policy": raw_policy,
+                            "raw_model_confidence": raw_model_confidence,
+                            "raw_model_value": raw_model_value,
+                            "post_veto_action": self._trade_action_label(action),
+                            "veto_reason": veto_reason,
+                            "cortex_bias": last_strat.get("cortex_bias", "NEUTRAL"),
+                            "gnn_bias": last_strat.get("gnn_bias", "NEUTRAL"),
+                            "gnn_scalp_bias": last_strat.get("gnn_scalp_bias", "NEUTRAL"),
+                            "gnn_intraday_bias": last_strat.get("gnn_intraday_bias", "NEUTRAL"),
+                            "gnn_swing_bias": last_strat.get("gnn_swing_bias", "NEUTRAL"),
+                            "gnn_confidence": float(last_strat.get("gnn_confidence", 0.0) or 0.0),
+                            "final_bias": last_strat.get("bias", bias),
+                            "bias_alignment": last_strat.get("bias_alignment", "unknown"),
+                            "bias_strength": last_strat.get("bias_strength", "weak"),
+                            "training_compat_mode": self._training_compat_mode,
+                            "cpu_live_mode": self._cpu_live_mode,
                             "comment": comment,
                             "timestamp": datetime.now().isoformat(),
+                            "selection": lab_selection,
+                            "checkpoint": checkpoint_path,
+                            "model_version": model_version,
+                            "model_status": model_status,
+                            "engine_name": engine_name or ("ensemble" if ensemble_mode else "muzero"),
+                            "ensemble_mode": ensemble_mode,
+                            "degraded_fallback_reason": degraded_fallback_reason,
+                            "muzero_decision": muzero_decision,
+                            "dreamer_decision": dreamer_decision,
+                            "ensemble_decision": {
+                                "action": raw_model_action,
+                                "confidence": raw_model_confidence,
+                                "value": raw_model_value,
+                            } if ensemble_mode else {},
+                            "ensemble_scores": ensemble_scores,
                             "lab_selection": lab_selection,
                             "lab_selection_policy": lab_selection_policy,
                             "live_model_allowed": live_model_allowed,
@@ -1728,6 +2529,26 @@ class AutoTradingEngine:
                         if self._is_unusable_reasoning(str(decision_state.get("raw_thought", ""))):
                             decision_state["raw_thought"] = comment
                         self.latest_decisions[symbol] = decision_state
+                        self._record_decision_audit({
+                            "symbol": symbol,
+                            "timestamp": decision_state["timestamp"],
+                            "raw_model_action": raw_model_action,
+                            "post_veto_action": self._trade_action_label(action),
+                            "veto_reason": veto_reason,
+                            "cortex_bias": decision_state.get("cortex_bias"),
+                            "gnn_bias": decision_state.get("gnn_bias"),
+                            "final_bias": decision_state.get("final_bias"),
+                            "selection": lab_selection,
+                            "training_compat_mode": self._training_compat_mode,
+                            "checkpoint": checkpoint_path,
+                            "model_version": model_version,
+                            "model_status": model_status,
+                            "engine_name": decision_state.get("engine_name"),
+                            "ensemble_mode": decision_state.get("ensemble_mode"),
+                            "degraded_fallback_reason": decision_state.get("degraded_fallback_reason"),
+                        })
+                        await self._publish_trading_context_event(symbol, live_horizon, decision_state)
+                        await self._publish_trading_decision_event(symbol, live_horizon, decision_state)
 
                         if action is None:
                             continue
@@ -1767,6 +2588,7 @@ class AutoTradingEngine:
                         broker_min_volume = float(volume_constraints.get("min", Decimal("0.01")))
 
                         if dynamic_vol <= 0:
+                            requested_action = self._trade_action_label(action)
                             logger.info(
                                 "Execution ignoree sur %s: volume calcule nul pour le budget risque courant.",
                                 symbol,
@@ -1776,10 +2598,20 @@ class AutoTradingEngine:
                                     f"*RISK VETO* | {symbol} {action.value if hasattr(action, 'value') else action} bloque\n"
                                     "Raison: risque autorise insuffisant pour calculer un volume exploitable."
                                 )
+                            await self._publish_execution_event(
+                                symbol=symbol,
+                                action=requested_action,
+                                stage="risk_sizing",
+                                allowed=False,
+                                reason="volume_calcule_nul",
+                                volume=float(dynamic_vol),
+                                payload={"risk_percent": float(risk_pct)},
+                            )
                             action = None
                             comment = "Risque insuffisant"
 
                         if action and dynamic_vol < broker_min_volume:
+                            requested_action = self._trade_action_label(action)
                             logger.warning(
                                 "Execution ignoree sur %s: volume calcule %.4f inferieur au minimum broker %.4f.",
                                 symbol,
@@ -1788,17 +2620,36 @@ class AutoTradingEngine:
                             )
                             if self._should_send_veto_alert("volume_min"):
                                 self.telegram.send_sync(
-                                    f"*BROKER MIN VETO* | {symbol} {action.value if hasattr(action, 'value') else action} bloque\n"
-                                    f"Volume risque: {dynamic_vol:.4f} | Min broker: {broker_min_volume:.4f}"
-                                )
+                                        f"*BROKER MIN VETO* | {symbol} {action.value if hasattr(action, 'value') else action} bloque\n"
+                                        f"Volume risque: {dynamic_vol:.4f} | Min broker: {broker_min_volume:.4f}"
+                                    )
+                            await self._publish_execution_event(
+                                symbol=symbol,
+                                action=requested_action,
+                                stage="broker_volume_guard",
+                                allowed=False,
+                                reason="volume_minimum_broker",
+                                volume=float(dynamic_vol),
+                                payload={"broker_min_volume": broker_min_volume},
+                            )
                             action = None
                             comment = "Volume minimum broker > risque autorise"
 
                         if action is None:
                             continue
 
-                        # Safety Caps
-                        final_vol = min(0.10, dynamic_vol)
+                        # Le mode CPU live privilegie un plafond de taille
+                        # tres conservateur pour la demo pendant le training GPU.
+                        max_volume_cap = (
+                            self._cpu_live_max_volume
+                            if self._cpu_live_mode
+                            else 0.10
+                        )
+                        if str(decision_state.get("ensemble_mode") or "").lower() == "degraded_muzero_only":
+                            # En mode degrade, on reduit la taille pour proteger la demo
+                            # tant que DreamerV3 n'est pas capable de participer au vote.
+                            max_volume_cap = max(0.01, round(max_volume_cap * 0.5, 2))
+                        final_vol = min(max_volume_cap, dynamic_vol)
 
                         order = TradeOrder(
                             symbol=symbol,
@@ -1819,6 +2670,14 @@ class AutoTradingEngine:
                                     "Execution ignoree sur %s: une position existe deja juste avant l'envoi.",
                                     symbol,
                                 )
+                                await self._publish_execution_event(
+                                    symbol=symbol,
+                                    action=self._trade_action_label(action),
+                                    stage="position_guard",
+                                    allowed=False,
+                                    reason="position_deja_ouverte",
+                                    volume=float(final_vol),
+                                )
                                 open_symbols.add(symbol)
                                 action = None
                                 comment = "Position deja ouverte"
@@ -1831,6 +2690,7 @@ class AutoTradingEngine:
                             if margin_required is not None and account:
                                 free_margin = float(account.get("free_margin", 0.0))
                                 if free_margin < margin_required:
+                                    requested_action = self._trade_action_label(action)
                                     logger.warning(
                                         "Veto marge pour %s %s: requis=%.2f libre=%.2f",
                                         symbol,
@@ -1843,6 +2703,18 @@ class AutoTradingEngine:
                                             f"*MARGIN VETO* | {symbol} {action.value if hasattr(action, 'value') else action} bloque\n"
                                             f"Requis: ${margin_required:.2f} | Libre: ${free_margin:.2f}"
                                         )
+                                    await self._publish_execution_event(
+                                        symbol=symbol,
+                                        action=requested_action,
+                                        stage="margin_guard",
+                                        allowed=False,
+                                        reason="marge_insuffisante",
+                                        volume=float(final_vol),
+                                        payload={
+                                            "margin_required": margin_required,
+                                            "free_margin": free_margin,
+                                        },
+                                    )
                                     action = None
                                     comment = "Marge insuffisante"
                             
@@ -1853,6 +2725,15 @@ class AutoTradingEngine:
                         validation = await self.risk.validate_order(order)
                         if validation["allowed"]:
                             logger.info(f"ðŸ¤– EXEC {symbol}: {action} | {comment}")
+                            await self._publish_execution_event(
+                                symbol=symbol,
+                                action=self._trade_action_label(action),
+                                stage="risk_validation",
+                                allowed=True,
+                                reason="validation_ok",
+                                volume=float(order.volume),
+                                payload=validation,
+                            )
                             result = await self.worker.execute_skill(skill, order)
                             if result.get("success"):
                                 # --- NEW (Sprint 11): LLM Micro-Reasoning ---
@@ -1909,6 +2790,17 @@ class AutoTradingEngine:
                                     self._known_tickets.add(ticket)
                                     self._last_symbol_entry_at[symbol] = now_open
                                     open_symbols.add(symbol)
+
+                                await self._publish_execution_event(
+                                    symbol=symbol,
+                                    action=self._trade_action_label(action),
+                                    stage="execution",
+                                    allowed=True,
+                                    reason="ordre_execute",
+                                    volume=float(order.volume),
+                                    ticket=int(ticket) if ticket else None,
+                                    payload=result,
+                                )
                                 
                                 asyncio.create_task(self._record_learning_experience(order, result, observation))
                             else:
@@ -1927,8 +2819,26 @@ class AutoTradingEngine:
                                     f"Raison: {fail_msg}\n"
                                     f"SL: {float(sl_price):.2f} | Vol envoye: {float(fail_volume):.2f}"
                                 )
+                                await self._publish_execution_event(
+                                    symbol=symbol,
+                                    action=self._trade_action_label(action),
+                                    stage="execution",
+                                    allowed=False,
+                                    reason=fail_msg,
+                                    volume=float(fail_volume),
+                                    payload=result,
+                                )
                         else:
                             logger.warning(f"Rejected {symbol}: {validation['reason']}")
+                            await self._publish_execution_event(
+                                symbol=symbol,
+                                action=self._trade_action_label(action),
+                                stage="risk_validation",
+                                allowed=False,
+                                reason=str(validation.get("reason") or "validation_refusee"),
+                                volume=float(order.volume),
+                                payload=validation,
+                            )
                             
                         # Small delay between symbols
                         await asyncio.sleep(1.0)

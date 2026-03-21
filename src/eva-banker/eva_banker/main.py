@@ -15,6 +15,7 @@ Architecture :
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -35,10 +36,13 @@ from eva_banker.skill_library import SkillLibrary
 from eva_banker.swarm import BankerSwarm
 from shared import (
     AccountBalance,
+    ConnectorMode,
     Position,
     RiskStatus,
+    RuntimeMode,
     TradeAction,
     TradeOrder,
+    TradingDecisionEnvelope,
     get_settings,
     BaseHealthResponse,
 )
@@ -46,7 +50,56 @@ from shared.auth_middleware import InternalAuthMiddleware
 from shared.probes import check_cognitive_sincerity
 from shared.redis_client import get_redis_client, init_redis
 
-logging.basicConfig(level=logging.INFO)
+
+def configure_logging() -> None:
+    """Configure une journalisation console lisible pour le banker local.
+
+    Le banker tourne surtout sur Windows a cote de MT5. On force donc une
+    sortie UTF-8 et on prefere ``rich`` quand il est disponible afin de
+    supprimer le bruit visuel et de rendre les niveaux de logs plus lisibles.
+    """
+    level_name = os.getenv("BANKER_LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, level_name, logging.INFO)
+    rich_enabled = os.getenv("BANKER_RICH_LOGS", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+    if rich_enabled:
+        try:
+            from rich.console import Console
+            from rich.logging import RichHandler
+
+            console = Console(stderr=True, soft_wrap=True)
+            logging.basicConfig(
+                level=log_level,
+                format="%(message)s",
+                datefmt="[%H:%M:%S]",
+                handlers=[
+                    RichHandler(
+                        console=console,
+                        rich_tracebacks=False,
+                        show_path=False,
+                        markup=False,
+                    )
+                ],
+                force=True,
+            )
+            logging.captureWarnings(True)
+            return
+        except Exception:
+            pass
+
+    logging.basicConfig(
+        level=log_level,
+        format="%(levelname)s:%(name)s:%(message)s",
+        force=True,
+    )
+
+
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -168,6 +221,135 @@ def _is_mt5_live_offline(mt5_service: MT5Service) -> bool:
         bool: True si aucun mock n'est actif et que la connexion MT5 est perdue.
     """
     return not mt5_service.mock_mode and not mt5_service.is_connected
+
+
+def _derive_runtime_mode(auto_engine) -> RuntimeMode:
+    """
+    Derive le mode runtime canonique du banker.
+
+    Args:
+        auto_engine: Instance du moteur d'auto-trading.
+
+    Returns:
+        RuntimeMode: Mode stable expose aux autres services.
+    """
+    if not getattr(auto_engine, "is_active", False):
+        return RuntimeMode.MAINTENANCE
+    if bool(getattr(auto_engine, "_cpu_live_mode", False)):
+        return RuntimeMode.TRAINING_CPU_LIVE
+    return RuntimeMode.DEMO_LIVE
+
+
+def _build_connector_status(app: FastAPI) -> dict[str, Any]:
+    """
+    Construit une vue explicite des connecteurs du banker.
+
+    Args:
+        app (FastAPI): Application Banker courante.
+
+    Returns:
+        dict[str, Any]: Etat explicite des connecteurs critiques.
+    """
+    mt5_service: MT5Service = app.state.mt5_service
+    auto_engine = app.state.auto_engine
+    binance: BinanceService = app.state.binance_service
+    trade_republic: TradeRepublicService = app.state.tr_service
+    gnn_available = not bool(getattr(getattr(auto_engine, "manager", None), "brain", None) is None)
+    gnn_stub = bool(getattr(getattr(auto_engine, "manager", None), "brain", None) and getattr(getattr(auto_engine.manager, "brain", None), "gnn", None) and getattr(auto_engine.manager.brain.gnn, "stub", False))
+    live_inference_url = ""
+    if hasattr(auto_engine, "_resolve_live_inference_url"):
+        try:
+            live_inference_url = str(auto_engine._resolve_live_inference_url() or "")
+        except Exception:
+            live_inference_url = ""
+
+    mt5_mode = ConnectorMode.LIVE if mt5_service.is_connected and not mt5_service.mock_mode else ConnectorMode.PAPER
+    if not mt5_service.is_connected and not mt5_service.mock_mode:
+        mt5_mode = ConnectorMode.DISABLED
+
+    binance_mode = ConnectorMode.PAPER
+    if getattr(binance, "api_key", None) and getattr(binance, "api_secret", None):
+        binance_mode = ConnectorMode.LIVE
+
+    trade_republic_mode = ConnectorMode.PAPER
+    if getattr(trade_republic, "is_connected", False):
+        trade_republic_mode = ConnectorMode.LIVE
+    elif getattr(trade_republic, "phone", None) and getattr(trade_republic, "pin", None):
+        trade_republic_mode = ConnectorMode.PAPER
+
+    gnn_mode = ConnectorMode.DISABLED
+    if gnn_available and not gnn_stub:
+        gnn_mode = ConnectorMode.LIVE
+
+    vllm_mode = ConnectorMode.DISABLED if bool(getattr(auto_engine, "_cpu_live_mode", False)) else ConnectorMode.LIVE
+    live_inference_mode = ConnectorMode.LIVE if live_inference_url else ConnectorMode.DISABLED
+
+    return {
+        "mt5": {
+            "mode": mt5_mode.value,
+            "connected": mt5_service.is_connected,
+            "mock_mode": mt5_service.mock_mode,
+        },
+        "binance": {
+            "mode": binance_mode.value,
+            "testnet": bool(getattr(binance, "testnet", False)),
+        },
+        "traderepublic": {
+            "mode": trade_republic_mode.value,
+            "connected": bool(getattr(trade_republic, "is_connected", False)),
+        },
+        "gnn": {
+            "mode": gnn_mode.value,
+            "stub": gnn_stub,
+            "role": "consultatif" if bool(getattr(auto_engine, "_cpu_live_mode", False)) else "fusionne",
+        },
+        "vllm": {
+            "mode": vllm_mode.value,
+            "required": not bool(getattr(auto_engine, "_cpu_live_mode", False)),
+        },
+        "live_inference": {
+            "mode": live_inference_mode.value,
+            "required": bool(getattr(auto_engine, "_cpu_live_mode", False)),
+            "url": live_inference_url or None,
+        },
+    }
+
+
+async def _publish_trading_status_snapshot(payload: dict[str, Any]) -> None:
+    """
+    Met en cache la vue de trading agregee pour EVA Core.
+
+    Args:
+        payload (dict[str, Any]): Etat trading agrege pret a serialiser.
+    """
+    try:
+        redis = get_redis_client()
+        await redis.cache_set("eva:state:trading:status", payload, ttl_seconds=30)
+        latest_events = list((payload.get("decision_audit") or {}).get("recent", []) or [])
+        latest_event = latest_events[-1] if latest_events else {}
+        runtime_mode_value = str((payload.get("runtime") or {}).get("runtime_mode") or RuntimeMode.MAINTENANCE.value)
+        try:
+            runtime_mode = RuntimeMode(runtime_mode_value)
+        except ValueError:
+            runtime_mode = RuntimeMode.MAINTENANCE
+        decision_envelope = TradingDecisionEnvelope(
+            runtime_mode=runtime_mode,
+            symbol=str(latest_event.get("symbol") or "GLOBAL"),
+            horizon=str((latest_event.get("horizon") or (payload.get("universe") or {}).get("lab_live", {}).get("horizon") or "unknown")),
+            raw_model_action=str(latest_event.get("raw_model_action") or "HOLD"),
+            post_veto_action=str(latest_event.get("post_veto_action") or "HOLD"),
+            selection=str(latest_event.get("selection") or "none"),
+            checkpoint=str(latest_event.get("checkpoint") or "") or None,
+            final_bias=str(latest_event.get("final_bias") or "NEUTRAL"),
+            veto_reason=str(latest_event.get("veto_reason") or "") or None,
+            connectors=dict(payload.get("connectors") or {}),
+            payload=latest_event,
+            metadata={"snapshot": "trading_status"},
+        )
+        await redis.publish("eva.trading.status", payload)
+        await redis.publish("eva.trading.decision", decision_envelope.model_dump())
+    except Exception as exc:
+        logger.debug("Publication du statut trading ignoree: %s", exc)
 
 
 async def _cancel_background_tasks(tasks: list[asyncio.Task[Any]]) -> None:
@@ -861,13 +1043,24 @@ async def get_trading_status():
     risk = await risk_validator.get_current_status()
     if account is None:
         risk = risk.model_copy(update={"trading_allowed": False})
+    runtime_status = app.state.auto_engine.get_runtime_mode_status()
+    execution_mechanics = app.state.auto_engine.get_execution_mechanics_status()
+    decision_audit = app.state.auto_engine.get_decision_audit_snapshot()
+    live_universe_status = app.state.auto_engine.get_live_universe_status()
 
-    return {
+    payload = {
         "status": "offline" if account is None else "online",
+        "runtime": runtime_status,
         "connection": {
             "mt5_connected": mt5_service.is_connected,
             "mock_mode": mt5_service.mock_mode,
         },
+        "topology": {
+            "execution_authority": "banker_local_mt5",
+            "server_role": "modeles_supervision_memoire",
+            "runtime_mode": _derive_runtime_mode(app.state.auto_engine).value,
+        },
+        "connectors": _build_connector_status(app),
         "account": {
             "equity": float(account.equity) if account is not None else 0.0,
             "balance": float(account.balance) if account is not None else 0.0,
@@ -895,14 +1088,27 @@ async def get_trading_status():
             "anti_tilt_active": risk.anti_tilt_active,
             "news_filter_active": risk.news_filter_active,
         },
+        "execution_mechanics": execution_mechanics,
         "decisions": app.state.auto_engine.latest_decisions,
+        "decision_audit": decision_audit,
+        "ensemble_decision_stats": decision_audit.get("ensemble_decision_stats", {}),
+        "live_family": execution_mechanics.get("live_family"),
+        "live_champion_id_muzero": execution_mechanics.get("live_champion_id_muzero"),
+        "live_champion_id_dreamer": execution_mechanics.get("live_champion_id_dreamer"),
+        "degraded_fallback_reason": (
+            ((decision_audit.get("recent") or [{}])[-1]).get("degraded_fallback_reason")
+            if decision_audit.get("recent")
+            else None
+        ),
         "universe": {
             "dynamic": getattr(app.state.auto_engine, "_dynamic_universe_enabled", False),
             "symbols_total": len(app.state.auto_engine.symbols),
             "batch_size": len(app.state.auto_engine.get_symbol_batch(advance=False)),
-            "lab_live": app.state.auto_engine.get_live_universe_status(),
+            "lab_live": live_universe_status,
         }
     }
+    await _publish_trading_status_snapshot(payload)
+    return payload
 
 
 

@@ -24,20 +24,20 @@ Ce document détaille l'implémentation de la couche "Physique" et "Virtualisati
 
 ## 3. Détails Techniques & Pièges à Éviter (Guidance Senior)
 
-### ⚠️ Gestion de la Mémoire (OOM Killer)
+###  Gestion de la Mémoire (OOM Killer)
 *   **Risque** : Avec 128 Go et des LLM chargés, le système peut crash.
 *   **Solution** :
     *   Utiliser **ZRAM** sur les VMs Linux pour compresser la RAM.
     *   Configurer des priorités de swap strictes.
     *   *The Keeper* doit avoir un accès API Proxmox pour "Ballooner" la RAM des VMs inactives.
 
-### ⚠️ Latence Trading
+###  Latence Trading
 *   **Risque** : Une surcharge CPU due à l'IA ralentit l'exécution d'un ordre MT5.
 *   **Solution** :
     *   Pinning CPU (CPU Affinity) : Réserver 2-4 cœurs PHYSIQUES exclusifs à la VM 200 (*Trading Floor*). Interdire à l'IA d'utiliser ces cœurs.
     *   Priorité Processus : La VM Trading doit être en priorité "Real Time" dans Proxmox.
 
-### ⚠️ Sécurité Physique
+###  Sécurité Physique
 *   **Implémentation The Watchdog** : Ne pas attendre la phase finale. Mettre en place un ESP32 basique sur les headers *Reset* de la carte mère dès le jour 1. Si le Kernel Linux freeze, le hardware doit rebooter seul en <3 min.
 
 ## 4. Spécifications des VMS (Configuration Cible)

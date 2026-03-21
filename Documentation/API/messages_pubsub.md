@@ -6,7 +6,7 @@
 
 ---
 
-## 🔄 Architecture de Communication
+##  Architecture de Communication
 
 ```
 ┌─────────────┐        ┌───────────────┐        ┌─────────────┐
@@ -35,7 +35,7 @@
 
 ---
 
-## 📨 Format des Messages
+##  Format des Messages
 
 ### Structure de Base
 
@@ -72,7 +72,7 @@ Tous les messages suivent cette structure :
 
 ---
 
-## 🏦 Messages The Banker
+##  Messages The Banker
 
 ### TRADE_EXECUTE (Core → Banker)
 
@@ -191,7 +191,7 @@ Tous les messages suivent cette structure :
 
 ---
 
-## 🔍 Messages The Shadow (OSINT)
+##  Messages The Shadow (OSINT)
 
 ### OSINT_SEARCH (Core → Shadow)
 
@@ -252,7 +252,7 @@ Tous les messages suivent cette structure :
 
 ---
 
-## 🛡️ Messages The Sentinel (Security)
+##  Messages The Sentinel (Security)
 
 ### SECURITY_ALERT (Sentinel → Broadcast)
 
@@ -313,7 +313,7 @@ Tous les messages suivent cette structure :
 
 ---
 
-## 📊 Messages System (Keeper)
+##  Messages System (Keeper)
 
 ### SYSTEM_METRICS (Keeper → Broadcast)
 
@@ -372,7 +372,7 @@ Tous les messages suivent cette structure :
 
 ---
 
-## 📝 Messages Audit (Black Box)
+##  Messages Audit (Black Box)
 
 ### AUDIT_RECORD (Any → Audit)
 
@@ -409,7 +409,7 @@ Tous les messages suivent cette structure :
 
 ---
 
-## ⚠️ Gestion des Erreurs
+##  Gestion des Erreurs
 
 ### ERROR Message
 
@@ -450,7 +450,7 @@ Tous les messages suivent cette structure :
 
 ---
 
-## 🔧 Implémentation Python
+##  Implémentation Python
 
 ```python
 import json

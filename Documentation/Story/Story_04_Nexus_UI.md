@@ -1,13 +1,13 @@
 # Story 04: The Nexus & UI (The Interface)
 
-## 📌 Context
+##  Context
 How the Admin interacts with the Hive.
 
-## 🎯 Objectives
+##  Objectives
 - Create the Admin Dashboard (Panopticon).
 - Setup the secure Chat interface (Nexus).
 
-## 📋 Epic/Tasks Breakdown
+##  Epic/Tasks Breakdown
 
 ### TASK-04-01: Dashboard V0 (Streamlit)
 - **Role**: Frontend Dev

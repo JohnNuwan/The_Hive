@@ -1,4 +1,4 @@
-﻿import type { LabChampionStatus, TradingStatusResponse, TrainingRunStatus } from '../../services/api'
+import type { LabChampionStatus, TradingStatusResponse, TrainingRunStatus } from '../../services/api'
 import { MetricPill, PanelShell, compactList } from './TradingShared'
 
 function collectLiveUniverseSamples(championStatus: LabChampionStatus | null, tradingData: TradingStatusResponse | null) {

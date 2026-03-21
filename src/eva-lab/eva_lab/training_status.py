@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,14 @@ HORIZON_TO_TIMEFRAME = {
     "intraday": "H1",
     "swing": "D1",
 }
+PHASE_ORDER = {
+    "initialisation": 0,
+    "demarrage": 1,
+    "collecte": 2,
+    "optimisation": 3,
+    "arena": 4,
+    "termine": 5,
+}
 
 
 def _now_iso() -> str:
@@ -74,6 +83,7 @@ def _default_status() -> dict[str, Any]:
     """Construit la structure de base du statut training."""
 
     return {
+        "engine": None,
         "run_id": None,
         "active": False,
         "status": "idle",
@@ -90,6 +100,27 @@ def _default_status() -> dict[str, Any]:
         "launcher": {},
         "dependencies": {},
         "universe": {},
+        "family": None,
+        "dataset_id": None,
+        "dataset_source": None,
+        "feature_profile": None,
+        "mechanics_profile_version": None,
+        "ga_status": None,
+        "ga_generation": None,
+        "ga_trial": None,
+        "trial_mode": None,
+        "trial_cost_profile": None,
+        "replay_cache_status": None,
+        "replay_cache_key": None,
+        "replay_cache_entries": None,
+        "replay_cache_source": None,
+        "shadow_buffer_size": None,
+        "sequence_length": None,
+        "sequence_stride": None,
+        "world_model_steps": None,
+        "dataset_coverage": {},
+        "metrics_by_position_mechanics": {},
+        "arena_progress": None,
     }
 
 
@@ -163,6 +194,87 @@ def merge_training_status(patch: dict[str, Any]) -> dict[str, Any]:
     return persist_training_status(status)
 
 
+def set_arena_progress(progress: dict[str, Any] | None) -> dict[str, Any]:
+    """Met a jour la progression detaillee de l'Arena.
+
+    Args:
+        progress (dict[str, Any] | None): Charge utile de progression ou ``None``.
+
+    Returns:
+        dict[str, Any]: Statut training persiste.
+    """
+    status = load_training_status()
+    status["arena_progress"] = progress
+    if progress:
+        current_step = dict(status.get("current_step") or {})
+        if (str(current_step.get("phase") or "").lower() == "arena") or not current_step:
+            current_step["phase"] = "arena"
+            if progress.get("horizon"):
+                current_step["horizon"] = progress.get("horizon")
+                current_step.setdefault("name", f"muzero_{progress.get('horizon')}")
+            if progress.get("family"):
+                current_step["family"] = progress.get("family")
+            if progress.get("current_symbol"):
+                current_step["symbol"] = progress.get("current_symbol")
+            if progress.get("symbol_index") is not None:
+                current_step["symbol_index"] = progress.get("symbol_index")
+            if progress.get("symbol_total") is not None:
+                current_step["symbol_total"] = progress.get("symbol_total")
+            current_step["updated_at"] = _now_iso()
+            status["current_step"] = current_step
+        if progress.get("family") is not None:
+            status["family"] = progress.get("family")
+        if progress.get("engine") is not None:
+            status["engine"] = progress.get("engine")
+        if progress.get("dataset_id") is not None:
+            status["dataset_id"] = progress.get("dataset_id")
+        if progress.get("dataset_source") is not None:
+            status["dataset_source"] = progress.get("dataset_source")
+        if progress.get("feature_profile") is not None:
+            status["feature_profile"] = progress.get("feature_profile")
+        if progress.get("mechanics_profile_version") is not None:
+            status["mechanics_profile_version"] = progress.get("mechanics_profile_version")
+        if progress.get("ga_status") is not None:
+            status["ga_status"] = progress.get("ga_status")
+        if progress.get("ga_generation") is not None:
+            status["ga_generation"] = progress.get("ga_generation")
+        if progress.get("ga_trial") is not None:
+            status["ga_trial"] = progress.get("ga_trial")
+        if progress.get("trial_mode") is not None:
+            status["trial_mode"] = progress.get("trial_mode")
+        if progress.get("trial_cost_profile") is not None:
+            status["trial_cost_profile"] = progress.get("trial_cost_profile")
+        if progress.get("replay_cache_status") is not None:
+            status["replay_cache_status"] = progress.get("replay_cache_status")
+        if progress.get("replay_cache_key") is not None:
+            status["replay_cache_key"] = progress.get("replay_cache_key")
+        if progress.get("replay_cache_entries") is not None:
+            status["replay_cache_entries"] = progress.get("replay_cache_entries")
+        if progress.get("replay_cache_source") is not None:
+            status["replay_cache_source"] = progress.get("replay_cache_source")
+        if progress.get("shadow_buffer_size") is not None:
+            status["shadow_buffer_size"] = progress.get("shadow_buffer_size")
+        if progress.get("sequence_length") is not None:
+            status["sequence_length"] = progress.get("sequence_length")
+        if progress.get("sequence_stride") is not None:
+            status["sequence_stride"] = progress.get("sequence_stride")
+        if progress.get("world_model_steps") is not None:
+            status["world_model_steps"] = progress.get("world_model_steps")
+        if progress.get("dataset_coverage") is not None:
+            status["dataset_coverage"] = dict(progress.get("dataset_coverage") or {})
+        current_role = str(progress.get("current_role") or "").lower()
+        metrics_payload: dict[str, Any] = {}
+        if current_role in {"challenger", "champion"}:
+            role_payload = dict(progress.get(current_role) or {})
+            metrics_payload = dict(role_payload.get("metrics") or {})
+        elif str(progress.get("status") or "").lower() == "completed":
+            metrics_payload = dict((progress.get("challenger") or {}).get("metrics") or {})
+        mechanics_payload = dict(metrics_payload.get("metrics_by_position_mechanics") or {})
+        if mechanics_payload:
+            status["metrics_by_position_mechanics"] = mechanics_payload
+    return persist_training_status(status)
+
+
 def set_training_dependency(name: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Met a jour une dependance dans le statut training."""
 
@@ -217,8 +329,171 @@ def tail_training_log(limit: int = 30) -> list[str]:
     return lines[-safe_limit:]
 
 
+def _extract_log_timestamp(line: str) -> str | None:
+    """Extrait l'horodatage ISO d'une ligne de log partagee.
+
+    Args:
+        line (str): Ligne brute du journal partage.
+
+    Returns:
+        str | None: Horodatage ISO si detecte, sinon ``None``.
+    """
+    prefix = str(line or "").split(" [", 1)[0].strip()
+    if not prefix:
+        return None
+    try:
+        datetime.fromisoformat(prefix)
+        return prefix
+    except ValueError:
+        return None
+
+
+def derive_observed_training_step(log_lines: list[str]) -> dict[str, Any] | None:
+    """Derive l'etape la plus recente a partir du journal partage.
+
+    Args:
+        log_lines (list[str]): Dernieres lignes du journal d'entrainement.
+
+    Returns:
+        dict[str, Any] | None: Etape observee ou ``None`` si aucun motif reconnu.
+    """
+    patterns: list[tuple[re.Pattern[str], callable]] = [
+        (
+            re.compile(
+                r"MuZero (?P<horizon>\w+): collecte sur (?P<symbol>[A-Za-z0-9._-]+) "
+                r"\((?P<symbol_index>\d+)/(?P<symbol_total>\d+)\)\."
+            ),
+            lambda match, stamp: {
+                "name": f"muzero_{match.group('horizon')}",
+                "phase": "collecte",
+                "horizon": match.group("horizon"),
+                "symbol": match.group("symbol"),
+                "symbol_index": int(match.group("symbol_index")),
+                "symbol_total": int(match.group("symbol_total")),
+                "updated_at": stamp,
+                "source": "training_log",
+            },
+        ),
+        (
+            re.compile(
+                r"MuZero (?P<horizon>\w+): optimisation profonde sur (?P<total>\d+) steps\."
+            ),
+            lambda match, stamp: {
+                "name": f"muzero_{match.group('horizon')}",
+                "phase": "optimisation",
+                "horizon": match.group("horizon"),
+                "training_step_total": int(match.group("total")),
+                "updated_at": stamp,
+                "source": "training_log",
+            },
+        ),
+        (
+            re.compile(
+                r"MuZero (?P<horizon>\w+): step (?P<step>\d+)/(?P<total>\d+) \|"
+            ),
+            lambda match, stamp: {
+                "name": f"muzero_{match.group('horizon')}",
+                "phase": "optimisation",
+                "horizon": match.group("horizon"),
+                "training_step_current": int(match.group("step")),
+                "training_step_total": int(match.group("total")),
+                "updated_at": stamp,
+                "source": "training_log",
+            },
+        ),
+        (
+            re.compile(r"MuZero (?P<horizon>\w+): lancement de l'arena ADN\."),
+            lambda match, stamp: {
+                "name": f"muzero_{match.group('horizon')}",
+                "phase": "arena",
+                "horizon": match.group("horizon"),
+                "updated_at": stamp,
+                "source": "training_log",
+            },
+        ),
+    ]
+
+    for line in reversed(log_lines):
+        timestamp = _extract_log_timestamp(line)
+        for pattern, factory in patterns:
+            match = pattern.search(line)
+            if match:
+                return factory(match, timestamp)
+    return None
+
+
+def _step_rank(step: dict[str, Any] | None) -> tuple[int, int]:
+    """Retourne un rang simple pour comparer deux etapes.
+
+    Args:
+        step (dict[str, Any] | None): Etape a classer.
+
+    Returns:
+        tuple[int, int]: Rang de phase puis progression numerique.
+    """
+    if not step:
+        return (-1, -1)
+    phase = str(step.get("phase") or "").strip().lower()
+    progress = int(step.get("training_step_current") or 0)
+    return PHASE_ORDER.get(phase, -1), progress
+
+
+def select_effective_training_step(
+    reported_step: dict[str, Any] | None,
+    observed_step: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Choisit l'etape la plus credible entre statut et journal.
+
+    Args:
+        reported_step (dict[str, Any] | None): Etape issue du statut structure.
+        observed_step (dict[str, Any] | None): Etape derivee du journal.
+
+    Returns:
+        dict[str, Any] | None: Etape retenue pour l'affichage.
+    """
+    if not observed_step:
+        return reported_step
+    if not reported_step:
+        return observed_step
+    return observed_step if _step_rank(observed_step) > _step_rank(reported_step) else reported_step
+
+
+def format_training_step_label(step: dict[str, Any] | None) -> str:
+    """Construit un libelle lisible d'etape training.
+
+    Args:
+        step (dict[str, Any] | None): Etape a formatter.
+
+    Returns:
+        str: Libelle compact et lisible.
+    """
+    if not step:
+        return ""
+
+    parts = [
+        str(step.get("name") or "").strip(),
+        str(step.get("phase") or "").strip(),
+        str(step.get("horizon") or "").strip(),
+        str(step.get("symbol") or "").strip(),
+    ]
+    label = " | ".join(part for part in parts if part)
+
+    symbol_index = step.get("symbol_index")
+    symbol_total = step.get("symbol_total")
+    if symbol_index is not None and symbol_total is not None:
+        label = f"{label} | {symbol_index}/{symbol_total}".strip(" |")
+
+    step_current = step.get("training_step_current")
+    step_total = step.get("training_step_total")
+    if step_current is not None and step_total is not None:
+        label = f"{label} | {step_current}/{step_total}".strip(" |")
+
+    return label
+
+
 def reset_training_status(
     *,
+    engine: str | None = None,
     run_id: str,
     trigger: str,
     strategy: str,
@@ -229,6 +504,7 @@ def reset_training_status(
 
     previous = load_training_status()
     status = _default_status()
+    status["engine"] = engine
     status["run_id"] = run_id
     status["active"] = True
     status["status"] = "running"
@@ -240,6 +516,7 @@ def reset_training_status(
     status["launcher"] = dict(previous.get("launcher") or {})
     status["dependencies"] = dict(previous.get("dependencies") or {})
     status["universe"] = universe or build_training_universe_summary()
+    status["arena_progress"] = None
     persisted = persist_training_status(status)
     append_training_log(
         f"Run {run_id} demarre | strategie={strategy} | trigger={trigger} | raison={reason}",
@@ -251,8 +528,10 @@ def reset_training_status(
 def mark_step_running(
     step_name: str,
     *,
+    engine: str | None = None,
     phase: str | None = None,
     horizon: str | None = None,
+    family: str | None = None,
     symbol: str | None = None,
     symbol_index: int | None = None,
     symbol_total: int | None = None,
@@ -262,6 +541,25 @@ def mark_step_running(
     epoch_total: int | None = None,
     training_step_current: int | None = None,
     training_step_total: int | None = None,
+    dataset_id: str | None = None,
+    dataset_source: str | None = None,
+    feature_profile: str | None = None,
+    mechanics_profile_version: str | None = None,
+    ga_status: str | None = None,
+    ga_generation: int | None = None,
+    ga_trial: str | None = None,
+    trial_mode: str | None = None,
+    trial_cost_profile: str | None = None,
+    replay_cache_status: str | None = None,
+    replay_cache_key: str | None = None,
+    replay_cache_entries: int | None = None,
+    replay_cache_source: str | None = None,
+    shadow_buffer_size: int | None = None,
+    sequence_length: int | None = None,
+    sequence_stride: int | None = None,
+    world_model_steps: int | None = None,
+    dataset_coverage: dict[str, Any] | None = None,
+    metrics_by_position_mechanics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Met a jour l'etape courante d'un run."""
 
@@ -270,6 +568,7 @@ def mark_step_running(
         "status": "running",
         "phase": phase,
         "horizon": horizon,
+        "family": family,
         "symbol": symbol,
         "symbol_index": symbol_index,
         "symbol_total": symbol_total,
@@ -282,10 +581,54 @@ def mark_step_running(
         "updated_at": _now_iso(),
     }
     status = load_training_status()
+    if engine is not None:
+        status["engine"] = engine
     status["active"] = True
     status["status"] = "running"
     status["current_step"] = {key: value for key, value in step.items() if value is not None}
+    if family is not None:
+        status["family"] = family
+    if dataset_id is not None:
+        status["dataset_id"] = dataset_id
+    if dataset_source is not None:
+        status["dataset_source"] = dataset_source
+    if feature_profile is not None:
+        status["feature_profile"] = feature_profile
+    if mechanics_profile_version is not None:
+        status["mechanics_profile_version"] = mechanics_profile_version
+    if ga_status is not None:
+        status["ga_status"] = ga_status
+    if ga_generation is not None:
+        status["ga_generation"] = ga_generation
+    if ga_trial is not None:
+        status["ga_trial"] = ga_trial
+    if trial_mode is not None:
+        status["trial_mode"] = trial_mode
+    if trial_cost_profile is not None:
+        status["trial_cost_profile"] = trial_cost_profile
+    if replay_cache_status is not None:
+        status["replay_cache_status"] = replay_cache_status
+    if replay_cache_key is not None:
+        status["replay_cache_key"] = replay_cache_key
+    if replay_cache_entries is not None:
+        status["replay_cache_entries"] = replay_cache_entries
+    if replay_cache_source is not None:
+        status["replay_cache_source"] = replay_cache_source
+    if shadow_buffer_size is not None:
+        status["shadow_buffer_size"] = shadow_buffer_size
+    if sequence_length is not None:
+        status["sequence_length"] = sequence_length
+    if sequence_stride is not None:
+        status["sequence_stride"] = sequence_stride
+    if world_model_steps is not None:
+        status["world_model_steps"] = world_model_steps
+    if dataset_coverage is not None:
+        status["dataset_coverage"] = dict(dataset_coverage)
+    if metrics_by_position_mechanics is not None:
+        status["metrics_by_position_mechanics"] = dict(metrics_by_position_mechanics)
     status["failed_step"] = None
+    if (phase or "").lower() != "arena":
+        status["arena_progress"] = None
     return persist_training_status(status)
 
 
@@ -347,18 +690,36 @@ def finalize_training_status(
 
 
 def mark_skip_status(reason: str, trigger: str, lock_payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Met a jour le statut pour un skip propre du cron."""
+    """Met a jour le statut pour un skip propre du cron.
+
+    Si un run est deja en cours, la fonction preserve la vue du run actif et
+    n'ecrase pas son `trigger`, son statut ni son indicateur `active`.
+
+    Args:
+        reason (str): Motif du skip.
+        trigger (str): Trigger du run qui a ete ignore.
+        lock_payload (dict[str, Any] | None): Charge utile du verrou si elle
+            est disponible.
+
+    Returns:
+        dict[str, Any]: Statut training persiste.
+    """
 
     status = load_training_status()
-    status["active"] = False
-    status["status"] = "skipped"
-    status["trigger"] = trigger
-    status["skip_reason"] = reason
-    status["finished_at"] = _now_iso()
     launcher = dict(status.get("launcher") or {})
     if lock_payload:
         launcher["skip_lock"] = lock_payload
+    launcher["last_skip_reason"] = reason
+    launcher["updated_at"] = _now_iso()
     status["launcher"] = launcher
+    active_run_present = bool(status.get("active")) and str(status.get("status") or "").lower() == "running"
+    if not active_run_present:
+        status["active"] = False
+        status["status"] = "skipped"
+        status["trigger"] = trigger
+        status["skip_reason"] = reason
+        status["finished_at"] = _now_iso()
+        status["arena_progress"] = None
     persisted = persist_training_status(status)
     append_training_log(f"Run ignore: {reason}", level="WARNING", source="launcher")
     return persisted

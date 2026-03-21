@@ -112,6 +112,337 @@ class SessionResponse(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
+def _extract_operational_topics(message: str) -> set[str]:
+    """
+    Detecte les demandes operationnelles qui doivent lire l'etat structure.
+
+    Args:
+        message (str): Message utilisateur brut.
+
+    Returns:
+        set[str]: Topics detectes parmi ``trading``, ``training`` et ``champions``.
+    """
+    normalized = str(message or "").lower()
+    topics: set[str] = set()
+
+    trading_tokens = (
+        "trade",
+        "trading",
+        "position",
+        "ordre",
+        "ordre",
+        "risque",
+        "compte",
+        "banker",
+        "connecteur",
+        "mt5",
+        "spread",
+    )
+    training_tokens = (
+        "training",
+        "entrain",
+        "run",
+        "arena",
+        "scalp",
+        "intraday",
+        "swing",
+        "dreamer",
+        "gnn",
+    )
+    champion_tokens = (
+        "champion",
+        "modele",
+        "model",
+        "promotion",
+        "challenger",
+        "live symbol",
+        "meilleur actif",
+    )
+
+    if any(token in normalized for token in trading_tokens):
+        topics.add("trading")
+    if any(token in normalized for token in training_tokens):
+        topics.add("training")
+    if any(token in normalized for token in champion_tokens):
+        topics.add("champions")
+
+    return topics
+
+
+async def _read_cached_state(cache_key: str) -> dict[str, Any] | None:
+    """
+    Lit un etat structure depuis Redis si disponible.
+
+    Args:
+        cache_key (str): Cle de cache Redis.
+
+    Returns:
+        dict[str, Any] | None: Snapshot JSON ou ``None``.
+    """
+    try:
+        redis_client = get_redis_client()
+        payload = await redis_client.cache_get(cache_key)
+    except Exception as exc:
+        logger.debug("Cache Redis indisponible sur %s: %s", cache_key, exc)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+async def _fetch_lab_snapshot(path: str) -> dict[str, Any] | None:
+    """
+    Interroge EVA Lab pour un snapshot operationnel.
+
+    Args:
+        path (str): Route absolue sur EVA Lab.
+
+    Returns:
+        dict[str, Any] | None: JSON retourne par EVA Lab si disponible.
+    """
+    import httpx
+
+    settings: Settings = app.state.settings
+    lab_url = f"http://{settings.lab_api_host}:{settings.lab_api_port}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                lab_url,
+                headers=get_internal_headers("core"),
+            )
+            if response.status_code == 200:
+                payload = response.json()
+                return payload if isinstance(payload, dict) else None
+    except Exception as exc:
+        logger.debug("Lecture EVA Lab impossible sur %s: %s", path, exc)
+    return None
+
+
+def _format_connectors(connectors: dict[str, Any]) -> str:
+    """
+    Formate les connecteurs pour une reponse EVA lisible.
+
+    Args:
+        connectors (dict[str, Any]): Connecteurs exposes par les services.
+
+    Returns:
+        str: Resume compact des connecteurs.
+    """
+    if not connectors:
+        return "Connecteurs: indisponibles."
+
+    ordered = []
+    for name in ("mt5", "live_inference", "binance", "traderepublic", "gnn", "vllm"):
+        connector = dict(connectors.get(name) or {})
+        if not connector:
+            continue
+        mode = str(connector.get("mode") or "inconnu")
+        ordered.append(f"{name}={mode}")
+    return "Connecteurs: " + ", ".join(ordered) + "."
+
+
+def _build_operational_reply(
+    topics: set[str],
+    trading: dict[str, Any] | None,
+    training: dict[str, Any] | None,
+    champions: dict[str, Any] | None,
+) -> str:
+    """
+    Construit une reponse operationnelle sans passer par le LLM.
+
+    Args:
+        topics (set[str]): Topics demandes.
+        trading (dict[str, Any] | None): Snapshot trading.
+        training (dict[str, Any] | None): Snapshot training.
+        champions (dict[str, Any] | None): Snapshot champions.
+
+    Returns:
+        str: Reponse texte exploitable dans le chat EVA.
+    """
+    sections: list[str] = []
+
+    if "trading" in topics:
+        trading_payload = trading or {}
+        account = dict(trading_payload.get("account") or {})
+        risk = dict(trading_payload.get("risk") or {})
+        positions = list(trading_payload.get("positions") or [])
+        runtime = dict(trading_payload.get("runtime") or {})
+        connectors = dict(trading_payload.get("connectors") or {})
+        sections.append(
+            "\n".join(
+                [
+                    "Etat trading:",
+                    f"- statut={trading_payload.get('status', 'indisponible')}",
+                    f"- runtime={runtime.get('runtime_mode', runtime.get('training_compat_mode', 'indisponible'))}",
+                    f"- ensemble={runtime.get('ensemble_mode', 'muzero_only')} | family={trading_payload.get('live_family', 'indisponible')}",
+                    f"- balance={account.get('balance', 0.0)} | equity={account.get('equity', 0.0)}",
+                    f"- positions={len(positions)} | trading_allowed={risk.get('trading_allowed', False)}",
+                    _format_connectors(connectors),
+                ]
+            )
+        )
+        if positions:
+            first_positions = []
+            for position in positions[:5]:
+                first_positions.append(
+                    f"- {position.get('symbol', 'UNKNOWN')} {position.get('action', 'WAIT')} vol={position.get('volume', 0)} pnl={position.get('profit', 0)}"
+                )
+            sections.append("Positions ouvertes:\n" + "\n".join(first_positions))
+
+    if "training" in topics:
+        training_payload = training or {}
+        run = dict(training_payload.get("run") or training_payload)
+        current_step = dict(run.get("current_step") or {})
+        arena_progress = dict(run.get("arena_progress") or {})
+        training_lines = [
+            "Etat entrainement:",
+            f"- run_id={run.get('run_id', 'indisponible')}",
+            f"- status={run.get('status', 'indisponible')}",
+            f"- engine={run.get('engine', 'muzero')}",
+            f"- etape={run.get('step_label', 'indisponible')}",
+            f"- horizon={current_step.get('horizon', 'indisponible')}",
+            f"- famille={run.get('family', 'indisponible')}",
+            f"- dataset={run.get('dataset_id', 'indisponible')}",
+            f"- features={run.get('feature_profile', 'indisponible')}",
+            f"- mecanique={run.get('mechanics_profile_version', 'indisponible')}",
+            f"- ga={run.get('ga_status', 'standard')} / generation={run.get('ga_generation', '--')} / essai={run.get('ga_trial', '--')}",
+            f"- source_dataset={run.get('dataset_source', 'indisponible')}",
+            f"- symbole={current_step.get('symbol', 'indisponible')}",
+        ]
+        dataset_coverage = dict(run.get("dataset_coverage") or {})
+        if dataset_coverage:
+            training_lines.append(
+                f"- couverture={dataset_coverage.get('covered_symbols_count', 0)}/{dataset_coverage.get('requested_symbols_count', 0)} "
+                f"source_effective={dataset_coverage.get('effective_source', run.get('dataset_source', 'indisponible'))}"
+            )
+        sections.append(
+            "\n".join(training_lines)
+        )
+        if arena_progress:
+            challenger = dict(arena_progress.get("challenger") or {})
+            champion = dict(arena_progress.get("champion") or {})
+            sections.append(
+                "\n".join(
+                    [
+                        "Arena:",
+                        f"- symbole={arena_progress.get('current_symbol', 'indisponible')} ({arena_progress.get('symbol_index', '?')}/{arena_progress.get('symbol_total', '?')})",
+                        f"- challenger={arena_progress.get('challenger_score', challenger.get('score', 'indisponible'))} | champion={arena_progress.get('champion_score', champion.get('score', 'indisponible'))}",
+                    ]
+                )
+            )
+
+    if "champions" in topics:
+        champion_payload = champions or {}
+        engines = dict(champion_payload.get("engines") or {})
+        champion_lines = ["Etat modeles:"]
+        if engines:
+            for engine_name in ("muzero", "dreamer"):
+                engine_horizons = dict(engines.get(engine_name) or {})
+                if not engine_horizons:
+                    continue
+                champion_lines.append(f"- moteur={engine_name}")
+                for horizon in ("scalp", "intraday", "swing"):
+                    horizon_status = dict(engine_horizons.get(horizon) or {})
+                    if not horizon_status:
+                        continue
+                    champion_lines.append(
+                        f"  {horizon}: live={horizon_status.get('live_champion_id', 'none')} "
+                        f"famille={horizon_status.get('family', 'mixed')} "
+                        f"gate={horizon_status.get('gate_reason', 'indisponible')} "
+                        f"failure_mode={horizon_status.get('failure_mode', 'indisponible')}"
+                    )
+                    dataset_id = str(horizon_status.get("dataset_id") or "").strip()
+                    feature_profile = str(horizon_status.get("feature_profile") or "").strip()
+                    mechanics_profile = str(horizon_status.get("mechanics_profile_version") or "").strip()
+                    if dataset_id:
+                        champion_lines.append(f"    dataset={dataset_id}")
+                    if feature_profile:
+                        champion_lines.append(f"    features={feature_profile}")
+                    if mechanics_profile:
+                        champion_lines.append(f"    mecanique={mechanics_profile}")
+                    top_live_symbols = list(horizon_status.get("top_live_symbols") or [])
+                    if top_live_symbols:
+                        champion_lines.append(f"    top_live_symbols={', '.join(top_live_symbols[:5])}")
+        else:
+            live_champions = dict(champion_payload.get("live_champions") or {})
+            horizons = dict(champion_payload.get("horizons") or {})
+            for horizon in ("scalp", "intraday", "swing"):
+                horizon_status = dict(horizons.get(horizon) or {})
+                champion_lines.append(
+                    f"- {horizon}: live={live_champions.get(horizon, 'none')} famille={horizon_status.get('family', 'mixed')} "
+                    f"gate={horizon_status.get('gate_reason', 'indisponible')} failure_mode={horizon_status.get('failure_mode', 'indisponible')}"
+                )
+        sections.append("\n".join(champion_lines))
+
+    return "\n\n".join(section for section in sections if section).strip() or "Etat structure indisponible."
+
+
+async def _maybe_answer_operational_chat(
+    request: ChatRequest,
+    session_id: UUID,
+    user_message: ChatMessage,
+) -> ChatResponse | None:
+    """
+    Repond aux questions operationnelles via lecture d'etat structuree.
+
+    Args:
+        request (ChatRequest): Requete de chat initiale.
+        session_id (UUID): Session courante.
+        user_message (ChatMessage): Message utilisateur normalise.
+
+    Returns:
+        ChatResponse | None: Reponse structuree si applicable, sinon ``None``.
+    """
+    topics = _extract_operational_topics(request.message)
+    if not topics:
+        return None
+
+    trading_snapshot = None
+    training_snapshot = None
+    champions_snapshot = None
+
+    if "trading" in topics:
+        trading_snapshot = await _read_cached_state("eva:state:trading:status")
+        if trading_snapshot is None:
+            trading_snapshot = await trading_status()
+
+    if "training" in topics:
+        training_snapshot = await _read_cached_state("eva:state:training:run")
+        if training_snapshot is None:
+            training_snapshot = await _fetch_lab_snapshot("/training/status")
+
+    if "champions" in topics:
+        champions_snapshot = await _read_cached_state("eva:state:champions:status")
+        if champions_snapshot is None:
+            champions_snapshot = await _fetch_lab_snapshot("/champions/status")
+
+    reply = _build_operational_reply(
+        topics=topics,
+        trading=trading_snapshot,
+        training=training_snapshot,
+        champions=champions_snapshot,
+    )
+
+    memory_service: MemoryService = app.state.memory_service
+    await memory_service.store_message(user_message)
+    assistant_message = ChatMessage(
+        session_id=session_id,
+        role=MessageRole.ASSISTANT,
+        content=reply,
+        metadata={"mode": "structured_status", "topics": sorted(topics)},
+    )
+    with suppress(Exception):
+        await memory_service.store_message(assistant_message)
+
+    return ChatResponse(
+        message=reply,
+        session_id=session_id,
+        metadata={
+            "expert": "core",
+            "mode": "structured_status",
+            "topics": sorted(topics),
+        },
+    )
+
+
 # -------------------------------------------------------------------------------
 # LIFECYCLE
 # -------------------------------------------------------------------------------
@@ -301,6 +632,14 @@ async def chat(request: ChatRequest) -> ChatResponse:
             role=MessageRole.USER,
             content=request.message,
         )
+
+        structured_response = await _maybe_answer_operational_chat(
+            request=request,
+            session_id=session_id,
+            user_message=user_message,
+        )
+        if structured_response is not None:
+            return structured_response
 
         # Classification de l'intent (Via Strategy Orchestrator pour plus de "profondeur")
         strategy: StrategyOrchestrator = app.state.strategy_orchestrator

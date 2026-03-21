@@ -1,8 +1,8 @@
-﻿/**
- * THE HIVE â€” API Service
+/**
+ * Service API principal de THE HIVE.
  */
 
-// â•â•â• HELPERS â•â•â•
+// Aides locales.
 function uuidv4() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
         const r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
@@ -20,7 +20,7 @@ export function createClientUuid() {
 
 
 
-// â•â•â• AUTH HELPERS â•â•â•
+// Aides d'authentification.
 const TOKEN_KEY = 'hive-auth-token'
 const LOCAL_BANKER_URL = 'http://127.0.0.1:8100'
 const CAN_BROWSER_USE_LOCAL_BANKER = ['127.0.0.1', 'localhost'].includes(window.location.hostname)
@@ -35,7 +35,7 @@ function authHeaders(): Record<string, string> {
     return token ? { 'Authorization': `Bearer ${token}` } : {}
 }
 
-// â•â•â• TYPES â•â•â•
+// Types publics.
 export interface NodeHealth {
     name: string
     status: 'online' | 'offline' | 'degraded'
@@ -98,7 +98,7 @@ export interface AccountInfo {
 export interface ChatMessage {
     message: string
     session_id?: string
-    thoughts?: string | null  // Reasoning trace from the expert
+    thoughts?: string | null  // Trace de raisonnement retournee par l'expert
     metadata?: Record<string, unknown>
 }
 
@@ -129,12 +129,12 @@ export interface ContainerStats {
     uptime: string
 }
 
-// â•â•â• API HELPERS â•â•â•
+// Aides API.
 async function fetchWithTimeout(url: string, options: RequestInit = {}, timeout = 3000): Promise<Response> {
     const controller = new AbortController()
     const id = setTimeout(() => controller.abort(), timeout)
     try {
-        // Merge auth headers
+        // Fusionne les en-tetes d'authentification avec ceux de l'appel.
         const headers = {
             ...authHeaders(),
             ...(options.headers || {}),
@@ -158,7 +158,7 @@ export async function safeFetch<T>(url: string, fallback: T, timeout = 3000): Pr
     }
 }
 
-// â•â•â• HEALTH CHECKS â•â•â•
+// Verification de sante.
 async function probeNodeHealth(name: string, url: string): Promise<NodeHealth> {
     const start = performance.now()
     try {
@@ -270,7 +270,7 @@ export async function getStatus() {
     })
 }
 
-// â•â•â• KERNEL â•â•â•
+// Services noyau.
 export async function getKillSwitchStatus(): Promise<KillSwitchStatus> {
     return safeFetch('/api/sentinel/health', { is_active: false, message: 'OFFLINE' })
         .then(data => ({
@@ -293,7 +293,7 @@ export async function toggleKillSwitch(action: 'activate' | 'reset'): Promise<Ki
     }
 }
 
-// â•â•â• CORE â•â•â•
+// Services EVA Core.
 export async function getCoreTelemetry(): Promise<TelemetryData | null> {
     return safeFetch('/api/core/telemetry', null)
 }
@@ -336,7 +336,7 @@ export async function createSession(): Promise<{ session_id: string }> {
 }
 
 
-// â•â•â• BANKER â•â•â•
+// Services banker.
 export interface OrderRequest {
     symbol: string
     action: 'BUY' | 'SELL'
@@ -393,6 +393,9 @@ export interface TradingLiveUniverseStatus {
     restricted?: boolean
     selection?: string
     engine_label?: string
+    live_champion_id_muzero?: string | null
+    live_champion_id_dreamer?: string | null
+    top_live_symbols_by_engine?: Record<string, string[]>
 }
 
 export interface TradingStatusResponse {
@@ -408,6 +411,15 @@ export interface TradingStatusResponse {
         batch_size: number
         lab_live?: TradingLiveUniverseStatus | null
     }
+    runtime_mode?: string
+    connectors?: Record<string, unknown>
+    execution_mechanics?: Record<string, unknown>
+    decision_audit?: Record<string, unknown>
+    ensemble_decision_stats?: Record<string, number>
+    live_family?: string | null
+    live_champion_id_muzero?: string | null
+    live_champion_id_dreamer?: string | null
+    degraded_fallback_reason?: string | null
 }
 
 export async function createOrder(order: OrderRequest): Promise<OrderResponse> {
@@ -481,6 +493,15 @@ export async function getTradingStatus(): Promise<TradingStatusResponse> {
             batch_size: 0,
             lab_live: null,
         },
+        runtime_mode: 'offline',
+        connectors: {},
+        execution_mechanics: {},
+        decision_audit: {},
+        ensemble_decision_stats: {},
+        live_family: null,
+        live_champion_id_muzero: null,
+        live_champion_id_dreamer: null,
+        degraded_fallback_reason: null,
     })
 }
 
@@ -573,7 +594,7 @@ export async function getPropFirmAccounts(): Promise<any[]> {
     return safeBankerFetch('/accounts/propfirm', [])
 }
 
-// â•â•â• LAB / CHAMPIONS â•â•â•
+// Services lab et champions.
 export interface ModelArtifactInfo {
     path: string | null
     exists: boolean
@@ -583,6 +604,14 @@ export interface ModelArtifactInfo {
 
 export interface HorizonChampionStatus {
     horizon: string
+    engine?: string
+    family?: string
+    feature_profile?: string | null
+    dataset_id?: string | null
+    dataset_source?: string | null
+    mechanics_profile_version?: string | null
+    dataset_coverage?: Record<string, unknown>
+    failure_mode?: string | null
     champion_id: string | null
     registry_champion_id?: string | null
     live_champion_id?: string | null
@@ -617,6 +646,8 @@ export interface HorizonChampionStatus {
             expectancy_pct?: number
             max_drawdown_pct?: number
             positive_episode_rate?: number
+            directional_bias?: string
+            metrics_by_position_mechanics?: Record<string, number | string | null | undefined>
         }
     } | null
     live_universe?: {
@@ -632,12 +663,19 @@ export interface HorizonChampionStatus {
     latest_checkpoint: ModelArtifactInfo
     manifest: Record<string, unknown> | null
     arena_report: Record<string, unknown> | null
+    metrics_by_position_mechanics?: Record<string, number | string | null | undefined>
+    top_live_symbols?: string[]
+    metrics_by_symbol?: Record<string, Record<string, unknown>>
 }
 
 export interface ChampionPerformanceSummary {
     champion: string
     win_rate: number
     return_pct: number
+}
+
+export interface EngineChampionMatrix {
+    [engine: string]: Record<string, HorizonChampionStatus>
 }
 
 export interface LabChampionStatus {
@@ -657,8 +695,10 @@ export interface LabChampionStatus {
     champions: Record<string, string>
     registry_champions?: Record<string, string>
     live_champions?: Record<string, string | null>
+    live_champions_by_engine?: Record<string, Record<string, string | null>>
     performance_summary: Record<string, ChampionPerformanceSummary>
     horizons: Record<string, HorizonChampionStatus>
+    engines?: EngineChampionMatrix
     nightly_summary: Record<string, unknown> | null
 }
 
@@ -674,11 +714,78 @@ export interface TrainingDependencyStatus {
     updated_at?: string
 }
 
+export interface TrainingArenaMetrics {
+    score?: number
+    family?: string
+    feature_profile?: string | null
+    dataset_id?: string | null
+    dataset_source?: string | null
+    mechanics_profile_version?: string | null
+    dataset_coverage?: Record<string, unknown>
+    evaluation_games?: number
+    evaluation_symbols?: number
+    return_pct?: number
+    net_realized_pct?: number
+    profit_factor?: number
+    win_rate?: number
+    total_trades?: number
+    max_drawdown_pct?: number
+    expectancy_pct?: number
+    positive_episode_rate?: number
+    long_entry_share?: number
+    short_entry_share?: number
+    directional_imbalance?: number
+    directional_bias?: string
+    ema200_blocked_buy?: number
+    ema200_blocked_sell?: number
+    metrics_by_position_mechanics?: Record<string, number | string | null | undefined>
+}
+
+export interface TrainingArenaSymbolProgress {
+    symbol: string
+    order?: number
+    challenger?: TrainingArenaMetrics
+    champion?: TrainingArenaMetrics
+}
+
+export interface TrainingArenaSideProgress {
+    id?: string | null
+    path?: string | null
+    score?: number
+    metrics?: TrainingArenaMetrics
+}
+
+export interface TrainingArenaProgress {
+    status: string
+    horizon?: string
+    family?: string
+    feature_profile?: string | null
+    dataset_id?: string | null
+    dataset_source?: string | null
+    mechanics_profile_version?: string | null
+    dataset_coverage?: Record<string, unknown>
+    timeframe?: string
+    started_at?: string | null
+    updated_at?: string | null
+    eval_symbols?: string[]
+    symbol_total?: number
+    current_role?: string | null
+    current_symbol?: string | null
+    symbol_index?: number
+    challenger?: TrainingArenaSideProgress
+    champion?: TrainingArenaSideProgress
+    symbols?: Record<string, TrainingArenaSymbolProgress>
+    outcome?: string
+    action_required?: string
+    validation?: Record<string, unknown>
+}
+
 export interface TrainingCurrentStep {
     name?: string
     status?: string
     phase?: string
     horizon?: string
+    family?: string
     symbol?: string
     symbol_index?: number
     symbol_total?: number
@@ -695,9 +802,30 @@ export interface TrainingRunPayload {
     run_id: string | null
     active: boolean
     status: string
+    engine?: string | null
     trigger: string | null
     strategy: string | null
     reason: string | null
+    family?: string | null
+    feature_profile?: string | null
+    dataset_id?: string | null
+    dataset_source?: string | null
+    mechanics_profile_version?: string | null
+    ga_status?: string | null
+    ga_generation?: number | null
+    ga_trial?: string | null
+    trial_mode?: string | null
+    trial_cost_profile?: string | null
+    replay_cache_status?: string | null
+    replay_cache_key?: string | null
+    replay_cache_entries?: number | null
+    replay_cache_source?: string | null
+    shadow_buffer_size?: number | null
+    sequence_length?: number | null
+    sequence_stride?: number | null
+    world_model_steps?: number | null
+    dataset_coverage?: Record<string, unknown>
+    metrics_by_position_mechanics?: Record<string, number | string | null | undefined>
     skip_reason?: string | null
     started_at?: string | null
     updated_at?: string | null
@@ -705,6 +833,12 @@ export interface TrainingRunPayload {
     step_label?: string
     has_active_run?: boolean
     current_step?: TrainingCurrentStep | null
+    arena_progress?: TrainingArenaProgress | null
+    reported_step?: TrainingCurrentStep | null
+    observed_step?: TrainingCurrentStep | null
+    effective_step?: TrainingCurrentStep | null
+    reported_step_label?: string
+    observed_step_label?: string
     completed_steps?: string[]
     failed_step?: Record<string, unknown> | null
     launcher?: Record<string, unknown>
@@ -722,6 +856,27 @@ export interface TrainingUniverseSummary {
 
 export interface TrainingRunStatus {
     status: string
+    engine?: string | null
+    family?: string | null
+    feature_profile?: string | null
+    dataset_id?: string | null
+    dataset_source?: string | null
+    mechanics_profile_version?: string | null
+    ga_status?: string | null
+    ga_generation?: number | null
+    ga_trial?: string | null
+    trial_mode?: string | null
+    trial_cost_profile?: string | null
+    replay_cache_status?: string | null
+    replay_cache_key?: string | null
+    replay_cache_entries?: number | null
+    replay_cache_source?: string | null
+    shadow_buffer_size?: number | null
+    sequence_length?: number | null
+    sequence_stride?: number | null
+    world_model_steps?: number | null
+    dataset_coverage?: Record<string, unknown>
+    metrics_by_position_mechanics?: Record<string, number | string | null | undefined>
     run: TrainingRunPayload
     dependencies: Record<string, TrainingDependencyStatus>
     universe: TrainingUniverseSummary
@@ -729,6 +884,92 @@ export interface TrainingRunStatus {
     nightly_summary: Record<string, unknown> | null
     status_path?: string
     log_path?: string
+}
+
+export interface MarketGnnArtifactInfo {
+    path: string | null
+    exists: boolean
+    size_bytes: number | null
+    modified_at: string | null
+}
+
+export interface MarketGnnRegistry {
+    name: string
+    version: string | null
+    status: 'draft' | 'validated' | 'live' | 'blocked' | 'stale' | 'unavailable' | string
+    trained_at: string | null
+    checkpoint_path: string | null
+    source_run_id?: string | null
+    timeframes: string[]
+    universe: {
+        symbols: string[]
+        count: number
+        family_counts: Record<string, number>
+    }
+    metrics: {
+        loss: number
+        scalp_accuracy: number
+        intraday_accuracy: number
+        swing_accuracy: number
+        epochs: number
+        batch_size: number
+        samples: number
+    }
+    artifacts: {
+        registry: MarketGnnArtifactInfo
+        checkpoint: MarketGnnArtifactInfo
+        metrics: MarketGnnArtifactInfo
+    }
+}
+
+export interface MarketGnnStatusResponse {
+    status: string
+    gnn: MarketGnnRegistry
+}
+
+export interface MarketGnnMetricsResponse {
+    status: string
+    version: string | null
+    model_status: string
+    trained_at: string | null
+    metrics: MarketGnnRegistry['metrics']
+    universe: MarketGnnRegistry['universe']
+    timeframes: string[]
+    artifacts: MarketGnnRegistry['artifacts']
+}
+
+export interface MarketGnnGraphNode {
+    id: string
+    label: string
+    role: 'core' | 'asset' | string
+    family?: string
+    centrality?: number
+    timestamp?: string | null
+}
+
+export interface MarketGnnGraphLink {
+    source: string
+    target: string
+    value: number
+    correlation?: number
+    kind?: string
+}
+
+export interface MarketGnnGraphSnapshot {
+    status: 'ok' | 'unavailable' | string
+    reason: string
+    version?: string | null
+    model_status?: string
+    trained_at?: string | null
+    timeframes?: string[]
+    universe?: MarketGnnRegistry['universe']
+    metrics?: MarketGnnRegistry['metrics']
+    graph_timeframe?: string | null
+    displayed_symbol_count?: number
+    universe_symbol_count?: number
+    correlation_points?: number
+    nodes: MarketGnnGraphNode[]
+    links: MarketGnnGraphLink[]
 }
 
 export async function getLabChampionStatus(): Promise<LabChampionStatus> {
@@ -749,8 +990,10 @@ export async function getLabChampionStatus(): Promise<LabChampionStatus> {
         champions: {},
         registry_champions: {},
         live_champions: {},
+        live_champions_by_engine: {},
         performance_summary: {},
         horizons: {},
+        engines: {},
         nightly_summary: null,
     }, 8000)
 }
@@ -758,10 +1001,12 @@ export async function getLabChampionStatus(): Promise<LabChampionStatus> {
 export async function getLabTrainingStatus(): Promise<TrainingRunStatus> {
     return safeFetch('/api/lab/training/status', {
         status: 'offline',
+        engine: null,
         run: {
             run_id: null,
             active: false,
             status: 'idle',
+            engine: null,
             trigger: null,
             strategy: null,
             reason: null,
@@ -790,7 +1035,70 @@ export async function getLabTrainingStatus(): Promise<TrainingRunStatus> {
     }, 8000)
 }
 
-// â•â•â• MONITORING â€” REAL DOCKER & SYSTEM DATA â•â•â•
+export async function getMarketGnnStatus(): Promise<MarketGnnStatusResponse> {
+    return safeFetch('/api/lab/gnn/status', {
+        status: 'offline',
+        gnn: {
+            name: 'market_gnn',
+            version: null,
+            status: 'unavailable',
+            trained_at: null,
+            checkpoint_path: null,
+            source_run_id: null,
+            timeframes: [],
+            universe: {
+                symbols: [],
+                count: 0,
+                family_counts: {},
+            },
+            metrics: {
+                loss: 0,
+                scalp_accuracy: 0,
+                intraday_accuracy: 0,
+                swing_accuracy: 0,
+                epochs: 0,
+                batch_size: 0,
+                samples: 0,
+            },
+            artifacts: {
+                registry: { path: null, exists: false, size_bytes: null, modified_at: null },
+                checkpoint: { path: null, exists: false, size_bytes: null, modified_at: null },
+                metrics: { path: null, exists: false, size_bytes: null, modified_at: null },
+            },
+        },
+    }, 8000)
+}
+
+export async function getMarketGnnMetrics(): Promise<MarketGnnMetricsResponse> {
+    return safeFetch('/api/lab/gnn/metrics', {
+        status: 'offline',
+        version: null,
+        model_status: 'unavailable',
+        trained_at: null,
+        metrics: {
+            loss: 0,
+            scalp_accuracy: 0,
+            intraday_accuracy: 0,
+            swing_accuracy: 0,
+            epochs: 0,
+            batch_size: 0,
+            samples: 0,
+        },
+        universe: {
+            symbols: [],
+            count: 0,
+            family_counts: {},
+        },
+        timeframes: [],
+        artifacts: {
+            registry: { path: null, exists: false, size_bytes: null, modified_at: null },
+            checkpoint: { path: null, exists: false, size_bytes: null, modified_at: null },
+            metrics: { path: null, exists: false, size_bytes: null, modified_at: null },
+        },
+    }, 8000)
+}
+
+// Monitoring systeme et Docker.
 export async function getSystemMetrics(): Promise<SystemMetrics | null> {
     return safeFetch('/api/core/system/metrics', null, 5000)
 }
@@ -809,11 +1117,38 @@ export async function getMemoryGraph(limit = 50, similarityThreshold = 0.8) {
     return safeFetch(`/api/core/memory/graph?limit=${limit}&similarity_threshold=${similarityThreshold}`, { nodes: [], links: [] })
 }
 
-export async function getGNNGraph() {
-    return safeFetch(`/api/core/gnn/graph`, { nodes: [], links: [] })
+export async function getMarketGnnGraph(): Promise<MarketGnnGraphSnapshot> {
+    return safeFetch('/api/lab/gnn/graph', {
+        status: 'unavailable',
+        reason: 'GNN indisponible',
+        version: null,
+        model_status: 'unavailable',
+        trained_at: null,
+        timeframes: [],
+        universe: {
+            symbols: [],
+            count: 0,
+            family_counts: {},
+        },
+        metrics: {
+            loss: 0,
+            scalp_accuracy: 0,
+            intraday_accuracy: 0,
+            swing_accuracy: 0,
+            epochs: 0,
+            batch_size: 0,
+            samples: 0,
+        },
+        graph_timeframe: null,
+        displayed_symbol_count: 0,
+        universe_symbol_count: 0,
+        correlation_points: 0,
+        nodes: [],
+        links: [],
+    })
 }
 
-// â•â•â• ACCOUNTANT â•â•â•
+// Services comptables.
 export interface AccountantReport {
     summary: {
         gross: number
@@ -880,7 +1215,7 @@ export async function getAccountantReport(): Promise<AccountantReport | null> {
     }
 }
 
-// â•â•â• BUILDER â•â•â•
+// Services builder.
 export interface BuilderHealth {
     status: string
     service: string
@@ -964,7 +1299,7 @@ export interface BuilderPipelineResult {
 }
 
 export async function getBuilderHealth(): Promise<BuilderHealth> {
-    return safeFetch('/api/builder/health', {
+    const fallback: BuilderHealth = {
         status: 'offline',
         service: 'builder',
         active_pipelines: 0,
@@ -973,7 +1308,12 @@ export async function getBuilderHealth(): Promise<BuilderHealth> {
         public_api_entries: 0,
         mutation_enabled: false,
         deploy_enabled: false,
-    })
+    }
+    const payload = await safeFetch('/api/builder/health', fallback)
+    return {
+        ...fallback,
+        ...(payload || {}),
+    }
 }
 
 export async function getBuilderHistory(): Promise<{ history: BuilderHistoryEntry[]; total: number }> {
@@ -1066,3 +1406,659 @@ export async function runBuilderPipeline(request: BuilderPipelineRequest): Promi
     return { build, deploy, mutation }
 }
 
+export interface MemoryFragment {
+    id: string
+    content: string
+    role: string
+    timestamp: string
+}
+
+export interface MemorySearchResult {
+    id: string
+    score: number
+    content: string
+    role: string
+    session_id?: string
+    timestamp: string
+}
+
+export interface MemoryGraphNode {
+    id: string
+    label: string
+    role?: string
+    expert?: string
+    timestamp?: string
+}
+
+export interface MemoryGraphLink {
+    source: string
+    target: string
+    value: number
+}
+
+export interface CoreAgentStatus {
+    status: string
+    updated_at?: string | null
+    last_seen?: string | null
+    payload?: Record<string, unknown>
+}
+
+export interface ResearchResult {
+    title: string
+    url: string
+    summary: string
+    source?: string
+    relevance_score?: number
+}
+
+export interface ResearchSearchResponse {
+    query: string
+    domain: string
+    results: ResearchResult[]
+    synthesis: string
+    search_time_ms: number
+    timestamp: string
+    review_queue?: ResearchQueueSummary
+}
+
+export interface ResearchPaper {
+    title: string
+    summary: string
+    url: string
+    published?: string
+    authors?: string[]
+}
+
+export interface ResearchPapersResponse {
+    query: string
+    category: string
+    papers: ResearchPaper[]
+    total: number
+    review_queue?: ResearchQueueSummary
+}
+
+export interface ResearchTrendSource {
+    key?: string
+    source_type?: string
+    source_name: string
+    family?: string
+    last_sync?: string | null
+    queued?: number
+    duplicates?: number
+    errors?: number
+    url?: string
+    categories?: string[]
+}
+
+export interface ResearchTrendsResponse {
+    domain: string
+    sources: string[]
+    ingest_sources: ResearchTrendSource[]
+    message: string
+    timestamp: string
+}
+
+export interface ResearchHistoryEntry {
+    query: string
+    results_count: number
+    timestamp: string
+}
+
+export interface ResearchQueueSummary {
+    queued: number
+    duplicates: number
+    errors: number
+    items?: Array<{ id?: string | null; status: string; reason?: string }>
+}
+
+export interface KnowledgeReviewItem {
+    id: string
+    source_type: string
+    source_name: string
+    title: string
+    url: string
+    published_at?: string | null
+    authors?: string[]
+    origin?: string
+    summary_raw?: string
+    summary_curated?: string
+    tags: string[]
+    family: string
+    confidence_score: number
+    priority_score?: number
+    content_hash?: string
+    review_status: 'pending' | 'approved' | 'rejected' | 'ingested' | string
+    metadata?: Record<string, unknown>
+    collected_at?: string
+    reviewed_at?: string | null
+    reviewed_by?: string | null
+    rejection_reason?: string | null
+    ingested_at?: string | null
+}
+
+export interface IngestionDependencyStatus {
+    status: 'ok' | 'error' | string
+    detail?: string
+}
+
+export interface IngestionLogEntry {
+    ts?: string
+    level?: string
+    message?: string
+    [key: string]: unknown
+}
+
+export interface IngestionStatusResponse {
+    status: string
+    counts: {
+        pending: number
+        approved: number
+        rejected: number
+        ingested: number
+    }
+    active_run: {
+        run_id?: string | null
+        active: boolean
+        status: string
+        trigger?: string | null
+        strategy?: string | null
+        reason?: string | null
+        started_at?: string | null
+        updated_at?: string | null
+        finished_at?: string | null
+        current_source?: string | null
+    }
+    last_run?: Record<string, unknown> | null
+    source_stats: Record<string, unknown>
+    duplicate_rate: number
+    dependencies: Record<string, IngestionDependencyStatus>
+    logs: Array<string | IngestionLogEntry | Record<string, unknown>>
+}
+
+export interface IngestionSourcesResponse {
+    status: string
+    sources: ResearchTrendSource[]
+}
+
+export interface ReviewQueueResponse {
+    status: string
+    review_status: string
+    total: number
+    items: KnowledgeReviewItem[]
+}
+
+export interface ApprovedKnowledgeResponse {
+    status: string
+    total: number
+    items: KnowledgeReviewItem[]
+}
+
+export interface ShadowMonitor {
+    id: string
+    keyword: string
+    category: string
+    interval_minutes: number
+    created_at: string
+    status: string
+    last_check?: string | null
+    hits?: number
+}
+
+export interface ShadowAlert {
+    id?: string
+    severity?: string
+    category?: string
+    type?: string
+    message: string
+    timestamp: string
+    source?: string
+}
+
+export interface ShadowThreatAnalysis {
+    indicator: string
+    type: string
+    threat_score: number
+    severity: string
+    details?: Record<string, unknown>
+    mode?: string
+    analyzed_at?: string
+}
+
+export interface SentinelAlert {
+    severity?: string
+    category?: string
+    message: string
+    timestamp: string
+}
+
+export interface SentinelAuditLog {
+    action: string
+    actor?: string
+    target?: string
+    details?: string
+    severity?: string
+    timestamp: string
+}
+
+export interface ComplianceAlert {
+    severity?: string
+    category?: string
+    message: string
+    timestamp: string
+}
+
+export interface ComplianceHistoryEntry {
+    timestamp?: string
+    amount?: number
+    category?: string
+    description?: string
+    [key: string]: unknown
+}
+
+export interface ComplianceUrssafReport {
+    period: string
+    gross_revenue_quarter: number
+    cotisations_urssaf: number
+    total_provisions: number
+    transactions_count: number
+    generated_at: string
+}
+
+export interface AccountantDashboard {
+    summary: {
+        gross_profit: number
+        total_taxes: number
+        total_expenses: number
+        net_roi: number
+        currency: string
+    }
+    expenses_by_category: Record<string, number>
+    recent_pnl: Array<Record<string, unknown>>
+    expense_count: number
+    pnl_count: number
+}
+
+export interface RwaHealth {
+    status: string
+    service: string
+    total_assets: number
+    total_valuation: number
+}
+
+export interface MuseStats {
+    total_generations: number
+    available_templates: number
+    model: string
+    mode: string
+}
+
+export interface MuseNiche {
+    id: string
+    label: string
+    description: string
+    enabled: boolean
+    is_nsfw: boolean
+    post_interval_hours: number
+    recommended_loras: Array<{ filename: string; strength: number }>
+}
+
+export interface KernelFeedMessage {
+    id: string
+    agent: string
+    type: string
+    content: string
+    timestamp: string
+    target?: string
+}
+
+async function postJsonWithFallback<T>(url: string, body: Record<string, unknown>, fallback: T, timeout = 15000): Promise<T> {
+    try {
+        const res = await fetchWithTimeout(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        }, timeout)
+        if (!res.ok) {
+            return fallback
+        }
+        return await res.json() as T
+    } catch {
+        return fallback
+    }
+}
+
+export async function getMemoryFragments(limit = 50): Promise<MemoryFragment[]> {
+    return safeFetch(`/api/core/memory/fragments?limit=${limit}`, [], 8000)
+}
+
+export async function searchCoreMemory(query: string, limit = 8): Promise<MemorySearchResult[]> {
+    if (!query.trim()) {
+        return []
+    }
+    return safeFetch(`/api/core/memory/search?query=${encodeURIComponent(query.trim())}&limit=${limit}`, [], 8000)
+}
+
+export async function getCoreAgentsStatus(): Promise<Record<string, CoreAgentStatus>> {
+    return safeFetch('/api/core/agents/status', {}, 8000)
+}
+
+export async function getCoreAutonomyContext(): Promise<Record<string, unknown> | null> {
+    return safeFetch('/api/core/intelligence/autonomy/context', null, 8000)
+}
+
+export async function getCoreIntelligenceStatus(): Promise<Record<string, unknown> | null> {
+    return safeFetch('/api/core/intelligence/status', null, 8000)
+}
+
+export async function searchResearcher(query: string, domain = 'general', maxResults = 5): Promise<ResearchSearchResponse> {
+    return postJsonWithFallback('/api/researcher/search', {
+        query,
+        domain,
+        max_results: maxResults,
+    }, {
+        query,
+        domain,
+        results: [],
+        synthesis: 'Recherche indisponible.',
+        search_time_ms: 0,
+        timestamp: new Date(0).toISOString(),
+        review_queue: {
+            queued: 0,
+            duplicates: 0,
+            errors: 0,
+            items: [],
+        },
+    }, 20000)
+}
+
+export async function searchResearchPapers(query: string, category = 'cs.AI', maxResults = 5): Promise<ResearchPapersResponse> {
+    return postJsonWithFallback('/api/researcher/papers', {
+        query,
+        category,
+        max_results: maxResults,
+    }, {
+        query,
+        category,
+        papers: [],
+        total: 0,
+        review_queue: {
+            queued: 0,
+            duplicates: 0,
+            errors: 0,
+            items: [],
+        },
+    }, 20000)
+}
+
+export async function getResearcherTrends(domain = 'tech'): Promise<ResearchTrendsResponse> {
+    return safeFetch(`/api/researcher/trends?domain=${encodeURIComponent(domain)}`, {
+        domain,
+        sources: [],
+        ingest_sources: [],
+        message: 'Veille indisponible.',
+        timestamp: new Date(0).toISOString(),
+    }, 8000)
+}
+
+export async function getResearcherHistory(limit = 20): Promise<{ history: ResearchHistoryEntry[] }> {
+    return safeFetch(`/api/researcher/history?limit=${limit}`, { history: [] }, 8000)
+}
+
+export async function syncResearchSources(includeArxiv = true, includeNews = true, maxItemsPerSource?: number): Promise<Record<string, unknown>> {
+    const payload: Record<string, unknown> = {
+        include_arxiv: includeArxiv,
+        include_news: includeNews,
+        trigger: 'nexus_manual',
+    }
+    if (typeof maxItemsPerSource === 'number') {
+        payload.max_items_per_source = maxItemsPerSource
+    }
+    return postJsonWithFallback('/api/researcher/ingest/sources/sync', payload, {
+        status: 'error',
+        message: 'Synchronisation indisponible.',
+    }, 30000)
+}
+
+export async function getResearchIngestStatus(tail = 20): Promise<IngestionStatusResponse> {
+    return safeFetch(`/api/researcher/ingest/status?tail=${tail}`, {
+        status: 'offline',
+        counts: {
+            pending: 0,
+            approved: 0,
+            rejected: 0,
+            ingested: 0,
+        },
+        active_run: {
+            active: false,
+            status: 'idle',
+        },
+        last_run: null,
+        source_stats: {},
+        duplicate_rate: 0,
+        dependencies: {},
+        logs: [],
+    }, 8000)
+}
+
+export async function getResearchReviewQueue(reviewStatus = 'pending', limit = 50, offset = 0): Promise<ReviewQueueResponse> {
+    return safeFetch(
+        `/api/researcher/ingest/review?review_status=${encodeURIComponent(reviewStatus)}&limit=${limit}&offset=${offset}`,
+        {
+            status: 'offline',
+            review_status: reviewStatus,
+            total: 0,
+            items: [],
+        },
+        8000,
+    )
+}
+
+export async function approveResearchReviewItem(itemId: string, reviewedBy = 'nexus'): Promise<{ status: string; item?: KnowledgeReviewItem }> {
+    return postJsonWithFallback(`/api/researcher/ingest/review/${encodeURIComponent(itemId)}/approve`, {
+        reviewed_by: reviewedBy,
+        reason: 'Validation depuis Nexus',
+    }, { status: 'error' }, 20000)
+}
+
+export async function rejectResearchReviewItem(itemId: string, reason: string, reviewedBy = 'nexus'): Promise<{ status: string; item?: KnowledgeReviewItem }> {
+    return postJsonWithFallback(`/api/researcher/ingest/review/${encodeURIComponent(itemId)}/reject`, {
+        reviewed_by: reviewedBy,
+        reason,
+    }, { status: 'error' }, 20000)
+}
+
+export async function getApprovedKnowledge(limit = 30): Promise<ApprovedKnowledgeResponse> {
+    return safeFetch(`/api/researcher/ingest/approved?limit=${limit}`, {
+        status: 'offline',
+        total: 0,
+        items: [],
+    }, 8000)
+}
+
+export async function getResearchSources(): Promise<IngestionSourcesResponse> {
+    return safeFetch('/api/researcher/ingest/sources', {
+        status: 'offline',
+        sources: [],
+    }, 8000)
+}
+
+export async function getResearchPeaAnalysis(): Promise<Record<string, unknown>> {
+    return safeFetch('/api/researcher/pea-analysis', {
+        status: 'info',
+        message: 'Analyse PEA indisponible.',
+        targets: [],
+    }, 8000)
+}
+
+export async function searchShadow(query: string, maxResults = 10): Promise<{ query: string; results: ResearchResult[]; count: number }> {
+    const payload = await safeFetch<{ query: string; results: Array<Record<string, unknown>>; count: number }>(`/api/shadow/search?q=${encodeURIComponent(query)}&max_results=${maxResults}`, {
+        query,
+        results: [],
+        count: 0,
+    }, 10000)
+    return {
+        query: payload.query,
+        count: payload.count,
+        results: (payload.results || []).map((result) => ({
+            title: String(result.title || 'Resultat'),
+            url: String(result.url || ''),
+            summary: String(result.summary || result.snippet || ''),
+            source: typeof result.source === 'string' ? result.source : 'shadow',
+            relevance_score: Number(result.relevance_score || 0),
+        })),
+    }
+}
+
+export async function reconShadow(target: string): Promise<Record<string, unknown>> {
+    const payload = await safeFetch<Record<string, unknown>>(`/api/shadow/recon?target=${encodeURIComponent(target)}`, {}, 12000)
+    if (Array.isArray(payload.web_findings)) {
+        payload.web_findings = payload.web_findings.map((result) => ({
+            ...result,
+            summary: String((result as Record<string, unknown>).summary || (result as Record<string, unknown>).snippet || ''),
+        }))
+    }
+    return payload
+}
+
+export async function getShadowThreatHistory(): Promise<{ analyses: ShadowThreatAnalysis[]; total: number }> {
+    return safeFetch('/api/shadow/threats/history', { analyses: [], total: 0 }, 8000)
+}
+
+export async function getShadowMonitors(): Promise<{ monitors: ShadowMonitor[]; total_active: number }> {
+    return safeFetch('/api/shadow/monitor', { monitors: [], total_active: 0 }, 8000)
+}
+
+export async function getShadowAlerts(limit = 50): Promise<{ alerts: ShadowAlert[]; total: number }> {
+    return safeFetch(`/api/shadow/alerts?limit=${limit}`, { alerts: [], total: 0 }, 8000)
+}
+
+export async function getSentinelMetrics(): Promise<Record<string, unknown> | null> {
+    return safeFetch('/api/sentinel/metrics', null, 8000)
+}
+
+export async function getSentinelAlerts(limit = 50): Promise<{ alerts: SentinelAlert[]; total: number }> {
+    return safeFetch(`/api/sentinel/alerts?limit=${limit}`, { alerts: [], total: 0 }, 8000)
+}
+
+export async function getSentinelAuditLogs(limit = 50): Promise<{ logs: SentinelAuditLog[]; total: number }> {
+    return safeFetch(`/api/sentinel/audit/logs?limit=${limit}`, { logs: [], total: 0 }, 8000)
+}
+
+export async function getSentinelQuarantine(): Promise<{ quarantined: Array<Record<string, unknown>>; total: number }> {
+    return safeFetch('/api/sentinel/quarantine', { quarantined: [], total: 0 }, 8000)
+}
+
+export async function getSentinelComplianceCheck(): Promise<Record<string, unknown> | null> {
+    return safeFetch('/api/sentinel/compliance/check', null, 8000)
+}
+
+export async function getSubstrateMetrics(): Promise<Record<string, unknown> | null> {
+    return safeFetch('/api/substrate/metrics', null, 8000)
+}
+
+export async function getSubstrateGpu(): Promise<Record<string, unknown> | null> {
+    return safeFetch('/api/substrate/gpu', null, 8000)
+}
+
+export async function getSubstrateMetricsHistory(limit = 60): Promise<{ history: Array<Record<string, unknown>>; count: number }> {
+    return safeFetch(`/api/substrate/metrics/history?limit=${limit}`, { history: [], count: 0 }, 8000)
+}
+
+export async function getSubstrateAlerts(limit = 50): Promise<{ alerts: Array<Record<string, unknown>>; total: number }> {
+    return safeFetch(`/api/substrate/alerts?limit=${limit}`, { alerts: [], total: 0 }, 8000)
+}
+
+export async function getSubstrateEcoQueue(): Promise<{ queue: Array<Record<string, unknown>>; total: number }> {
+    return safeFetch('/api/substrate/eco/queue', { queue: [], total: 0 }, 8000)
+}
+
+export async function getComplianceHealth(): Promise<Record<string, unknown> | null> {
+    return safeFetch('/api/compliance/health', null, 8000)
+}
+
+export async function getComplianceHistory(limit = 50): Promise<{ provisions: ComplianceHistoryEntry[]; total: number }> {
+    return safeFetch(`/api/compliance/history?limit=${limit}`, { provisions: [], total: 0 }, 8000)
+}
+
+export async function getComplianceUrssafReport(): Promise<ComplianceUrssafReport | null> {
+    return safeFetch('/api/compliance/report/urssaf', null, 8000)
+}
+
+export async function getComplianceAlerts(limit = 50): Promise<{ alerts: ComplianceAlert[]; total: number }> {
+    return safeFetch(`/api/compliance/alerts?limit=${limit}`, { alerts: [], total: 0 }, 8000)
+}
+
+export async function getAccountantDashboard(): Promise<AccountantDashboard | null> {
+    return safeFetch('/api/accountant/dashboard', null, 8000)
+}
+
+export async function getRwaHealth(): Promise<RwaHealth | null> {
+    return safeFetch('/api/rwa/health', null, 8000)
+}
+
+export async function getRwaPortfolio(): Promise<Record<string, unknown> | null> {
+    return safeFetch('/api/rwa/portfolio', null, 8000)
+}
+
+export async function getRwaStrategy(): Promise<Record<string, unknown> | null> {
+    return safeFetch('/api/rwa/strategy', null, 8000)
+}
+
+export async function getRwaRecommendations(): Promise<Record<string, unknown> | null> {
+    return safeFetch('/api/rwa/strategy/recommendations', null, 8000)
+}
+
+export async function getRwaTelemetry(): Promise<Record<string, unknown> | null> {
+    return safeFetch('/api/rwa/iot/telemetry', null, 8000)
+}
+
+export async function getRwaEnergyHistory(days = 7): Promise<Record<string, unknown> | null> {
+    return safeFetch(`/api/rwa/iot/energy/history?days=${days}`, null, 8000)
+}
+
+export async function getMuseStats(): Promise<MuseStats | null> {
+    return safeFetch('/api/muse/stats', null, 8000)
+}
+
+export async function getMuseNiches(): Promise<MuseNiche[]> {
+    const payload = await safeFetch<{ niches?: MuseNiche[] }>('/api/muse/niches', {}, 8000)
+    return payload.niches || []
+}
+
+export async function getMuseNicheScores(): Promise<Record<string, number>> {
+    const payload = await safeFetch<{ scores?: Record<string, number> }>('/api/muse/niches/scores', {}, 12000)
+    return payload.scores || {}
+}
+
+export async function getKernelRecentFeed(limit = 20): Promise<{ available: boolean; messages: KernelFeedMessage[] }> {
+    try {
+        const res = await fetchWithTimeout(`/api/kernel/feed/recent?limit=${limit}`, {}, 5000)
+        if (res.status === 404) {
+            return { available: false, messages: [] }
+        }
+        if (!res.ok) {
+            return { available: true, messages: [] }
+        }
+        const payload = await res.json()
+        const rawMessages = Array.isArray(payload?.messages) ? payload.messages : []
+        const messages = rawMessages.map((item: Record<string, unknown>, index: number) => ({
+            id: typeof item.id === 'string' && item.id.trim() ? item.id : `${index}-${String(item.timestamp || '')}`,
+            agent: typeof item.agent === 'string' && item.agent.trim() ? item.agent : String(item.source_agent || item.source || item.service || 'system'),
+            type: typeof item.type === 'string' && item.type.trim() ? item.type : String(item.kind || item.message_type || 'message'),
+            content: typeof item.content === 'string' && item.content.trim()
+                ? item.content
+                : typeof item.message === 'string' && item.message.trim()
+                    ? item.message
+                    : typeof item.summary === 'string' && item.summary.trim()
+                        ? item.summary
+                        : 'Message indisponible',
+            timestamp: typeof item.timestamp === 'string' && item.timestamp.trim()
+                ? item.timestamp
+                : new Date().toISOString(),
+            target: typeof item.target === 'string' && item.target.trim() ? item.target : undefined,
+        }))
+        return { available: true, messages }
+    } catch {
+        return { available: false, messages: [] }
+    }
+}

@@ -11,7 +11,8 @@ dependencies = [
     "jax",
     "jaxlib",
     "torch",
-    "torch-geometric"
+    "torch-geometric",
+    "psycopg2-binary"
 ]
 
 [build-system]

@@ -1,6 +1,11 @@
 @echo off
 setlocal
 title THE HIVE - EXPERT BANKER (MT5)
+chcp 65001 >nul
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
+set PYTHONLEGACYWINDOWSSTDIO=utf-8
+if "%BANKER_RICH_LOGS%"=="" set BANKER_RICH_LOGS=true
 
 :start
 echo [%DATE% %TIME%] Demarrage de The Banker (mode natif MT5)...
@@ -13,10 +18,10 @@ if not exist "venv\Scripts\python.exe" (
     exit /b 1
 )
 
-venv\Scripts\python -c "import MetaTrader5" 2>nul
+venv\Scripts\python -X utf8 -c "import MetaTrader5" 2>nul
 if %errorlevel% neq 0 (
     echo Installation de la dependance MetaTrader5...
-    venv\Scripts\python -m pip install MetaTrader5
+    venv\Scripts\python -X utf8 -m pip install MetaTrader5
 )
 
 :: Configuration locale du Banker
@@ -66,7 +71,7 @@ if %errorlevel% equ 3 (
 )
 
 :: Lancement du service
-venv\Scripts\python -m uvicorn eva_banker.main:app --host 0.0.0.0 --port 8100 --env-file .env --no-access-log
+venv\Scripts\python -X utf8 -m uvicorn eva_banker.main:app --host 0.0.0.0 --port 8100 --env-file .env --no-access-log
 
 echo.
 echo [%DATE% %TIME%] Processus Banker arrete.

@@ -5,7 +5,7 @@
 
 ---
 
-## 📐 C4 - Context Diagram
+##  C4 - Context Diagram
 
 Vue d'ensemble du système et ses interactions externes.
 
@@ -33,7 +33,7 @@ C4Context
 
 ---
 
-## 📦 C4 - Container Diagram
+##  C4 - Container Diagram
 
 Architecture des conteneurs/VMs du système.
 
@@ -82,20 +82,20 @@ C4Container
 
 ---
 
-## 🔄 Sequence - Trade Execution Flow
+##  Sequence - Trade Execution Flow
 
 Flux complet d'exécution d'un ordre de trading.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant User as 👤 Admin
-    participant Nexus as 📱 The Nexus
-    participant Core as 🧠 EVA Core
-    participant Kernel as 🔒 Rust Kernel
-    participant Banker as 💰 The Banker
-    participant MT5 as 📊 MetaTrader 5
-    participant DB as 🗄️ TimescaleDB
+    participant User as  Admin
+    participant Nexus as  The Nexus
+    participant Core as  EVA Core
+    participant Kernel as  Rust Kernel
+    participant Banker as  The Banker
+    participant MT5 as  MetaTrader 5
+    participant DB as  TimescaleDB
     
     User->>Nexus: "Achète 0.5 lot Gold avec SL à 2050"
     Nexus->>Core: POST /chat/message
@@ -135,20 +135,20 @@ sequenceDiagram
 
 ---
 
-## 🛡️ Sequence - Security Alert Flow
+##  Sequence - Security Alert Flow
 
 Flux de détection et réponse à une alerte sécurité.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Attack as 🔴 Attacker
-    participant FW as 🧱 Firewall
-    participant Wazuh as 🛡️ Wazuh SIEM
-    participant Sentinel as 🔍 The Sentinel
-    participant Kernel as 🔒 Kernel
-    participant Discord as 💬 Discord
-    participant Admin as 👤 Admin
+    participant Attack as  Attacker
+    participant FW as  Firewall
+    participant Wazuh as  Wazuh SIEM
+    participant Sentinel as  The Sentinel
+    participant Kernel as  Kernel
+    participant Discord as  Discord
+    participant Admin as  Admin
     
     Attack->>FW: Brute Force SSH (5 attempts)
     FW->>Wazuh: Log Events
@@ -163,20 +163,20 @@ sequenceDiagram
     Kernel->>FW: iptables -A INPUT -s 192.168.1.100 -j DROP
     
     Sentinel->>Discord: POST /webhooks (Alert + Screenshot)
-    Discord-->>Admin: 🚨 Security Alert Notification
+    Discord-->>Admin:  Security Alert Notification
     
     Sentinel->>Sentinel: Log to audit_trail (Black Box)
 ```
 
 ---
 
-## 🌐 Network Topology
+##  Network Topology
 
 Architecture réseau avec VLANs et flux.
 
 ```mermaid
 flowchart TB
-    subgraph WAN ["🌍 Internet"]
+    subgraph WAN [" Internet"]
         ISP[ISP Router]
         Tailscale[Tailscale VPN]
     end
@@ -242,29 +242,29 @@ flowchart TB
 
 ---
 
-## 🤖 Agent Communication
+##  Agent Communication
 
 Flux de communication entre agents EVA.
 
 ```mermaid
 flowchart LR
-    subgraph Core ["🧠 The Core"]
+    subgraph Core [" The Core"]
         Router[Intent Router]
         Memory[Memory Manager]
     end
     
     subgraph Experts ["Experts"]
-        Banker[💰 Banker]
-        Shadow[🔍 Shadow]
-        Sentinel[🛡️ Sentinel]
-        Builder[🔧 Builder]
-        Muse[🎨 Muse]
+        Banker[ Banker]
+        Shadow[ Shadow]
+        Sentinel[ Sentinel]
+        Builder[ Builder]
+        Muse[ Muse]
     end
     
     subgraph Infra ["Infrastructure"]
         Redis[(Redis Pub/Sub)]
-        Kernel[🔒 Kernel]
-        Keeper[⚡ Keeper]
+        Kernel[ Kernel]
+        Keeper[ Keeper]
     end
     
     Router --> |eva.banker.requests| Redis
@@ -284,38 +284,38 @@ flowchart LR
 
 ---
 
-## 🗃️ Data Flow
+##  Data Flow
 
 Flux des données à travers le système.
 
 ```mermaid
 flowchart TD
-    subgraph Input ["📥 Input Sources"]
-        Voice[🎤 Voice Command]
-        Text[⌨️ Text Message]
-        Market[📈 Market Data]
-        Logs[📋 System Logs]
+    subgraph Input [" Input Sources"]
+        Voice[ Voice Command]
+        Text[⌨ Text Message]
+        Market[ Market Data]
+        Logs[ System Logs]
     end
     
-    subgraph Processing ["⚙️ Processing"]
-        LLM[🧠 LLM Inference]
+    subgraph Processing [" Processing"]
+        LLM[ LLM Inference]
         Intent[Intent Classification]
         RAG[RAG Retrieval]
         Risk[Risk Calculation]
     end
     
-    subgraph Storage ["💾 Storage"]
+    subgraph Storage [" Storage"]
         Qdrant[(Qdrant Vectors)]
         Timescale[(TimescaleDB)]
         Redis[(Redis Cache)]
         Audit[(Audit Trail)]
     end
     
-    subgraph Output ["📤 Output"]
-        Response[💬 Chat Response]
-        Trade[📊 Trade Execution]
-        Alert[🚨 Security Alert]
-        Metrics[📉 Metrics]
+    subgraph Output [" Output"]
+        Response[ Chat Response]
+        Trade[ Trade Execution]
+        Alert[ Security Alert]
+        Metrics[ Metrics]
     end
     
     Voice --> LLM
@@ -341,7 +341,7 @@ flowchart TD
 
 ---
 
-## 🏗️ Class Diagram - Trading Models
+##  Class Diagram - Trading Models
 
 Structure des classes principales du module Trading.
 
@@ -407,7 +407,7 @@ classDiagram
 
 ---
 
-## 📊 State Machine - Trade Lifecycle
+##  State Machine - Trade Lifecycle
 
 États d'un ordre de trading.
 

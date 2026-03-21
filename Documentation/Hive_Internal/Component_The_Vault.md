@@ -29,7 +29,7 @@ Les clés privées ne sont **JAMAIS** stockées sur le disque dur (même chiffr�
 Quand *The Banker* veut retirer des fonds :
 1.  Banker génère la transaction.
 2.  Banker envoie la Tx au Vault Service.
-3.  Vault Service affiche sur l'écran (si existant) ou envoie notif Admin : "Signer Tx de 1000$ vers IBAN X ?".
+3.  Vault Service affiche sur l'cran (si existant) ou envoie notif Admin : "Signer Tx de 1000$ vers IBAN X -".
 4.  Admin valide physiquement/biométriquement.
 5.  HSM signe.
 

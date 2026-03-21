@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-    AlertTriangle,
     Bot,
     CheckCircle2,
     Hammer,
@@ -14,14 +13,10 @@ import {
     type BuilderBuildRequest,
     type BuilderHealth,
     type BuilderHistoryEntry,
-    type BuilderPipelineResult,
     type BuilderPublicApiEntry,
-    buildBuilderProject,
     getBuilderHealth,
     getBuilderHistory,
-    runBuilderPipeline,
     searchBuilderPublicApis,
-    syncBuilderPublicApiCatalog,
 } from '../services/api'
 
 const INITIAL_BUILD_FORM: BuilderBuildRequest = {
@@ -44,6 +39,8 @@ const INITIAL_HEALTH: BuilderHealth = {
     mutation_enabled: false,
     deploy_enabled: false,
 }
+
+const EXECUTION_LOCKED = true
 
 function StatusPill({ active, label }: { active: boolean; label: string }) {
     return (
@@ -92,7 +89,6 @@ export default function BuilderWorkbench() {
     const [apiResults, setApiResults] = useState<BuilderPublicApiEntry[]>([])
     const [loadingAction, setLoadingAction] = useState<string | null>(null)
     const [feedback, setFeedback] = useState<string | null>(null)
-    const [pipelineResult, setPipelineResult] = useState<BuilderPipelineResult | null>(null)
 
     const refreshBuilderState = useCallback(async () => {
         const [builderHealth, historyPayload] = await Promise.all([
@@ -115,19 +111,6 @@ export default function BuilderWorkbench() {
         setBuildForm((current) => ({ ...current, [key]: value }))
     }
 
-    const handleSyncCatalog = async () => {
-        setLoadingAction('catalog')
-        setFeedback(null)
-        const result = await syncBuilderPublicApiCatalog()
-        if (result.status === 'success') {
-            setFeedback(`Catalogue synchronise: ${result.total_entries} APIs / ${result.total_categories} categories.`)
-        } else {
-            setFeedback(result.message || 'Synchronisation du catalogue impossible.')
-        }
-        await refreshBuilderState()
-        setLoadingAction(null)
-    }
-
     const handleSearchApis = async () => {
         const query = apiQuery.trim() || buildForm.api_context_query?.trim() || buildForm.prompt
         setLoadingAction('search')
@@ -137,59 +120,20 @@ export default function BuilderWorkbench() {
         setLoadingAction(null)
     }
 
-    const handleBuildOnly = async () => {
-        setLoadingAction('build')
-        setFeedback(null)
-        const build = await buildBuilderProject(buildForm)
-        setPipelineResult({
-            build,
-            deploy: { status: 'skipped', reason: 'Build seul.' },
-            mutation: { status: 'skipped', reason: 'Build seul.' },
-        })
-        setFeedback(build.status === 'error' ? (build.message || 'Le build a echoue.') : 'Build Builder termine.')
-        await refreshBuilderState()
-        setLoadingAction(null)
-    }
-
-    const handlePipeline = async () => {
-        setLoadingAction('pipeline')
-        setFeedback(null)
-        const result = await runBuilderPipeline({
-            build: buildForm,
-            deploy: deployService.trim()
-                ? {
-                    service: deployService.trim(),
-                    target: deployTarget,
-                    force_rebuild: deployForceRebuild,
-                    dry_run: deployDryRun,
-                    compose_file: composeFile.trim() || undefined,
-                }
-                : null,
-            mutation: {
-                change_summary: `Flux Nexus Builder pour ${buildForm.filename}`,
-                dry_run: mutationDryRun,
-            },
-        })
-        setPipelineResult(result)
-        setFeedback('Flux Builder execute depuis Nexus.')
-        await refreshBuilderState()
-        setLoadingAction(null)
-    }
-
     return (
         <section className="cyber-panel hud-corners p-4 lg:p-5 space-y-4">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div>
-                    <div className="text-[9px] uppercase tracking-[0.2em] text-cyber-cyan/50">Builder Control Deck</div>
-                    <h3 className="font-display text-lg font-black tracking-[0.08em] text-white/80 mt-1">Flux Builder pilote par Nexus</h3>
+                    <div className="text-[9px] uppercase tracking-[0.2em] text-cyber-cyan/50">Pilotage Builder</div>
+                    <h3 className="font-display text-lg font-black tracking-[0.08em] text-white/80 mt-1">Flux Builder en observation</h3>
                     <p className="text-[10px] text-white/25 mt-2 max-w-3xl">
-                        Nexus peut maintenant piloter le catalogue d'APIs, lancer un build BMAD, puis enchainer un deploiement et une mutation en mode securise.
+                        Cette vue reste volontairement en observation pendant le run trading. Les briefs, cibles et options restent visibles pour preparer le prochain cycle sans lancer de mutation.
                     </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
                     <StatusPill active={health.status === 'ok'} label="builder online" />
-                    <StatusPill active={health.deploy_enabled} label="deploy live" />
-                    <StatusPill active={health.mutation_enabled} label="mutation live" />
+                    <StatusPill active={false} label="execution verrouillee" />
+                    <StatusPill active={false} label="dry-run uniquement" />
                 </div>
             </div>
 
@@ -206,15 +150,15 @@ export default function BuilderWorkbench() {
                         <div className="flex items-center justify-between gap-3">
                             <div className="flex items-center gap-2">
                                 <Search size={14} className="text-cyber-cyan" />
-                                <span className="text-[10px] uppercase tracking-[0.2em] text-cyber-cyan/60">Scout API</span>
+                                <span className="text-[10px] uppercase tracking-[0.2em] text-cyber-cyan/60">Veille API</span>
                             </div>
                             <button
-                                onClick={handleSyncCatalog}
-                                disabled={loadingAction !== null}
-                                className="cyber-btn text-[9px] px-3 py-1.5 disabled:opacity-40"
+                                type="button"
+                                disabled={true}
+                                className="cyber-btn text-[9px] px-3 py-1.5 opacity-40 cursor-not-allowed"
                             >
-                                <RefreshCw size={11} className={loadingAction === 'catalog' ? 'animate-spin' : ''} />
-                                <span>Sync</span>
+                                <RefreshCw size={11} />
+                                <span>Sync verrouille</span>
                             </button>
                         </div>
 
@@ -299,6 +243,10 @@ export default function BuilderWorkbench() {
                     <div className="flex items-center gap-2">
                         <Hammer size={14} className="text-cyber-amber" />
                         <span className="text-[10px] uppercase tracking-[0.2em] text-cyber-amber/50">Flux Builder</span>
+                    </div>
+
+                    <div className="border border-cyber-amber/20 bg-cyber-amber/5 p-3 text-[10px] text-cyber-amber/80 leading-relaxed">
+                        Les builds, deploiements et mutations restent verrouilles pendant le run actif. Cet ecran sert uniquement a preparer le brief, la cible et le contexte API du prochain passage.
                     </div>
 
                     <div>
@@ -386,20 +334,20 @@ export default function BuilderWorkbench() {
 
                     <div className="flex flex-col sm:flex-row gap-3">
                         <button
-                            onClick={handleBuildOnly}
-                            disabled={loadingAction !== null}
-                            className="cyber-btn text-[10px] px-4 py-2 flex-1 disabled:opacity-40"
+                            type="button"
+                            disabled={EXECUTION_LOCKED}
+                            className="cyber-btn text-[10px] px-4 py-2 flex-1 opacity-40 cursor-not-allowed"
                         >
-                            <Wrench size={12} className={loadingAction === 'build' ? 'animate-spin' : ''} />
-                            <span>Build seul</span>
+                            <Wrench size={12} />
+                            <span>Build verrouille</span>
                         </button>
                         <button
-                            onClick={handlePipeline}
-                            disabled={loadingAction !== null}
-                            className="cyber-btn text-[10px] px-4 py-2 flex-1 disabled:opacity-40"
+                            type="button"
+                            disabled={EXECUTION_LOCKED}
+                            className="cyber-btn text-[10px] px-4 py-2 flex-1 opacity-40 cursor-not-allowed"
                         >
-                            <Rocket size={12} className={loadingAction === 'pipeline' ? 'animate-pulse' : ''} />
-                            <span>Flux complet</span>
+                            <Rocket size={12} />
+                            <span>Flux verrouille</span>
                         </button>
                     </div>
 
@@ -410,45 +358,6 @@ export default function BuilderWorkbench() {
                         </div>
                     )}
 
-                    {pipelineResult && (
-                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                            <PipelineCard
-                                title="Build"
-                                status={pipelineResult.build.status}
-                                lines={[
-                                    pipelineResult.build.filename || 'Sans fichier',
-                                    pipelineResult.build.project_dir || pipelineResult.build.message || 'Aucun dossier retourne.',
-                                    pipelineResult.build.validation?.success === false
-                                        ? 'Validation Python en warning'
-                                        : pipelineResult.build.validation?.success === true
-                                            ? 'Validation Python OK'
-                                            : pipelineResult.build.validation?.reason || 'Validation non executee',
-                                ]}
-                            />
-                            <PipelineCard
-                                title="Deploy"
-                                status={pipelineResult.deploy?.status}
-                                lines={[
-                                    pipelineResult.deploy?.deployment?.service || pipelineResult.deploy?.reason || 'Aucun service',
-                                    pipelineResult.deploy?.deployment?.target || pipelineResult.deploy?.message || 'Aucune cible',
-                                    pipelineResult.deploy?.execution?.returncode !== undefined
-                                        ? `Code retour ${pipelineResult.deploy.execution.returncode}`
-                                        : 'Sans execution distante',
-                                ]}
-                            />
-                            <PipelineCard
-                                title="Mutation"
-                                status={pipelineResult.mutation?.status}
-                                lines={[
-                                    pipelineResult.mutation?.summary || pipelineResult.mutation?.reason || 'Aucune mutation',
-                                    pipelineResult.mutation?.message || pipelineResult.mutation?.runner_path || 'Pas de runner retourne',
-                                    pipelineResult.mutation?.returncode !== undefined
-                                        ? `Code retour ${pipelineResult.mutation.returncode}`
-                                        : 'Execution non lancee',
-                                ]}
-                            />
-                        </div>
-                    )}
                 </div>
             </div>
         </section>
@@ -545,26 +454,5 @@ function ToggleChip({
         >
             {label}
         </button>
-    )
-}
-
-function PipelineCard({ title, status, lines }: { title: string; status?: string; lines: string[] }) {
-    const hasFailure = ['error', 'failed'].includes((status || '').toLowerCase())
-
-    return (
-        <div className={`border p-3 space-y-2 ${hasFailure ? 'border-cyber-pink/20 bg-cyber-pink/5' : 'border-white/[0.05] bg-white/[0.02]'}`}>
-            <div className="flex items-center justify-between gap-3">
-                <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/65">{title}</div>
-                <ResultBadge status={status} />
-            </div>
-            <div className="space-y-1.5">
-                {lines.map((line, index) => (
-                    <div key={`${title}-${index}`} className="flex items-start gap-2 text-[10px] text-white/30">
-                        {hasFailure ? <AlertTriangle size={12} className="shrink-0 mt-0.5 text-cyber-pink/70" /> : <CheckCircle2 size={12} className="shrink-0 mt-0.5 text-matrix/50" />}
-                        <span className="break-all">{line}</span>
-                    </div>
-                ))}
-            </div>
-        </div>
     )
 }

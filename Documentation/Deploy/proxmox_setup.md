@@ -6,7 +6,7 @@
 
 ---
 
-## 📋 Prérequis Matériels
+##  Prérequis Matériels
 
 ### Minimum (Genesis Phase)
 - **CPU**: Intel/AMD 8+ cores (Ryzen 7 ou équivalent)
@@ -22,7 +22,7 @@
 
 ---
 
-## 🔧 Étape 1: Installation Proxmox VE
+##  Étape 1: Installation Proxmox VE
 
 ### 1.1 Téléchargement
 ```bash
@@ -68,7 +68,7 @@ apt update && apt full-upgrade -y
 
 ---
 
-## 🌐 Étape 2: Configuration Réseau
+##  Étape 2: Configuration Réseau
 
 ### 2.1 Bridges Virtuels
 
@@ -112,7 +112,7 @@ Via l'interface web (https://10.0.0.1:8006):
 
 ---
 
-## 🎮 Étape 3: GPU Passthrough (IOMMU)
+##  Étape 3: GPU Passthrough (IOMMU)
 
 ### 3.1 Activer IOMMU
 
@@ -170,7 +170,7 @@ find /sys/kernel/iommu_groups/ -type l | grep "01:00"
 
 ---
 
-## 🖥️ Étape 4: Création des VMs
+##  Étape 4: Création des VMs
 
 ### 4.1 Template Ubuntu 22.04 (EVA Core & Sentinel)
 
@@ -254,7 +254,7 @@ qm start 150
 
 ---
 
-## 🔐 Étape 5: Configuration The Tablet
+##  Étape 5: Configuration The Tablet
 
 ### 5.1 Préparer la Clé USB
 
@@ -299,7 +299,7 @@ mount /mnt/THE_LAW
 
 ---
 
-## 🔒 Étape 6: Tailscale VPN
+##  Étape 6: Tailscale VPN
 
 ### 6.1 Installation sur Proxmox
 
@@ -318,7 +318,7 @@ tailscale up --hostname=eva-core
 
 ---
 
-## ✅ Étape 7: Vérification Finale
+##  Étape 7: Vérification Finale
 
 ### Checklist
 
@@ -343,7 +343,7 @@ ping 10.0.1.100  # Core VM
 
 ---
 
-## 📝 Prochaines Étapes
+##  Prochaines Étapes
 
 1. **Installer Docker** sur eva-core et sentinel
 2. **Déployer les services** via docker-compose

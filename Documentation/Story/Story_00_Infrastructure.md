@@ -1,14 +1,14 @@
 # Story 00: Infrastructure & DevOps (Foundation)
 
-## 📌 Context
+##  Context
 Before running any AI, we need a stable, secure, and resilient infrastructure. The "Genesis" phase relies on a single server (Proxmox) but must behave like a professional datacenter.
 
-## 🎯 Objectives
+##  Objectives
 - Install and configure Proxmox VE.
 - Secure the network (Segmentation).
 - Prepare the environment for AI (GPU Passthrough) and Trading (Windows VM).
 
-## 📋 Epic/Tasks Breakdown
+##  Epic/Tasks Breakdown
 
 ### TASK-00-01: Proxmox Setup (The Hive Metal)
 - **Role**: SysAdmin

@@ -5,7 +5,7 @@
 
 ---
 
-## 📋 Structure des Erreurs
+##  Structure des Erreurs
 
 ```json
 {
@@ -21,18 +21,18 @@
 
 ---
 
-## 🧠 Erreurs EVA Core (EVA-COR-XXX)
+##  Erreurs EVA Core (EVA-COR-XXX)
 
 | Code | Message | Sévérité | Récupérable | Action |
 |------|---------|----------|-------------|--------|
-| `EVA-COR-001` | Serveur LLM non répondant | critical | ✅ | Redémarrer vLLM, vérifier GPU |
-| `EVA-COR-002` | Échec classification intent | warning | ✅ | Fallback vers GENERAL_CHAT |
-| `EVA-COR-003` | Timeout recherche mémoire | warning | ✅ | Retry avec cache local |
-| `EVA-COR-004` | ID de session invalide | error | ❌ | Créer nouvelle session |
-| `EVA-COR-005` | Échec routage agent | error | ✅ | Retry direct vers Core |
-| `EVA-COR-006` | Limite de tokens dépassée | warning | ✅ | Tronquer le contexte |
-| `EVA-COR-007` | Connexion Qdrant perdue | critical | ✅ | Retry + alerte admin |
-| `EVA-COR-008` | Échec pub/sub Redis | critical | ✅ | Reconnexion auto |
+| `EVA-COR-001` | Serveur LLM non répondant | critical |  | Redémarrer vLLM, vérifier GPU |
+| `EVA-COR-002` | Échec classification intent | warning |  | Fallback vers GENERAL_CHAT |
+| `EVA-COR-003` | Timeout recherche mémoire | warning |  | Retry avec cache local |
+| `EVA-COR-004` | ID de session invalide | error |  | Créer nouvelle session |
+| `EVA-COR-005` | Échec routage agent | error |  | Retry direct vers Core |
+| `EVA-COR-006` | Limite de tokens dépassée | warning |  | Tronquer le contexte |
+| `EVA-COR-007` | Connexion Qdrant perdue | critical |  | Retry + alerte admin |
+| `EVA-COR-008` | Échec pub/sub Redis | critical |  | Reconnexion auto |
 
 ### Détails EVA-COR-001
 ```json
@@ -52,24 +52,24 @@
 
 ---
 
-## 💰 Erreurs Trading (EVA-TRD-XXX)
+##  Erreurs Trading (EVA-TRD-XXX)
 
 | Code | Message | Sévérité | Récupérable | Action |
 |------|---------|----------|-------------|--------|
-| `EVA-TRD-001` | Connexion MT5 perdue | critical | ✅ | Reconnexion auto, pause trading |
-| `EVA-TRD-002` | Limite de risque dépassée | error | ❌ | Rejeter ordre, log Constitution |
-| `EVA-TRD-003` | Limite drawdown journalier | critical | ❌ | Kill-Switch, fermer tout |
-| `EVA-TRD-004` | Limite drawdown total | critical | ❌ | Kill-Switch, désactiver trading |
-| `EVA-TRD-005` | Anti-tilt déclenché | warning | ❌ | Pause 24h |
-| `EVA-TRD-006` | Filtre news actif | info | ❌ | Attendre fin période |
-| `EVA-TRD-007` | Marge insuffisante | error | ❌ | Réduire taille position |
-| `EVA-TRD-008` | Marché fermé | info | ❌ | Ordre en attente |
-| `EVA-TRD-009` | Échec exécution ordre | error | ✅ | Retry (max 2x) |
-| `EVA-TRD-010` | Symbole non autorisé | error | ❌ | Ajouter à whitelist si légitime |
-| `EVA-TRD-011` | Stop loss manquant | error | ❌ | Rejeter (ROE: SL obligatoire) |
-| `EVA-TRD-012` | Slippage excessif | warning | ✅ | Log, ajuster EA |
-| `EVA-TRD-013` | Échec copie Hydra | error | ✅ | Retry sur compte spécifique |
-| `EVA-TRD-014` | Violation règle Prop Firm | critical | ❌ | Alerte immédiate, review trade |
+| `EVA-TRD-001` | Connexion MT5 perdue | critical |  | Reconnexion auto, pause trading |
+| `EVA-TRD-002` | Limite de risque dépassée | error |  | Rejeter ordre, log Constitution |
+| `EVA-TRD-003` | Limite drawdown journalier | critical |  | Kill-Switch, fermer tout |
+| `EVA-TRD-004` | Limite drawdown total | critical |  | Kill-Switch, désactiver trading |
+| `EVA-TRD-005` | Anti-tilt déclenché | warning |  | Pause 24h |
+| `EVA-TRD-006` | Filtre news actif | info |  | Attendre fin période |
+| `EVA-TRD-007` | Marge insuffisante | error |  | Réduire taille position |
+| `EVA-TRD-008` | Marché fermé | info |  | Ordre en attente |
+| `EVA-TRD-009` | Échec exécution ordre | error |  | Retry (max 2x) |
+| `EVA-TRD-010` | Symbole non autorisé | error |  | Ajouter à whitelist si légitime |
+| `EVA-TRD-011` | Stop loss manquant | error |  | Rejeter (ROE: SL obligatoire) |
+| `EVA-TRD-012` | Slippage excessif | warning |  | Log, ajuster EA |
+| `EVA-TRD-013` | Échec copie Hydra | error |  | Retry sur compte spécifique |
+| `EVA-TRD-014` | Violation règle Prop Firm | critical |  | Alerte immédiate, review trade |
 
 ### Détails EVA-TRD-003
 ```json
@@ -88,20 +88,20 @@
 
 ---
 
-## 🔒 Erreurs Sécurité (EVA-SEC-XXX)
+##  Erreurs Sécurité (EVA-SEC-XXX)
 
 | Code | Message | Sévérité | Récupérable | Action |
 |------|---------|----------|-------------|--------|
-| `EVA-SEC-001` | Brute force détecté | high | ✅ | Bloquer IP, alerter |
-| `EVA-SEC-002` | Échec intégrité Kernel | critical | ❌ | ARRÊT système |
-| `EVA-SEC-003` | Constitution altérée | critical | ❌ | ARRÊT système |
-| `EVA-SEC-004` | Accès non autorisé | high | ✅ | Bloquer + enquêter |
-| `EVA-SEC-005` | HSM non répondant | critical | ✅ | Retry, alerter admin |
-| `EVA-SEC-006` | Tablet non montée | critical | ❌ | Refuser démarrage |
-| `EVA-SEC-007` | Scan de ports détecté | medium | ✅ | Logger, bloquer optionnel |
-| `EVA-SEC-008` | Signature malware | critical | ✅ | Quarantaine, alerter |
-| `EVA-SEC-009` | Certificat SSL expiré | warning | ❌ | Renouveler certificat |
-| `EVA-SEC-010` | Tailscale déconnecté | warning | ✅ | Reconnexion auto |
+| `EVA-SEC-001` | Brute force détecté | high |  | Bloquer IP, alerter |
+| `EVA-SEC-002` | Échec intégrité Kernel | critical |  | ARRÊT système |
+| `EVA-SEC-003` | Constitution altérée | critical |  | ARRÊT système |
+| `EVA-SEC-004` | Accès non autorisé | high |  | Bloquer + enquêter |
+| `EVA-SEC-005` | HSM non répondant | critical |  | Retry, alerter admin |
+| `EVA-SEC-006` | Tablet non montée | critical |  | Refuser démarrage |
+| `EVA-SEC-007` | Scan de ports détecté | medium |  | Logger, bloquer optionnel |
+| `EVA-SEC-008` | Signature malware | critical |  | Quarantaine, alerter |
+| `EVA-SEC-009` | Certificat SSL expiré | warning |  | Renouveler certificat |
+| `EVA-SEC-010` | Tailscale déconnecté | warning |  | Reconnexion auto |
 
 ### Détails EVA-SEC-002
 ```json
@@ -120,18 +120,18 @@
 
 ---
 
-## ⚙️ Erreurs Système (EVA-SYS-XXX)
+##  Erreurs Système (EVA-SYS-XXX)
 
 | Code | Message | Sévérité | Récupérable | Action |
 |------|---------|----------|-------------|--------|
-| `EVA-SYS-001` | Avertissement température GPU | warning | ✅ | Réduire charge |
-| `EVA-SYS-002` | Température GPU critique | critical | ✅ | Arrêt gracieux |
-| `EVA-SYS-003` | Espace disque faible | warning | ❌ | Nettoyage, alerter |
-| `EVA-SYS-004` | Pression mémoire | warning | ✅ | Tuer tâches basse priorité |
-| `EVA-SYS-005` | Pool connexions DB épuisé | error | ✅ | Étendre pool, retry |
-| `EVA-SYS-006` | Timeout watchdog | critical | ✅ | Reset par ESP32 |
-| `EVA-SYS-007` | Échec sauvegarde | error | ✅ | Retry, alerter si 3x échec |
-| `EVA-SYS-008` | Container OOM killed | error | ✅ | Restart, augmenter limites |
+| `EVA-SYS-001` | Avertissement température GPU | warning |  | Réduire charge |
+| `EVA-SYS-002` | Température GPU critique | critical |  | Arrêt gracieux |
+| `EVA-SYS-003` | Espace disque faible | warning |  | Nettoyage, alerter |
+| `EVA-SYS-004` | Pression mémoire | warning |  | Tuer tâches basse priorité |
+| `EVA-SYS-005` | Pool connexions DB épuisé | error |  | Étendre pool, retry |
+| `EVA-SYS-006` | Timeout watchdog | critical |  | Reset par ESP32 |
+| `EVA-SYS-007` | Échec sauvegarde | error |  | Retry, alerter si 3x échec |
+| `EVA-SYS-008` | Container OOM killed | error |  | Restart, augmenter limites |
 
 ### Détails EVA-SYS-002
 ```json
@@ -154,19 +154,19 @@
 
 ---
 
-## 🌐 Erreurs Réseau (EVA-NET-XXX)
+##  Erreurs Réseau (EVA-NET-XXX)
 
 | Code | Message | Sévérité | Récupérable | Action |
 |------|---------|----------|-------------|--------|
-| `EVA-NET-001` | Timeout API | warning | ✅ | Retry avec backoff |
-| `EVA-NET-002` | Échec résolution DNS | error | ✅ | Utiliser DNS fallback |
-| `EVA-NET-003` | Rate limit atteint | warning | ✅ | Attendre, retry |
-| `EVA-NET-004` | Échec handshake TLS | error | ✅ | Vérifier certificats |
-| `EVA-NET-005` | API externe indisponible | warning | ✅ | Utiliser cache si dispo |
+| `EVA-NET-001` | Timeout API | warning |  | Retry avec backoff |
+| `EVA-NET-002` | Échec résolution DNS | error |  | Utiliser DNS fallback |
+| `EVA-NET-003` | Rate limit atteint | warning |  | Attendre, retry |
+| `EVA-NET-004` | Échec handshake TLS | error |  | Vérifier certificats |
+| `EVA-NET-005` | API externe indisponible | warning |  | Utiliser cache si dispo |
 
 ---
 
-## 📊 Mapping Codes HTTP
+##  Mapping Codes HTTP
 
 | Code HTTP | Code Erreur | Signification |
 |-----------|-------------|---------------|
@@ -180,7 +180,7 @@
 
 ---
 
-## 🔔 Matrice d'Escalation
+##  Matrice d'Escalation
 
 | Sévérité | Notification | Délai | Canaux |
 |----------|--------------|-------|--------|
@@ -191,7 +191,7 @@
 
 ---
 
-## 💻 Implémentation Python
+##  Implémentation Python
 
 ```python
 from enum import Enum

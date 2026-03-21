@@ -18,7 +18,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from shared import get_settings
+from shared import PromotionReportEnvelope, TrainingRunEnvelope, get_settings
 from shared.redis_client import init_redis, get_redis_client
 
 from eva_lab.arena import Arena
@@ -26,11 +26,21 @@ from eva_lab.backtester import Backtester
 from eva_lab.champion_promoter import ChampionPromoter
 from eva_lab.dreamer_model import DreamerModel
 from eva_lab.genetic_updater import GeneticUpdater
+from eva_lab.gnn_registry import (
+    build_market_gnn_graph_snapshot,
+    load_market_gnn_registry,
+)
+from eva_lab.live_inference_models import LivePredictRequest
 from eva_lab.shadow_learning import ShadowLearningService
 from eva_lab.dreamer_gate import DreamerGate
+from eva_lab.timescale_store import describe_timescale_source
 from eva_lab.training_status import (
     build_training_universe_summary,
+    classify_training_symbol,
+    derive_observed_training_step,
+    format_training_step_label,
     load_nightly_summary,
+    select_effective_training_step,
     load_training_status,
     tail_training_log,
 )
@@ -102,6 +112,7 @@ async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str
     redis_host = os.getenv("REDIS_HOST", "redis")
     neo4j_host = os.getenv("NEO4J_HOST", "neo4j")
     mqtt_host = os.getenv("HIVE_MQTT_HOST", "mosquitto")
+    timescale_info = describe_timescale_source()
 
     vllm_state = str(launcher.get("vllm_state") or "").lower()
     if vllm_state == "stopped_for_training":
@@ -118,6 +129,13 @@ async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str
     dependencies["redis"] = await _probe_tcp_dependency("redis", redis_host, 6379)
     dependencies["neo4j"] = await _probe_tcp_dependency("neo4j", neo4j_host, 7687)
     dependencies["mosquitto"] = await _probe_tcp_dependency("mosquitto", mqtt_host, 1883)
+    dependencies["timescaledb"] = await _probe_tcp_dependency(
+        "timescaledb",
+        str(timescale_info.get("host") or "timescaledb"),
+        int(timescale_info.get("port") or 5432),
+    )
+    dependencies["timescaledb"]["enabled"] = bool(timescale_info.get("enabled", False))
+    dependencies["timescaledb"]["source"] = str(timescale_info.get("source") or "csv")
 
     trainer_container = launcher.get("trainer_container")
     trainer_running = bool(run_status.get("active")) or bool(trainer_container)
@@ -129,6 +147,118 @@ async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str
         "pid": launcher.get("remote_pid"),
     }
     return dependencies
+
+
+async def _publish_training_run_snapshot(
+    run_view: dict[str, Any],
+    dependencies: dict[str, Any],
+    universe: dict[str, Any],
+    nightly_summary: dict[str, Any] | None,
+) -> None:
+    """
+    Publie un instantane structure du run courant pour EVA Core.
+
+    Args:
+        run_view (dict[str, Any]): Vue courante du run.
+        dependencies (dict[str, Any]): Dependances observees.
+        universe (dict[str, Any]): Resume de l'univers.
+        nightly_summary (dict[str, Any] | None): Resume nightly en lecture seule.
+    """
+    try:
+        current_step = dict(run_view.get("current_step") or {})
+        symbol = str(current_step.get("symbol") or "") or None
+        family = str(run_view.get("family") or "").strip()
+        if not family and symbol:
+            family = classify_training_symbol(symbol)
+        envelope = TrainingRunEnvelope(
+            engine=str(run_view.get("engine") or "") or None,
+            run_id=str(run_view.get("run_id") or "") or None,
+            horizon=str(current_step.get("horizon") or "") or None,
+            family=family or None,
+            feature_profile=str(run_view.get("feature_profile") or "") or None,
+            dataset_id=str(run_view.get("dataset_id") or "") or None,
+            dataset_source=str(run_view.get("dataset_source") or "") or None,
+            mechanics_profile_version=str(run_view.get("mechanics_profile_version") or "") or None,
+            ga_status=str(run_view.get("ga_status") or "") or None,
+            ga_generation=run_view.get("ga_generation"),
+            ga_trial=str(run_view.get("ga_trial") or "") or None,
+            trial_mode=str(run_view.get("trial_mode") or "") or None,
+            trial_cost_profile=str(run_view.get("trial_cost_profile") or "") or None,
+            replay_cache_status=str(run_view.get("replay_cache_status") or "") or None,
+            replay_cache_key=str(run_view.get("replay_cache_key") or "") or None,
+            replay_cache_entries=run_view.get("replay_cache_entries"),
+            replay_cache_source=str(run_view.get("replay_cache_source") or "") or None,
+            shadow_buffer_size=run_view.get("shadow_buffer_size"),
+            sequence_length=run_view.get("sequence_length"),
+            sequence_stride=run_view.get("sequence_stride"),
+            world_model_steps=run_view.get("world_model_steps"),
+            dataset_coverage=dict(run_view.get("dataset_coverage") or {}),
+            phase=str(current_step.get("phase") or "") or None,
+            current_symbol=symbol,
+            status=str(run_view.get("status") or "idle"),
+            arena_progress=run_view.get("arena_progress"),
+            dependencies=dependencies,
+            universe=universe,
+            payload={
+                "run": run_view,
+                "nightly_summary": nightly_summary,
+            },
+            metadata={"source": "training_status_endpoint"},
+        )
+        redis = get_redis_client()
+        payload = envelope.model_dump()
+        await redis.cache_set("eva:state:training:run", payload, ttl_seconds=60)
+        await redis.publish("eva.training.run", payload)
+    except Exception as exc:
+        logger.debug("Publication du run training ignoree: %s", exc)
+
+
+async def _publish_champion_status_snapshot(payload: dict[str, Any]) -> None:
+    """
+    Publie un instantane agrege des champions et promotions.
+
+    Args:
+        payload (dict[str, Any]): Charge utile complete de l'endpoint champions.
+    """
+    try:
+        redis = get_redis_client()
+        await redis.cache_set("eva:state:champions:status", payload, ttl_seconds=120)
+        await redis.publish("eva.training.champions", payload)
+        engine_payloads = dict(payload.get("engines") or {})
+        if not engine_payloads:
+            engine_payloads = {"muzero": dict(payload.get("horizons") or {})}
+        for engine_name, horizons in engine_payloads.items():
+            for horizon, status in dict(horizons or {}).items():
+                envelope = PromotionReportEnvelope(
+                    engine=str(engine_name or "muzero"),
+                    horizon=str(horizon),
+                    family=str(status.get("family") or "") or None,
+                    live_champion_id=str(status.get("live_champion_id") or "") or None,
+                    challenger_id=str(
+                        status.get("candidate_id")
+                        or (status.get("manifest") or {}).get("challenger_id")
+                        or ""
+                    ) or None,
+                    promotion_gate=dict(status.get("promotion_gate") or {}),
+                    promotion_checks=dict(status.get("promotion_checks") or {}),
+                    metrics_by_symbol=dict(status.get("metrics_by_symbol") or {}),
+                    metrics_by_position_mechanics=dict(status.get("metrics_by_position_mechanics") or {}),
+                    feature_profile=str(status.get("feature_profile") or "") or None,
+                    dataset_id=str(status.get("dataset_id") or "") or None,
+                    failure_mode=str(status.get("failure_mode") or "") or None,
+                    top_live_symbols=list(status.get("top_live_symbols") or []),
+                    payload=status,
+                    metadata={"source": "champions_status_endpoint"},
+                )
+                serialized = envelope.model_dump()
+                await redis.cache_set(
+                    f"eva:state:promotion:{str(engine_name).lower()}:{str(horizon).lower()}",
+                    serialized,
+                    ttl_seconds=120,
+                )
+                await redis.publish("eva.training.promotion", serialized)
+    except Exception as exc:
+        logger.debug("Publication du statut champions ignoree: %s", exc)
 
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -576,13 +706,69 @@ async def shadow_stats():
 @app.get("/dreamer/status")
 async def dreamer_status():
     """
-    VÃ©rifie l'Ã©tat de la porte logique DreamerV3 (Feature Flag).
+    Retourne l'etat exploitable du pipeline DreamerV3.
 
     Returns:
-        dict: Ã‰tat (enabled/disabled) et configuration.
+        dict: Etat du gate, du pipeline et des derniers artefacts Dreamer.
     """
     gate: DreamerGate = app.state.dreamer_gate
-    return gate.get_status()
+    promoter: ChampionPromoter = app.state.promoter
+    horizons = ["scalp", "intraday", "swing"]
+    training_run = load_training_status()
+    active_run = training_run if str(training_run.get("engine") or "").lower() == "dreamer" else {}
+    pipeline = {
+        "active": bool(active_run.get("active")),
+        "run_id": active_run.get("run_id"),
+        "status": active_run.get("status"),
+        "family": active_run.get("family"),
+        "feature_profile": active_run.get("feature_profile"),
+        "mechanics_profile_version": active_run.get("mechanics_profile_version"),
+        "ga_status": active_run.get("ga_status"),
+        "ga_generation": active_run.get("ga_generation"),
+        "ga_trial": active_run.get("ga_trial"),
+        "trial_mode": active_run.get("trial_mode"),
+        "trial_cost_profile": active_run.get("trial_cost_profile"),
+        "replay_cache_status": active_run.get("replay_cache_status"),
+        "replay_cache_key": active_run.get("replay_cache_key"),
+        "replay_cache_entries": active_run.get("replay_cache_entries"),
+        "shadow_buffer_size": active_run.get("shadow_buffer_size"),
+        "sequence_length": active_run.get("sequence_length"),
+        "sequence_stride": active_run.get("sequence_stride"),
+        "world_model_steps": active_run.get("world_model_steps"),
+        "dataset_id": active_run.get("dataset_id"),
+        "dataset_source": active_run.get("dataset_source"),
+        "dataset_coverage": active_run.get("dataset_coverage", {}),
+    }
+    engine_horizons = {
+        horizon: promoter.build_engine_horizon_status("dreamer", horizon)
+        for horizon in horizons
+    }
+    latest_candidate = None
+    latest_verdict = None
+    for horizon in horizons:
+        horizon_status = dict(engine_horizons.get(horizon) or {})
+        if latest_candidate is None and horizon_status.get("candidate_id"):
+            latest_candidate = {
+                "engine": "dreamer",
+                "horizon": horizon,
+                "candidate_id": horizon_status.get("candidate_id"),
+                "failure_mode": horizon_status.get("failure_mode"),
+            }
+        if latest_verdict is None and horizon_status.get("promotion_gate"):
+            latest_verdict = {
+                "engine": "dreamer",
+                "horizon": horizon,
+                "status": horizon_status.get("promotion_gate", {}).get("status"),
+                "reason": horizon_status.get("gate_reason"),
+                "failure_mode": horizon_status.get("failure_mode"),
+            }
+    return {
+        **gate.get_status(),
+        "pipeline": pipeline,
+        "horizons": engine_horizons,
+        "latest_candidate": latest_candidate,
+        "latest_verdict": latest_verdict,
+    }
 
 
 @app.get("/champions/status")
@@ -611,26 +797,35 @@ async def champion_status():
     except Exception as exc:
         logger.warning("Lecture du resume nocturne impossible: %s", exc)
 
-    horizon_status = {
-        horizon: promoter.build_horizon_status(horizon, registry_champions.get(horizon))
-        for horizon in horizons
-    }
+    engine_status = promoter.build_engine_matrix_status(horizons, registry_champions)
+    horizon_status = dict(engine_status.get("muzero") or {})
     live_champions = {
         horizon: status.get("live_champion_id")
         for horizon, status in horizon_status.items()
     }
+    live_champions_by_engine = {
+        engine: {
+            horizon: status.get("live_champion_id")
+            for horizon, status in statuses.items()
+        }
+        for engine, statuses in engine_status.items()
+    }
 
-    return {
+    payload = {
         "status": "ok",
         "selection_policy": promoter.get_live_selection_policy(),
         "dreamer_gate": gate.get_status(),
         "champions": registry_champions,
         "registry_champions": registry_champions,
         "live_champions": live_champions,
+        "live_champions_by_engine": live_champions_by_engine,
         "performance_summary": performance_summary,
         "horizons": horizon_status,
+        "engines": engine_status,
         "nightly_summary": nightly_summary,
     }
+    await _publish_champion_status_snapshot(payload)
+    return payload
 
 
 @app.get("/training/status")
@@ -648,49 +843,118 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
     nightly_summary = load_nightly_summary()
     universe_summary = run_status.get("universe") or build_training_universe_summary()
     dependencies = await _collect_training_dependencies(run_status)
+    logs = tail_training_log(limit)
 
     current_step = run_status.get("current_step") or {}
-    step_parts = [
-        str(current_step.get("name") or "").strip(),
-        str(current_step.get("phase") or "").strip(),
-        str(current_step.get("horizon") or "").strip(),
-        str(current_step.get("symbol") or "").strip(),
-    ]
+    arena_progress = run_status.get("arena_progress") or None
+    observed_step = derive_observed_training_step(logs)
+    effective_step = select_effective_training_step(current_step, observed_step)
     run_view = dict(run_status)
-    run_view["step_label"] = " | ".join(part for part in step_parts if part)
+    run_view["current_step"] = effective_step
+    run_view["arena_progress"] = arena_progress
+    run_view["reported_step"] = current_step or None
+    run_view["observed_step"] = observed_step
+    run_view["effective_step"] = effective_step
+    run_view["step_label"] = format_training_step_label(effective_step)
+    run_view["reported_step_label"] = format_training_step_label(current_step)
+    run_view["observed_step_label"] = format_training_step_label(observed_step)
     run_view["has_active_run"] = bool(run_status.get("active"))
+    if arena_progress and isinstance(arena_progress, dict):
+        challenger_metrics = dict((arena_progress.get("challenger") or {}).get("metrics") or {})
+        if challenger_metrics.get("metrics_by_position_mechanics"):
+            run_view["metrics_by_position_mechanics"] = challenger_metrics.get("metrics_by_position_mechanics")
 
-    return {
+    payload = {
         "status": "ok",
         "run": run_view,
         "dependencies": dependencies,
         "universe": universe_summary,
-        "logs": tail_training_log(limit),
+        "logs": logs,
         "nightly_summary": nightly_summary,
         "status_path": str(Path("data/checkpoints/training_status.json")),
         "log_path": str(Path("data/checkpoints/training_run.log")),
+        "engine": run_view.get("engine"),
+        "dataset_id": run_view.get("dataset_id"),
+        "feature_profile": run_view.get("feature_profile"),
+        "family": run_view.get("family"),
+        "dataset_source": run_view.get("dataset_source"),
+        "mechanics_profile_version": run_view.get("mechanics_profile_version"),
+        "ga_status": run_view.get("ga_status"),
+        "ga_generation": run_view.get("ga_generation"),
+        "ga_trial": run_view.get("ga_trial"),
+        "trial_mode": run_view.get("trial_mode"),
+        "trial_cost_profile": run_view.get("trial_cost_profile"),
+        "replay_cache_status": run_view.get("replay_cache_status"),
+        "replay_cache_key": run_view.get("replay_cache_key"),
+        "replay_cache_entries": run_view.get("replay_cache_entries"),
+        "replay_cache_source": run_view.get("replay_cache_source"),
+        "shadow_buffer_size": run_view.get("shadow_buffer_size"),
+        "sequence_length": run_view.get("sequence_length"),
+        "sequence_stride": run_view.get("sequence_stride"),
+        "world_model_steps": run_view.get("world_model_steps"),
+        "dataset_coverage": run_view.get("dataset_coverage", {}),
+        "metrics_by_position_mechanics": run_view.get("metrics_by_position_mechanics", {}),
     }
+    await _publish_training_run_snapshot(
+        run_view=run_view,
+        dependencies=dependencies,
+        universe=universe_summary,
+        nightly_summary=nightly_summary,
+    )
+    return payload
 
 
 @app.get("/live/universe")
-async def live_universe(horizon: str = Query(default="intraday")):
+async def live_universe(
+    horizon: str = Query(default="intraday"),
+    engine: str = Query(default="muzero"),
+):
     """
     Retourne l'univers live recommande pour un horizon MuZero.
 
     Args:
         horizon (str): Horizon cible (`scalp`, `intraday`, `swing`).
+        engine (str): Moteur cible (`muzero` ou `dreamer`).
 
     Returns:
         dict: Liste de symboles recommandee et metadonnees de restriction.
     """
     promoter: ChampionPromoter = app.state.promoter
-    status = promoter.build_horizon_status(horizon)
+    normalized_horizon = str(horizon or "intraday").lower()
+    normalized_engine = promoter.normalize_engine_name(engine)
+    status = promoter.build_engine_horizon_status(normalized_engine, normalized_horizon)
+    engine_matrix = promoter.build_engine_matrix_status([normalized_horizon], {})
+    live_champions_by_engine = {
+        engine_name: {
+            item_horizon: item_status.get("live_champion_id")
+            for item_horizon, item_status in statuses.items()
+        }
+        for engine_name, statuses in engine_matrix.items()
+    }
+    top_live_symbols_by_engine = {
+        engine_name: list(
+            dict(statuses or {}).get(normalized_horizon, {}).get("top_live_symbols") or []
+        )
+        for engine_name, statuses in engine_matrix.items()
+    }
     return {
         "status": "ok",
-        "horizon": horizon.lower(),
+        "engine": normalized_engine,
+        "horizon": normalized_horizon,
+        "family": status.get("family"),
+        "feature_profile": status.get("feature_profile"),
+        "mechanics_profile_version": status.get("mechanics_profile_version"),
+        "dataset_id": status.get("dataset_id"),
+        "dataset_source": status.get("dataset_source"),
+        "dataset_coverage": status.get("dataset_coverage"),
         "selection_policy": promoter.get_live_selection_policy(),
         "engine_label": status.get("engine_label"),
         "selection": status.get("selection"),
+        "live_champion_id": status.get("live_champion_id"),
+        "live_champion_id_muzero": live_champions_by_engine.get("muzero", {}).get(normalized_horizon),
+        "live_champion_id_dreamer": live_champions_by_engine.get("dreamer", {}).get(normalized_horizon),
+        "top_live_symbols_by_engine": top_live_symbols_by_engine,
+        "top_live_symbols": status.get("top_live_symbols"),
         "promotion_gate": status.get("promotion_gate"),
         "live_universe": status.get("live_universe"),
     }
@@ -709,6 +973,36 @@ async def dreamer_predict(observation: dict):
     """
     gate: DreamerGate = app.state.dreamer_gate
     return gate.run_inference(observation)
+
+
+@app.post("/predict/live")
+async def predict_live(request: LivePredictRequest):
+    """
+    Execute une inference live stricte pour le banker.
+
+    Args:
+        request (LivePredictRequest): Observation live du banker.
+
+    Returns:
+        dict: Action brute du champion scalp live ou blocage explicite.
+    """
+    gate: DreamerGate = app.state.dreamer_gate
+    return gate.run_live_inference(request.model_dump())
+
+
+@app.post("/predict/ensemble")
+async def predict_ensemble(request: LivePredictRequest):
+    """
+    Execute un arbitrage 50/50 entre MuZero et DreamerV3.
+
+    Args:
+        request (LivePredictRequest): Observation live du banker.
+
+    Returns:
+        dict: Sous-decisions par moteur et decision finale d'ensemble.
+    """
+    gate: DreamerGate = app.state.dreamer_gate
+    return gate.run_ensemble_inference(request.model_dump())
 
 
 @app.post("/dreamer/train")
@@ -824,62 +1118,63 @@ async def gnn_predict(request: GNNPredictRequest):
         }
 
 
+@app.get("/gnn/status")
+async def gnn_status():
+    """
+    Retourne le registre public du Market GNN.
+
+    Returns:
+        dict: Version, statut, univers et artefacts du GNN de marche.
+    """
+    registry = load_market_gnn_registry()
+    return {
+        "status": "ok",
+        "gnn": registry,
+    }
+
+
+@app.get("/gnn/metrics")
+async def gnn_metrics():
+    """
+    Retourne les metriques publiques du Market GNN.
+
+    Returns:
+        dict: Metriques consolidees et informations de couverture.
+    """
+    registry = load_market_gnn_registry()
+    return {
+        "status": "ok",
+        "version": registry.get("version"),
+        "model_status": registry.get("status"),
+        "trained_at": registry.get("trained_at"),
+        "metrics": registry.get("metrics", {}),
+        "universe": registry.get("universe", {}),
+        "timeframes": registry.get("timeframes", []),
+        "artifacts": registry.get("artifacts", {}),
+    }
+
+
 @app.get("/gnn/graph")
 async def get_gnn_graph(style: str = "cyberpunk"):
     """
-    Expose la topologie complÃ¨te (Nodes & Edge Index) du MultiAssetGNN.
-    Sert au Dashboard Nexus pour le 'GNN Knowledge Graph'.
+    Expose un graphe reel du Market GNN, derive des historiques.
+
+    Args:
+        style (str): Parametre conserve pour compatibilite avec l'UI existante.
+
+    Returns:
+        dict: Graphe reel ou etat explicite d'indisponibilite.
     """
-    if not hasattr(app.state, "gnn_model") or app.state.gnn_model is None:
-        return {"nodes": [], "links": []}
-    
-    # 1. Obtenir les noeuds (Actifs orbitaux + Noyau Central)
-    # Dans une version pure, les assets sont extraits de l'Ã©tat GNN.
-    # Ici, nous crÃ©ons une vue reprÃ©sentative des actifs surveillÃ©s par The Hive.
-    assets = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "AVAX"]
-    nodes = []
-    
-    # Noyau Central Macro
-    nodes.append({
-        "id": "macro_core",
-        "label": "MACRO GATConv Core",
-        "role": "core",
-        "expert": "gnn",
-        "timestamp": datetime.now().isoformat()
-    })
-    
-    # Actifs PÃ©riphÃ©riques
-    for asset in assets:
-        nodes.append({
-            "id": asset,
-            "label": f"{asset}/USDT",
-            "role": "asset",
-            "expert": "gnn",
-            "timestamp": datetime.now().isoformat()
-        })
-    
-    # 2. Construire l'Edge Index (Liens)
-    links = []
-    import random
-    
-    # Liens du noyau vers les actifs (Attention spatiale)
-    for asset in assets:
-        # Poids simulÃ© basÃ© sur l'attention du GATConv
-        weight = random.uniform(0.3, 0.95)
-        links.append({
-            "source": "macro_core",
-            "target": asset,
-            "value": weight
-        })
-        
-    # CorrÃ©lations croisÃ©es majeures (Liens entre actifs)
-    # e.g BTC <-> ETH est toujours fort
-    links.append({"source": "BTC", "target": "ETH", "value": 0.88})
-    links.append({"source": "SOL", "target": "ETH", "value": 0.72})
-    links.append({"source": "ADA", "target": "BTC", "value": 0.55})
-    links.append({"source": "DOGE", "target": "BTC", "value": 0.45})
-    
-    return {"nodes": nodes, "links": links}
+    _ = style
+    registry = load_market_gnn_registry()
+    snapshot = build_market_gnn_graph_snapshot(registry=registry)
+    snapshot["version"] = registry.get("version")
+    snapshot["model_status"] = registry.get("status")
+    snapshot["trained_at"] = registry.get("trained_at")
+    snapshot["timeframes"] = registry.get("timeframes", [])
+    snapshot["universe"] = registry.get("universe", {})
+    snapshot["metrics"] = registry.get("metrics", {})
+    return snapshot
 
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•

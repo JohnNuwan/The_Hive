@@ -1,14 +1,14 @@
 # Story 01: The Kernel & Security (The Shield)
 
-## 📌 Context
+##  Context
 Security is not an option, especially with real money involved. The Kernel (Rust) provides immutable guarantees that Python logic cannot override.
 
-## 🎯 Objectives
+##  Objectives
 - Implement the "Financial Kill-Switch".
 - Secure the Key handling.
 - Monitor critical hardware metrics.
 
-## 📋 Epic/Tasks Breakdown
+##  Epic/Tasks Breakdown
 
 ### TASK-01-01: Rust Environment & Skeleton
 - **Role**: Rust Developer

@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Activity, BrainCircuit, ShieldAlert } from 'lucide-react'
 import {
     checkNodeHealth,

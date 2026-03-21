@@ -1,14 +1,14 @@
 # Story 02: E.V.A. Core & API (The Brain)
 
-## 📌 Context
+##  Context
 The central nervous system. It orchestrates the Experts and handles communication with the outside world.
 
-## 🎯 Objectives
+##  Objectives
 - Setup FastAPI Gateway.
 - Implement the LangGraph Router.
 - Connect local LLM inference.
 
-## 📋 Epic/Tasks Breakdown
+##  Epic/Tasks Breakdown
 
 ### TASK-02-01: API Gateway (FastAPI)
 - **Role**: Python Backend Dev
@@ -29,7 +29,7 @@ The central nervous system. It orchestrates the Experts and handles communicatio
     - `Banker`: (Stub) Returns financial data.
     - `Chat`: (Stub) Returns Llama 3 response.
 - **Acceptance Criteria**:
-    - [ ] A query "What is the price of Gold?" routes to `Banker` node.
+    - [ ] A query "What is the price of Gold-" routes to `Banker` node.
     - [ ] A query "Hello" routes to `Chat` node.
 
 ### TASK-02-03: Local Inference Engine (vLLM)

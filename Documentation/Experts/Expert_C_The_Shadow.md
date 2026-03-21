@@ -7,7 +7,7 @@
 
 ## 2. Architecture Technique
 *   **Modèle LLM** : `Dolphin-2.x-Mistral` (Non-Censuré).
-    *   *Pourquoi ?* Nécessaire pour analyser des données de leaks ou de sécurité sans refus moralisateur ("Je ne peux pas t'aider à hacker").
+    *   *Pourquoi -* Ncessaire pour analyser des donnes de leaks ou de scurit sans refus moralisateur ("Je ne peux pas t'aider  hacker").
 *   **Outils (Tools)** :
     *   `GoogleSerperAPI` : Recherche Web.
     *   `Shodan API` : Scan infrastructure.
@@ -19,8 +19,8 @@
     *   *Interdit* : Interaction active avec la cible (Login, SQL Injection).
 
 ## 4. Missions Types
-1.  **Due Diligence** : "Qui est ce CEO ?" -> Scraping LinkedIn, Greffe tribunal, News.
-2.  **Network Recon** : "Quels ports sont ouverts sur mon serveur ?" -> Shodan Scan.
+1.  **Due Diligence** : "Qui est ce CEO -" -> Scraping LinkedIn, Greffe tribunal, News.
+2.  **Network Recon** : "Quels ports sont ouverts sur mon serveur -" -> Shodan Scan.
 
 ## 5. Roadmap Dév
 *   **J1** : Setup Docker pour Dolphin-Mistral.

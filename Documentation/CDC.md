@@ -1,4 +1,4 @@
-# 🐝 THE HIVE & E.V.A. : CAHIER DES CHARGES DÉTAILLÉ (MASTER SPEC)
+#  THE HIVE & E.V.A. : CAHIER DES CHARGES DÉTAILLÉ (MASTER SPEC)
 
 > **Version** : 2.0 (Corporation Autonome)
 > **Statut** : CIBLE ATTEINTE (100% Implémenté)

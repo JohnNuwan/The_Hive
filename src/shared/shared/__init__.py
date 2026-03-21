@@ -1,82 +1,82 @@
 """
-Shared - Modèles et Utilitaires Partagés THE HIVE
+Shared - modeles et utilitaires partages THE HIVE.
 """
 
 from shared.models import (
-    # Enums
-    TradeAction,
-    OrderType,
-    OrderSource,
-    IntentType,
-    MessageRole,
-    SecuritySeverity,
-    # Trading
-    TradeOrder,
-    Position,
-    RiskStatus,
     AccountBalance,
-    PropFirmAccount,
-    # Communication
     AgentMessage,
     AgentMessageType,
-    # Chat
-    ChatMessage,
-    Intent,
-    # Sécurité
-    SecurityEvent,
-    AuditRecord,
-    SecuritySeverity,
-    # Agences / Système
-    BaseHealthResponse,
     AgentStatus,
-    HardwareMetrics,
+    AuditRecord,
+    BaseHealthResponse,
+    ChatMessage,
+    ConnectorMode,
+    EventEnvelope,
+    ExecutionEventEnvelope,
     GPUMetrics,
+    HardwareMetrics,
+    Intent,
+    IntentType,
+    MessageRole,
+    OrderSource,
+    OrderType,
+    Position,
+    PromotionReportEnvelope,
+    PropFirmAccount,
+    RiskStatus,
+    RuntimeMode,
+    SecurityEvent,
+    SecuritySeverity,
+    TradeAction,
+    TradeOrder,
+    TradingContextEnvelope,
+    TradingDecisionEnvelope,
+    TrainingRunEnvelope,
 )
-from shared.math_ops import symlog, inv_symlog, calculate_var, calculate_cvar
+from shared.math_ops import calculate_cvar, calculate_var, inv_symlog, symlog
 from shared.config import Settings, get_settings
 from shared.telemetry import Telemetry
 from shared.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from shared.grpc_client import SwarmGRPCClient
 
 __all__ = [
-    # Enums
-    "TradeAction",
-    "OrderType",
-    "OrderSource",
-    "IntentType",
-    "MessageRole",
-    "SecuritySeverity",
-    # Trading
-    "TradeOrder",
-    "Position",
-    "RiskStatus",
     "AccountBalance",
-    "PropFirmAccount",
-    # Communication
     "AgentMessage",
     "AgentMessageType",
-    # Chat
-    "ChatMessage",
-    "Intent",
-    # Sécurité
-    "SecurityEvent",
-    "AuditRecord",
-    # Système
-    "BaseHealthResponse",
-    "HardwareMetrics",
-    "GPUMetrics",
     "AgentStatus",
-    # Config
-    "Settings",
-    "get_settings",
-    # Math
-    "symlog",
-    "inv_symlog",
-    "calculate_var",
-    "calculate_cvar",
-    # Résilience & Observabilité
-    "Telemetry",
+    "AuditRecord",
+    "BaseHealthResponse",
+    "ChatMessage",
     "CircuitBreaker",
     "CircuitBreakerOpenError",
+    "ConnectorMode",
+    "EventEnvelope",
+    "ExecutionEventEnvelope",
+    "GPUMetrics",
+    "HardwareMetrics",
+    "Intent",
+    "IntentType",
+    "MessageRole",
+    "OrderSource",
+    "OrderType",
+    "Position",
+    "PromotionReportEnvelope",
+    "PropFirmAccount",
+    "RiskStatus",
+    "RuntimeMode",
+    "SecurityEvent",
+    "SecuritySeverity",
+    "Settings",
     "SwarmGRPCClient",
+    "Telemetry",
+    "TradeAction",
+    "TradeOrder",
+    "TradingContextEnvelope",
+    "TradingDecisionEnvelope",
+    "TrainingRunEnvelope",
+    "calculate_cvar",
+    "calculate_var",
+    "get_settings",
+    "inv_symlog",
+    "symlog",
 ]

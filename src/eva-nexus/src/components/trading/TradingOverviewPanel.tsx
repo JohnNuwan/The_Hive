@@ -1,4 +1,4 @@
-﻿import { AlertTriangle, Cpu, ShieldAlert, Wallet } from 'lucide-react'
+import { AlertTriangle, Cpu, ShieldAlert, Wallet } from 'lucide-react'
 import type { NemesisStatus, TradingAccountStatus, TradingRiskStatus, TradingPosition } from '../../services/api'
 import { MetricTile, PanelShell, StatusBadge, formatPercent, formatUsd } from './TradingShared'
 

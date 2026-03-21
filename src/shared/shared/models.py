@@ -627,3 +627,226 @@ class HiveError(BaseModel):
     details: dict[str, Any] = {}
     constitution_reference: str | None = None
     timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class ConnectorMode(str, Enum):
+    """
+    Etat explicite d'un connecteur ou d'un moteur externe.
+
+    Values:
+        DISABLED: Connecteur inactif ou stub non exploitable.
+        PAPER: Connecteur en simulation ou en mode degrade non executable.
+        LIVE: Connecteur operationnel sur le chemin reel.
+    """
+
+    DISABLED = "disabled"
+    PAPER = "paper"
+    LIVE = "live"
+
+
+class RuntimeMode(str, Enum):
+    """
+    Mode runtime stable de l'usine de trading.
+
+    Values:
+        DEMO_LIVE: Execution demo standard.
+        TRAINING_CPU_LIVE: Trading live minimal pendant un training GPU.
+        MAINTENANCE: Service en lecture seule ou arrete.
+    """
+
+    DEMO_LIVE = "demo_live"
+    TRAINING_CPU_LIVE = "training_cpu_live"
+    MAINTENANCE = "maintenance"
+
+
+class EventEnvelope(BaseModel):
+    """
+    Enveloppe canonique commune a tous les evenements metier.
+
+    Attributes:
+        envelope_id (UUID): Identifiant unique de l'evenement.
+        event_type (str): Type semantique stable de l'evenement.
+        source (str): Service emetteur.
+        created_at (datetime): Horodatage de creation.
+        metadata (dict[str, Any]): Metadonnees transverses de correlation.
+    """
+
+    envelope_id: UUID = Field(default_factory=uuid4)
+    event_type: str
+    source: str
+    created_at: datetime = Field(default_factory=datetime.now)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TradingContextEnvelope(EventEnvelope):
+    """
+    Etat de contexte de marche utilise pour une decision live.
+
+    Attributes:
+        runtime_mode (RuntimeMode): Mode d'execution courant.
+        symbol (str): Symbole evalue.
+        horizon (str): Horizon du modele sollicite.
+        market_state (dict[str, Any]): Indicateurs et biais de contexte.
+        connectors (dict[str, Any]): Etat des dependances de decision.
+    """
+
+    event_type: str = "trading.context"
+    source: str = "banker"
+    runtime_mode: RuntimeMode
+    symbol: str
+    horizon: str
+    market_state: dict[str, Any] = Field(default_factory=dict)
+    connectors: dict[str, Any] = Field(default_factory=dict)
+
+
+class TradingDecisionEnvelope(EventEnvelope):
+    """
+    Decision brute et post-filtrage produite par le banker.
+
+    Attributes:
+        runtime_mode (RuntimeMode): Mode runtime ayant produit la decision.
+        symbol (str): Symbole traite.
+        horizon (str): Horizon du modele choisi.
+        raw_model_action (str): Action brute du modele.
+        post_veto_action (str): Action finale retenue.
+        selection (str): Source du modele retenu.
+        checkpoint (str | None): Checkpoint utilise pour l'inference.
+        final_bias (str): Biais final applique a la decision.
+        veto_reason (str | None): Motif de veto si applicable.
+        connectors (dict[str, Any]): Etat des dependances de decision.
+    """
+
+    event_type: str = "trading.decision"
+    source: str = "banker"
+    runtime_mode: RuntimeMode
+    symbol: str
+    horizon: str
+    engine: str | None = None
+    raw_model_action: str
+    post_veto_action: str
+    selection: str
+    checkpoint: str | None = None
+    final_bias: str = "NEUTRAL"
+    veto_reason: str | None = None
+    ensemble_mode: str | None = None
+    degraded_fallback_reason: str | None = None
+    connectors: dict[str, Any] = Field(default_factory=dict)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExecutionEventEnvelope(EventEnvelope):
+    """
+    Evenement d'execution ou de refus d'ordre.
+
+    Attributes:
+        runtime_mode (RuntimeMode): Mode runtime courant.
+        symbol (str): Symbole concerne.
+        action (str): Action demandee.
+        stage (str): Etape du pipeline d'execution.
+        allowed (bool): Indique si l'etape a permis la poursuite.
+        reason (str | None): Motif principal du refus ou du resultat.
+        volume (float | None): Volume envoye ou refuse.
+        spread_points (float | None): Spread releve au moment du controle.
+        ticket (int | None): Ticket MT5 si execution reussie.
+    """
+
+    event_type: str = "trading.execution"
+    source: str = "banker"
+    runtime_mode: RuntimeMode
+    symbol: str
+    action: str
+    stage: str
+    allowed: bool
+    reason: str | None = None
+    volume: float | None = None
+    spread_points: float | None = None
+    ticket: int | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromotionReportEnvelope(EventEnvelope):
+    """
+    Rapport de promotion ou de blocage d'un challenger.
+
+    Attributes:
+        horizon (str): Horizon strategique concerne.
+        family (str | None): Famille d'actifs eventuelle.
+        live_champion_id (str | None): Champion live courant.
+        challenger_id (str | None): Challenger evalue.
+        promotion_gate (dict[str, Any]): Verdict et motif principal.
+        promotion_checks (dict[str, Any]): Checks unitaires de promotion.
+        metrics_by_symbol (dict[str, Any]): Metriques par actif.
+        metrics_by_position_mechanics (dict[str, Any]): Metriques de sortie et de gestion de position.
+        feature_profile (str | None): Profil de features actif.
+        dataset_id (str | None): Identifiant immuable du dataset d'evaluation.
+        top_live_symbols (list[str]): Selection live recommandee.
+    """
+
+    event_type: str = "training.promotion"
+    source: str = "lab"
+    engine: str = "muzero"
+    horizon: str
+    family: str | None = None
+    live_champion_id: str | None = None
+    challenger_id: str | None = None
+    promotion_gate: dict[str, Any] = Field(default_factory=dict)
+    promotion_checks: dict[str, Any] = Field(default_factory=dict)
+    metrics_by_symbol: dict[str, Any] = Field(default_factory=dict)
+    metrics_by_position_mechanics: dict[str, Any] = Field(default_factory=dict)
+    feature_profile: str | None = None
+    dataset_id: str | None = None
+    failure_mode: str | None = None
+    top_live_symbols: list[str] = Field(default_factory=list)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class TrainingRunEnvelope(EventEnvelope):
+    """
+    Etat structure d'un run d'entrainement en cours ou termine.
+
+    Attributes:
+        run_id (str | None): Identifiant du run.
+        horizon (str | None): Horizon courant du run.
+        family (str | None): Famille d'actifs ciblee si disponible.
+        feature_profile (str | None): Profil de features applique au run.
+        dataset_id (str | None): Identifiant immuable du dataset courant.
+        dataset_source (str | None): Source historique utilisee par le run.
+        phase (str | None): Phase courante.
+        current_symbol (str | None): Symbole courant.
+        status (str): Etat global du run.
+        arena_progress (dict[str, Any] | None): Progression Arena en direct.
+        dependencies (dict[str, Any]): Dependances utiles au run.
+        universe (dict[str, Any]): Resume de l'univers entraine.
+    """
+
+    event_type: str = "training.run"
+    source: str = "lab"
+    engine: str | None = None
+    run_id: str | None = None
+    horizon: str | None = None
+    family: str | None = None
+    feature_profile: str | None = None
+    dataset_id: str | None = None
+    dataset_source: str | None = None
+    mechanics_profile_version: str | None = None
+    ga_status: str | None = None
+    ga_generation: int | None = None
+    ga_trial: str | None = None
+    trial_mode: str | None = None
+    trial_cost_profile: str | None = None
+    replay_cache_status: str | None = None
+    replay_cache_key: str | None = None
+    replay_cache_entries: int | None = None
+    replay_cache_source: str | None = None
+    shadow_buffer_size: int | None = None
+    sequence_length: int | None = None
+    sequence_stride: int | None = None
+    world_model_steps: int | None = None
+    dataset_coverage: dict[str, Any] = Field(default_factory=dict)
+    phase: str | None = None
+    current_symbol: str | None = None
+    status: str = "idle"
+    arena_progress: dict[str, Any] | None = None
+    dependencies: dict[str, Any] = Field(default_factory=dict)
+    universe: dict[str, Any] = Field(default_factory=dict)
+    payload: dict[str, Any] = Field(default_factory=dict)
