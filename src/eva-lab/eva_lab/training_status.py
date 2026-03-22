@@ -13,6 +13,11 @@ STATUS_DIR = Path(os.getenv("TRAINING_CHECKPOINT_DIR", "data/checkpoints"))
 STATUS_PATH = STATUS_DIR / "training_status.json"
 RUN_LOG_PATH = STATUS_DIR / "training_run.log"
 NIGHTLY_SUMMARY_PATH = STATUS_DIR / "nightly_training_summary.json"
+CPU_SCHEDULER_STATE_PATH = STATUS_DIR / "cpu_scheduler" / "state.json"
+V4_SEQUENCE_DIR = STATUS_DIR / "v4_ga"
+V4_SEQUENCE_STATE_PATH = V4_SEQUENCE_DIR / "sequence_state.json"
+V4_SEQUENCE_PID_PATH = V4_SEQUENCE_DIR / "sequence_supervisor.pid"
+TERMINAL_SUMMARY_DIR = Path(os.getenv("TRAINING_TERMINAL_SUMMARY_DIR", "data/muzero/results"))
 MAX_LOG_LINES = int(os.getenv("TRAINING_STATUS_MAX_LOG_LINES", "400"))
 
 FOREX_CODES = {
@@ -105,6 +110,14 @@ def _default_status() -> dict[str, Any]:
         "dataset_source": None,
         "feature_profile": None,
         "mechanics_profile_version": None,
+        "focus_symbols": [],
+        "gate_profile": None,
+        "sequence_id": None,
+        "sequence_profile": None,
+        "window_id": None,
+        "trial_id": None,
+        "terminal_summary_path": None,
+        "supervisor_state": None,
         "ga_status": None,
         "ga_generation": None,
         "ga_trial": None,
@@ -121,6 +134,43 @@ def _default_status() -> dict[str, Any]:
         "dataset_coverage": {},
         "metrics_by_position_mechanics": {},
         "arena_progress": None,
+        "gold_precheck": None,
+        "precheck_status": None,
+        "precheck_step": None,
+        "precheck_metrics": {},
+        "precheck_summary_path": None,
+    }
+
+
+def _default_sequence_state() -> dict[str, Any]:
+    """Construit l'etat minimal du superviseur de sequence V4."""
+
+    return {
+        "sequence_id": None,
+        "sequence_name": None,
+        "state": "idle",
+        "profile": None,
+        "engine": None,
+        "mode": None,
+        "trial_id": None,
+        "window_id": None,
+        "window_index": None,
+        "status": "idle",
+        "last_run_id": None,
+        "last_completed_trial": None,
+        "retry_count": 0,
+        "next_step": None,
+        "last_error": None,
+        "supervisor_heartbeat": None,
+        "started_at": None,
+        "updated_at": None,
+        "stdout_log_path": None,
+        "stderr_log_path": None,
+        "continued_after_precheck": None,
+        "killed_after_precheck": None,
+        "precheck_status": None,
+        "precheck_score": None,
+        "proxy_terminal_score": None,
     }
 
 
@@ -133,7 +183,7 @@ def _ensure_status_dir() -> None:
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     """Ecrit un JSON de facon atomique."""
 
-    _ensure_status_dir()
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
     tmp_path.replace(path)
@@ -175,6 +225,255 @@ def persist_training_status(status: dict[str, Any]) -> dict[str, Any]:
     snapshot["updated_at"] = _now_iso()
     _atomic_write_json(STATUS_PATH, snapshot)
     return snapshot
+
+
+def load_sequence_state() -> dict[str, Any]:
+    """Charge l'etat persiste du superviseur de sequence V4."""
+
+    if not V4_SEQUENCE_STATE_PATH.exists():
+        return _default_sequence_state()
+    try:
+        payload = json.loads(V4_SEQUENCE_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return _default_sequence_state()
+    if not isinstance(payload, dict):
+        return _default_sequence_state()
+    state = _default_sequence_state()
+    state.update(payload)
+    return state
+
+
+def persist_sequence_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Persiste l'etat courant du superviseur de sequence V4."""
+
+    snapshot = _default_sequence_state()
+    snapshot.update(state)
+    snapshot["updated_at"] = _now_iso()
+    _atomic_write_json(V4_SEQUENCE_STATE_PATH, snapshot)
+    return snapshot
+
+
+def merge_sequence_state(patch: dict[str, Any]) -> dict[str, Any]:
+    """Fusionne un patch simple dans l'etat du superviseur V4."""
+
+    state = load_sequence_state()
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(state.get(key), dict):
+            merged = dict(state.get(key) or {})
+            merged.update(value)
+            state[key] = merged
+        else:
+            state[key] = value
+    return persist_sequence_state(state)
+
+
+def _sanitize_summary_token(value: str | None, default: str) -> str:
+    """Nettoie un fragment de nom de fichier de resume terminal."""
+
+    token = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(value or "").strip())
+    return token.strip("._-") or default
+
+
+def get_terminal_summary_path(
+    *,
+    engine: str,
+    run_id: str,
+    horizon: str | None = None,
+    family: str | None = None,
+    trial_id: str | None = None,
+) -> Path:
+    """Construit le chemin canonique d'un resume terminal par run.
+
+    Args:
+        engine (str): Moteur concerne.
+        run_id (str): Identifiant unique du run.
+        horizon (str | None): Horizon associe si connu.
+        family (str | None): Famille d'actifs associee si connue.
+        trial_id (str | None): Identifiant de trial si connu.
+
+    Returns:
+        Path: Chemin cible du resume terminal.
+    """
+
+    safe_engine = _sanitize_summary_token(engine, "unknown_engine")
+    safe_horizon = _sanitize_summary_token(horizon, "unknown_horizon")
+    safe_family = _sanitize_summary_token(family, "unknown_family")
+    safe_trial = _sanitize_summary_token(trial_id, "final")
+    safe_run_id = _sanitize_summary_token(run_id, "unknown_run")
+    filename = f"terminal_{safe_engine}_{safe_horizon}_{safe_family}_{safe_trial}_{safe_run_id}.json"
+    return TERMINAL_SUMMARY_DIR / filename
+
+
+def get_precheck_summary_path(
+    *,
+    engine: str,
+    run_id: str,
+    horizon: str | None = None,
+    family: str | None = None,
+    trial_id: str | None = None,
+) -> Path:
+    """Construit le chemin canonique d'un resume de precheck par run.
+
+    Args:
+        engine (str): Moteur concerne.
+        run_id (str): Identifiant unique du run.
+        horizon (str | None): Horizon associe si connu.
+        family (str | None): Famille d'actifs associee si connue.
+        trial_id (str | None): Identifiant de trial si connu.
+
+    Returns:
+        Path: Chemin cible du resume de precheck.
+    """
+
+    safe_engine = _sanitize_summary_token(engine, "unknown_engine")
+    safe_horizon = _sanitize_summary_token(horizon, "unknown_horizon")
+    safe_family = _sanitize_summary_token(family, "unknown_family")
+    safe_trial = _sanitize_summary_token(trial_id, "precheck")
+    safe_run_id = _sanitize_summary_token(run_id, "unknown_run")
+    filename = f"precheck_{safe_engine}_{safe_horizon}_{safe_family}_{safe_trial}_{safe_run_id}.json"
+    return TERMINAL_SUMMARY_DIR / filename
+
+
+def write_terminal_summary(summary: dict[str, Any]) -> Path:
+    """Ecrit un resume terminal de run et met a jour le statut courant.
+
+    Args:
+        summary (dict[str, Any]): Resume terminal structure.
+
+    Returns:
+        Path: Chemin final du resume ecrit.
+
+    Raises:
+        ValueError: Si le resume ne contient pas de ``run_id``.
+    """
+
+    run_id = str(summary.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("Impossible d'ecrire un resume terminal sans run_id.")
+
+    path = get_terminal_summary_path(
+        engine=str(summary.get("engine") or "unknown"),
+        run_id=run_id,
+        horizon=str(summary.get("horizon") or ""),
+        family=str(summary.get("family") or ""),
+        trial_id=str(summary.get("trial_id") or summary.get("ga_trial") or ""),
+    )
+    payload = dict(summary)
+    payload["path"] = str(path)
+    payload.setdefault("terminal_at", _now_iso())
+    _atomic_write_json(path, payload)
+
+    status = load_training_status()
+    if str(status.get("run_id") or "").strip() == run_id:
+        status["terminal_summary_path"] = str(path)
+        persisted = persist_training_status(status)
+    if str(persisted.get("run_id") or "").strip() == run_id:
+        return path
+    return path
+
+
+def write_precheck_summary(summary: dict[str, Any]) -> Path:
+    """Ecrit un resume intermediaire de precheck et met a jour le statut courant.
+
+    Args:
+        summary (dict[str, Any]): Resume structure du precheck Gold.
+
+    Returns:
+        Path: Chemin final du resume ecrit.
+
+    Raises:
+        ValueError: Si le resume ne contient pas de ``run_id``.
+    """
+
+    run_id = str(summary.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("Impossible d'ecrire un resume de precheck sans run_id.")
+
+    path = get_precheck_summary_path(
+        engine=str(summary.get("engine") or "unknown"),
+        run_id=run_id,
+        horizon=str(summary.get("horizon") or ""),
+        family=str(summary.get("family") or ""),
+        trial_id=str(summary.get("trial_id") or summary.get("ga_trial") or ""),
+    )
+    payload = dict(summary)
+    payload["path"] = str(path)
+    payload.setdefault("generated_at", _now_iso())
+    _atomic_write_json(path, payload)
+
+    status = load_training_status()
+    if str(status.get("run_id") or "").strip() == run_id:
+        status["gold_precheck"] = payload
+        status["precheck_status"] = payload.get("status")
+        status["precheck_step"] = payload.get("step")
+        status["precheck_metrics"] = dict(payload.get("metrics") or {})
+        status["precheck_summary_path"] = str(path)
+        persisted = persist_training_status(status)
+        if str(persisted.get("run_id") or "").strip() == run_id:
+            return path
+    return path
+
+
+def load_terminal_summary(
+    *,
+    path: str | os.PathLike[str] | Path | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Charge un resume terminal par chemin explicite ou par ``run_id``.
+
+    Args:
+        path (str | os.PathLike[str] | Path | None): Chemin explicite du resume.
+        run_id (str | None): Identifiant du run a retrouver si le chemin est absent.
+
+    Returns:
+        dict[str, Any] | None: Resume charge ou ``None`` si introuvable.
+    """
+
+    candidate_path: Path | None = Path(path) if path else None
+    if candidate_path is None and run_id:
+        matches = sorted(
+            TERMINAL_SUMMARY_DIR.glob(f"terminal_*_{_sanitize_summary_token(run_id, 'unknown_run')}.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        candidate_path = matches[0] if matches else None
+    if candidate_path is None or not candidate_path.exists():
+        return None
+    try:
+        payload = json.loads(candidate_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def load_latest_terminal_summary(
+    *,
+    engine: str | None = None,
+    horizon: str | None = None,
+) -> dict[str, Any] | None:
+    """Charge le resume terminal le plus recent avec filtres optionnels.
+
+    Args:
+        engine (str | None): Moteur a filtrer.
+        horizon (str | None): Horizon a filtrer.
+
+    Returns:
+        dict[str, Any] | None: Resume terminal le plus recent ou ``None``.
+    """
+
+    engine_token = _sanitize_summary_token(engine, "*") if engine else "*"
+    horizon_token = _sanitize_summary_token(horizon, "*") if horizon else "*"
+    pattern = f"terminal_{engine_token}_{horizon_token}_*.json"
+    candidates = sorted(
+        TERMINAL_SUMMARY_DIR.glob(pattern),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in candidates:
+        payload = load_terminal_summary(path=candidate)
+        if payload is not None:
+            return payload
+    return None
 
 
 def merge_training_status(patch: dict[str, Any]) -> dict[str, Any]:
@@ -275,6 +574,32 @@ def set_arena_progress(progress: dict[str, Any] | None) -> dict[str, Any]:
     return persist_training_status(status)
 
 
+def set_gold_precheck(progress: dict[str, Any] | None) -> dict[str, Any]:
+    """Met a jour le statut detaille du precheck Gold.
+
+    Args:
+        progress (dict[str, Any] | None): Charge utile du precheck ou ``None``.
+
+    Returns:
+        dict[str, Any]: Statut training persiste.
+    """
+
+    status = load_training_status()
+    status["gold_precheck"] = progress
+    if progress:
+        status["precheck_status"] = progress.get("status")
+        status["precheck_step"] = progress.get("step")
+        status["precheck_metrics"] = dict(progress.get("metrics") or {})
+        if progress.get("path"):
+            status["precheck_summary_path"] = progress.get("path")
+    else:
+        status["precheck_status"] = None
+        status["precheck_step"] = None
+        status["precheck_metrics"] = {}
+        status["precheck_summary_path"] = None
+    return persist_training_status(status)
+
+
 def set_training_dependency(name: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Met a jour une dependance dans le statut training."""
 
@@ -316,17 +641,74 @@ def append_training_log(message: str, level: str = "INFO", source: str = "traini
     RUN_LOG_PATH.write_text("\n".join(lines[-MAX_LOG_LINES:]) + "\n", encoding="utf-8")
 
 
-def tail_training_log(limit: int = 30) -> list[str]:
-    """Retourne les dernieres lignes du journal partage."""
+def tail_log_file(
+    path: str | os.PathLike[str] | Path,
+    limit: int = 30,
+    source: str | None = None,
+    contains: str | None = None,
+) -> list[str]:
+    """Retourne les dernieres lignes utiles d'un journal texte.
 
-    if not RUN_LOG_PATH.exists():
+    Args:
+        path (str | os.PathLike[str] | Path): Chemin du journal a lire.
+        limit (int): Nombre maximal de lignes a retourner.
+        source (str | None): Filtre optionnel sur la balise source `[source]`.
+        contains (str | None): Motif libre a rechercher dans les lignes.
+
+    Returns:
+        list[str]: Lignes filtrees, tronquees a la fin du journal.
+    """
+    log_path = Path(path)
+    if not log_path.exists():
         return []
     try:
-        lines = RUN_LOG_PATH.read_text(encoding="utf-8").splitlines()
+        lines = log_path.read_text(encoding="utf-8").splitlines()
     except Exception:
         return []
+
+    source_filter = str(source or "").strip().lower()
+    contains_filter = str(contains or "").strip().lower()
+    if source_filter:
+        token = f"[{source_filter}]"
+        lines = [line for line in lines if token in line.lower()]
+    if contains_filter:
+        lines = [line for line in lines if contains_filter in line.lower()]
+
     safe_limit = max(limit, 1)
     return lines[-safe_limit:]
+
+
+def tail_training_log(
+    limit: int = 30,
+    source: str | None = None,
+    contains: str | None = None,
+) -> list[str]:
+    """Retourne les dernieres lignes du journal partage.
+
+    Args:
+        limit (int): Nombre maximal de lignes a retourner.
+        source (str | None): Filtre optionnel sur la balise source.
+        contains (str | None): Motif libre a rechercher.
+
+    Returns:
+        list[str]: Lignes du journal partage.
+    """
+    return tail_log_file(RUN_LOG_PATH, limit=limit, source=source, contains=contains)
+
+
+def load_cpu_scheduler_state() -> dict[str, Any] | None:
+    """Charge l'etat persiste du scheduler CPU si disponible.
+
+    Returns:
+        dict[str, Any] | None: Etat du scheduler ou ``None`` si absent.
+    """
+    if not CPU_SCHEDULER_STATE_PATH.exists():
+        return None
+    try:
+        payload = json.loads(CPU_SCHEDULER_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _extract_log_timestamp(line: str) -> str | None:
@@ -503,6 +885,11 @@ def reset_training_status(
     """Reinitialise le statut d'un nouveau run en preservant le lanceur."""
 
     previous = load_training_status()
+    focus_symbols = [
+        item.strip()
+        for item in str(os.getenv("TRAINING_FOCUS_SYMBOLS", "")).split(",")
+        if item.strip()
+    ]
     status = _default_status()
     status["engine"] = engine
     status["run_id"] = run_id
@@ -513,6 +900,18 @@ def reset_training_status(
     status["reason"] = reason
     status["skip_reason"] = None
     status["started_at"] = _now_iso()
+    status["sequence_id"] = str(os.getenv("TRAINING_SEQUENCE_ID", "")).strip() or None
+    status["sequence_profile"] = str(os.getenv("TRAINING_SEQUENCE_PROFILE", "")).strip() or None
+    status["window_id"] = str(os.getenv("TRAINING_WINDOW_ID", "")).strip() or None
+    status["trial_id"] = (
+        str(os.getenv("TRAINING_TRIAL_ID", "")).strip()
+        or str(os.getenv("TRAINING_GA_TRIAL", "")).strip()
+        or None
+    )
+    status["terminal_summary_path"] = None
+    status["focus_symbols"] = focus_symbols
+    status["gate_profile"] = str(os.getenv("TRAINING_GATE_PROFILE", "")).strip() or None
+    status["supervisor_state"] = str(os.getenv("TRAINING_SUPERVISOR_STATE", "")).strip() or None
     status["launcher"] = dict(previous.get("launcher") or {})
     status["dependencies"] = dict(previous.get("dependencies") or {})
     status["universe"] = universe or build_training_universe_summary()
@@ -545,6 +944,8 @@ def mark_step_running(
     dataset_source: str | None = None,
     feature_profile: str | None = None,
     mechanics_profile_version: str | None = None,
+    focus_symbols: list[str] | None = None,
+    gate_profile: str | None = None,
     ga_status: str | None = None,
     ga_generation: int | None = None,
     ga_trial: str | None = None,
@@ -596,6 +997,18 @@ def mark_step_running(
         status["feature_profile"] = feature_profile
     if mechanics_profile_version is not None:
         status["mechanics_profile_version"] = mechanics_profile_version
+    if focus_symbols is not None:
+        status["focus_symbols"] = [str(item).strip() for item in focus_symbols if str(item).strip()]
+    elif status.get("focus_symbols") in (None, []):
+        status["focus_symbols"] = [
+            item.strip()
+            for item in str(os.getenv("TRAINING_FOCUS_SYMBOLS", "")).split(",")
+            if item.strip()
+        ]
+    if gate_profile is not None:
+        status["gate_profile"] = gate_profile
+    elif not status.get("gate_profile"):
+        status["gate_profile"] = str(os.getenv("TRAINING_GATE_PROFILE", "")).strip() or None
     if ga_status is not None:
         status["ga_status"] = ga_status
     if ga_generation is not None:

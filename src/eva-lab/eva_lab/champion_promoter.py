@@ -17,6 +17,7 @@ from eva_lab.training_utils import (
     resolve_symbol_overrides,
     resolve_training_symbols,
 )
+from eva_lab.training_status import load_latest_terminal_summary
 
 logger = logging.getLogger(__name__)
 
@@ -220,13 +221,82 @@ class ChampionPromoter:
             return default
         return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
-    def get_promotion_thresholds(self) -> dict[str, Any]:
+    @staticmethod
+    def normalize_gate_profile(raw_profile: str | None, default: str = "standard") -> str:
+        """Normalise un profil de gate de promotion.
+
+        Args:
+            raw_profile (str | None): Profil brut a normaliser.
+            default (str): Profil de repli si absent.
+
+        Returns:
+            str: Profil de gate supporte.
+        """
+        normalized = str(raw_profile or default).strip().lower()
+        if normalized in {"gold", "gold_only", "gold-demo"}:
+            return "gold_demo"
+        if normalized not in {"standard", "gold_demo"}:
+            return default
+        return normalized
+
+    def _resolve_gate_profile(self, *payloads: dict[str, Any] | None) -> str:
+        """Determine le profil de gate a utiliser.
+
+        Args:
+            *payloads (dict[str, Any] | None): Artefacts potentiellement
+                porteurs du profil de gate.
+
+        Returns:
+            str: Profil de gate normalise.
+        """
+        for payload in payloads:
+            current = dict(payload or {})
+            direct_profile = str(current.get("gate_profile") or "").strip()
+            if direct_profile:
+                return self.normalize_gate_profile(direct_profile)
+            promotion_gate = dict(current.get("promotion_gate") or {})
+            embedded_profile = str(promotion_gate.get("gate_profile") or "").strip()
+            if embedded_profile:
+                return self.normalize_gate_profile(embedded_profile)
+        env_profile = (
+            str(os.getenv("TRAINING_GATE_PROFILE", "")).strip()
+            or str(os.getenv("MUZERO_PROMOTION_GATE_PROFILE", "")).strip()
+        )
+        return self.normalize_gate_profile(env_profile or "standard")
+
+    def get_promotion_thresholds(self, gate_profile: str | None = None) -> dict[str, Any]:
         """Retourne les seuils minimums de promotion live.
 
         Returns:
             dict[str, Any]: Configuration active de filtrage des champions.
         """
+        normalized_gate_profile = self.normalize_gate_profile(gate_profile or "standard")
+        if normalized_gate_profile == "gold_demo":
+            return {
+                "gate_profile": normalized_gate_profile,
+                "require_positive_metrics": True,
+                "min_win_rate": 55.0,
+                "min_return_pct": 0.0,
+                "min_profit_factor": 1.10,
+                "min_total_trades": 12.0,
+                "min_eval_games": 12.0,
+                "min_eval_symbols": 1.0,
+                "min_expectancy_pct": 0.0,
+                "max_drawdown_pct": 3.0,
+                "min_positive_episode_rate": 12.0,
+                "min_net_realized_pct": 0.0,
+                "min_long_entry_share": 0.15,
+                "min_short_entry_share": 0.15,
+                "max_directional_imbalance": 0.70,
+                "min_split_efficiency": 0.40,
+                "min_pyramid_efficiency": 0.40,
+                "min_slbe_capture_rate": 0.35,
+                "max_hold_drag_score": 0.55,
+                "min_close_quality_score": 0.40,
+            }
+
         return {
+            "gate_profile": normalized_gate_profile,
             "require_positive_metrics": self._read_boolean_env(
                 "MUZERO_PROMOTION_REQUIRE_POSITIVE_METRICS",
                 True,
@@ -342,21 +412,27 @@ class ChampionPromoter:
     def evaluate_promotion_gate(
         self,
         battle_report: dict[str, Any] | None,
+        gate_profile: str | None = None,
     ) -> dict[str, Any]:
         """Valide l'eligibilite d'un challenger avant de l'exposer au live.
 
         Args:
             battle_report (dict[str, Any] | None): Rapport Arena du challenger.
+            gate_profile (str | None): Profil de gate explicite a appliquer.
 
         Returns:
             dict[str, Any]: Verdict detaille avec metriques, seuils et raison.
         """
-        thresholds = self.get_promotion_thresholds()
+        normalized_gate_profile = self.normalize_gate_profile(
+            gate_profile or self._resolve_gate_profile(battle_report),
+        )
+        thresholds = self.get_promotion_thresholds(normalized_gate_profile)
         if not battle_report:
             return {
                 "allowed": False,
                 "status": "blocked",
                 "reason": "missing_battle_report",
+                "gate_profile": normalized_gate_profile,
                 "failure_mode": "insufficient_sample",
                 "checks": {"arena_victory": False},
                 "thresholds": thresholds,
@@ -484,6 +560,7 @@ class ChampionPromoter:
             "allowed": all(checks.values()),
             "status": "eligible" if all(checks.values()) else "blocked",
             "reason": failure_reason,
+            "gate_profile": normalized_gate_profile,
             "failure_mode": self._derive_failure_mode(
                 reason=failure_reason,
                 metrics=metrics_payload,
@@ -508,16 +585,25 @@ class ChampionPromoter:
         Returns:
             dict[str, Any]: Verdict detaille de la barriere de promotion.
         """
+        gate_profile = self._resolve_gate_profile(manifest, arena_report)
         if manifest and isinstance(manifest.get("promotion_gate"), dict):
-            return manifest["promotion_gate"]
+            gate_payload = dict(manifest["promotion_gate"])
+            gate_payload.setdefault("gate_profile", gate_profile)
+            return gate_payload
 
         if manifest and isinstance(manifest.get("battle_report"), dict):
-            return self.evaluate_promotion_gate(manifest["battle_report"])
+            return self.evaluate_promotion_gate(
+                manifest["battle_report"],
+                gate_profile=gate_profile,
+            )
 
         if arena_report and isinstance(arena_report.get("battle_report"), dict):
-            return self.evaluate_promotion_gate(arena_report["battle_report"])
+            return self.evaluate_promotion_gate(
+                arena_report["battle_report"],
+                gate_profile=gate_profile,
+            )
 
-        return self.evaluate_promotion_gate(None)
+        return self.evaluate_promotion_gate(None, gate_profile=gate_profile)
 
     def load_manifest(self, horizon: str, engine: str = "muzero") -> dict[str, Any] | None:
         """Charge le manifeste d'un champion si disponible.
@@ -928,6 +1014,7 @@ class ChampionPromoter:
         horizon = horizon.lower()
         manifest = self.load_manifest(horizon, engine=normalized_engine)
         arena_report = self.load_arena_report(horizon, engine=normalized_engine)
+        terminal_summary = load_latest_terminal_summary(engine=normalized_engine, horizon=horizon) or {}
         live_path, live_meta = self.resolve_live_checkpoint(horizon, engine=normalized_engine)
         champion_path = self.get_champion_path(horizon, engine=normalized_engine)
         latest_path = self.get_latest_model_path(horizon, engine=normalized_engine)
@@ -954,6 +1041,8 @@ class ChampionPromoter:
                 and live_champion_id is None
             ):
                 live_champion_id = candidate_id
+        if candidate_id is None:
+            candidate_id = str(terminal_summary.get("latest_candidate") or "").strip() or None
 
         promotion_gate = live_meta.get("promotion_gate") or self.resolve_promotion_gate(
             manifest,
@@ -967,6 +1056,7 @@ class ChampionPromoter:
             live_meta.get("family")
             or (manifest or {}).get("family")
             or candidate_metrics.get("family")
+            or terminal_summary.get("family")
             or live_universe.get("family")
             or "mixed"
         )
@@ -974,6 +1064,7 @@ class ChampionPromoter:
             live_meta.get("feature_profile")
             or (manifest or {}).get("feature_profile")
             or candidate_metrics.get("feature_profile")
+            or terminal_summary.get("feature_profile")
             or live_universe.get("feature_profile")
             or resolve_feature_profile(horizon, family).get("profile_name")
             or "default"
@@ -981,12 +1072,14 @@ class ChampionPromoter:
         mechanics_profile_version = str(
             (manifest or {}).get("mechanics_profile_version")
             or candidate_metrics.get("mechanics_profile_version")
+            or terminal_summary.get("mechanics_profile_version")
             or promotion_gate.get("metrics", {}).get("mechanics_profile_version")
             or "v1"
         )
         dataset_coverage = (
             (manifest or {}).get("dataset_coverage")
             or candidate_metrics.get("dataset_coverage")
+            or terminal_summary.get("dataset_coverage")
             or promotion_gate.get("metrics", {}).get("dataset_coverage")
             or {}
         )
@@ -1007,11 +1100,13 @@ class ChampionPromoter:
             "dataset_id": (
                 (manifest or {}).get("dataset_id")
                 or candidate_metrics.get("dataset_id")
+                or terminal_summary.get("dataset_id")
                 or (arena_report or {}).get("dataset_id")
             ),
             "dataset_source": (
                 (manifest or {}).get("dataset_source")
                 or candidate_metrics.get("dataset_source")
+                or terminal_summary.get("dataset_source")
                 or (arena_report or {}).get("dataset_source")
             ),
             "champion_id": live_champion_id or registry_champion_id,
@@ -1022,8 +1117,9 @@ class ChampionPromoter:
             "engine_label": live_meta.get("engine_label"),
             "selection": live_meta.get("selection"),
             "gate_allowed": promotion_gate.get("allowed"),
+            "gate_profile": promotion_gate.get("gate_profile"),
             "gate_reason": promotion_gate.get("reason"),
-            "failure_mode": promotion_gate.get("failure_mode"),
+            "failure_mode": promotion_gate.get("failure_mode") or terminal_summary.get("failure_mode"),
             "promotion_gate": promotion_gate,
             "promotion_checks": promotion_gate.get("checks", {}),
             "promotion_thresholds": promotion_gate.get("thresholds", {}),
@@ -1041,6 +1137,12 @@ class ChampionPromoter:
             "champion_checkpoint": self._describe_path(champion_path),
             "latest_model": self._describe_path(latest_path),
             "latest_checkpoint": self._describe_path(latest_checkpoint),
+            "latest_run_id": terminal_summary.get("run_id"),
+            "latest_candidate": terminal_summary.get("latest_candidate"),
+            "latest_verdict": terminal_summary.get("latest_verdict"),
+            "failed_step": terminal_summary.get("failed_step"),
+            "artifact_state": terminal_summary.get("artifact_state"),
+            "terminal_summary": terminal_summary or None,
             "manifest": manifest,
             "arena_report": arena_report,
             "live_universe": live_universe,
@@ -1094,6 +1196,7 @@ class ChampionPromoter:
         latest_checkpoint: str | Path | None = None,
         challenger_id: str | None = None,
         engine: str = "muzero",
+        gate_profile: str | None = None,
     ) -> dict[str, Any]:
         """Promeut un challenger d'un moteur vers le live.
 
@@ -1105,6 +1208,7 @@ class ChampionPromoter:
             latest_checkpoint (str | Path | None): Dernier checkpoint du run.
             challenger_id (str | None): Identifiant genetique du challenger.
             engine (str): Moteur du challenger a promouvoir.
+            gate_profile (str | None): Profil de gate a appliquer.
 
         Returns:
             dict[str, Any]: Resultat detaille de la promotion.
@@ -1125,10 +1229,16 @@ class ChampionPromoter:
                 "horizon": horizon,
                 "source_path": str(source_path),
                 "champion_paths": [],
-                "promotion_gate": self.evaluate_promotion_gate(battle_report),
+                "promotion_gate": self.evaluate_promotion_gate(
+                    battle_report,
+                    gate_profile=gate_profile,
+                ),
             }
 
-        promotion_gate = self.evaluate_promotion_gate(battle_report)
+        promotion_gate = self.evaluate_promotion_gate(
+            battle_report,
+            gate_profile=gate_profile,
+        )
         if not promotion_gate["allowed"]:
             logger.warning(
                 "Promotion live refusee pour %s: garde-fou=%s | metrics=%s",
@@ -1171,6 +1281,7 @@ class ChampionPromoter:
             ),
             "dataset_id": battle_report.get("challenger", {}).get("metrics", {}).get("dataset_id"),
             "dataset_source": battle_report.get("challenger", {}).get("metrics", {}).get("dataset_source"),
+            "gate_profile": promotion_gate.get("gate_profile"),
             "selection_policy": "champion_only",
             "engine_label": self.get_engine_label(normalized_engine, variant="champion"),
             "challenger_id": challenger_id or battle_report.get("challenger", {}).get("id"),
@@ -1200,6 +1311,7 @@ class ChampionPromoter:
         training_metrics: dict[str, Any] | None = None,
         latest_checkpoint: str | Path | None = None,
         challenger_id: str | None = None,
+        gate_profile: str | None = None,
     ) -> dict[str, Any]:
         """Promeut un challenger MuZero en champion live.
 
@@ -1210,6 +1322,7 @@ class ChampionPromoter:
             training_metrics (dict[str, Any] | None): Metriques du run.
             latest_checkpoint (str | Path | None): Dernier checkpoint du run.
             challenger_id (str | None): Identifiant genetique du challenger.
+            gate_profile (str | None): Profil de gate a appliquer.
 
         Returns:
             dict[str, Any]: Resultat detaille de la promotion.
@@ -1222,6 +1335,7 @@ class ChampionPromoter:
             latest_checkpoint=latest_checkpoint,
             challenger_id=challenger_id,
             engine="muzero",
+            gate_profile=gate_profile,
         )
 
     def promote_dreamer_challenger(
@@ -1232,6 +1346,7 @@ class ChampionPromoter:
         training_metrics: dict[str, Any] | None = None,
         latest_checkpoint: str | Path | None = None,
         challenger_id: str | None = None,
+        gate_profile: str | None = None,
     ) -> dict[str, Any]:
         """Promeut un challenger DreamerV3 en champion live.
 
@@ -1242,6 +1357,7 @@ class ChampionPromoter:
             training_metrics (dict[str, Any] | None): Metriques du run.
             latest_checkpoint (str | Path | None): Dernier checkpoint du run.
             challenger_id (str | None): Identifiant genetique du challenger.
+            gate_profile (str | None): Profil de gate a appliquer.
 
         Returns:
             dict[str, Any]: Resultat detaille de la promotion.
@@ -1254,6 +1370,7 @@ class ChampionPromoter:
             latest_checkpoint=latest_checkpoint,
             challenger_id=challenger_id,
             engine="dreamer",
+            gate_profile=gate_profile,
         )
 
     def resolve_live_checkpoint(

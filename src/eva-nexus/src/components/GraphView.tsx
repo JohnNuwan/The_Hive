@@ -15,10 +15,13 @@ import {
 import {
     getMarketGnnGraph,
     getMarketGnnMetrics,
+    getMarketGnnRefreshStatus,
     getMarketGnnStatus,
+    requestMarketGnnRefresh,
     type MarketGnnGraphNode,
     type MarketGnnGraphSnapshot,
     type MarketGnnMetricsResponse,
+    type MarketGnnRefreshState,
     type MarketGnnStatusResponse,
 } from '../services/api'
 
@@ -91,6 +94,9 @@ export default function GraphView() {
     const [statusData, setStatusData] = useState<MarketGnnStatusResponse | null>(null)
     const [metricsData, setMetricsData] = useState<MarketGnnMetricsResponse | null>(null)
     const [graphData, setGraphData] = useState<MarketGnnGraphSnapshot | null>(null)
+    const [refreshState, setRefreshState] = useState<MarketGnnRefreshState | null>(null)
+    const [refreshFeedback, setRefreshFeedback] = useState<string>('')
+    const [isRefreshing, setIsRefreshing] = useState(false)
     const [selectedNode, setSelectedNode] = useState<MarketGnnGraphNode | null>(null)
     const fgRef = useRef<any>(null)
 
@@ -104,12 +110,14 @@ export default function GraphView() {
                     getMarketGnnMetrics(),
                     getMarketGnnGraph(),
                 ])
+                const refreshPayload = await getMarketGnnRefreshStatus()
                 if (!mounted) {
                     return
                 }
                 setStatusData(gnnStatus)
                 setMetricsData(gnnMetrics)
                 setGraphData(gnnGraph)
+                setRefreshState(refreshPayload.refresh)
             } catch (error) {
                 console.error('Chargement du GNN impossible', error)
             } finally {
@@ -134,6 +142,7 @@ export default function GraphView() {
         nodes: [],
         links: [],
     }
+    const graphReadiness = statusData?.graph_readiness
     const graphPayload = useMemo(
         () => ({
             nodes: graph.nodes ?? [],
@@ -141,6 +150,23 @@ export default function GraphView() {
         }),
         [graph.nodes, graph.links],
     )
+
+    const handleRefresh = async () => {
+        setIsRefreshing(true)
+        setRefreshFeedback('')
+        const response = await requestMarketGnnRefresh()
+        setRefreshState(response.refresh)
+        setRefreshFeedback(response.message || (response.status === 'started' ? 'Refresh GNN demarre.' : 'Refresh GNN planifie.'))
+        const [gnnStatus, gnnMetrics, gnnGraph] = await Promise.all([
+            getMarketGnnStatus(),
+            getMarketGnnMetrics(),
+            getMarketGnnGraph(),
+        ])
+        setStatusData(gnnStatus)
+        setMetricsData(gnnMetrics)
+        setGraphData(gnnGraph)
+        setIsRefreshing(false)
+    }
 
     if (isLoading) {
         return (
@@ -181,12 +207,40 @@ export default function GraphView() {
                     </button>
                 </div>
 
+                <div className="mb-4 flex flex-wrap items-center gap-3">
+                    <button
+                        onClick={handleRefresh}
+                        disabled={isRefreshing}
+                        className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-2 text-[10px] font-black uppercase tracking-[0.2em] text-emerald-300 disabled:opacity-40"
+                    >
+                        {isRefreshing ? 'Refresh en cours...' : 'Refresh GNN'}
+                    </button>
+                    <div className="text-[10px] text-slate-400">
+                        {refreshState?.queued
+                            ? 'Refresh en file d attente jusqu a liberation du GPU.'
+                            : registry?.status_reason || 'Aucun diagnostic GNN detaille.'}
+                    </div>
+                </div>
+
                 <div className="mb-6 grid grid-cols-2 gap-3 xl:grid-cols-4">
                     {infoCard('Version', registry?.version || '--', registry?.checkpoint_path ? registry.checkpoint_path.split(/[\\/]/).pop() : 'Aucun checkpoint')}
                     {infoCard('Dernier entrainement', formatDateTime(registry?.trained_at), registry?.source_run_id || 'Run inconnu')}
                     {infoCard('Univers versionne', String(registry?.universe.count || 0), `${graph.displayed_symbol_count || 0} affiches sur le graphe`)}
                     {infoCard('Timeframe graphe', graph.graph_timeframe || '--', `${graph.correlation_points || 0} points de correlation`)}
                 </div>
+
+                <div className="mb-6 grid grid-cols-2 gap-3 xl:grid-cols-4">
+                    {infoCard('Derniere demande', formatDateTime(registry?.last_refresh_requested_at || refreshState?.requested_at), refreshState?.status || 'idle')}
+                    {infoCard('Dernier depart', formatDateTime(registry?.last_refresh_started_at || refreshState?.started_at), registry?.last_refresh_status || '--')}
+                    {infoCard('Derniere fin', formatDateTime(registry?.last_refresh_finished_at || refreshState?.finished_at), refreshState?.failure_reason || 'Aucune erreur')}
+                    {infoCard('Readiness graphe', graphReadiness?.status || graph.status || '--', graphReadiness?.reason || graph.reason)}
+                </div>
+
+                {refreshFeedback ? (
+                    <div className="mb-4 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-[11px] text-slate-300">
+                        {refreshFeedback}
+                    </div>
+                ) : null}
 
                 {graph.status === 'ok' && graphPayload.nodes.length > 0 ? (
                     <div className="relative h-[640px] overflow-hidden rounded-[1.75rem] border border-white/5 bg-black/30">
@@ -267,6 +321,12 @@ export default function GraphView() {
                         <p className="mt-3 max-w-xl text-[12px] text-slate-400">
                             {graph.reason || 'Le graphe reel du GNN n est pas encore disponible pour cette version du modele.'}
                         </p>
+                        <div className="mt-4 grid grid-cols-1 gap-2 text-left text-[11px] text-slate-400">
+                            <div>Timeframes candidats: {(graph.candidate_timeframes || []).join(' -> ') || '--'}</div>
+                            <div>Timeframe retenu: {graph.selected_timeframe || '--'}</div>
+                            <div>Overlap: {graph.overlap_points || 0}</div>
+                            <div>Symboles manquants: {(graph.missing_symbols || []).slice(0, 8).join(', ') || 'Aucun'}</div>
+                        </div>
                     </div>
                 )}
             </div>
@@ -286,6 +346,9 @@ export default function GraphView() {
                         {infoCard('Accuracy intraday', formatPercent(metricsData?.metrics.intraday_accuracy))}
                         {infoCard('Accuracy swing', formatPercent(metricsData?.metrics.swing_accuracy))}
                         {infoCard('Epochs', String(metricsData?.metrics.epochs || 0), `Batch ${metricsData?.metrics.batch_size || 0}`)}
+                    </div>
+                    <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
+                        {metricsData?.status_reason || registry?.status_reason || 'Aucun diagnostic detaille disponible.'}
                     </div>
                 </div>
 
@@ -327,6 +390,15 @@ export default function GraphView() {
                                     {symbol}
                                 </span>
                             ))}
+                        </div>
+                    </div>
+                    <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 px-4 py-3">
+                        <div className="text-[9px] font-black uppercase tracking-[0.2em] text-slate-500">Couverture</div>
+                        <div className="mt-2 text-[11px] text-white/75">
+                            {(registry?.coverage_summary?.graph_reason as string | undefined) || 'Couverture non calculee.'}
+                        </div>
+                        <div className="mt-2 text-[10px] text-slate-500">
+                            Timeframe: {(registry?.coverage_summary?.selected_timeframe as string | undefined) || '--'} | Overlap: {(registry?.coverage_summary?.overlap_points as number | undefined) || 0}
                         </div>
                     </div>
                 </div>

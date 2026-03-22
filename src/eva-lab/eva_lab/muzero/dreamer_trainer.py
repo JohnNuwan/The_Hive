@@ -64,35 +64,72 @@ class DreamerTrainerJAX:
 
     def prepare_batch(self, samples) -> WorldModelBatch:
         """
-        Transforme une liste de GameHistory en WorldModelBatch JAX.
+        Transforme une liste de parties en batch Dreamer homogene.
+
+        Args:
+            samples: Parties echantillonnees depuis le replay buffer.
+
+        Returns:
+            WorldModelBatch: Batch homogene compatible avec JAX.
+
+        Raises:
+            ValueError: Si aucune sequence exploitable n'est disponible.
         """
-        # Pour Dreamer, on a besoin de séquences de longueur T (ex: 50)
-        # On suppose que samples est une liste de segments [T, Obs/Act/Rew]
         import numpy as np
-        
-        # Debug: Check first sample
-        if len(samples) > 0:
-            first = samples[0]
-            # print(f"Sample 0 obs len: {len(first.observations)}, shape: {np.array(first.observations[0]).shape}")
+
+        required_length = int(
+            getattr(self.config, "dreamer_sequence_length", 0) or 0
+        )
+        normalized_samples = []
+
+        for sample in samples:
+            sample_length = min(
+                len(getattr(sample, "observations", [])),
+                len(getattr(sample, "actions", [])),
+                len(getattr(sample, "rewards", [])),
+            )
+            if sample_length <= 0:
+                continue
+            if required_length > 0 and sample_length < required_length:
+                continue
+
+            target_length = required_length if required_length > 0 else sample_length
+            start_index = max(0, sample_length - target_length)
+            end_index = start_index + target_length
+            normalized_samples.append(
+                (
+                    np.stack(sample.observations[start_index:end_index]),
+                    np.stack(sample.actions[start_index:end_index]),
+                    np.asarray(
+                        sample.rewards[start_index:end_index], dtype=np.float32
+                    ).reshape(-1, 1),
+                )
+            )
+
+        if not normalized_samples:
+            raise ValueError(
+                "Aucune sequence Dreamer homogene n'est disponible pour construire le batch."
+            )
 
         try:
-            # Use np.stack to ensure consistent shape before JAX
-            obs_list = [np.stack(s.observations) for s in samples]
-            obs = jnp.array(np.stack(obs_list)) # [B, T, Obs]
-            
-            act_list = [np.stack(s.actions) for s in samples]
-            actions = jnp.array(np.stack(act_list)) # [B, T, Act]
-            
-            rew_list = [np.stack(s.rewards) for s in samples]
-            rewards = jnp.array(np.stack(rew_list)).reshape(len(samples), -1, 1) # [B, T, 1]
-        except Exception as e:
-            print(f"Error packing batch: {e}")
-            # Fallback debug print
-            for i, s in enumerate(samples):
-                print(f"Sample {i}: obs_len={len(s.observations)}")
-            raise e
+            obs = jnp.array(np.stack([item[0] for item in normalized_samples]))
+            actions = jnp.array(np.stack([item[1] for item in normalized_samples]))
+            rewards = jnp.array(np.stack([item[2] for item in normalized_samples]))
+        except Exception as exc:
+            print(f"Erreur de composition du batch Dreamer: {exc}")
+            for index, sample in enumerate(samples):
+                print(
+                    "Echantillon %s: obs_len=%s, act_len=%s, rew_len=%s"
+                    % (
+                        index,
+                        len(getattr(sample, "observations", [])),
+                        len(getattr(sample, "actions", [])),
+                        len(getattr(sample, "rewards", [])),
+                    )
+                )
+            raise
 
-        # is_first: 1.0 au début de chaque séquence
+        # Le drapeau is_first marque le premier pas de chaque sequence.
         is_first = jnp.zeros_like(rewards)
         is_first = is_first.at[:, 0, 0].set(1.0)
         

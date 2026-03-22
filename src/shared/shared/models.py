@@ -764,6 +764,76 @@ class ExecutionEventEnvelope(EventEnvelope):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class MarketContextEnvelope(EventEnvelope):
+    """
+    Contexte de marche consultatif produit par la lane prop.
+
+    Attributes:
+        symbol (str): Symbole concerne.
+        family (str | None): Famille d'actifs associee.
+        mode (str): Mode de consommation du contexte.
+        macro_bias (str | None): Biais macro agrege.
+        event_risk (str | None): Niveau de risque evenementiel.
+        geo_risk (str | None): Niveau de risque geopolitique.
+        blocked (bool): Indique si le contexte recommande un gel consultatif.
+        confidence (float): Score de confiance normalise.
+        sources (list[str]): Sources primaires ayant servi au contexte.
+        payload (dict[str, Any]): Charge utile complete du snapshot.
+        generated_at (datetime): Horodatage de generation logique.
+        ttl_seconds (int): Duree de validite conseillee.
+    """
+
+    event_type: str = "research.market_context"
+    source: str = "researcher"
+    symbol: str
+    family: str | None = None
+    mode: str = "prop"
+    macro_bias: str | None = None
+    event_risk: str | None = None
+    geo_risk: str | None = None
+    blocked: bool = False
+    confidence: float = 0.0
+    sources: list[str] = Field(default_factory=list)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    generated_at: datetime = Field(default_factory=datetime.now)
+    ttl_seconds: int = 900
+
+
+class InvestmentThesisEnvelope(EventEnvelope):
+    """
+    These d'investissement long terme produite par la lane invest.
+
+    Attributes:
+        symbol (str): Symbole ou actif concerne.
+        issuer (str | None): Emetteur ou societe associee.
+        mode (str): Mode de consommation cible.
+        conviction_score (float): Score de conviction normalise.
+        fundamental_risk (str | None): Risque fondamental principal.
+        governance_risk (str | None): Risque de gouvernance principal.
+        horizon_months (int): Horizon cible en mois.
+        thesis (str): Resume textuel de la these.
+        sources (list[str]): Sources principales exploitees.
+        payload (dict[str, Any]): Charge utile complete de la these.
+        generated_at (datetime): Horodatage de generation logique.
+        review_status (str): Etat de revue de la these.
+    """
+
+    event_type: str = "research.investment_thesis"
+    source: str = "researcher"
+    symbol: str
+    issuer: str | None = None
+    mode: str = "invest"
+    conviction_score: float = 0.0
+    fundamental_risk: str | None = None
+    governance_risk: str | None = None
+    horizon_months: int = 12
+    thesis: str = ""
+    sources: list[str] = Field(default_factory=list)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    generated_at: datetime = Field(default_factory=datetime.now)
+    review_status: str = "draft"
+
+
 class PromotionReportEnvelope(EventEnvelope):
     """
     Rapport de promotion ou de blocage d'un challenger.
@@ -823,6 +893,12 @@ class TrainingRunEnvelope(EventEnvelope):
     source: str = "lab"
     engine: str | None = None
     run_id: str | None = None
+    sequence_id: str | None = None
+    sequence_profile: str | None = None
+    window_id: str | None = None
+    trial_id: str | None = None
+    terminal_summary_path: str | None = None
+    supervisor_state: str | None = None
     horizon: str | None = None
     family: str | None = None
     feature_profile: str | None = None

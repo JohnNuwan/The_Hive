@@ -897,9 +897,16 @@ export interface MarketGnnRegistry {
     name: string
     version: string | null
     status: 'draft' | 'validated' | 'live' | 'blocked' | 'stale' | 'unavailable' | string
+    status_reason?: string | null
     trained_at: string | null
     checkpoint_path: string | null
     source_run_id?: string | null
+    last_refresh_requested_at?: string | null
+    last_refresh_started_at?: string | null
+    last_refresh_finished_at?: string | null
+    last_refresh_status?: string | null
+    coverage_summary?: Record<string, unknown>
+    refresh_state?: Record<string, unknown>
     timeframes: string[]
     universe: {
         symbols: string[]
@@ -925,17 +932,45 @@ export interface MarketGnnRegistry {
 export interface MarketGnnStatusResponse {
     status: string
     gnn: MarketGnnRegistry
+    graph_readiness?: {
+        status?: string
+        reason?: string
+        selected_timeframe?: string | null
+        candidate_timeframes?: string[]
+        overlap_points?: number
+        missing_symbols?: string[]
+    }
+    refresh?: MarketGnnRefreshState
 }
 
 export interface MarketGnnMetricsResponse {
     status: string
     version: string | null
     model_status: string
+    status_reason?: string | null
     trained_at: string | null
+    source_run_id?: string | null
+    coverage_summary?: Record<string, unknown>
+    last_refresh_requested_at?: string | null
+    last_refresh_started_at?: string | null
+    last_refresh_finished_at?: string | null
+    last_refresh_status?: string | null
     metrics: MarketGnnRegistry['metrics']
     universe: MarketGnnRegistry['universe']
     timeframes: string[]
     artifacts: MarketGnnRegistry['artifacts']
+}
+
+export interface MarketGnnRefreshState {
+    status: string
+    queued: boolean
+    requested_at?: string | null
+    started_at?: string | null
+    finished_at?: string | null
+    run_id?: string | null
+    failure_reason?: string | null
+    source_run_id?: string | null
+    requested_by?: string | null
 }
 
 export interface MarketGnnGraphNode {
@@ -960,11 +995,17 @@ export interface MarketGnnGraphSnapshot {
     reason: string
     version?: string | null
     model_status?: string
+    status_reason?: string | null
     trained_at?: string | null
     timeframes?: string[]
     universe?: MarketGnnRegistry['universe']
     metrics?: MarketGnnRegistry['metrics']
     graph_timeframe?: string | null
+    selected_timeframe?: string | null
+    candidate_timeframes?: string[]
+    overlap_points?: number
+    missing_symbols?: string[]
+    coverage_summary?: Record<string, unknown>
     displayed_symbol_count?: number
     universe_symbol_count?: number
     correlation_points?: number
@@ -1042,9 +1083,16 @@ export async function getMarketGnnStatus(): Promise<MarketGnnStatusResponse> {
             name: 'market_gnn',
             version: null,
             status: 'unavailable',
+            status_reason: 'GNN indisponible.',
             trained_at: null,
             checkpoint_path: null,
             source_run_id: null,
+            last_refresh_requested_at: null,
+            last_refresh_started_at: null,
+            last_refresh_finished_at: null,
+            last_refresh_status: 'idle',
+            coverage_summary: {},
+            refresh_state: {},
             timeframes: [],
             universe: {
                 symbols: [],
@@ -1066,6 +1114,25 @@ export async function getMarketGnnStatus(): Promise<MarketGnnStatusResponse> {
                 metrics: { path: null, exists: false, size_bytes: null, modified_at: null },
             },
         },
+        graph_readiness: {
+            status: 'unavailable',
+            reason: 'Graphe indisponible.',
+            selected_timeframe: null,
+            candidate_timeframes: [],
+            overlap_points: 0,
+            missing_symbols: [],
+        },
+        refresh: {
+            status: 'idle',
+            queued: false,
+            requested_at: null,
+            started_at: null,
+            finished_at: null,
+            run_id: null,
+            failure_reason: null,
+            source_run_id: null,
+            requested_by: null,
+        },
     }, 8000)
 }
 
@@ -1074,7 +1141,14 @@ export async function getMarketGnnMetrics(): Promise<MarketGnnMetricsResponse> {
         status: 'offline',
         version: null,
         model_status: 'unavailable',
+        status_reason: 'GNN indisponible.',
         trained_at: null,
+        source_run_id: null,
+        coverage_summary: {},
+        last_refresh_requested_at: null,
+        last_refresh_started_at: null,
+        last_refresh_finished_at: null,
+        last_refresh_status: 'idle',
         metrics: {
             loss: 0,
             scalp_accuracy: 0,
@@ -1123,6 +1197,7 @@ export async function getMarketGnnGraph(): Promise<MarketGnnGraphSnapshot> {
         reason: 'GNN indisponible',
         version: null,
         model_status: 'unavailable',
+        status_reason: 'GNN indisponible.',
         trained_at: null,
         timeframes: [],
         universe: {
@@ -1140,11 +1215,53 @@ export async function getMarketGnnGraph(): Promise<MarketGnnGraphSnapshot> {
             samples: 0,
         },
         graph_timeframe: null,
+        selected_timeframe: null,
+        candidate_timeframes: [],
+        overlap_points: 0,
+        missing_symbols: [],
+        coverage_summary: {},
         displayed_symbol_count: 0,
         universe_symbol_count: 0,
         correlation_points: 0,
         nodes: [],
         links: [],
+    })
+}
+
+export async function requestMarketGnnRefresh(): Promise<{ status: string; refresh: MarketGnnRefreshState; message?: string }> {
+    return postJsonWithFallback('/api/lab/gnn/refresh', {}, {
+        status: 'error',
+        refresh: {
+            status: 'idle',
+            queued: false,
+            requested_at: null,
+            started_at: null,
+            finished_at: null,
+            run_id: null,
+            failure_reason: null,
+            source_run_id: null,
+            requested_by: null,
+        },
+        message: 'Refresh GNN indisponible.',
+    }, 15000)
+}
+
+export async function getMarketGnnRefreshStatus(): Promise<{ status: string; refresh: MarketGnnRefreshState; running: boolean; log_path?: string }> {
+    return safeFetch('/api/lab/gnn/refresh/status', {
+        status: 'offline',
+        refresh: {
+            status: 'idle',
+            queued: false,
+            requested_at: null,
+            started_at: null,
+            finished_at: null,
+            run_id: null,
+            failure_reason: null,
+            source_run_id: null,
+            requested_by: null,
+        },
+        running: false,
+        log_path: '',
     })
 }
 
@@ -1479,15 +1596,29 @@ export interface ResearchPapersResponse {
 
 export interface ResearchTrendSource {
     key?: string
+    source_key?: string
     source_type?: string
     source_name: string
     family?: string
     last_sync?: string | null
     queued?: number
+    approved?: number
+    rejected?: number
+    ingested?: number
+    failed_ingestion?: number
+    auto_approved?: number
+    auto_ingested?: number
     duplicates?: number
     errors?: number
+    review_mode?: 'auto' | 'manual' | string
+    trust_level?: 'trusted' | 'review_required' | string
+    last_error?: string | null
+    ingestion_errors?: number
+    durable_ingestion_ready?: boolean
     url?: string
     categories?: string[]
+    auto_approve?: boolean
+    auto_approve_pattern?: string | null
 }
 
 export interface ResearchTrendsResponse {
@@ -1506,6 +1637,8 @@ export interface ResearchHistoryEntry {
 
 export interface ResearchQueueSummary {
     queued: number
+    auto_approved?: number
+    auto_ingested?: number
     duplicates: number
     errors: number
     items?: Array<{ id?: string | null; status: string; reason?: string }>
@@ -1527,13 +1660,18 @@ export interface KnowledgeReviewItem {
     confidence_score: number
     priority_score?: number
     content_hash?: string
-    review_status: 'pending' | 'approved' | 'rejected' | 'ingested' | string
+    review_status: 'pending' | 'approved' | 'rejected' | 'ingested' | 'failed_ingestion' | string
     metadata?: Record<string, unknown>
+    source_key?: string
+    review_mode?: 'auto' | 'manual' | string
+    trust_level?: 'trusted' | 'review_required' | string
     collected_at?: string
     reviewed_at?: string | null
     reviewed_by?: string | null
     rejection_reason?: string | null
     ingested_at?: string | null
+    failed_ingestion_at?: string | null
+    ingestion_error?: string | null
 }
 
 export interface IngestionDependencyStatus {
@@ -1555,6 +1693,7 @@ export interface IngestionStatusResponse {
         approved: number
         rejected: number
         ingested: number
+        failed_ingestion: number
     }
     active_run: {
         run_id?: string | null
@@ -1569,9 +1708,21 @@ export interface IngestionStatusResponse {
         current_source?: string | null
     }
     last_run?: Record<string, unknown> | null
+    auto_review?: {
+        enabled: boolean
+        sources: string[]
+        policies?: Array<{
+            source_key: string
+            review_mode: 'auto' | 'manual' | string
+            trust_level: 'trusted' | 'review_required' | string
+            auto_approve_pattern?: string | null
+        }>
+    }
     source_stats: Record<string, unknown>
+    pending_by_source?: Record<string, number>
     duplicate_rate: number
     dependencies: Record<string, IngestionDependencyStatus>
+    durable_ingestion_ready?: boolean
     logs: Array<string | IngestionLogEntry | Record<string, unknown>>
 }
 
@@ -1585,6 +1736,7 @@ export interface ReviewQueueResponse {
     review_status: string
     total: number
     items: KnowledgeReviewItem[]
+    filters?: Record<string, unknown>
 }
 
 export interface ApprovedKnowledgeResponse {
@@ -1764,6 +1916,8 @@ export async function searchResearcher(query: string, domain = 'general', maxRes
         timestamp: new Date(0).toISOString(),
         review_queue: {
             queued: 0,
+            auto_approved: 0,
+            auto_ingested: 0,
             duplicates: 0,
             errors: 0,
             items: [],
@@ -1783,6 +1937,8 @@ export async function searchResearchPapers(query: string, category = 'cs.AI', ma
         total: 0,
         review_queue: {
             queued: 0,
+            auto_approved: 0,
+            auto_ingested: 0,
             duplicates: 0,
             errors: 0,
             items: [],
@@ -1827,27 +1983,67 @@ export async function getResearchIngestStatus(tail = 20): Promise<IngestionStatu
             approved: 0,
             rejected: 0,
             ingested: 0,
+            failed_ingestion: 0,
         },
         active_run: {
             active: false,
             status: 'idle',
         },
         last_run: null,
+        auto_review: {
+            enabled: false,
+            sources: [],
+            policies: [],
+        },
         source_stats: {},
+        pending_by_source: {},
         duplicate_rate: 0,
         dependencies: {},
+        durable_ingestion_ready: false,
         logs: [],
     }, 8000)
 }
 
-export async function getResearchReviewQueue(reviewStatus = 'pending', limit = 50, offset = 0): Promise<ReviewQueueResponse> {
+export async function getResearchReviewQueue(
+    reviewStatus = 'pending',
+    limit = 50,
+    offset = 0,
+    filters: {
+        sourceKey?: string
+        family?: string
+        trustLevel?: string
+        reviewMode?: string
+        search?: string
+    } = {},
+): Promise<ReviewQueueResponse> {
+    const params = new URLSearchParams({
+        review_status: reviewStatus,
+        limit: String(limit),
+        offset: String(offset),
+    })
+    if (filters.sourceKey) {
+        params.set('source_key', filters.sourceKey)
+    }
+    if (filters.family) {
+        params.set('family', filters.family)
+    }
+    if (filters.trustLevel) {
+        params.set('trust_level', filters.trustLevel)
+    }
+    if (filters.reviewMode) {
+        params.set('review_mode', filters.reviewMode)
+    }
+    if (filters.search) {
+        params.set('search', filters.search)
+    }
     return safeFetch(
-        `/api/researcher/ingest/review?review_status=${encodeURIComponent(reviewStatus)}&limit=${limit}&offset=${offset}`,
+        `/api/researcher/ingest/review?${params.toString()}`,
         {
             status: 'offline',
             review_status: reviewStatus,
             total: 0,
             items: [],
+            filters: {},
         },
         8000,
     )
@@ -1865,6 +2061,31 @@ export async function rejectResearchReviewItem(itemId: string, reason: string, r
         reviewed_by: reviewedBy,
         reason,
     }, { status: 'error' }, 20000)
+}
+
+export async function retryResearchReviewIngestion(itemId: string, reviewedBy = 'nexus:retry'): Promise<{ status: string; item?: KnowledgeReviewItem; reason?: string }> {
+    return postJsonWithFallback(`/api/researcher/ingest/review/${encodeURIComponent(itemId)}/retry-ingestion`, {
+        reviewed_by: reviewedBy,
+        reason: 'Reprise de l ingestion durable depuis Nexus',
+    }, { status: 'error' }, 20000)
+}
+
+export async function autoApproveResearchReviewItems(sourcePattern?: string, limit = 500, reviewedBy = 'nexus:auto'): Promise<Record<string, unknown>> {
+    const payload: Record<string, unknown> = {
+        reviewed_by: reviewedBy,
+        limit,
+    }
+    if (sourcePattern) {
+        payload.source_pattern = sourcePattern
+    }
+    return postJsonWithFallback('/api/researcher/ingest/review/auto-approve', payload, {
+        status: 'error',
+        matched: 0,
+        approved: 0,
+        ingested: 0,
+        errors: 0,
+        items: [],
+    }, 30000)
 }
 
 export async function getApprovedKnowledge(limit = 30): Promise<ApprovedKnowledgeResponse> {

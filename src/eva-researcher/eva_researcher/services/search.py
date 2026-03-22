@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from shared import get_settings
 
 from eva_researcher.services.ingestion import (
+    AutoApproveRequest,
     KnowledgeIngestionService,
     ReviewDecisionRequest,
     SyncSourcesRequest,
@@ -78,9 +79,9 @@ class ResearchService:
 
     async def search_papers(self, query: str, category: str, max_results: int) -> dict[str, Any]:
         """Interroge arXiv et met les papiers en file de revue."""
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             response = await client.get(
-                "http://export.arxiv.org/api/query",
+                "https://export.arxiv.org/api/query",
                 params={
                     "search_query": f"cat:{category} AND all:{query}",
                     "max_results": max_results,
@@ -143,9 +144,28 @@ class ResearchService:
         """Retourne l'etat global de la pipeline d'ingestion."""
         return await self.ingestion.get_status(tail=tail)
 
-    async def list_review_items(self, review_status: str = "pending", limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    async def list_review_items(
+        self,
+        review_status: str = "pending",
+        limit: int = 50,
+        offset: int = 0,
+        source_key: str | None = None,
+        family: str | None = None,
+        trust_level: str | None = None,
+        review_mode: str | None = None,
+        search: str | None = None,
+    ) -> dict[str, Any]:
         """Retourne les candidats en revue selon un statut donne."""
-        return await self.ingestion.list_review_items(review_status=review_status, limit=limit, offset=offset)
+        return await self.ingestion.list_review_items(
+            review_status=review_status,
+            limit=limit,
+            offset=offset,
+            source_key=source_key,
+            family=family,
+            trust_level=trust_level,
+            review_mode=review_mode,
+            search=search,
+        )
 
     async def approve_review_item(self, item_id: str, decision: ReviewDecisionRequest) -> dict[str, Any]:
         """Approuve un candidat puis l'ingere durablement."""
@@ -154,6 +174,16 @@ class ResearchService:
     async def reject_review_item(self, item_id: str, decision: ReviewDecisionRequest) -> dict[str, Any]:
         """Rejette un candidat de la file de revue."""
         return await self.ingestion.reject_item(item_id, decision)
+
+    async def retry_review_item_ingestion(self, item_id: str, reviewed_by: str = "manual:retry") -> dict[str, Any]:
+        """Relance l'ingestion durable d'un candidat en erreur."""
+
+        return await self.ingestion.retry_failed_ingestion(item_id, reviewed_by=reviewed_by)
+
+    async def auto_approve_review_items(self, request: AutoApproveRequest | None = None) -> dict[str, Any]:
+        """Applique les politiques d'auto-approbation sur la file de revue."""
+
+        return await self.ingestion.auto_approve_pending_items(request)
 
     async def list_approved_items(self, limit: int = 50) -> dict[str, Any]:
         """Retourne les derniers elements approuves et ingeres."""

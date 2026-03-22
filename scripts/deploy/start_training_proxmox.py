@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import stat
 import sys
 import time
@@ -24,6 +25,8 @@ REMOTE_LOG = f"{REMOTE_DIR}/hive_nightly_training.log"
 REMOTE_SCRIPT = f"{REMOTE_DIR}/scripts/run_nightly_training_remote.sh"
 REMOTE_SEQUENCE_SCRIPT = f"{REMOTE_DIR}/scripts/run_wave1_sequence_remote.sh"
 REMOTE_SEQUENCE_LOG = f"{REMOTE_DIR}/hive_wave1_sequence.log"
+REMOTE_V4_SEQUENCE_DIR = f"{REMOTE_DIR}/data/checkpoints/v4_ga"
+REMOTE_V4_SEQUENCE_RUNNER = f"{REMOTE_DIR}/scripts/deploy/v4_sequence_runner.py"
 LOCAL_ROOT = Path(__file__).resolve().parents[2]
 
 SYNC_FILES = [
@@ -34,6 +37,7 @@ SYNC_FILES = [
     Path("src/eva-lab/eva_lab/muzero/config.py"),
     Path("src/eva-lab/eva_lab/muzero/environment.py"),
     Path("src/eva-lab/eva_lab/dreamer_gate.py"),
+    Path("src/eva-lab/eva_lab/gold_cpu_prep.py"),
     Path("src/eva-lab/eva_lab/live_inference_main.py"),
     Path("src/eva-lab/eva_lab/live_inference_models.py"),
     Path("src/eva-lab/eva_lab/muzero/dreamer_networks.py"),
@@ -61,6 +65,8 @@ SYNC_FILES = [
     Path("src/shared/shared/__init__.py"),
     Path("src/shared/shared/config.py"),
     Path("src/shared/shared/models.py"),
+    Path("scripts/deploy/v4_sequence_runner.py"),
+    Path("scripts/prepare_gold_cpu_artifacts.py"),
 ]
 
 SYNC_DIRS = [
@@ -75,6 +81,7 @@ PASSTHROUGH_VARS = [
     "TRAINING_MAX_CHAMPION_AGE_HOURS",
     "TRAINING_MIN_SHADOW_RECORDS",
     "NIGHTLY_KEEP_VLLM",
+    "NIGHTLY_DEFER_VLLM_RESTART",
     "NIGHTLY_STOP_COMFYUI",
     "REBUILD_TRAINER_IMAGE",
     "RUN_TRAIN_GNN",
@@ -89,6 +96,11 @@ PASSTHROUGH_VARS = [
     "DREAMER_EPOCHS",
     "TRAIN_GNN_EPOCHS",
     "TRAIN_GNN_BATCH_SIZE",
+    "TRAIN_GNN_CHECKPOINT_EVERY",
+    "TRAIN_GNN_SYMBOLS",
+    "TRAIN_GNN_FOCUS_SYMBOL",
+    "TRAIN_GNN_CONTEXT_SYMBOLS",
+    "TRAIN_GNN_DEPLOYMENT_CLASS",
     "MUZERO_TRAINING_STEPS",
     "MUZERO_GAMES_PER_SYMBOL",
     "MUZERO_BATCH_SIZE",
@@ -193,12 +205,22 @@ PASSTHROUGH_VARS = [
     "TRAINING_TIMESCALE_FEATURES_TABLE",
     "TRAINING_TIMESCALE_DATASETS_TABLE",
     "TRAINING_TIMESCALE_ARENA_TABLE",
+    "TRAINING_TIMESCALE_GA_TABLE",
+    "TRAINING_TIMESCALE_REPLAY_TABLE",
+    "TRAINING_TIMESCALE_RUN_WINDOWS_TABLE",
     "TELEGRAM_NOTIFY_TRAINING",
     "TRAINING_RUN_TRIGGER",
     "TRAINING_RUN_LOCK_MAX_AGE_HOURS",
     "TRAINING_GA_STATUS",
     "TRAINING_GA_GENERATION",
     "TRAINING_GA_TRIAL",
+    "TRAINING_GATE_PROFILE",
+    "TRAINING_FOCUS_SYMBOLS",
+    "TRAINING_SEQUENCE_ID",
+    "TRAINING_SEQUENCE_PROFILE",
+    "TRAINING_WINDOW_ID",
+    "TRAINING_TRIAL_ID",
+    "TRAINING_SUPERVISOR_STATE",
 ]
 
 WAVE1_FAMILY_SYMBOLS = {
@@ -243,7 +265,18 @@ V4_MODE_ORDER = ["proxy_ga", "full"]
 
 V4_SEQUENCE_ORDER = {
     "scalp": ["scalp_metals_v2", "scalp_fx_v2", "scalp_indices_v2"],
+    "gold_monday_xauusd": ["scalp_metals_v2"],
 }
+
+GOLD_MONDAY_SEQUENCE_NAME = "gold_monday_xauusd"
+GOLD_MONDAY_PROFILE = "scalp_metals_v2"
+GOLD_MONDAY_FOCUS_SYMBOL = "XAUUSD"
+GOLD_MONDAY_CONTEXT_SYMBOLS = [
+    "XAGUSD",
+    "DXY.cash",
+    "US500.cash",
+    "EURUSD",
+]
 
 V4_WINDOW_ORDER = [
     ("muzero", "proxy_ga"),
@@ -496,6 +529,7 @@ if [ \"$TRAINING_PROFILE\" = \"research\" ]; then
 fi
 
 export NIGHTLY_KEEP_VLLM=\"${NIGHTLY_KEEP_VLLM:-1}\"
+export NIGHTLY_DEFER_VLLM_RESTART=\"${NIGHTLY_DEFER_VLLM_RESTART:-0}\"
 export NIGHTLY_STOP_COMFYUI=\"${NIGHTLY_STOP_COMFYUI:-1}\"
 acquire_lock
 emit_launcher_state \"preflight\" \"online\" \"online\"
@@ -531,6 +565,12 @@ cleanup() {
     docker compose up -d comfyui >/dev/null 2>&1 || true
   fi
   if [ \"$VLLM_STOPPED\" = \"1\" ]; then
+    if [ \"$NIGHTLY_DEFER_VLLM_RESTART\" = \"1\" ]; then
+      echo \"[nightly] Redemarrage de vLLM differe jusqu'a la fin de la sequence\"
+      emit_launcher_state \"cleanup\" \"deferred\" \"$([ \"$COMFYUI_STOPPED\" = \"1\" ] && echo restarting || echo online)\"
+      emit_training_log INFO launcher \"Redemarrage de vLLM differe a la fin de la sequence Gold.\"
+      return
+    fi
     docker compose up -d vllm >/dev/null 2>&1 || true
     echo \"[nightly] Attente de vLLM apres redemarrage\"
     emit_launcher_state \"cleanup\" \"restarting\" \"$([ \"$COMFYUI_STOPPED\" = \"1\" ] && echo restarting || echo online)\"
@@ -567,6 +607,11 @@ export DREAMER_DEFAULT_HORIZON=\"${DREAMER_DEFAULT_HORIZON:-}\"
 export DREAMER_EPOCHS=\"${DREAMER_EPOCHS:-1500}\"
 export TRAIN_GNN_EPOCHS=\"${TRAIN_GNN_EPOCHS:-500}\"
 export TRAIN_GNN_BATCH_SIZE=\"${TRAIN_GNN_BATCH_SIZE:-64}\"
+export TRAIN_GNN_CHECKPOINT_EVERY=\"${TRAIN_GNN_CHECKPOINT_EVERY:-25}\"
+export TRAIN_GNN_SYMBOLS=\"${TRAIN_GNN_SYMBOLS:-}\"
+export TRAIN_GNN_FOCUS_SYMBOL=\"${TRAIN_GNN_FOCUS_SYMBOL:-}\"
+export TRAIN_GNN_CONTEXT_SYMBOLS=\"${TRAIN_GNN_CONTEXT_SYMBOLS:-}\"
+export TRAIN_GNN_DEPLOYMENT_CLASS=\"${TRAIN_GNN_DEPLOYMENT_CLASS:-consultative}\"
 export MUZERO_TRAINING_STEPS=\"${MUZERO_TRAINING_STEPS:-24000}\"
 export MUZERO_GAMES_PER_SYMBOL=\"${MUZERO_GAMES_PER_SYMBOL:-12}\"
 export MUZERO_BATCH_SIZE=\"${MUZERO_BATCH_SIZE:-32}\"
@@ -633,21 +678,29 @@ export MUZERO_PROMOTION_MIN_PYRAMID_EFFICIENCY=\"${MUZERO_PROMOTION_MIN_PYRAMID_
 export MUZERO_PROMOTION_MIN_SLBE_CAPTURE_RATE=\"${MUZERO_PROMOTION_MIN_SLBE_CAPTURE_RATE:-0.40}\"
 export MUZERO_PROMOTION_MAX_HOLD_DRAG_SCORE=\"${MUZERO_PROMOTION_MAX_HOLD_DRAG_SCORE:-0.40}\"
 export MUZERO_PROMOTION_MIN_CLOSE_QUALITY_SCORE=\"${MUZERO_PROMOTION_MIN_CLOSE_QUALITY_SCORE:-0.45}\"
-export TRAINING_TIMESCALE_ENABLED=\"${TRAINING_TIMESCALE_ENABLED:-0}\"
+export TRAINING_TIMESCALE_ENABLED=\"${TRAINING_TIMESCALE_ENABLED:-1}\"
 export TRAINING_TIMESCALE_HOST=\"${TRAINING_TIMESCALE_HOST:-timescaledb}\"
 export TRAINING_TIMESCALE_PORT=\"${TRAINING_TIMESCALE_PORT:-5432}\"
 export TRAINING_TIMESCALE_DB=\"${TRAINING_TIMESCALE_DB:-thehive}\"
 export TRAINING_TIMESCALE_USER=\"${TRAINING_TIMESCALE_USER:-eva}\"
-export TRAINING_TIMESCALE_PASSWORD=\"${TRAINING_TIMESCALE_PASSWORD:-eva_pwd}\"
+export TRAINING_TIMESCALE_PASSWORD=\"${TRAINING_TIMESCALE_PASSWORD:-${TIMESCALE_PASSWORD:-devpassword}}\"
 export TRAINING_TIMESCALE_SSLMODE=\"${TRAINING_TIMESCALE_SSLMODE:-prefer}\"
-export TRAINING_TIMESCALE_BARS_TABLE=\"${TRAINING_TIMESCALE_BARS_TABLE:-market_bars}\"
-export TRAINING_TIMESCALE_FEATURES_TABLE=\"${TRAINING_TIMESCALE_FEATURES_TABLE:-market_features}\"
-export TRAINING_TIMESCALE_DATASETS_TABLE=\"${TRAINING_TIMESCALE_DATASETS_TABLE:-training_datasets}\"
-export TRAINING_TIMESCALE_ARENA_TABLE=\"${TRAINING_TIMESCALE_ARENA_TABLE:-arena_results}\"
+export TRAINING_TIMESCALE_BARS_TABLE=\"${TRAINING_TIMESCALE_BARS_TABLE:-market.market_bars}\"
+export TRAINING_TIMESCALE_FEATURES_TABLE=\"${TRAINING_TIMESCALE_FEATURES_TABLE:-market.market_features}\"
+export TRAINING_TIMESCALE_DATASETS_TABLE=\"${TRAINING_TIMESCALE_DATASETS_TABLE:-training.training_datasets}\"
+export TRAINING_TIMESCALE_ARENA_TABLE=\"${TRAINING_TIMESCALE_ARENA_TABLE:-training.arena_results}\"
+export TRAINING_TIMESCALE_RUN_WINDOWS_TABLE=\"${TRAINING_TIMESCALE_RUN_WINDOWS_TABLE:-training.run_windows}\"
 export TELEGRAM_NOTIFY_TRAINING=\"${TELEGRAM_NOTIFY_TRAINING:-1}\"
 export TRAINING_GA_STATUS=\"${TRAINING_GA_STATUS:-}\"
 export TRAINING_GA_GENERATION=\"${TRAINING_GA_GENERATION:-}\"
 export TRAINING_GA_TRIAL=\"${TRAINING_GA_TRIAL:-}\"
+export TRAINING_GATE_PROFILE=\"${TRAINING_GATE_PROFILE:-}\"
+export TRAINING_FOCUS_SYMBOLS=\"${TRAINING_FOCUS_SYMBOLS:-}\"
+export TRAINING_SEQUENCE_ID=\"${TRAINING_SEQUENCE_ID:-}\"
+export TRAINING_SEQUENCE_PROFILE=\"${TRAINING_SEQUENCE_PROFILE:-}\"
+export TRAINING_WINDOW_ID=\"${TRAINING_WINDOW_ID:-}\"
+export TRAINING_TRIAL_ID=\"${TRAINING_TRIAL_ID:-}\"
+export TRAINING_SUPERVISOR_STATE=\"${TRAINING_SUPERVISOR_STATE:-}\"
 
 if [ \"$REBUILD_TRAINER_IMAGE\" = \"1\" ]; then
   echo \"[nightly] Reconstruction de l'image eva-trainer\"
@@ -683,6 +736,11 @@ docker compose run --rm \
   -e DREAMER_EPOCHS=\"$DREAMER_EPOCHS\" \
   -e TRAIN_GNN_EPOCHS=\"$TRAIN_GNN_EPOCHS\" \
   -e TRAIN_GNN_BATCH_SIZE=\"$TRAIN_GNN_BATCH_SIZE\" \
+  -e TRAIN_GNN_CHECKPOINT_EVERY=\"$TRAIN_GNN_CHECKPOINT_EVERY\" \
+  -e TRAIN_GNN_SYMBOLS=\"$TRAIN_GNN_SYMBOLS\" \
+  -e TRAIN_GNN_FOCUS_SYMBOL=\"$TRAIN_GNN_FOCUS_SYMBOL\" \
+  -e TRAIN_GNN_CONTEXT_SYMBOLS=\"$TRAIN_GNN_CONTEXT_SYMBOLS\" \
+  -e TRAIN_GNN_DEPLOYMENT_CLASS=\"$TRAIN_GNN_DEPLOYMENT_CLASS\" \
   -e MUZERO_TRAINING_STEPS=\"$MUZERO_TRAINING_STEPS\" \
   -e MUZERO_GAMES_PER_SYMBOL=\"$MUZERO_GAMES_PER_SYMBOL\" \
   -e MUZERO_BATCH_SIZE=\"$MUZERO_BATCH_SIZE\" \
@@ -750,10 +808,18 @@ docker compose run --rm \
   -e TRAINING_TIMESCALE_FEATURES_TABLE=\"$TRAINING_TIMESCALE_FEATURES_TABLE\" \
   -e TRAINING_TIMESCALE_DATASETS_TABLE=\"$TRAINING_TIMESCALE_DATASETS_TABLE\" \
   -e TRAINING_TIMESCALE_ARENA_TABLE=\"$TRAINING_TIMESCALE_ARENA_TABLE\" \
+  -e TRAINING_TIMESCALE_RUN_WINDOWS_TABLE=\"$TRAINING_TIMESCALE_RUN_WINDOWS_TABLE\" \
   -e TELEGRAM_NOTIFY_TRAINING=\"$TELEGRAM_NOTIFY_TRAINING\" \
   -e TRAINING_GA_STATUS=\"$TRAINING_GA_STATUS\" \
   -e TRAINING_GA_GENERATION=\"$TRAINING_GA_GENERATION\" \
   -e TRAINING_GA_TRIAL=\"$TRAINING_GA_TRIAL\" \
+  -e TRAINING_GATE_PROFILE=\"$TRAINING_GATE_PROFILE\" \
+  -e TRAINING_FOCUS_SYMBOLS=\"$TRAINING_FOCUS_SYMBOLS\" \
+  -e TRAINING_SEQUENCE_ID=\"$TRAINING_SEQUENCE_ID\" \
+  -e TRAINING_SEQUENCE_PROFILE=\"$TRAINING_SEQUENCE_PROFILE\" \
+  -e TRAINING_WINDOW_ID=\"$TRAINING_WINDOW_ID\" \
+  -e TRAINING_TRIAL_ID=\"$TRAINING_TRIAL_ID\" \
+  -e TRAINING_SUPERVISOR_STATE=\"$TRAINING_SUPERVISOR_STATE\" \
   -e TRAINING_RUN_TRIGGER=\"$RUN_TRIGGER\" \
   -e NIGHTLY_RUN_LOCK_ALREADY_HELD=\"1\" \
   -v \"$PROJECT_DIR/data:/app/eva-lab/data\" \
@@ -962,6 +1028,55 @@ def build_runtime_exports(overrides: dict[str, str] | None = None) -> str:
     for name, value in values.items():
         exports.append(f"export {name}={shlex.quote(value)}")
     return "; ".join(exports)
+
+
+def _build_v4_supervisor_overrides() -> dict[str, str]:
+    """Construit les variables minimales requises par le superviseur V4.
+
+    Returns:
+        dict[str, str]: Variables a exporter avant le lancement du superviseur.
+    """
+
+    return {
+        "TRAINING_TIMESCALE_ENABLED": os.getenv("TRAINING_TIMESCALE_ENABLED", "1"),
+        "TRAINING_TIMESCALE_HOST": os.getenv("TRAINING_TIMESCALE_HOST", "timescaledb"),
+        "TRAINING_TIMESCALE_PORT": os.getenv("TRAINING_TIMESCALE_PORT", "5432"),
+        "TRAINING_TIMESCALE_DB": os.getenv("TRAINING_TIMESCALE_DB", "thehive"),
+        "TRAINING_TIMESCALE_USER": os.getenv("TRAINING_TIMESCALE_USER", "eva"),
+        "TRAINING_TIMESCALE_PASSWORD": os.getenv(
+            "TRAINING_TIMESCALE_PASSWORD",
+            os.getenv("TIMESCALE_PASSWORD", "devpassword"),
+        ),
+        "TRAINING_TIMESCALE_SSLMODE": os.getenv("TRAINING_TIMESCALE_SSLMODE", "prefer"),
+        "TRAINING_TIMESCALE_BARS_TABLE": os.getenv(
+            "TRAINING_TIMESCALE_BARS_TABLE",
+            "market.market_bars",
+        ),
+        "TRAINING_TIMESCALE_FEATURES_TABLE": os.getenv(
+            "TRAINING_TIMESCALE_FEATURES_TABLE",
+            "market.market_features",
+        ),
+        "TRAINING_TIMESCALE_DATASETS_TABLE": os.getenv(
+            "TRAINING_TIMESCALE_DATASETS_TABLE",
+            "training.training_datasets",
+        ),
+        "TRAINING_TIMESCALE_ARENA_TABLE": os.getenv(
+            "TRAINING_TIMESCALE_ARENA_TABLE",
+            "training.arena_results",
+        ),
+        "TRAINING_TIMESCALE_GA_TABLE": os.getenv(
+            "TRAINING_TIMESCALE_GA_TABLE",
+            "training.ga_trials",
+        ),
+        "TRAINING_TIMESCALE_REPLAY_TABLE": os.getenv(
+            "TRAINING_TIMESCALE_REPLAY_TABLE",
+            "training.replay_metadata",
+        ),
+        "TRAINING_TIMESCALE_RUN_WINDOWS_TABLE": os.getenv(
+            "TRAINING_TIMESCALE_RUN_WINDOWS_TABLE",
+            "training.run_windows",
+        ),
+    }
 
 
 def _build_manual_massive_overrides() -> dict[str, str]:
@@ -1848,6 +1963,425 @@ def _build_v4_profile_overrides(
     )
 
 
+def _build_gold_monday_common_overrides(
+    profile: str,
+    *,
+    engine: str,
+) -> dict[str, str]:
+    """Construit les surcharges communes du profil Monday Gold.
+
+    Args:
+        profile (str): Profil V4 cible.
+        engine (str): Moteur cible.
+
+    Returns:
+        dict[str, str]: Variables communes au mode Gold-only.
+    """
+
+    normalized_profile = _normalize_v4_profile(profile)
+    horizon, family = _split_v3_profile(normalized_profile)
+    return {
+        "TRAINING_PROFILE": "refresh",
+        "TRAINING_AUTOMATION_MODE": "force_refresh",
+        "TRAINING_ENGINE": _normalize_v4_engine(engine),
+        "TRAINING_GATE_PROFILE": "gold_demo",
+        "MUZERO_PROMOTION_GATE_PROFILE": "gold_demo",
+        "TRAINING_FOCUS_SYMBOLS": GOLD_MONDAY_FOCUS_SYMBOL,
+        "MUZERO_HORIZONS": horizon,
+        "DREAMER_HORIZON": horizon,
+        "MUZERO_MODEL_FAMILY": family,
+        "MUZERO_DATASET_SOURCE": "auto",
+        "MUZERO_SYMBOLS": GOLD_MONDAY_FOCUS_SYMBOL,
+        "MUZERO_SYMBOLS_SCALP": GOLD_MONDAY_FOCUS_SYMBOL,
+        "ARENA_SYMBOLS": GOLD_MONDAY_FOCUS_SYMBOL,
+        "ARENA_SYMBOLS_SCALP": GOLD_MONDAY_FOCUS_SYMBOL,
+        "MUZERO_MAX_SYMBOLS": "1",
+        "ARENA_MAX_SYMBOLS": "1",
+        "ARENA_MIN_SYMBOLS": "1",
+        "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": "1",
+        "MUZERO_LIVE_TOP_SYMBOLS": "1",
+        "NIGHTLY_KEEP_VLLM": "0",
+        "NIGHTLY_DEFER_VLLM_RESTART": "1",
+        "RUN_TRAIN_GNN": "0",
+    }
+
+
+def _build_gold_monday_muzero_overrides(
+    profile: str,
+    *,
+    mode: str,
+    trial: dict[str, Any] | None = None,
+    finalist_rank: int | None = None,
+) -> dict[str, str]:
+    """Construit les surcharges MuZero du mode Monday Gold.
+
+    Args:
+        profile (str): Profil cible.
+        mode (str): Mode `proxy_ga` ou `full`.
+        trial (dict[str, Any] | None): Definition du trial.
+        finalist_rank (int | None): Rang du finaliste en mode `full`.
+
+    Returns:
+        dict[str, str]: Environnement complet d'un trial MuZero Gold.
+    """
+
+    normalized_mode = _normalize_v4_mode(mode)
+    base = _build_muzero_v4_profile_overrides(
+        profile,
+        mode="proxy_ga" if normalized_mode == "proxy_ga" else "full",
+        trial=trial,
+        finalist_rank=finalist_rank,
+    )
+    trial_id = str((trial or {}).get("trial_id") or "").strip() or "baseline"
+    base.update(_build_gold_monday_common_overrides(profile, engine="muzero"))
+    base.update(
+        {
+            "TRAINING_RUN_TRIGGER": (
+                f"manual_{GOLD_MONDAY_SEQUENCE_NAME}_muzero_{trial_id}"
+                if normalized_mode == "proxy_ga"
+                else (
+                    f"manual_{GOLD_MONDAY_SEQUENCE_NAME}_muzero_finalist_"
+                    f"{str(finalist_rank or 0)}_{trial_id}"
+                )
+            ),
+            "TRAINING_TRIAL_MODE": normalized_mode,
+            "TRAINING_TRIAL_COST_PROFILE": "proxy" if normalized_mode == "proxy_ga" else "full",
+            "TRAINING_GA_STATUS": normalized_mode,
+            "TRAINING_GA_TRIAL": trial_id,
+            "RUN_TRAIN_MUZERO": "1",
+            "RUN_TRAIN_DREAMER": "0",
+        }
+    )
+    if normalized_mode == "proxy_ga":
+        base.update(
+            {
+                "MUZERO_TRAINING_STEPS": "10000",
+                "MUZERO_GAMES_PER_SYMBOL": "12",
+                "MUZERO_NUM_SIMULATIONS": "128",
+                "MUZERO_MAX_MOVES": "260",
+                "MUZERO_GOLD_PRECHECK_STEP": "3000",
+                "MUZERO_GOLD_PRECHECK_GAMES": "6",
+                "ARENA_GAMES_PER_SYMBOL": "6",
+                "ARENA_MIN_GAMES": "12",
+            }
+        )
+    else:
+        base.update(
+            {
+                "MUZERO_TRAINING_STEPS": "32000",
+                "MUZERO_GAMES_PER_SYMBOL": "32",
+                "MUZERO_NUM_SIMULATIONS": "192",
+                "MUZERO_MAX_MOVES": "360",
+                "ARENA_GAMES_PER_SYMBOL": "16",
+                "ARENA_MIN_GAMES": "32",
+            }
+        )
+    return base
+
+
+def _build_gold_monday_dreamer_overrides(
+    profile: str,
+    *,
+    mode: str,
+    trial: dict[str, Any] | None = None,
+    finalist_rank: int | None = None,
+) -> dict[str, str]:
+    """Construit les surcharges Dreamer du mode Monday Gold.
+
+    Args:
+        profile (str): Profil cible.
+        mode (str): Mode `smoke`, `proxy_ga` ou `full`.
+        trial (dict[str, Any] | None): Definition du trial.
+        finalist_rank (int | None): Rang du finaliste en mode `full`.
+
+    Returns:
+        dict[str, str]: Environnement complet d'un trial Dreamer Gold.
+    """
+
+    normalized_profile = _normalize_v4_profile(profile)
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode not in {"smoke", "proxy_ga", "full"}:
+        raise ValueError(f"Mode Dreamer Gold non supporte: {mode}")
+    horizon, family = _split_v3_profile(normalized_profile)
+    base_profile = f"{horizon}_{family}"
+    overrides = _build_wave1_profile_overrides(base_profile)
+    overrides.update(_build_scalp_v3_base_overrides(family))
+    overrides.update(_build_gold_monday_common_overrides(profile, engine="dreamer"))
+    trial_id = str((trial or {}).get("trial_id") or "").strip() or "baseline"
+    overrides.update(
+        {
+            "TRAINING_ENGINE": "dreamer",
+            "TRAINING_GA_STATUS": normalized_mode,
+            "TRAINING_GA_GENERATION": "1",
+            "TRAINING_GA_TRIAL": trial_id,
+            "TRAINING_TRIAL_MODE": normalized_mode,
+            "TRAINING_TRIAL_COST_PROFILE": (
+                "smoke"
+                if normalized_mode == "smoke"
+                else ("proxy" if normalized_mode == "proxy_ga" else "full")
+            ),
+            "TRAINING_MECHANICS_PROFILE_VERSION": normalized_profile,
+            "RUN_TRAIN_GNN": "0",
+            "RUN_TRAIN_MUZERO": "0",
+            "RUN_TRAIN_DREAMER": "1",
+            "DREAMER_HORIZON": horizon,
+        }
+    )
+    if normalized_mode == "smoke":
+        overrides["TRAINING_RUN_TRIGGER"] = f"manual_{GOLD_MONDAY_SEQUENCE_NAME}_dreamer_smoke_{trial_id}"
+    elif normalized_mode == "proxy_ga":
+        overrides["TRAINING_RUN_TRIGGER"] = f"manual_{GOLD_MONDAY_SEQUENCE_NAME}_dreamer_{trial_id}"
+    else:
+        overrides["TRAINING_RUN_TRIGGER"] = (
+            f"manual_{GOLD_MONDAY_SEQUENCE_NAME}_dreamer_finalist_"
+            f"{str(finalist_rank or 0)}_{trial_id}"
+        )
+    if trial:
+        trial_overrides = {key: str(value) for key, value in dict(trial.get("overrides") or {}).items()}
+        if normalized_mode == "full":
+            overrides.update(
+                {
+                    "DREAMER_EPOCHS": "220",
+                    "DREAMER_BATCH_SIZE": "6",
+                    "DREAMER_REPLAY_MAX_GAMES": "1500",
+                }
+            )
+            for key in (
+                "DREAMER_SEQUENCE_LENGTH",
+                "DREAMER_SEQUENCE_STRIDE",
+                "DREAMER_NUM_UNROLL_STEPS",
+                "DREAMER_HIDDEN_STATE_SIZE",
+                "DREAMER_NETWORK_HIDDEN_DIMS",
+                "DREAMER_MAX_START_STATES",
+            ):
+                if key in trial_overrides:
+                    overrides[key] = trial_overrides[key]
+        else:
+            overrides.update(trial_overrides)
+    return overrides
+
+
+def _get_gold_monday_dreamer_smoke_trials() -> list[dict[str, Any]]:
+    """Retourne le catalogue de smoke tests Dreamer Gold."""
+
+    return [
+        {
+            "trial_id": "gold_smoke_primary",
+            "overrides": {
+                "DREAMER_EPOCHS": "10",
+                "DREAMER_SEQUENCE_LENGTH": "24",
+                "DREAMER_SEQUENCE_STRIDE": "6",
+                "DREAMER_NUM_UNROLL_STEPS": "6",
+                "DREAMER_BATCH_SIZE": "2",
+                "DREAMER_REPLAY_MAX_GAMES": "600",
+            },
+        },
+        {
+            "trial_id": "gold_smoke_rescue",
+            "overrides": {
+                "DREAMER_EPOCHS": "10",
+                "DREAMER_SEQUENCE_LENGTH": "16",
+                "DREAMER_SEQUENCE_STRIDE": "4",
+                "DREAMER_NUM_UNROLL_STEPS": "4",
+                "DREAMER_BATCH_SIZE": "2",
+                "DREAMER_REPLAY_MAX_GAMES": "600",
+            },
+        },
+    ]
+
+
+def _get_gold_monday_dreamer_proxy_trials() -> list[dict[str, Any]]:
+    """Retourne le catalogue proxy GA Dreamer pour Monday Gold."""
+
+    return [
+        {
+            "trial_id": "gold_balanced_short_seq",
+            "overrides": {
+                "DREAMER_SEQUENCE_LENGTH": "32",
+                "DREAMER_SEQUENCE_STRIDE": "8",
+                "DREAMER_NUM_UNROLL_STEPS": "8",
+                "DREAMER_BATCH_SIZE": "4",
+                "DREAMER_EPOCHS": "60",
+                "DREAMER_REPLAY_MAX_GAMES": "1200",
+            },
+        },
+        {
+            "trial_id": "gold_fast_close",
+            "overrides": {
+                "DREAMER_SEQUENCE_LENGTH": "24",
+                "DREAMER_SEQUENCE_STRIDE": "6",
+                "DREAMER_NUM_UNROLL_STEPS": "8",
+                "DREAMER_BATCH_SIZE": "4",
+                "DREAMER_EPOCHS": "80",
+                "DREAMER_REPLAY_MAX_GAMES": "1200",
+            },
+        },
+        {
+            "trial_id": "gold_memory_mid",
+            "overrides": {
+                "DREAMER_SEQUENCE_LENGTH": "40",
+                "DREAMER_SEQUENCE_STRIDE": "8",
+                "DREAMER_NUM_UNROLL_STEPS": "10",
+                "DREAMER_HIDDEN_STATE_SIZE": "192",
+                "DREAMER_BATCH_SIZE": "4",
+                "DREAMER_EPOCHS": "80",
+                "DREAMER_REPLAY_MAX_GAMES": "1200",
+            },
+        },
+    ]
+
+
+def _build_gold_monday_sequence_config(
+    *,
+    sequence_id: str,
+    stdout_log_path: str,
+    stderr_log_path: str,
+) -> dict[str, Any]:
+    """Construit la configuration du superviseur pour Monday Gold.
+
+    Args:
+        sequence_id (str): Identifiant unique de sequence.
+        stdout_log_path (str): Journal stdout du superviseur.
+        stderr_log_path (str): Journal stderr du superviseur.
+
+    Returns:
+        dict[str, Any]: Configuration serialisable de la sequence Gold.
+    """
+
+    muzero_proxy_trials = []
+    muzero_full_catalog: dict[str, dict[str, str]] = {}
+    for trial in _get_v3_trial_catalog(GOLD_MONDAY_PROFILE):
+        trial_id = str(trial.get("trial_id") or "").strip()
+        muzero_proxy_trials.append(
+            {
+                **dict(trial),
+                "runtime_overrides": _build_gold_monday_muzero_overrides(
+                    GOLD_MONDAY_PROFILE,
+                    mode="proxy_ga",
+                    trial=trial,
+                ),
+            }
+        )
+        if trial_id:
+            muzero_full_catalog[trial_id] = _build_gold_monday_muzero_overrides(
+                GOLD_MONDAY_PROFILE,
+                mode="full",
+                trial=trial,
+            )
+
+    dreamer_smoke_trials = []
+    for trial in _get_gold_monday_dreamer_smoke_trials():
+        dreamer_smoke_trials.append(
+            {
+                **dict(trial),
+                "runtime_overrides": _build_gold_monday_dreamer_overrides(
+                    GOLD_MONDAY_PROFILE,
+                    mode="smoke",
+                    trial=trial,
+                ),
+            }
+        )
+
+    dreamer_proxy_trials = []
+    dreamer_full_catalog: dict[str, dict[str, str]] = {}
+    for trial in _get_gold_monday_dreamer_proxy_trials():
+        trial_id = str(trial.get("trial_id") or "").strip()
+        dreamer_proxy_trials.append(
+            {
+                **dict(trial),
+                "runtime_overrides": _build_gold_monday_dreamer_overrides(
+                    GOLD_MONDAY_PROFILE,
+                    mode="proxy_ga",
+                    trial=trial,
+                ),
+            }
+        )
+        if trial_id:
+            dreamer_full_catalog[trial_id] = _build_gold_monday_dreamer_overrides(
+                GOLD_MONDAY_PROFILE,
+                mode="full",
+                trial=trial,
+            )
+
+    return {
+        "sequence_id": sequence_id,
+        "sequence_name": GOLD_MONDAY_SEQUENCE_NAME,
+        "profiles": [GOLD_MONDAY_PROFILE],
+        "focus_symbol": GOLD_MONDAY_FOCUS_SYMBOL,
+        "gate_profile": "gold_demo",
+        "retry_limit": 1,
+        "stdout_log_path": stdout_log_path,
+        "stderr_log_path": stderr_log_path,
+        "catalogs": {
+            "muzero": {GOLD_MONDAY_PROFILE: muzero_proxy_trials},
+            "dreamer": {GOLD_MONDAY_PROFILE: dreamer_proxy_trials},
+        },
+        "full_catalogs": {
+            "muzero": {GOLD_MONDAY_PROFILE: muzero_full_catalog},
+            "dreamer": {GOLD_MONDAY_PROFILE: dreamer_full_catalog},
+        },
+        "smoke_catalogs": {
+            "dreamer": {GOLD_MONDAY_PROFILE: dreamer_smoke_trials},
+        },
+        "steps": [
+            {
+                "kind": "window",
+                "profile": GOLD_MONDAY_PROFILE,
+                "engine": "muzero",
+                "mode": "proxy_ga",
+            },
+            {
+                "kind": "window",
+                "profile": GOLD_MONDAY_PROFILE,
+                "engine": "muzero",
+                "mode": "full",
+            },
+            {
+                "kind": "window",
+                "profile": GOLD_MONDAY_PROFILE,
+                "engine": "dreamer",
+                "mode": "smoke",
+            },
+            {
+                "kind": "window",
+                "profile": GOLD_MONDAY_PROFILE,
+                "engine": "dreamer",
+                "mode": "proxy_ga",
+            },
+            {
+                "kind": "window",
+                "profile": GOLD_MONDAY_PROFILE,
+                "engine": "dreamer",
+                "mode": "full",
+            },
+            {
+                "kind": "gnn_refresh",
+                "profile": GOLD_MONDAY_PROFILE,
+                "focus_symbol": GOLD_MONDAY_FOCUS_SYMBOL,
+                "gate_profile": "gold_demo",
+                "refresh_payload": {
+                    "symbols": [
+                        GOLD_MONDAY_FOCUS_SYMBOL,
+                        *GOLD_MONDAY_CONTEXT_SYMBOLS,
+                    ],
+                    "focus_symbol": GOLD_MONDAY_FOCUS_SYMBOL,
+                    "context_symbols": GOLD_MONDAY_CONTEXT_SYMBOLS,
+                    "deployment_class": "consultative_gold",
+                    "epochs": 300,
+                    "batch_size": 32,
+                    "checkpoint_every": 25,
+                    "max_symbols": 5,
+                },
+            },
+            {
+                "kind": "service_action",
+                "action": "restart_vllm",
+                "profile": GOLD_MONDAY_PROFILE,
+            },
+        ],
+    }
+
+
 def _get_v3_results_dir() -> Path:
     """Retourne le dossier local de resultats V3."""
     target_dir = LOCAL_ROOT / "data" / "checkpoints" / "v3_ga"
@@ -1863,6 +2397,156 @@ def _get_v4_results_dir() -> Path:
     return target_dir
 
 
+def _archive_local_v4_snapshots(sequence_id: str) -> Path:
+    """Archive les instantanes V4 locaux avant une nouvelle sequence.
+
+    Args:
+        sequence_id (str): Identifiant de sequence qui servira de dossier
+            d'archive.
+
+    Returns:
+        Path: Dossier d'archive cree localement.
+    """
+
+    results_dir = _get_v4_results_dir()
+    archive_dir = results_dir / "archive" / sequence_id
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    for path in results_dir.iterdir():
+        if path.name == "archive" or not path.is_file():
+            continue
+        shutil.move(str(path), str(archive_dir / path.name))
+    return archive_dir
+
+
+def _write_remote_text_file(
+    sftp: paramiko.SFTPClient,
+    remote_path: str,
+    content: str,
+    *,
+    executable: bool = False,
+) -> None:
+    """Ecrit un fichier texte distant via SFTP.
+
+    Args:
+        sftp (paramiko.SFTPClient): Canal SFTP actif.
+        remote_path (str): Chemin absolu cible sur le serveur.
+        content (str): Contenu texte a ecrire.
+        executable (bool): Rend le fichier executable si demande.
+    """
+
+    ensure_remote_parent(sftp, remote_path)
+    with sftp.file(remote_path, "w") as remote_file:
+        remote_file.write(content)
+    if executable:
+        sftp.chmod(
+            remote_path,
+            stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IROTH,
+        )
+
+
+def _build_v4_sequence_config(
+    sequence_name: str,
+    *,
+    sequence_id: str,
+    profiles: list[str],
+    stdout_log_path: str,
+    stderr_log_path: str,
+) -> dict[str, Any]:
+    """Construit la configuration JSON du superviseur distant V4.
+
+    Args:
+        sequence_name (str): Nom logique de la sequence.
+        sequence_id (str): Identifiant unique de sequence.
+        profiles (list[str]): Profils V4 a jouer dans l'ordre.
+        stdout_log_path (str): Chemin du journal stdout du superviseur.
+        stderr_log_path (str): Chemin du journal stderr du superviseur.
+
+    Returns:
+        dict[str, Any]: Configuration serialisable pour le superviseur distant.
+    """
+
+    catalogs: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    full_catalogs: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
+    for engine in V4_ENGINE_ORDER:
+        engine_catalog: dict[str, list[dict[str, Any]]] = {}
+        engine_full_catalog: dict[str, dict[str, dict[str, str]]] = {}
+        for profile in profiles:
+            trials: list[dict[str, Any]] = []
+            full_trials: dict[str, dict[str, str]] = {}
+            for trial in _get_v4_trial_catalog(profile, engine):
+                trial_id = str(trial.get("trial_id") or "").strip()
+                trials.append(
+                    {
+                        **dict(trial),
+                        "runtime_overrides": _build_v4_profile_overrides(
+                            profile,
+                            engine=engine,
+                            mode="proxy_ga",
+                            trial=trial,
+                        ),
+                    }
+                )
+                if trial_id:
+                    full_trials[trial_id] = _build_v4_profile_overrides(
+                        profile,
+                        engine=engine,
+                        mode="full",
+                        trial=trial,
+                    )
+            engine_catalog[profile] = trials
+            engine_full_catalog[profile] = full_trials
+        catalogs[engine] = engine_catalog
+        full_catalogs[engine] = engine_full_catalog
+    return {
+        "sequence_id": sequence_id,
+        "sequence_name": sequence_name,
+        "profiles": profiles,
+        "window_order": [{"engine": engine, "mode": mode} for engine, mode in V4_WINDOW_ORDER],
+        "retry_limit": 1,
+        "stdout_log_path": stdout_log_path,
+        "stderr_log_path": stderr_log_path,
+        "catalogs": catalogs,
+        "full_catalogs": full_catalogs,
+    }
+
+
+def _prepare_remote_v4_sequence_workspace(client: paramiko.SSHClient, sequence_id: str) -> str:
+    """Archive les artefacts V4 distants avant une nouvelle sequence.
+
+    Args:
+        client (paramiko.SSHClient): Session SSH active.
+        sequence_id (str): Identifiant de sequence utilise pour l'archive.
+
+    Returns:
+        str: Dossier d'archive cree cote serveur.
+
+    Raises:
+        RuntimeError: Si le nettoyage distant echoue.
+    """
+
+    remote_archive_dir = f"{REMOTE_V4_SEQUENCE_DIR}/archive/{sequence_id}"
+    remote_body = f"""
+set -euo pipefail
+SEQUENCE_DIR={shlex.quote(REMOTE_V4_SEQUENCE_DIR)}
+ARCHIVE_DIR={shlex.quote(remote_archive_dir)}
+mkdir -p "$ARCHIVE_DIR"
+if [ -f "$SEQUENCE_DIR/sequence_supervisor.pid" ]; then
+  SUPERVISOR_PID="$(cat "$SEQUENCE_DIR/sequence_supervisor.pid" 2>/dev/null || true)"
+  if [ -n "$SUPERVISOR_PID" ] && kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
+    kill "$SUPERVISOR_PID" || true
+    sleep 2
+  fi
+fi
+find "$SEQUENCE_DIR" -maxdepth 1 -type f \\( -name '*.json' -o -name '*.log' -o -name '*.pid' \\) -print0 | while IFS= read -r -d '' FILE; do
+  mv "$FILE" "$ARCHIVE_DIR"/
+done
+"""
+    output, error, code = run_command(client, f"bash -lc {shlex.quote(remote_body)}", timeout=60)
+    if code != 0:
+        raise RuntimeError(error or output or "Archivage distant V4 impossible.")
+    return remote_archive_dir
+
+
 def _fetch_remote_champion_status() -> dict:
     """Lit le statut HTTP des champions distants.
 
@@ -1873,6 +2557,24 @@ def _fetch_remote_champion_status() -> dict:
         RuntimeError: Si la lecture echoue.
     """
     url = f"http://{HOST}:8600/champions/status"
+    try:
+        with urllib.request.urlopen(url, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Lecture impossible de {url}: {exc}") from exc
+
+
+def _fetch_remote_sequence_status() -> dict[str, Any]:
+    """Lit le statut HTTP du superviseur distant de sequence.
+
+    Returns:
+        dict[str, Any]: Charge JSON de `GET /sequence/status`.
+
+    Raises:
+        RuntimeError: Si la lecture echoue.
+    """
+
+    url = f"http://{HOST}:8600/sequence/status"
     try:
         with urllib.request.urlopen(url, timeout=20) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -2132,6 +2834,11 @@ def _read_active_remote_run() -> dict[str, Any]:
         "ga_trial": str(run.get("ga_trial") or "") or None,
         "trial_mode": str(run.get("trial_mode") or "") or None,
         "trial_cost_profile": str(run.get("trial_cost_profile") or "") or None,
+        "sequence_id": str(run.get("sequence_id") or "") or None,
+        "window_id": str(run.get("window_id") or "") or None,
+        "trial_id": str(run.get("trial_id") or "") or None,
+        "terminal_summary_path": str(run.get("terminal_summary_path") or "") or None,
+        "supervisor_state": str(run.get("supervisor_state") or "") or None,
     }
 
 
@@ -2706,27 +3413,117 @@ def launch_v4_sequence_remote(
     stop_existing: bool = False,
     stop_reason: str = "manual_v4_unified_factory",
 ) -> None:
-    """Execute la sequence V4 unifiee MuZero puis Dreamer, fenetre par fenetre."""
+    """Lance une sequence V4 durable via un superviseur distant.
+
+    Args:
+        sequence_name (str): Nom logique de sequence, par exemple `scalp`.
+        stop_existing (bool): Coupe le run distant actif avant relance.
+        stop_reason (str): Motif explicite de coupure initiale.
+
+    Raises:
+        ValueError: Si la sequence demandee est inconnue.
+        RuntimeError: Si le superviseur distant ne peut pas etre lance.
+    """
 
     normalized = str(sequence_name or "").strip().lower()
-    profiles = V4_SEQUENCE_ORDER.get(normalized)
+    profiles = list(V4_SEQUENCE_ORDER.get(normalized) or [])
     if not profiles:
         raise ValueError(f"Sequence V4 non supportee: {sequence_name}")
 
-    first_step = True
-    print(f"Sequence V4 '{normalized}' preparee: {', '.join(profiles)}")
-    for profile in profiles:
-        for engine, mode in V4_WINDOW_ORDER:
-            print(f"[v4-sequence] Lancement de {profile} | moteur={engine} | mode={mode}.")
-            launch_v4_profile_remote(
-                profile,
-                engine=engine,
-                mode=mode,
-                stop_existing=stop_existing if first_step else False,
-                stop_reason=stop_reason,
+    sequence_id = f"v4_{normalized}_{time.strftime('%Y%m%d_%H%M%S')}"
+    stdout_log_path = f"{REMOTE_V4_SEQUENCE_DIR}/sequence_{sequence_id}.out.log"
+    stderr_log_path = f"{REMOTE_V4_SEQUENCE_DIR}/sequence_{sequence_id}.err.log"
+    if normalized == GOLD_MONDAY_SEQUENCE_NAME:
+        config_payload = _build_gold_monday_sequence_config(
+            sequence_id=sequence_id,
+            stdout_log_path=stdout_log_path,
+            stderr_log_path=stderr_log_path,
+        )
+    else:
+        config_payload = _build_v4_sequence_config(
+            normalized,
+            sequence_id=sequence_id,
+            profiles=profiles,
+            stdout_log_path=stdout_log_path,
+            stderr_log_path=stderr_log_path,
+        )
+    local_archive_dir = _archive_local_v4_snapshots(sequence_id)
+
+    print(f"Connexion a Proxmox {HOST}...")
+    ssh_password, _sudo_password = _require_remote_credentials()
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+        client.connect(HOST, username=USER, password=ssh_password, timeout=15)
+        print("Connexion SSH etablie.")
+
+        active_run = _read_active_remote_run()
+        if active_run.get("active") and not stop_existing:
+            raise RuntimeError(
+                "Un run distant est deja actif. Utilisez --stop-existing pour relancer proprement la sequence V4."
             )
-            first_step = False
-            print(f"[v4-sequence] {profile} | moteur={engine} | mode={mode} termine.")
+        if active_run.get("active") and stop_existing:
+            stop_remote_training(client, reason=stop_reason)
+
+        _sync_remote_training_payload(client, profile_hint=None)
+        print("Payload V4 synchronise pour toute la sequence.")
+
+        remote_archive_dir = _prepare_remote_v4_sequence_workspace(client, sequence_id)
+        remote_config_path = f"{REMOTE_V4_SEQUENCE_DIR}/sequence_config_{sequence_id}.json"
+        sftp = client.open_sftp()
+        try:
+            _write_remote_text_file(
+                sftp,
+                remote_config_path,
+                json.dumps(config_payload, indent=2, ensure_ascii=False),
+            )
+        finally:
+            sftp.close()
+
+        supervisor_exports = build_runtime_exports(_build_v4_supervisor_overrides())
+        supervisor_prefix = f"{supervisor_exports}; " if supervisor_exports else ""
+        launch_cmd = (
+            "bash -lc "
+            + shlex.quote(
+                "set -euo pipefail\n"
+                f"cd {REMOTE_DIR}\n"
+                f"mkdir -p {REMOTE_V4_SEQUENCE_DIR}\n"
+                f"{supervisor_prefix}"
+                "nohup env "
+                f"PYTHONPATH={REMOTE_DIR}/src/eva-lab:{REMOTE_DIR}/src/shared "
+                f"python3 {REMOTE_V4_SEQUENCE_RUNNER} --config {remote_config_path} "
+                f"> {stdout_log_path} 2> {stderr_log_path} < /dev/null &\n"
+                "echo $!"
+            )
+        )
+        output, error, code = run_command(client, launch_cmd, timeout=30)
+        if code != 0:
+            raise RuntimeError(error or output or "Lancement du superviseur distant impossible.")
+
+        pid_lines = [line.strip() for line in output.splitlines() if line.strip()]
+        remote_pid = pid_lines[-1] if pid_lines else "inconnu"
+        print(f"Sequence V4 '{normalized}' demarree.")
+        print(f" - sequence_id: {sequence_id}")
+        print(f" - pid distant: {remote_pid}")
+        print(f" - archive locale: {local_archive_dir}")
+        print(f" - archive distante: {remote_archive_dir}")
+        print(f" - config distante: {remote_config_path}")
+        print(f" - stdout: {stdout_log_path}")
+        print(f" - stderr: {stderr_log_path}")
+
+        time.sleep(5)
+        try:
+            sequence_status = _fetch_remote_sequence_status()
+            print(
+                "[v4-sequence] Etat superviseur: "
+                f"{sequence_status.get('state')} | trial={sequence_status.get('current_trial')} "
+                f"| next={sequence_status.get('next_step')}"
+            )
+        except RuntimeError as exc:
+            print(f"[v4-sequence] Lecture initiale du superviseur indisponible: {exc}")
+    finally:
+        client.close()
 
 
 def _fetch_remote_training_status() -> dict:
@@ -2785,10 +3582,8 @@ def _wait_for_remote_run_completion(run_id: str, poll_interval_seconds: int = 60
         poll_interval_seconds (int): Frequence de poll.
 
     Returns:
-        dict: Dernier statut HTTP du run.
-
-    Raises:
-        RuntimeError: Si le run termine avec un statut d'echec.
+        dict: Etat terminal structure du run, y compris le statut, la
+            derniere etape connue et les metadonnees de sequence visibles.
     """
     last_step_label = ""
     while True:
@@ -2802,9 +3597,18 @@ def _wait_for_remote_run_completion(run_id: str, poll_interval_seconds: int = 60
         if current_run_id == run_id and not bool(run.get("active")):
             final_status = str(run.get("status") or "unknown")
             print(f"Run {run_id} termine avec statut {final_status}.")
-            if final_status not in {"ok", "completed"}:
-                raise RuntimeError(f"Run {run_id} termine en echec: {final_status}")
-            return status
+            return {
+                "status": final_status,
+                "run_id": run_id,
+                "failed_step": dict(run.get("failed_step") or {}),
+                "reason": str(run.get("reason") or ""),
+                "step_label": current_step or last_step_label,
+                "terminal_summary_path": str(run.get("terminal_summary_path") or ""),
+                "sequence_id": str(run.get("sequence_id") or ""),
+                "window_id": str(run.get("window_id") or ""),
+                "trial_id": str(run.get("trial_id") or ""),
+                "payload": status,
+            }
         time.sleep(max(10, poll_interval_seconds))
 
 

@@ -1353,9 +1353,14 @@ def build_dataset_coverage(
     timescale_info: dict[str, Any] = {}
     timescale_available: list[str] = []
     try:
-        from eva_lab.timescale_store import describe_timescale_source, discover_timescale_inventory
+        from eva_lab.timescale_store import (
+            describe_timescale_source,
+            discover_timescale_inventory,
+            ensure_timescale_ready,
+        )
 
         timescale_info = describe_timescale_source()
+        timescale_ready = ensure_timescale_ready() if bool(timescale_info.get("enabled", False)) else False
         timescale_inventory = discover_timescale_inventory()
         timescale_available = [
             symbol
@@ -1363,17 +1368,32 @@ def build_dataset_coverage(
             if target_timeframe in {str(item).upper() for item in timescale_inventory.get(symbol, set())}
         ]
     except Exception:
-        timescale_info = {"enabled": False, "kind": "timescaledb"}
+        timescale_info = {"enabled": False, "kind": "timescaledb", "state": "offline"}
+        timescale_ready = False
         timescale_available = []
 
     csv_missing = [symbol for symbol in normalized_symbols if symbol not in csv_available]
     timescale_missing = [symbol for symbol in normalized_symbols if symbol not in timescale_available]
     timescale_enabled = bool(timescale_info.get("enabled", False))
-    effective_source = "timescaledb" if timescale_enabled and not timescale_missing else "csv"
+    if not timescale_enabled:
+        effective_source = "csv"
+        effective_source_reason = "timescaledb_disabled"
+    elif not timescale_ready:
+        effective_source = "csv"
+        effective_source_reason = "timescaledb_unreachable"
+    elif timescale_missing:
+        effective_source = "csv"
+        effective_source_reason = "timescaledb_incomplete_coverage"
+    else:
+        effective_source = "timescaledb"
+        effective_source_reason = "timescaledb_ready"
     effective_available = timescale_available if effective_source == "timescaledb" else csv_available
+    effective_missing = timescale_missing if effective_source == "timescaledb" else csv_missing
+    effective_ratio = len(effective_available) / max(len(normalized_symbols), 1)
 
     return {
         "timeframe": target_timeframe,
+        "requested_symbols": list(normalized_symbols),
         "required_symbols": len(normalized_symbols),
         "csv": {
             "available_symbols": csv_available,
@@ -1382,12 +1402,21 @@ def build_dataset_coverage(
         },
         "timescaledb": {
             "enabled": timescale_enabled,
+            "ready": timescale_ready,
+            "state": str(timescale_info.get("state") or ("enabled" if timescale_enabled else "disabled")),
+            "host": timescale_info.get("host"),
+            "database": timescale_info.get("database"),
+            "bars_table": timescale_info.get("bars_table"),
+            "features_table": timescale_info.get("features_table"),
             "available_symbols": timescale_available,
             "missing_symbols": timescale_missing,
             "coverage_ratio": len(timescale_available) / max(len(normalized_symbols), 1),
         },
         "effective_source": effective_source,
+        "effective_source_reason": effective_source_reason,
         "effective_symbols": effective_available,
+        "missing_symbols": effective_missing,
+        "coverage_ratio": effective_ratio,
         "all_symbols_available": len(effective_available) == len(normalized_symbols),
     }
 

@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -29,25 +30,83 @@ from eva_lab.genetic_updater import GeneticUpdater
 from eva_lab.gnn_registry import (
     build_market_gnn_graph_snapshot,
     load_market_gnn_registry,
+    load_market_gnn_refresh_state,
+    persist_market_gnn_refresh_state,
+    update_market_gnn_registry,
 )
 from eva_lab.live_inference_models import LivePredictRequest
 from eva_lab.shadow_learning import ShadowLearningService
 from eva_lab.dreamer_gate import DreamerGate
-from eva_lab.timescale_store import describe_timescale_source
+from eva_lab.timescale_store import describe_timescale_source, record_ga_trial, record_run_window
 from eva_lab.training_status import (
+    CPU_SCHEDULER_STATE_PATH,
+    RUN_LOG_PATH,
+    STATUS_DIR,
     build_training_universe_summary,
     classify_training_symbol,
     derive_observed_training_step,
     format_training_step_label,
+    load_latest_terminal_summary,
     load_nightly_summary,
+    load_cpu_scheduler_state,
+    load_sequence_state,
     select_effective_training_step,
+    tail_log_file,
     load_training_status,
     tail_training_log,
+    write_terminal_summary,
 )
 from eva_lab.training_utils import get_gnn_model_kwargs
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+HOST_DATA_PREFIX = Path("/home/aza/The_Hive/data")
+CONTAINER_DATA_ROOT = Path("/app/eva-lab/data")
+LAB_APP_ROOT = Path("/app/eva-lab")
+GNN_REFRESH_LOG_PATH = STATUS_DIR / "gnn_refresh.log"
+
+
+def _resolve_latest_checkpoint_log(*patterns: str) -> Path | None:
+    """
+    Retourne le journal le plus recent correspondant aux motifs demandes.
+
+    Args:
+        *patterns (str): Motifs ``glob`` a appliquer dans le dossier checkpoints.
+
+    Returns:
+        Path | None: Chemin du journal retenu ou ``None`` si absent.
+    """
+    candidates: list[Path] = []
+    for pattern in patterns:
+        candidates.extend(path for path in STATUS_DIR.glob(pattern) if path.is_file())
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _as_path(raw_path: Any) -> Path | None:
+    """
+    Convertit un chemin brut en chemin lisible depuis le conteneur Lab.
+
+    Args:
+        raw_path (Any): Valeur brute potentiellement serialisee dans l'etat.
+
+    Returns:
+        Path | None: Chemin resolu dans le conteneur, ou ``None`` si absent.
+    """
+
+    text = str(raw_path or "").strip()
+    if not text:
+        return None
+    candidate = Path(text)
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+    try:
+        relative = candidate.relative_to(HOST_DATA_PREFIX)
+    except ValueError:
+        return candidate
+    mapped = CONTAINER_DATA_ROOT / relative
+    return mapped
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -136,6 +195,9 @@ async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str
     )
     dependencies["timescaledb"]["enabled"] = bool(timescale_info.get("enabled", False))
     dependencies["timescaledb"]["source"] = str(timescale_info.get("source") or "csv")
+    dependencies["timescaledb"]["state"] = str(timescale_info.get("state") or "disabled")
+    dependencies["timescaledb"]["bars_table"] = str(timescale_info.get("bars_table") or "")
+    dependencies["timescaledb"]["features_table"] = str(timescale_info.get("features_table") or "")
 
     trainer_container = launcher.get("trainer_container")
     trainer_running = bool(run_status.get("active")) or bool(trainer_container)
@@ -173,6 +235,12 @@ async def _publish_training_run_snapshot(
         envelope = TrainingRunEnvelope(
             engine=str(run_view.get("engine") or "") or None,
             run_id=str(run_view.get("run_id") or "") or None,
+            sequence_id=str(run_view.get("sequence_id") or "") or None,
+            sequence_profile=str(run_view.get("sequence_profile") or "") or None,
+            window_id=str(run_view.get("window_id") or "") or None,
+            trial_id=str(run_view.get("trial_id") or "") or None,
+            terminal_summary_path=str(run_view.get("terminal_summary_path") or "") or None,
+            supervisor_state=str(run_view.get("supervisor_state") or "") or None,
             horizon=str(current_step.get("horizon") or "") or None,
             family=family or None,
             feature_profile=str(run_view.get("feature_profile") or "") or None,
@@ -261,6 +329,282 @@ async def _publish_champion_status_snapshot(payload: dict[str, Any]) -> None:
         logger.debug("Publication du statut champions ignoree: %s", exc)
 
 
+def _current_gnn_refresh_state() -> dict[str, Any]:
+    """Charge l'etat persistant du refresh GNN."""
+
+    return load_market_gnn_refresh_state()
+
+
+def _gnn_refresh_is_running(app: FastAPI) -> bool:
+    """Indique si un refresh GNN tourne deja dans le conteneur Lab."""
+
+    process = getattr(app.state, "gnn_refresh_process", None)
+    return process is not None and process.returncode is None
+
+
+def _resolve_gnn_source_run_id() -> str | None:
+    """Determine le run source a rattacher au prochain refresh GNN."""
+
+    training_state = load_training_status()
+    run_id = str(training_state.get("run_id") or "").strip()
+    if run_id:
+        return run_id
+    latest_summary = load_latest_terminal_summary()
+    if latest_summary:
+        candidate_run_id = str(latest_summary.get("run_id") or "").strip()
+        if candidate_run_id:
+            return candidate_run_id
+    return None
+
+
+def _build_gnn_coverage_summary(registry: dict[str, Any]) -> dict[str, Any]:
+    """Construit un resume lisible de couverture pour le GNN.
+
+    Args:
+        registry (dict[str, Any]): Registre GNN courant.
+
+    Returns:
+        dict[str, Any]: Resume synthétique de couverture et fraicheur.
+    """
+
+    graph_snapshot = build_market_gnn_graph_snapshot(registry=registry)
+    return {
+        "graph_status": graph_snapshot.get("status"),
+        "graph_reason": graph_snapshot.get("reason"),
+        "selected_timeframe": graph_snapshot.get("selected_timeframe"),
+        "candidate_timeframes": graph_snapshot.get("candidate_timeframes", []),
+        "overlap_points": graph_snapshot.get("overlap_points", 0),
+        "displayed_symbol_count": graph_snapshot.get("displayed_symbol_count", 0),
+        "universe_symbol_count": graph_snapshot.get("universe_symbol_count", 0),
+        "missing_symbols": graph_snapshot.get("missing_symbols", []),
+    }
+
+
+async def _finalize_gnn_refresh(
+    app: FastAPI,
+    *,
+    run_id: str,
+    source_run_id: str | None,
+    requested_at: str | None,
+    started_at: str | None,
+    log_path: Path,
+    return_code: int,
+) -> None:
+    """Finalise un refresh GNN avec resume terminal et registre enrichi."""
+
+    finished_at = datetime.utcnow().isoformat() + "Z"
+    registry = load_market_gnn_registry()
+    coverage_summary = _build_gnn_coverage_summary(registry)
+    success = return_code == 0 and bool(registry.get("checkpoint_path"))
+    failure_reason = None if success else f"Le script train_gnn.py a quitte avec le code {return_code}."
+    refresh_status = "completed" if success else "error"
+    status_reason = (
+        "Refresh GNN termine avec succes."
+        if success
+        else (failure_reason or "Le refresh GNN a echoue.")
+    )
+
+    persist_market_gnn_refresh_state(
+        {
+            "status": refresh_status,
+            "queued": False,
+            "requested_at": requested_at,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "run_id": run_id,
+            "failure_reason": failure_reason,
+            "source_run_id": source_run_id,
+            "requested_by": "lab",
+        }
+    )
+    update_market_gnn_registry(
+        {
+            "source_run_id": source_run_id,
+            "status_reason": status_reason,
+            "last_refresh_requested_at": requested_at,
+            "last_refresh_started_at": started_at,
+            "last_refresh_finished_at": finished_at,
+            "last_refresh_status": refresh_status,
+            "coverage_summary": coverage_summary,
+        }
+    )
+    registry = load_market_gnn_registry()
+    artifact_state = {
+        "checkpoint_present": bool(registry.get("artifacts", {}).get("checkpoint", {}).get("exists")),
+        "metrics_present": bool(registry.get("artifacts", {}).get("metrics", {}).get("exists")),
+        "log_path": str(log_path),
+    }
+    write_terminal_summary(
+        {
+            "engine": "gnn",
+            "run_id": run_id,
+            "horizon": "market",
+            "family": "mixed",
+            "trial_id": "refresh",
+            "source_run_id": source_run_id,
+            "focus_symbols": list(registry.get("focus_symbols") or []),
+            "focus_symbol": registry.get("focus_symbol"),
+            "context_symbols": list(registry.get("context_symbols") or []),
+            "deployment_class": registry.get("deployment_class"),
+            "status": refresh_status,
+            "terminal_status": refresh_status,
+            "failed_step": None if success else "train_gnn",
+            "failure_mode": None if success else "refresh_failed",
+            "failure_reason": failure_reason,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "metrics": dict(registry.get("metrics") or {}),
+            "coverage_summary": coverage_summary,
+            "artifact_state": artifact_state,
+        }
+    )
+    log_stream = getattr(app.state, "gnn_refresh_log_stream", None)
+    if log_stream is not None:
+        try:
+            log_stream.close()
+        except Exception:
+            pass
+        app.state.gnn_refresh_log_stream = None
+    app.state.gnn_refresh_process = None
+    app.state.gnn_refresh_monitor_task = None
+    app.state.gnn_refresh_log_stream = None
+
+
+async def _wait_for_gnn_refresh_completion(
+    app: FastAPI,
+    *,
+    process: asyncio.subprocess.Process,
+    run_id: str,
+    source_run_id: str | None,
+    requested_at: str | None,
+    started_at: str | None,
+    log_path: Path,
+) -> None:
+    """Attend la fin du processus de refresh GNN et publie son resultat."""
+
+    return_code = await process.wait()
+    await _finalize_gnn_refresh(
+        app,
+        run_id=run_id,
+        source_run_id=source_run_id,
+        requested_at=requested_at,
+        started_at=started_at,
+        log_path=log_path,
+        return_code=return_code,
+    )
+
+
+async def _start_gnn_refresh_process(app: FastAPI, refresh_state: dict[str, Any]) -> dict[str, Any]:
+    """Lance effectivement le script de refresh GNN s'il est autorise."""
+
+    if _gnn_refresh_is_running(app):
+        return _current_gnn_refresh_state()
+
+    run_id = str(refresh_state.get("run_id") or f"gnn_refresh_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}")
+    started_at = datetime.utcnow().isoformat() + "Z"
+    source_run_id = str(refresh_state.get("source_run_id") or _resolve_gnn_source_run_id() or "").strip() or None
+    GNN_REFRESH_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    log_stream = GNN_REFRESH_LOG_PATH.open("ab")
+    gnn_env = os.environ.copy()
+    requested_symbols = [
+        str(symbol).strip()
+        for symbol in list(refresh_state.get("requested_symbols") or [])
+        if str(symbol).strip()
+    ]
+    focus_symbol = str(refresh_state.get("focus_symbol") or "").strip() or None
+    context_symbols = [
+        str(symbol).strip()
+        for symbol in list(refresh_state.get("context_symbols") or [])
+        if str(symbol).strip()
+    ]
+    deployment_class = str(refresh_state.get("deployment_class") or "").strip() or None
+    if requested_symbols:
+        gnn_env["TRAIN_GNN_SYMBOLS"] = ",".join(requested_symbols)
+    if focus_symbol:
+        gnn_env["TRAIN_GNN_FOCUS_SYMBOL"] = focus_symbol
+    if context_symbols:
+        gnn_env["TRAIN_GNN_CONTEXT_SYMBOLS"] = ",".join(context_symbols)
+    if deployment_class:
+        gnn_env["TRAIN_GNN_DEPLOYMENT_CLASS"] = deployment_class
+    for env_name, state_key in (
+        ("TRAIN_GNN_EPOCHS", "epochs"),
+        ("TRAIN_GNN_BATCH_SIZE", "batch_size"),
+        ("TRAIN_GNN_CHECKPOINT_EVERY", "checkpoint_every"),
+        ("TRAIN_GNN_MAX_SYMBOLS", "max_symbols"),
+    ):
+        if refresh_state.get(state_key) is not None:
+            gnn_env[env_name] = str(refresh_state.get(state_key))
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(LAB_APP_ROOT / "scripts" / "train_gnn.py"),
+            cwd=str(LAB_APP_ROOT),
+            env=gnn_env,
+            stdout=log_stream,
+            stderr=log_stream,
+        )
+    except Exception:
+        log_stream.close()
+        raise
+    app.state.gnn_refresh_process = process
+    app.state.gnn_refresh_log_stream = log_stream
+    update_market_gnn_registry(
+        {
+            "source_run_id": source_run_id,
+            "focus_symbols": requested_symbols,
+            "focus_symbol": focus_symbol,
+            "context_symbols": context_symbols,
+            "deployment_class": deployment_class,
+            "status_reason": "Refresh GNN en cours.",
+            "last_refresh_requested_at": refresh_state.get("requested_at") or started_at,
+            "last_refresh_started_at": started_at,
+            "last_refresh_status": "running",
+        }
+    )
+    persisted_state = persist_market_gnn_refresh_state(
+        {
+            **refresh_state,
+            "status": "running",
+            "queued": False,
+            "run_id": run_id,
+            "requested_at": refresh_state.get("requested_at") or started_at,
+            "started_at": started_at,
+            "finished_at": None,
+            "failure_reason": None,
+            "source_run_id": source_run_id,
+        }
+    )
+    app.state.gnn_refresh_monitor_task = asyncio.create_task(
+        _wait_for_gnn_refresh_completion(
+            app,
+            process=process,
+            run_id=run_id,
+            source_run_id=source_run_id,
+            requested_at=persisted_state.get("requested_at"),
+            started_at=started_at,
+            log_path=GNN_REFRESH_LOG_PATH,
+        )
+    )
+    return persisted_state
+
+
+async def _gnn_refresh_queue_loop(app: FastAPI) -> None:
+    """Surveille la file de refresh GNN pour demarrer quand le GPU est libre."""
+
+    while True:
+        try:
+            refresh_state = _current_gnn_refresh_state()
+            if refresh_state.get("queued") and not _gnn_refresh_is_running(app):
+                training_status = load_training_status()
+                if not bool(training_status.get("active")):
+                    await _start_gnn_refresh_process(app, refresh_state)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Boucle de refresh GNN ignoree: %s", exc)
+        await asyncio.sleep(10)
+
+
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # MODÃˆLES API
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -321,6 +665,19 @@ class TradeRecordRequest(BaseModel):
 class GNNPredictRequest(BaseModel):
     """RequÃªte d'infÃ©rence pour le GNN (Multi-Asset correlation)"""
     assets_data: dict[str, list[list[float]]]  # { "XAUUSD": [[...features...], ...], ... }
+
+
+class GNNRefreshRequest(BaseModel):
+    """Decrit une demande de refresh explicite du GNN."""
+
+    symbols: list[str] = Field(default_factory=list)
+    focus_symbol: str | None = None
+    context_symbols: list[str] = Field(default_factory=list)
+    deployment_class: str | None = None
+    epochs: int | None = None
+    batch_size: int | None = None
+    checkpoint_every: int | None = None
+    max_symbols: int | None = None
 
 
 
@@ -403,6 +760,20 @@ async def lifespan(app: FastAPI):
         logger.warning(f"âš ï¸ Erreur chargement GNN (Stub Mode probable): {e}")
         app.state.gnn_model = None
 
+    app.state.gnn_refresh_process = None
+    app.state.gnn_refresh_monitor_task = None
+    refresh_state = _current_gnn_refresh_state()
+    if str(refresh_state.get("status") or "").lower() == "running":
+        persist_market_gnn_refresh_state(
+            {
+                **refresh_state,
+                "status": "queued",
+                "queued": True,
+                "failure_reason": "Le service Lab a redemarre avant la fin du refresh precedent.",
+            }
+        )
+    app.state.gnn_refresh_queue_task = asyncio.create_task(_gnn_refresh_queue_loop(app))
+
     asyncio.create_task(hard_heartbeat())
     if _env_flag("ENABLE_LAB_INTERNAL_NIGHTLY_SCHEDULER", False):
         asyncio.create_task(_nightly_training_loop())
@@ -416,6 +787,24 @@ async def lifespan(app: FastAPI):
     if app.state.shadow:
         count = app.state.shadow.manual_flush()
         logger.info(f"ðŸ’¾ Shadow Learning: {count} transitions saved sur arrÃªt")
+    queue_task = getattr(app.state, "gnn_refresh_queue_task", None)
+    if queue_task:
+        queue_task.cancel()
+        await asyncio.gather(queue_task, return_exceptions=True)
+    monitor_task = getattr(app.state, "gnn_refresh_monitor_task", None)
+    if monitor_task:
+        monitor_task.cancel()
+        await asyncio.gather(monitor_task, return_exceptions=True)
+    process = getattr(app.state, "gnn_refresh_process", None)
+    if process is not None and process.returncode is None:
+        process.terminate()
+        await process.wait()
+    log_stream = getattr(app.state, "gnn_refresh_log_stream", None)
+    if log_stream is not None:
+        try:
+            log_stream.close()
+        except Exception:
+            pass
     
     logger.info("ðŸ›‘ ArrÃªt EVA Lab")
 
@@ -715,7 +1104,9 @@ async def dreamer_status():
     promoter: ChampionPromoter = app.state.promoter
     horizons = ["scalp", "intraday", "swing"]
     training_run = load_training_status()
+    sequence_state = load_sequence_state()
     active_run = training_run if str(training_run.get("engine") or "").lower() == "dreamer" else {}
+    latest_summary = load_latest_terminal_summary(engine="dreamer")
     pipeline = {
         "active": bool(active_run.get("active")),
         "run_id": active_run.get("run_id"),
@@ -735,9 +1126,16 @@ async def dreamer_status():
         "sequence_length": active_run.get("sequence_length"),
         "sequence_stride": active_run.get("sequence_stride"),
         "world_model_steps": active_run.get("world_model_steps"),
-        "dataset_id": active_run.get("dataset_id"),
-        "dataset_source": active_run.get("dataset_source"),
-        "dataset_coverage": active_run.get("dataset_coverage", {}),
+        "dataset_id": active_run.get("dataset_id") or (latest_summary or {}).get("dataset_id"),
+        "dataset_source": active_run.get("dataset_source") or (latest_summary or {}).get("dataset_source"),
+        "dataset_coverage": active_run.get("dataset_coverage", {}) or (latest_summary or {}).get("dataset_coverage", {}),
+        "focus_symbols": active_run.get("focus_symbols", []) or list((latest_summary or {}).get("focus_symbols") or []),
+        "gate_profile": active_run.get("gate_profile") or (latest_summary or {}).get("gate_profile"),
+        "sequence_id": active_run.get("sequence_id"),
+        "window_id": active_run.get("window_id"),
+        "trial_id": active_run.get("trial_id"),
+        "terminal_summary_path": active_run.get("terminal_summary_path"),
+        "supervisor_state": sequence_state.get("state"),
     }
     engine_horizons = {
         horizon: promoter.build_engine_horizon_status("dreamer", horizon)
@@ -745,6 +1143,27 @@ async def dreamer_status():
     }
     latest_candidate = None
     latest_verdict = None
+    latest_run_id = None
+    failed_step = None
+    artifact_state = None
+    if latest_summary:
+        latest_run_id = latest_summary.get("run_id")
+        failed_step = latest_summary.get("failed_step")
+        artifact_state = dict(latest_summary.get("artifact_state") or {})
+        if latest_summary.get("latest_candidate"):
+            latest_candidate = {
+                "engine": "dreamer",
+                "horizon": latest_summary.get("horizon"),
+                "candidate_id": latest_summary.get("latest_candidate"),
+                "failure_mode": latest_summary.get("failure_mode"),
+                "run_id": latest_summary.get("run_id"),
+            }
+        if latest_summary.get("latest_verdict"):
+            latest_verdict = {
+                "engine": "dreamer",
+                "horizon": latest_summary.get("horizon"),
+                **dict(latest_summary.get("latest_verdict") or {}),
+            }
     for horizon in horizons:
         horizon_status = dict(engine_horizons.get(horizon) or {})
         if latest_candidate is None and horizon_status.get("candidate_id"):
@@ -754,6 +1173,9 @@ async def dreamer_status():
                 "candidate_id": horizon_status.get("candidate_id"),
                 "failure_mode": horizon_status.get("failure_mode"),
             }
+            latest_run_id = latest_run_id or horizon_status.get("latest_run_id")
+            failed_step = failed_step or horizon_status.get("failed_step")
+            artifact_state = artifact_state or horizon_status.get("artifact_state")
         if latest_verdict is None and horizon_status.get("promotion_gate"):
             latest_verdict = {
                 "engine": "dreamer",
@@ -766,8 +1188,77 @@ async def dreamer_status():
         **gate.get_status(),
         "pipeline": pipeline,
         "horizons": engine_horizons,
+        "latest_run_id": latest_run_id,
         "latest_candidate": latest_candidate,
         "latest_verdict": latest_verdict,
+        "failed_step": failed_step,
+        "artifact_state": artifact_state,
+        "focus_symbols": list(pipeline.get("focus_symbols") or []),
+        "gate_profile": pipeline.get("gate_profile"),
+        "terminal_summary": latest_summary,
+    }
+
+
+@app.get("/sequence/status")
+async def sequence_status():
+    """
+    Retourne l'etat persiste du superviseur de sequence V4.
+
+    Returns:
+        dict: Etat courant, heartbeat et pointeurs de logs du superviseur.
+    """
+    state = load_sequence_state()
+    return {
+        "status": "ok",
+        "sequence_id": state.get("sequence_id"),
+        "state": state.get("state"),
+        "current_window": {
+            "profile": state.get("profile"),
+            "engine": state.get("engine"),
+            "mode": state.get("mode"),
+            "window_id": state.get("window_id"),
+            "window_index": state.get("window_index"),
+        },
+        "current_trial": state.get("trial_id"),
+        "last_completed_trial": state.get("last_completed_trial"),
+        "last_run_id": state.get("last_run_id"),
+        "retry_count": state.get("retry_count"),
+        "next_step": state.get("next_step"),
+        "last_error": state.get("last_error"),
+        "continued_after_precheck": state.get("continued_after_precheck"),
+        "killed_after_precheck": state.get("killed_after_precheck"),
+        "precheck_status": state.get("precheck_status"),
+        "precheck_score": state.get("precheck_score"),
+        "proxy_terminal_score": state.get("proxy_terminal_score"),
+        "supervisor_heartbeat": state.get("supervisor_heartbeat"),
+        "stdout_log_path": state.get("stdout_log_path"),
+        "stderr_log_path": state.get("stderr_log_path"),
+        "payload": state,
+    }
+
+
+@app.get("/dreamer/logs/tail")
+async def dreamer_logs_tail(limit: int = Query(default=80, ge=1, le=500)):
+    """
+    Retourne les dernieres lignes utiles du pipeline Dreamer.
+
+    Args:
+        limit (int): Nombre maximal de lignes a retourner.
+
+    Returns:
+        dict: Journal filtre Dreamer et dernier verdict structure.
+    """
+    dreamer_payload = await dreamer_status()
+    lines = tail_training_log(limit=limit, source="dreamer")
+    return {
+        "status": "ok",
+        "engine": "dreamer",
+        "path": str(RUN_LOG_PATH),
+        "line_count": len(lines),
+        "lines": lines,
+        "pipeline": dreamer_payload.get("pipeline"),
+        "latest_candidate": dreamer_payload.get("latest_candidate"),
+        "latest_verdict": dreamer_payload.get("latest_verdict"),
     }
 
 
@@ -782,6 +1273,7 @@ async def champion_status():
     promoter: ChampionPromoter = app.state.promoter
     genetic: GeneticUpdater = app.state.genetic
     gate: DreamerGate = app.state.dreamer_gate
+    timescale_source = describe_timescale_source()
 
     horizons = ["scalp", "intraday", "swing"]
     registry_champions = genetic.get_all_champions()
@@ -815,6 +1307,9 @@ async def champion_status():
         "status": "ok",
         "selection_policy": promoter.get_live_selection_policy(),
         "dreamer_gate": gate.get_status(),
+        "data_source": timescale_source.get("source"),
+        "research_context_version": "v1_consultatif",
+        "consultative_blockers": {},
         "champions": registry_champions,
         "registry_champions": registry_champions,
         "live_champions": live_champions,
@@ -841,6 +1336,7 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
     """
     run_status = load_training_status()
     nightly_summary = load_nightly_summary()
+    sequence_state = load_sequence_state()
     universe_summary = run_status.get("universe") or build_training_universe_summary()
     dependencies = await _collect_training_dependencies(run_status)
     logs = tail_training_log(limit)
@@ -859,6 +1355,7 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
     run_view["reported_step_label"] = format_training_step_label(current_step)
     run_view["observed_step_label"] = format_training_step_label(observed_step)
     run_view["has_active_run"] = bool(run_status.get("active"))
+    run_view["supervisor_state"] = sequence_state.get("state")
     if arena_progress and isinstance(arena_progress, dict):
         challenger_metrics = dict((arena_progress.get("challenger") or {}).get("metrics") or {})
         if challenger_metrics.get("metrics_by_position_mechanics"):
@@ -879,11 +1376,27 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         "family": run_view.get("family"),
         "dataset_source": run_view.get("dataset_source"),
         "mechanics_profile_version": run_view.get("mechanics_profile_version"),
+        "focus_symbols": run_view.get("focus_symbols", []),
+        "gate_profile": run_view.get("gate_profile"),
+        "gold_precheck": run_view.get("gold_precheck"),
+        "precheck_status": run_view.get("precheck_status"),
+        "precheck_step": run_view.get("precheck_step"),
+        "precheck_metrics": run_view.get("precheck_metrics"),
+        "precheck_summary_path": run_view.get("precheck_summary_path"),
+        "timescaledb_status": ((run_view.get("dataset_coverage") or {}).get("timescaledb") or {}),
+        "bars_table": (((run_view.get("dataset_coverage") or {}).get("timescaledb") or {}).get("bars_table")),
+        "features_table": (((run_view.get("dataset_coverage") or {}).get("timescaledb") or {}).get("features_table")),
         "ga_status": run_view.get("ga_status"),
         "ga_generation": run_view.get("ga_generation"),
         "ga_trial": run_view.get("ga_trial"),
+        "sequence_id": run_view.get("sequence_id"),
+        "sequence_profile": run_view.get("sequence_profile"),
+        "window_id": run_view.get("window_id"),
+        "trial_id": run_view.get("trial_id"),
         "trial_mode": run_view.get("trial_mode"),
         "trial_cost_profile": run_view.get("trial_cost_profile"),
+        "terminal_summary_path": run_view.get("terminal_summary_path"),
+        "supervisor_state": run_view.get("supervisor_state"),
         "replay_cache_status": run_view.get("replay_cache_status"),
         "replay_cache_key": run_view.get("replay_cache_key"),
         "replay_cache_entries": run_view.get("replay_cache_entries"),
@@ -893,6 +1406,8 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         "sequence_stride": run_view.get("sequence_stride"),
         "world_model_steps": run_view.get("world_model_steps"),
         "dataset_coverage": run_view.get("dataset_coverage", {}),
+        "effective_source_reason": ((run_view.get("dataset_coverage") or {}).get("effective_source_reason")),
+        "replay_cache_reuse_ratio": ((run_view.get("dataset_coverage") or {}).get("replay_cache_reuse_ratio")),
         "metrics_by_position_mechanics": run_view.get("metrics_by_position_mechanics", {}),
     }
     await _publish_training_run_snapshot(
@@ -902,6 +1417,137 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         nightly_summary=nightly_summary,
     )
     return payload
+
+
+@app.get("/training/logs/tail")
+async def training_logs_tail(
+    limit: int = Query(default=120, ge=1, le=500),
+    source: str | None = Query(default=None),
+    contains: str | None = Query(default=None),
+):
+    """
+    Retourne un tail filtre du journal partage d'entrainement.
+
+    Args:
+        limit (int): Nombre maximal de lignes a retourner.
+        source (str | None): Source a filtrer, par exemple ``muzero`` ou ``dreamer``.
+        contains (str | None): Motif libre a rechercher dans les lignes.
+
+    Returns:
+        dict: Journal filtre et metadonnees de lecture.
+    """
+    lines = tail_training_log(limit=limit, source=source, contains=contains)
+    return {
+        "status": "ok",
+        "path": str(RUN_LOG_PATH),
+        "limit": limit,
+        "source": source,
+        "contains": contains,
+        "line_count": len(lines),
+        "lines": lines,
+    }
+
+
+@app.get("/ops/logs")
+async def ops_logs(limit: int = Query(default=80, ge=1, le=500)):
+    """
+    Retourne une vue centralisee des journaux et etats ops partages.
+
+    Args:
+        limit (int): Nombre maximal de lignes par journal.
+
+    Returns:
+        dict: Tails utiles pour le suivi ops sans lire les logs Docker bruts.
+    """
+    scheduler_state = load_cpu_scheduler_state()
+    sequence_state = load_sequence_state()
+    latest_muzero_summary = load_latest_terminal_summary(engine="muzero")
+    latest_dreamer_summary = load_latest_terminal_summary(engine="dreamer")
+    sequence_stdout_path = _as_path(sequence_state.get("stdout_log_path")) or _resolve_latest_checkpoint_log(
+        "*sequence*.out.log"
+    )
+    sequence_stderr_path = _as_path(sequence_state.get("stderr_log_path")) or _resolve_latest_checkpoint_log(
+        "*sequence*.err.log"
+    )
+
+    sequence_stdout = (
+        tail_log_file(sequence_stdout_path, limit=limit)
+        if sequence_stdout_path is not None
+        else []
+    )
+    sequence_stderr = (
+        tail_log_file(sequence_stderr_path, limit=limit)
+        if sequence_stderr_path is not None
+        else []
+    )
+
+    return {
+        "status": "ok",
+        "checkpoints_dir": str(STATUS_DIR),
+        "training": {
+            "path": str(RUN_LOG_PATH),
+            "lines": tail_training_log(limit=limit),
+        },
+        "dreamer": {
+            "path": str(RUN_LOG_PATH),
+            "lines": tail_training_log(limit=limit, source="dreamer"),
+        },
+        "sequence": {
+            "state": sequence_state,
+            "stdout_path": str(sequence_stdout_path) if sequence_stdout_path else None,
+            "stdout_lines": sequence_stdout,
+            "stderr_path": str(sequence_stderr_path) if sequence_stderr_path else None,
+            "stderr_lines": sequence_stderr,
+        },
+        "terminal_summaries": {
+            "muzero": latest_muzero_summary,
+            "dreamer": latest_dreamer_summary,
+        },
+        "cpu_scheduler": {
+            "state_path": str(CPU_SCHEDULER_STATE_PATH),
+            "state": scheduler_state,
+        },
+    }
+
+
+@app.post("/internal/sequence/window")
+async def persist_sequence_window(payload: dict[str, Any]):
+    """
+    Persiste une fenetre de sequence V4 depuis un superviseur externe.
+
+    Args:
+        payload (dict[str, Any]): Etat courant d'une fenetre de sequence.
+
+    Returns:
+        dict: Statut de persistance interne.
+    """
+
+    persisted = record_run_window(payload)
+    return {
+        "status": "ok" if persisted else "degraded",
+        "persisted": persisted,
+        "window_id": str(payload.get("window_id") or "") or None,
+    }
+
+
+@app.post("/internal/ga-trial")
+async def persist_ga_trial(payload: dict[str, Any]):
+    """
+    Persiste un resultat de trial GA depuis un superviseur externe.
+
+    Args:
+        payload (dict[str, Any]): Charge utile de scoring d'un trial.
+
+    Returns:
+        dict: Statut de persistance interne.
+    """
+
+    persisted = record_ga_trial(payload)
+    return {
+        "status": "ok" if persisted else "degraded",
+        "persisted": persisted,
+        "trial_id": str(payload.get("trial_id") or "") or None,
+    }
 
 
 @app.get("/live/universe")
@@ -1127,9 +1773,114 @@ async def gnn_status():
         dict: Version, statut, univers et artefacts du GNN de marche.
     """
     registry = load_market_gnn_registry()
+    refresh_state = _current_gnn_refresh_state()
+    graph_snapshot = build_market_gnn_graph_snapshot(registry=registry)
     return {
         "status": "ok",
         "gnn": registry,
+        "focus_symbol": registry.get("focus_symbol"),
+        "context_symbols": registry.get("context_symbols", []),
+        "deployment_class": registry.get("deployment_class"),
+        "graph_readiness": {
+            "status": graph_snapshot.get("status"),
+            "reason": graph_snapshot.get("reason"),
+            "selected_timeframe": graph_snapshot.get("selected_timeframe"),
+            "candidate_timeframes": graph_snapshot.get("candidate_timeframes", []),
+            "overlap_points": graph_snapshot.get("overlap_points", 0),
+            "missing_symbols": graph_snapshot.get("missing_symbols", []),
+        },
+        "refresh": refresh_state,
+    }
+
+
+@app.post("/gnn/refresh")
+async def request_gnn_refresh(request: GNNRefreshRequest | None = None):
+    """Declenche ou planifie un refresh explicite du GNN."""
+
+    request_payload = request.model_dump() if request is not None else {}
+    current_state = _current_gnn_refresh_state()
+    if _gnn_refresh_is_running(app):
+        return {"status": "running", "refresh": current_state, "message": "Un refresh GNN est deja en cours."}
+
+    training_state = load_training_status()
+    requested_at = datetime.utcnow().isoformat() + "Z"
+    source_run_id = _resolve_gnn_source_run_id()
+    queued = bool(training_state.get("active"))
+    requested_symbols = [
+        str(symbol).strip()
+        for symbol in list(request_payload.get("symbols") or [])
+        if str(symbol).strip()
+    ]
+    focus_symbol = str(request_payload.get("focus_symbol") or "").strip() or None
+    context_symbols = [
+        str(symbol).strip()
+        for symbol in list(request_payload.get("context_symbols") or [])
+        if str(symbol).strip()
+    ]
+    if focus_symbol and focus_symbol not in requested_symbols:
+        requested_symbols.insert(0, focus_symbol)
+    refresh_state = persist_market_gnn_refresh_state(
+        {
+            **current_state,
+            "status": "queued" if queued else "pending",
+            "queued": queued,
+            "requested_at": requested_at,
+            "started_at": None if queued else current_state.get("started_at"),
+            "finished_at": None,
+            "run_id": current_state.get("run_id") or f"gnn_refresh_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+            "failure_reason": None,
+            "source_run_id": source_run_id,
+            "requested_by": "api",
+            "requested_symbols": requested_symbols,
+            "focus_symbol": focus_symbol,
+            "context_symbols": context_symbols,
+            "deployment_class": str(request_payload.get("deployment_class") or "").strip() or None,
+            "epochs": request_payload.get("epochs"),
+            "batch_size": request_payload.get("batch_size"),
+            "checkpoint_every": request_payload.get("checkpoint_every"),
+            "max_symbols": request_payload.get("max_symbols"),
+        }
+    )
+    update_market_gnn_registry(
+        {
+            "source_run_id": source_run_id,
+            "focus_symbols": requested_symbols,
+            "focus_symbol": focus_symbol,
+            "context_symbols": context_symbols,
+            "deployment_class": str(request_payload.get("deployment_class") or "").strip() or None,
+            "status_reason": (
+                "Refresh GNN planifie: un entrainement GPU est deja actif."
+                if queued
+                else "Refresh GNN demande manuellement."
+            ),
+            "last_refresh_requested_at": requested_at,
+            "last_refresh_status": "queued" if queued else "pending",
+        }
+    )
+    if not queued:
+        refresh_state = await _start_gnn_refresh_process(app, refresh_state)
+        return {
+            "status": "started",
+            "refresh": refresh_state,
+            "message": "Refresh GNN demarre.",
+        }
+    return {
+        "status": "queued",
+        "refresh": refresh_state,
+        "message": "Refresh GNN place en file d'attente jusqu'a liberation du GPU.",
+    }
+
+
+@app.get("/gnn/refresh/status")
+async def gnn_refresh_status():
+    """Retourne la file de refresh GNN et son etat courant."""
+
+    refresh_state = _current_gnn_refresh_state()
+    return {
+        "status": "ok",
+        "refresh": refresh_state,
+        "running": _gnn_refresh_is_running(app),
+        "log_path": str(GNN_REFRESH_LOG_PATH),
     }
 
 
@@ -1146,7 +1897,17 @@ async def gnn_metrics():
         "status": "ok",
         "version": registry.get("version"),
         "model_status": registry.get("status"),
+        "status_reason": registry.get("status_reason"),
         "trained_at": registry.get("trained_at"),
+        "source_run_id": registry.get("source_run_id"),
+        "focus_symbol": registry.get("focus_symbol"),
+        "context_symbols": registry.get("context_symbols", []),
+        "deployment_class": registry.get("deployment_class"),
+        "coverage_summary": registry.get("coverage_summary", {}),
+        "last_refresh_requested_at": registry.get("last_refresh_requested_at"),
+        "last_refresh_started_at": registry.get("last_refresh_started_at"),
+        "last_refresh_finished_at": registry.get("last_refresh_finished_at"),
+        "last_refresh_status": registry.get("last_refresh_status"),
         "metrics": registry.get("metrics", {}),
         "universe": registry.get("universe", {}),
         "timeframes": registry.get("timeframes", []),
@@ -1174,6 +1935,11 @@ async def get_gnn_graph(style: str = "cyberpunk"):
     snapshot["timeframes"] = registry.get("timeframes", [])
     snapshot["universe"] = registry.get("universe", {})
     snapshot["metrics"] = registry.get("metrics", {})
+    snapshot["status_reason"] = registry.get("status_reason")
+    snapshot["coverage_summary"] = registry.get("coverage_summary", {})
+    snapshot["focus_symbol"] = registry.get("focus_symbol")
+    snapshot["context_symbols"] = registry.get("context_symbols", [])
+    snapshot["deployment_class"] = registry.get("deployment_class")
     return snapshot
 
 

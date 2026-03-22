@@ -2,7 +2,7 @@ FROM pytorch/pytorch:2.1.2-cuda11.8-cudnn8-devel
 
 WORKDIR /app
 
-# Install JAX with CUDA support explicitly locking version, alongside other dependencies
+# Installe JAX avec CUDA en verrouillant les versions critiques.
 RUN pip install --no-cache-dir --upgrade \
     jax==0.4.23 \
     jaxlib==0.4.23+cuda11.cudnn86 \
@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir --upgrade \
     "scipy<1.13" \
     gymnasium
 
-# Copy shared library
+# Copie puis installe la bibliotheque partagee.
 COPY src/shared /app/shared
 RUN python3 -m pip install grpcio-tools && \
     python3 -m grpc_tools.protoc -I/app/shared/shared/proto \
@@ -24,9 +24,9 @@ RUN python3 -m pip install grpcio-tools && \
     /app/shared/shared/proto/swarm.proto
 RUN pip install --no-cache-dir /app/shared
 
-# Copy eva-lab
+# Copie puis installe eva-lab avec toutes ses dependances declarees.
 COPY src/eva-lab /app/eva-lab
-RUN pip install --no-cache-dir fastapi uvicorn
+RUN pip install --no-cache-dir /app/eva-lab
 
 WORKDIR /app/eva-lab
 

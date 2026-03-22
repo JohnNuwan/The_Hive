@@ -36,6 +36,9 @@ from scripts.deploy.start_training_proxmox import (
 
 SYNC_FILES = [
     Path("docker-compose.yml"),
+    Path("scripts/cpu_assist.py"),
+    Path("scripts/cpu_scheduler.py"),
+    Path("scripts/sql/timescaledb_v51.sql"),
     Path("src/eva-lab/eva_lab/arena.py"),
     Path("src/eva-lab/eva_lab/champion_promoter.py"),
     Path("src/eva-lab/eva_lab/dreamer_gate.py"),
@@ -71,6 +74,7 @@ SYNC_FILES = [
     Path("src/eva-researcher/eva_researcher/main.py"),
     Path("src/eva-researcher/eva_researcher/report_generator.py"),
     Path("src/eva-researcher/eva_researcher/__init__.py"),
+    Path("src/eva-researcher/eva_researcher/services/context_engine.py"),
     Path("src/eva-researcher/eva_researcher/services/ingestion.py"),
     Path("src/eva-researcher/eva_researcher/services/pea_analyzer.py"),
     Path("src/eva-researcher/eva_researcher/services/search.py"),
@@ -78,7 +82,7 @@ SYNC_FILES = [
     Path("src/eva-researcher/pyproject.toml"),
     Path("src/eva-researcher/Dockerfile"),
 ]
-ALLOWED_SERVICES = {"core", "lab", "banker", "live-inference", "researcher"}
+ALLOWED_SERVICES = {"core", "lab", "banker", "live-inference", "researcher", "cpu-scheduler", "timescaledb"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -88,13 +92,13 @@ def parse_args() -> argparse.Namespace:
         argparse.Namespace: Arguments normalises du script.
     """
     parser = argparse.ArgumentParser(
-        description="Deploie `core`, `lab`, `live-inference`, `banker` et `researcher` a distance sans restart global."
+        description="Deploie `core`, `lab`, `live-inference`, `banker`, `researcher`, `cpu-scheduler` et `timescaledb` a distance sans restart global."
     )
     parser.add_argument(
         "--service",
         action="append",
         dest="services",
-        help="Service cible a reconstruire (`core`, `lab`, `live-inference`, `banker` ou `researcher`). Repetable.",
+        help="Service cible a reconstruire (`core`, `lab`, `live-inference`, `banker`, `researcher`, `cpu-scheduler` ou `timescaledb`). Repetable.",
     )
     parser.add_argument(
         "--no-sync",

@@ -23,7 +23,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from shared.redis_client import get_redis_client, init_redis
 
+from eva_researcher.services.context_engine import ContextEngine
 from eva_researcher.services.ingestion import ReviewDecisionRequest, SyncSourcesRequest
+from eva_researcher.services.ingestion import AutoApproveRequest
 from eva_researcher.services.search import ResearchQuery, ResearchService
 
 logging.basicConfig(level=logging.INFO)
@@ -65,6 +67,22 @@ class SotaEntry(BaseModel):
     paper_url: str = ""
 
 
+class MarketContextBuildRequest(BaseModel):
+    """Represente une demande de contexte marche consultatif."""
+
+    symbol: str = Field(..., min_length=2)
+    family: str = Field(default="mixed")
+    ttl_seconds: int = Field(default=900, ge=60, le=7200)
+
+
+class InvestmentThesisBuildRequest(BaseModel):
+    """Represente une demande de these investissement consultative."""
+
+    symbol: str = Field(..., min_length=2)
+    issuer: str | None = None
+    horizon_months: int = Field(default=12, ge=1, le=120)
+
+
 async def _heartbeat_loop(app: FastAPI) -> None:
     """Publie un heartbeat leger dans Redis tant que le service est actif."""
     try:
@@ -99,6 +117,7 @@ async def lifespan(app: FastAPI):
 
     service = ResearchService()
     app.state.service = service
+    app.state.context_engine = ContextEngine(service)
     app.state.knowledge_base: list[dict[str, Any]] = []
     app.state.sota_tracker: dict[str, dict[str, Any]] = {}
     app.state.research_history: deque[dict[str, Any]] = deque(maxlen=200)
@@ -260,6 +279,55 @@ async def get_pea_analysis() -> dict[str, Any]:
     }
 
 
+@app.post("/market-context/build", tags=["Intelligence"])
+async def build_market_context(request: MarketContextBuildRequest) -> dict[str, Any]:
+    """Construit un contexte marche prop consultatif pour un symbole."""
+
+    context_engine: ContextEngine = app.state.context_engine
+    return await context_engine.build_market_context(
+        symbol=request.symbol,
+        family=request.family,
+        ttl_seconds=request.ttl_seconds,
+    )
+
+
+@app.get("/market-context/latest", tags=["Intelligence"])
+async def get_latest_market_context(
+    symbol: str = Query(..., min_length=2),
+    family: str = Query(default="mixed"),
+) -> dict[str, Any]:
+    """Retourne le dernier contexte marche disponible pour un symbole."""
+
+    context_engine: ContextEngine = app.state.context_engine
+    payload = await context_engine.get_latest_market_context(symbol=symbol, family=family)
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"Contexte marche introuvable pour {symbol}.")
+    return payload
+
+
+@app.post("/investment-thesis/build", tags=["Intelligence"])
+async def build_investment_thesis(request: InvestmentThesisBuildRequest) -> dict[str, Any]:
+    """Construit une these investissement consultative pour un actif."""
+
+    context_engine: ContextEngine = app.state.context_engine
+    return await context_engine.build_investment_thesis(
+        symbol=request.symbol,
+        issuer=request.issuer,
+        horizon_months=request.horizon_months,
+    )
+
+
+@app.get("/investment-thesis/latest", tags=["Intelligence"])
+async def get_latest_investment_thesis(symbol: str = Query(..., min_length=2)) -> dict[str, Any]:
+    """Retourne la derniere these investissement disponible pour un symbole."""
+
+    context_engine: ContextEngine = app.state.context_engine
+    payload = await context_engine.get_latest_investment_thesis(symbol=symbol)
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"These investissement introuvable pour {symbol}.")
+    return payload
+
+
 @app.post("/ingest/sources/sync", tags=["Ingestion"])
 async def sync_ingest_sources(request: SyncSourcesRequest) -> dict[str, Any]:
     """Lance une collecte immediate des sources configurees."""
@@ -274,12 +342,26 @@ async def get_ingest_status(tail: int = Query(default=30, ge=1, le=100)) -> dict
 
 @app.get("/ingest/review", tags=["Ingestion"])
 async def list_ingest_review(
-    review_status: str = Query(default="pending", pattern="^(pending|approved|rejected|ingested)$"),
+    review_status: str = Query(default="pending", pattern="^(pending|approved|rejected|ingested|failed_ingestion)$"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    source_key: str | None = Query(default=None),
+    family: str | None = Query(default=None),
+    trust_level: str | None = Query(default=None, pattern="^(trusted|review_required)?$"),
+    review_mode: str | None = Query(default=None, pattern="^(auto|manual)?$"),
+    search: str | None = Query(default=None),
 ) -> dict[str, Any]:
     """Liste les candidats en revue par statut."""
-    return await app.state.service.list_review_items(review_status=review_status, limit=limit, offset=offset)
+    return await app.state.service.list_review_items(
+        review_status=review_status,
+        limit=limit,
+        offset=offset,
+        source_key=source_key,
+        family=family,
+        trust_level=trust_level,
+        review_mode=review_mode,
+        search=search,
+    )
 
 
 @app.post("/ingest/review/{item_id}/approve", tags=["Ingestion"])
@@ -298,6 +380,25 @@ async def reject_ingest_item(item_id: str, decision: ReviewDecisionRequest) -> d
         return await app.state.service.reject_review_item(item_id, decision)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Candidat introuvable: {exc.args[0]}") from exc
+
+
+@app.post("/ingest/review/{item_id}/retry-ingestion", tags=["Ingestion"])
+async def retry_ingest_item(item_id: str, decision: ReviewDecisionRequest) -> dict[str, Any]:
+    """Relance l'ingestion durable d'un candidat en erreur."""
+
+    try:
+        return await app.state.service.retry_review_item_ingestion(item_id, reviewed_by=decision.reviewed_by)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Candidat introuvable: {exc.args[0]}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/ingest/review/auto-approve", tags=["Ingestion"])
+async def auto_approve_ingest_review(request: AutoApproveRequest) -> dict[str, Any]:
+    """Applique la politique d'auto-approbation sur la file de revue."""
+
+    return await app.state.service.auto_approve_review_items(request)
 
 
 @app.get("/ingest/approved", tags=["Ingestion"])

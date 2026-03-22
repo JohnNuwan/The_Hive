@@ -648,6 +648,7 @@ class Arena:
         horizon: str,
         *,
         role: str | None = None,
+        eval_games_per_symbol: int | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Evalue un modele sur plusieurs fenetres historiques reellement distinctes.
@@ -657,6 +658,9 @@ class Arena:
             symbols (list[str]): Univers historique retenu.
             horizon (str): Horizon strategique evalue.
             role (str | None): Role logique (`challenger` ou `champion`).
+            eval_games_per_symbol (int | None): Nombre de segments d'evaluation
+                par symbole. Si absent, la variable d'environnement Arena est
+                utilisee.
             progress_callback (Callable[[dict[str, Any]], None] | None): Rappel
                 optionnel appele a chaque symbole complete.
 
@@ -679,7 +683,11 @@ class Arena:
             logger.error("Chargement MuZero impossible pour %s: %s", weights_path, exc)
             return self._empty_metrics()
 
-        eval_games_per_symbol = max(1, self._read_int_env("ARENA_GAMES_PER_SYMBOL", 6))
+        effective_games_per_symbol = (
+            max(1, int(eval_games_per_symbol))
+            if eval_games_per_symbol is not None
+            else max(1, self._read_int_env("ARENA_GAMES_PER_SYMBOL", 6))
+        )
         state: dict[str, Any] = {
             "total_return": 0.0,
             "gross_profit": 0.0,
@@ -718,7 +726,7 @@ class Arena:
             if market_data is None:
                 continue
 
-            segments = self._build_eval_segments(market_data, config, eval_games_per_symbol)
+            segments = self._build_eval_segments(market_data, config, effective_games_per_symbol)
             if not segments:
                 continue
 
@@ -834,6 +842,76 @@ class Arena:
         if int(state.get("evaluation_games", 0) or 0) == 0:
             return self._empty_metrics()
         return self._finalize_metrics_from_state(state)
+
+    def evaluate_candidate(
+        self,
+        challenger_id: str,
+        *,
+        horizon: str = "intraday",
+        eval_symbols: list[str] | None = None,
+        games_per_symbol: int = 6,
+    ) -> dict[str, Any]:
+        """Evalue un challenger seul sur un univers et un budget explicites.
+
+        Cette methode sert aux prechecks Gold intermediaires. Elle ne compare
+        pas le challenger au champion live et ne remplace pas l'Arena finale.
+
+        Args:
+            challenger_id (str): Identifiant du challenger a tester.
+            horizon (str): Horizon strategique evalue.
+            eval_symbols (list[str] | None): Univers explicite de symboles.
+            games_per_symbol (int): Nombre de segments d'evaluation par symbole.
+
+        Returns:
+            dict[str, Any]: Rapport compact de pre-evaluation du challenger.
+
+        Raises:
+            FileNotFoundError: Si le checkpoint challenger est introuvable.
+        """
+
+        normalized_horizon = str(horizon or "intraday").lower()
+        timeframe = get_horizon_timeframe(normalized_horizon)
+        symbols = [str(symbol).strip() for symbol in list(eval_symbols or []) if str(symbol).strip()]
+        if not symbols:
+            symbols = resolve_training_symbols(
+                data_dir=self.data_dir,
+                required_timeframes={timeframe},
+                max_symbols=self._read_int_env("ARENA_MAX_SYMBOLS", 12),
+                override_env_names=[
+                    f"ARENA_SYMBOLS_{normalized_horizon.upper()}",
+                    "ARENA_SYMBOLS",
+                    f"MUZERO_SYMBOLS_{normalized_horizon.upper()}",
+                    "MUZERO_SYMBOLS",
+                ],
+            )
+        if not symbols:
+            symbols = ["XAUUSD"]
+
+        challenger_path = self._resolve_model_path(challenger_id, normalized_horizon)
+        if challenger_path is None:
+            raise FileNotFoundError(f"Modele challenger introuvable: {challenger_id}")
+
+        challenger_metrics = self._evaluate_model(
+            challenger_path,
+            symbols,
+            normalized_horizon,
+            role="challenger",
+            eval_games_per_symbol=max(1, int(games_per_symbol)),
+        )
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "evaluation_type": "MUZERO_GOLD_PRECHECK",
+            "horizon": normalized_horizon,
+            "timeframe": timeframe,
+            "eval_symbols": symbols,
+            "games_per_symbol": max(1, int(games_per_symbol)),
+            "challenger": {
+                "id": challenger_id,
+                "path": str(challenger_path),
+                "score": round(self._score_metrics(challenger_metrics), 4),
+                "metrics": challenger_metrics,
+            },
+        }
 
     def battle(
         self,

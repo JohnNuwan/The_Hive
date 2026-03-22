@@ -167,6 +167,7 @@ class Settings(BaseSettings):
     nervous_api_port: int = 9090
     muse_api_port: int = 9100
     sage_api_port: int = 9200
+    researcher_api_host: str = "localhost"
     researcher_api_port: int = 9300
     wraith_api_port: int = 9400
     researcher_ingestion_enabled: bool = True
@@ -176,6 +177,10 @@ class Settings(BaseSettings):
     researcher_ingestion_news_interval_minutes: int = 90
     researcher_ingestion_max_items_per_source: int = 6
     researcher_arxiv_categories: str = "cs.AI,cs.LG,stat.ML,cs.IR,q-fin.TR"
+    researcher_ingestion_auto_approve_enabled: bool = True
+    researcher_ingestion_auto_approve_sources: str = "arxiv:*,google_news_markets"
+    researcher_ingestion_auto_approve_backlog_on_startup: bool = True
+    researcher_ingestion_auto_approve_reviewer: str = "policy:auto"
 
     # Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
     # EVA LAB (Feature Flags Ã¢â‚¬â€ Sprint 5)

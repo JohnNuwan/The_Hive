@@ -22,6 +22,11 @@ for candidate in (package_root, shared_root):
         sys.path.insert(0, candidate_str)
 
 from eva_lab.models.gnn_model import TFTGNNModel
+from eva_lab.gold_cpu_prep import (
+    build_gnn_dataset as build_gnn_cpu_dataset,
+    load_gnn_dataset_cache,
+    save_gnn_dataset_cache,
+)
 from eva_lab.training_status import append_training_log, mark_step_running
 from eva_lab.training_utils import MTF_HORIZONS, build_inventory_report, get_gnn_model_kwargs, load_history_frame, resolve_training_symbols
 from shared.indicators import IndicatorFactory
@@ -37,6 +42,13 @@ MODEL_DIR = Path(os.getenv("TRAIN_GNN_MODEL_DIR", "data/models"))
 MODEL_PATH = MODEL_DIR / os.getenv("TRAIN_GNN_MODEL_NAME", "gnn_master.pth")
 METRICS_PATH = MODEL_DIR / os.getenv("TRAIN_GNN_METRICS_NAME", "gnn_master_metrics.json")
 CLASSES = ["BULLISH", "BEARISH", "RANGING"]
+FOCUS_SYMBOL = str(os.getenv("TRAIN_GNN_FOCUS_SYMBOL", "")).strip() or None
+CONTEXT_SYMBOLS = [
+    item.strip()
+    for item in str(os.getenv("TRAIN_GNN_CONTEXT_SYMBOLS", "")).split(",")
+    if item.strip()
+]
+DEPLOYMENT_CLASS = str(os.getenv("TRAIN_GNN_DEPLOYMENT_CLASS", "")).strip() or "consultative"
 
 
 def get_label(current_price: float, future_price: float, atr: float) -> int:
@@ -117,49 +129,7 @@ def compute_feature_sequences(frame, seq_len: int, future_n: int):
 
 def build_dataset(symbols: list[str]):
     """Assemble le dataset multi-actifs pour les trois horizons."""
-    dataset = {}
-    valid_symbols: list[str] = []
-
-    for symbol in symbols:
-        horizon_payload = {}
-        symbol_valid = True
-
-        for timeframe, cfg in MTF_HORIZONS.items():
-            frame = load_history_frame(symbol, timeframe)
-            if frame is None:
-                logger.warning("Historique absent pour %s sur %s.", symbol, timeframe)
-                symbol_valid = False
-                break
-
-            clipped = frame.tail(cfg["count"]).copy()
-            features, labels = compute_feature_sequences(clipped, cfg["seq_len"], cfg["future"])
-            if len(labels) < 64:
-                logger.warning(
-                    "Pas assez d'echantillons pour %s sur %s (%s).",
-                    symbol,
-                    timeframe,
-                    len(labels),
-                )
-                symbol_valid = False
-                break
-
-            horizon_payload[timeframe] = {
-                "features": torch.tensor(features, dtype=torch.float32),
-                "labels": torch.tensor(labels, dtype=torch.long),
-            }
-
-        if symbol_valid:
-            dataset[symbol] = horizon_payload
-            valid_symbols.append(symbol)
-            logger.info(
-                "Dataset %s pret: M5=%s | H1=%s | D1=%s",
-                symbol,
-                len(dataset[symbol]["M5"]["labels"]),
-                len(dataset[symbol]["H1"]["labels"]),
-                len(dataset[symbol]["D1"]["labels"]),
-            )
-
-    return dataset, valid_symbols
+    return build_gnn_cpu_dataset(symbols)
 
 
 
@@ -188,12 +158,56 @@ def train_gnn() -> dict[str, object]:
     symbols = resolve_training_symbols(
         required_timeframes={"M5", "H1", "D1"},
         max_symbols=MAX_SYMBOLS,
+        override_env_names=["TRAIN_GNN_SYMBOLS"],
     )
     if not symbols:
         raise RuntimeError("Aucun symbole exploitable pour l'entrainement GNN.")
 
     logger.info("Univers GNN: %s", symbols)
-    dataset, valid_symbols = build_dataset(symbols)
+    cache_payload = load_gnn_dataset_cache(symbols)
+    cache_path_used: str | None = None
+    if cache_payload:
+        cache_path_used = str(cache_payload.get("cache_path") or "")
+        valid_symbols = list(cache_payload.get("valid_symbols") or [])
+        dataset = {}
+        for symbol in valid_symbols:
+            symbol_payload = {}
+            for timeframe, timeframe_payload in dict(cache_payload.get("dataset", {}).get(symbol) or {}).items():
+                symbol_payload[timeframe] = {
+                    "features": torch.tensor(timeframe_payload["features"], dtype=torch.float32),
+                    "labels": torch.tensor(timeframe_payload["labels"], dtype=torch.long),
+                }
+            dataset[symbol] = symbol_payload
+        inventory = dict(cache_payload.get("inventory") or inventory)
+        logger.info("Cache CPU GNN charge depuis %s.", cache_path_used)
+        append_training_log(
+            f"GNN: cache CPU charge depuis {Path(cache_path_used).name}.",
+            source="gnn",
+        )
+    else:
+        dataset_np, valid_symbols = build_dataset(symbols)
+        if valid_symbols:
+            cache_path = save_gnn_dataset_cache(
+                symbols=symbols,
+                dataset=dataset_np,
+                valid_symbols=valid_symbols,
+                inventory=inventory,
+            )
+            cache_path_used = str(cache_path)
+            logger.info("Cache CPU GNN ecrit dans %s.", cache_path)
+            append_training_log(
+                f"GNN: cache CPU ecrit dans {cache_path.name}.",
+                source="gnn",
+            )
+        dataset = {}
+        for symbol in valid_symbols:
+            symbol_payload = {}
+            for timeframe, timeframe_payload in dict(dataset_np.get(symbol) or {}).items():
+                symbol_payload[timeframe] = {
+                    "features": torch.tensor(timeframe_payload["features"], dtype=torch.float32),
+                    "labels": torch.tensor(timeframe_payload["labels"], dtype=torch.long),
+                }
+            dataset[symbol] = symbol_payload
     if not valid_symbols:
         raise RuntimeError("Le dataset GNN est vide apres validation.")
     append_training_log(
@@ -332,6 +346,13 @@ def train_gnn() -> dict[str, object]:
         "epochs": EPOCHS,
         "batch_size": BATCH_SIZE,
         "symbols": valid_symbols,
+        "focus_symbols": valid_symbols,
+        "focus_symbol": FOCUS_SYMBOL or (valid_symbols[0] if valid_symbols else None),
+        "context_symbols": CONTEXT_SYMBOLS or [
+            symbol for symbol in valid_symbols if symbol != (FOCUS_SYMBOL or (valid_symbols[0] if valid_symbols else None))
+        ],
+        "deployment_class": DEPLOYMENT_CLASS,
+        "cache_path": cache_path_used,
         "samples": num_samples,
         "inventory": inventory,
         **last_metrics,

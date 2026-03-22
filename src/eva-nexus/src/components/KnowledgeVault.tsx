@@ -14,6 +14,7 @@ import {
 
 import {
     approveResearchReviewItem,
+    autoApproveResearchReviewItems,
     getApprovedKnowledge,
     getMemoryGraph,
     getResearchIngestStatus,
@@ -22,6 +23,7 @@ import {
     getResearcherHistory,
     getResearcherTrends,
     rejectResearchReviewItem,
+    retryResearchReviewIngestion,
     searchCoreMemory,
     searchResearchPapers,
     searchResearcher,
@@ -37,6 +39,14 @@ import {
 import { navigateToHiveTab } from '../navigation'
 
 type SearchMode = 'web' | 'arxiv'
+type ReviewTab = 'pending' | 'auto' | 'ingested' | 'failed_ingestion' | 'rejected'
+
+type ReviewFilters = {
+    sourceKey: string
+    family: string
+    reviewMode: string
+    search: string
+}
 
 type SearchState = {
     mode: SearchMode
@@ -54,6 +64,13 @@ const INITIAL_SEARCH_STATE: SearchState = {
     synthesis: '',
     results: [],
     papers: [],
+}
+
+const INITIAL_REVIEW_FILTERS: ReviewFilters = {
+    sourceKey: '',
+    family: '',
+    reviewMode: '',
+    search: '',
 }
 
 function toDisplayString(value: unknown, fallback = '') {
@@ -168,15 +185,31 @@ function SourceBadge({ source }: { source: ResearchTrendSource }) {
     const family = toDisplayString(source.family || source.source_type, 'source')
     const sourceName = toDisplayString(source.source_name, 'source')
     const url = toDisplayString(source.url)
+    const autoApprove = Boolean(source.auto_approve)
+    const autoPattern = toDisplayString(source.auto_approve_pattern)
+    const reviewMode = toDisplayString(source.review_mode || (autoApprove ? 'auto' : 'manual'), 'manual')
+    const trustLevel = toDisplayString(source.trust_level || (autoApprove ? 'trusted' : 'review_required'))
     return (
         <div className="flex items-center justify-between gap-3 p-3 border border-white/[0.05] bg-white/[0.02]">
             <div>
                 <div className="text-[10px] font-bold text-white/70">{sourceName}</div>
                 <div className="text-[8px] text-white/25 uppercase tracking-[0.15em]">{family}</div>
+                <div className={`text-[8px] uppercase tracking-[0.15em] mt-1 ${autoApprove ? 'text-matrix/60' : 'text-white/20'}`}>
+                    {autoApprove ? `Auto-validation: ${autoPattern || 'active'}` : 'Auto-validation: manuelle'}
+                </div>
+                <div className="text-[8px] text-white/25 uppercase tracking-[0.15em] mt-1">
+                    {reviewMode} | {trustLevel}
+                </div>
+                <div className={`text-[8px] uppercase tracking-[0.15em] mt-1 ${source.durable_ingestion_ready ? 'text-matrix/60' : 'text-cyber-pink/60'}`}>
+                    {source.durable_ingestion_ready ? 'Memoire durable prete' : 'Memoire durable degradee'}
+                </div>
             </div>
             <div className="text-right text-[8px] text-white/25">
                 <div>Sync: {formatDate(source.last_sync)}</div>
                 <div>Queue: {source.queued || 0} | Doublons: {source.duplicates || 0}</div>
+                <div>Ingeres: {source.ingested || 0} | Echecs: {source.failed_ingestion || 0}</div>
+                <div>Auto: {source.auto_ingested || 0} | Erreurs: {source.ingestion_errors || 0}</div>
+                {source.last_error ? <div className="truncate max-w-[180px] text-cyber-pink/60">{toDisplayString(source.last_error)}</div> : null}
                 {url && <div className="truncate max-w-[180px]">{url}</div>}
             </div>
         </div>
@@ -188,17 +221,23 @@ function ReviewCard({
     busy,
     onApprove,
     onReject,
+    onRetry,
 }: {
     item: KnowledgeReviewItem
     busy: boolean
     onApprove: (itemId: string) => Promise<void>
     onReject: (itemId: string) => Promise<void>
+    onRetry?: (itemId: string) => Promise<void>
 }) {
     const tagList = normalizeStringList(item.tags).slice(0, 6)
     const itemFamily = toDisplayString(item.family, 'source')
     const sourceName = toDisplayString(item.source_name, 'source')
     const title = toDisplayString(item.title, 'Sans titre')
     const url = toDisplayString(item.url)
+    const reviewStatus = toDisplayString(item.review_status, 'pending')
+    const canApprove = reviewStatus === 'pending'
+    const canReject = reviewStatus === 'pending'
+    const canRetry = reviewStatus === 'failed_ingestion' && typeof onRetry === 'function'
     return (
         <div className="cyber-panel hud-corners p-4 space-y-3">
             <div className="flex items-start justify-between gap-4">
@@ -207,6 +246,9 @@ function ReviewCard({
                         {itemFamily} | {sourceName}
                     </div>
                     <h4 className="text-[12px] font-bold text-white/80 mt-1">{title}</h4>
+                    <div className="text-[8px] uppercase tracking-[0.15em] text-white/30 mt-2">
+                        {toDisplayString(item.review_mode, 'manual')} | {toDisplayString(item.trust_level, 'review_required')} | {reviewStatus}
+                    </div>
                 </div>
                 <div className="text-right text-[8px] text-white/25 shrink-0">
                     <div>Score {Math.round((item.confidence_score || 0) * 100)}%</div>
@@ -217,6 +259,12 @@ function ReviewCard({
             <p className="text-[10px] text-white/40 leading-relaxed">
                 {truncate(item.summary_curated || item.summary_raw || 'Aucun resume disponible.', 280)}
             </p>
+
+            {item.ingestion_error ? (
+                <div className="border border-cyber-pink/20 bg-cyber-pink/10 p-3 text-[9px] text-cyber-pink/70">
+                    Ingestion en erreur: {toDisplayString(item.ingestion_error, 'raison indisponible')}
+                </div>
+            ) : null}
 
             <div className="flex flex-wrap gap-1.5">
                 {tagList.map((tag) => (
@@ -237,20 +285,33 @@ function ReviewCard({
                     <span>Source</span>
                 </a>
                 <div className="flex gap-2">
-                    <button
-                        onClick={() => onReject(item.id)}
-                        disabled={busy}
-                        className="px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] border border-cyber-pink/20 bg-cyber-pink/10 text-cyber-pink/70 disabled:opacity-40"
-                    >
-                        Rejeter
-                    </button>
-                    <button
-                        onClick={() => onApprove(item.id)}
-                        disabled={busy}
-                        className="px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] border border-matrix/20 bg-matrix/10 text-matrix disabled:opacity-40"
-                    >
-                        Valider
-                    </button>
+                    {canReject ? (
+                        <button
+                            onClick={() => onReject(item.id)}
+                            disabled={busy}
+                            className="px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] border border-cyber-pink/20 bg-cyber-pink/10 text-cyber-pink/70 disabled:opacity-40"
+                        >
+                            Rejeter
+                        </button>
+                    ) : null}
+                    {canApprove ? (
+                        <button
+                            onClick={() => onApprove(item.id)}
+                            disabled={busy}
+                            className="px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] border border-matrix/20 bg-matrix/10 text-matrix disabled:opacity-40"
+                        >
+                            Valider
+                        </button>
+                    ) : null}
+                    {canRetry ? (
+                        <button
+                            onClick={() => onRetry?.(item.id)}
+                            disabled={busy}
+                            className="px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] border border-cyber-cyan/20 bg-cyber-cyan/10 text-cyber-cyan disabled:opacity-40"
+                        >
+                            Retenter
+                        </button>
+                    ) : null}
                 </div>
             </div>
         </div>
@@ -260,7 +321,7 @@ function ReviewCard({
 export default function KnowledgeVault() {
     const [ingestStatus, setIngestStatus] = useState<IngestionStatusResponse | null>(null)
     const [sources, setSources] = useState<ResearchTrendSource[]>([])
-    const [pendingItems, setPendingItems] = useState<KnowledgeReviewItem[]>([])
+    const [reviewItems, setReviewItems] = useState<KnowledgeReviewItem[]>([])
     const [approvedItems, setApprovedItems] = useState<KnowledgeReviewItem[]>([])
     const [history, setHistory] = useState<ResearchHistoryEntry[]>([])
     const [trends, setTrends] = useState<ResearchTrendSource[]>([])
@@ -270,12 +331,22 @@ export default function KnowledgeVault() {
     const [memoryQuery, setMemoryQuery] = useState('')
     const [busyAction, setBusyAction] = useState<string | null>(null)
     const [feedback, setFeedback] = useState<string>('')
+    const [reviewTab, setReviewTab] = useState<ReviewTab>('pending')
+    const [reviewFilters, setReviewFilters] = useState<ReviewFilters>(INITIAL_REVIEW_FILTERS)
 
     const loadKnowledgeState = useCallback(async () => {
+        const effectiveReviewStatus = reviewTab === 'auto' ? 'pending' : reviewTab
+        const reviewMode = reviewTab === 'auto' ? 'auto' : reviewFilters.reviewMode
         const [status, sourcePayload, pendingPayload, approvedPayload, historyPayload, trendPayload, graphPayload] = await Promise.all([
             getResearchIngestStatus(12),
             getResearchSources(),
-            getResearchReviewQueue('pending', 12, 0),
+            getResearchReviewQueue(effectiveReviewStatus, 12, 0, {
+                sourceKey: reviewFilters.sourceKey || undefined,
+                family: reviewFilters.family || undefined,
+                reviewMode: reviewMode || undefined,
+                trustLevel: reviewMode === 'auto' ? 'trusted' : undefined,
+                search: reviewFilters.search || undefined,
+            }),
             getApprovedKnowledge(12),
             getResearcherHistory(12),
             getResearcherTrends(searchState.domain),
@@ -283,12 +354,12 @@ export default function KnowledgeVault() {
         ])
         setIngestStatus(status)
         setSources(sourcePayload.sources || [])
-        setPendingItems(pendingPayload.items || [])
+        setReviewItems(pendingPayload.items || [])
         setApprovedItems(approvedPayload.items || [])
         setHistory(historyPayload.history || [])
         setTrends(trendPayload.ingest_sources || [])
         setMemoryGraph(graphPayload)
-    }, [searchState.domain])
+    }, [reviewFilters.family, reviewFilters.reviewMode, reviewFilters.search, reviewFilters.sourceKey, reviewTab, searchState.domain])
 
     useEffect(() => {
         void loadKnowledgeState()
@@ -302,7 +373,46 @@ export default function KnowledgeVault() {
         setBusyAction('sync')
         setFeedback('')
         const result = await syncResearchSources(true, true, 5)
-        setFeedback(result.status === 'ok' ? 'Synchronisation des sources lancee.' : 'Synchronisation indisponible.')
+        if (result.status === 'ok') {
+            const autoIngested = Number(result.auto_ingested || 0)
+            setFeedback(
+                autoIngested > 0
+                    ? `Synchronisation terminee. ${autoIngested} element(s) auto-ingere(s).`
+                    : 'Synchronisation des sources lancee.'
+            )
+        } else {
+            setFeedback('Synchronisation indisponible.')
+        }
+        await loadKnowledgeState()
+        setBusyAction(null)
+    }
+
+    const handleAutoApproveArxiv = async () => {
+        setBusyAction('auto-approve')
+        setFeedback('')
+        const result = await autoApproveResearchReviewItems('arxiv:*', 1000, 'nexus:auto')
+        const approved = Number(result.approved || 0)
+        const ingested = Number(result.ingested || 0)
+        setFeedback(
+            result.status === 'ok'
+                ? `Auto-validation arXiv terminee. ${approved} approuve(s), ${ingested} ingere(s).`
+                : 'Auto-validation arXiv indisponible.'
+        )
+        await loadKnowledgeState()
+        setBusyAction(null)
+    }
+
+    const handleAutoApproveTrusted = async () => {
+        setBusyAction('auto-approve-trusted')
+        setFeedback('')
+        const result = await autoApproveResearchReviewItems(undefined, 1500, 'nexus:auto:trusted')
+        const approved = Number(result.approved || 0)
+        const ingested = Number(result.ingested || 0)
+        setFeedback(
+            result.status === 'ok'
+                ? `Auto-validation des sources fiables terminee. ${approved} approuve(s), ${ingested} ingere(s).`
+                : 'Auto-validation des sources fiables indisponible.'
+        )
         await loadKnowledgeState()
         setBusyAction(null)
     }
@@ -311,7 +421,13 @@ export default function KnowledgeVault() {
         setBusyAction(`approve:${itemId}`)
         setFeedback('')
         const result = await approveResearchReviewItem(itemId)
-        setFeedback(result.status === 'ok' ? `Candidat ${itemId} valide et ingere.` : `Validation impossible pour ${itemId}.`)
+        setFeedback(
+            result.status === 'ok'
+                ? `Candidat ${itemId} valide et ingere.`
+                : result.status === 'degraded'
+                    ? `Candidat ${itemId} approuve, mais l ingestion durable a echoue.`
+                    : `Validation impossible pour ${itemId}.`
+        )
         await loadKnowledgeState()
         setBusyAction(null)
     }
@@ -321,6 +437,40 @@ export default function KnowledgeVault() {
         setFeedback('')
         const result = await rejectResearchReviewItem(itemId, 'Rejet manuel depuis Nexus')
         setFeedback(result.status === 'ok' ? `Candidat ${itemId} rejete.` : `Rejet impossible pour ${itemId}.`)
+        await loadKnowledgeState()
+        setBusyAction(null)
+    }
+
+    const handleRetry = async (itemId: string) => {
+        setBusyAction(`retry:${itemId}`)
+        setFeedback('')
+        const result = await retryResearchReviewIngestion(itemId)
+        setFeedback(
+            result.status === 'ok'
+                ? `Ingestion relancee avec succes pour ${itemId}.`
+                : result.status === 'degraded'
+                    ? `La reprise d ingestion de ${itemId} a encore echoue.`
+                    : `Reprise d ingestion impossible pour ${itemId}.`
+        )
+        await loadKnowledgeState()
+        setBusyAction(null)
+    }
+
+    const handleRetryFailedIngestions = async () => {
+        if (reviewItems.length === 0) {
+            setFeedback('Aucun item en erreur a relancer.')
+            return
+        }
+        setBusyAction('retry-bulk')
+        setFeedback('')
+        let recovered = 0
+        for (const item of reviewItems) {
+            const result = await retryResearchReviewIngestion(item.id, 'nexus:retry:bulk')
+            if (result.status === 'ok') {
+                recovered += 1
+            }
+        }
+        setFeedback(`Relance d ingestion terminee. ${recovered} item(s) recuperes.`)
         await loadKnowledgeState()
         setBusyAction(null)
     }
@@ -364,6 +514,28 @@ export default function KnowledgeVault() {
 
     const topSources = useMemo(() => (Array.isArray(sources) ? sources : []).slice(0, 4), [sources])
     const trendSources = useMemo(() => (Array.isArray(trends) ? trends : []).slice(0, 4), [trends])
+    const reviewTabs = useMemo<Array<{ id: ReviewTab; label: string }>>(
+        () => [
+            { id: 'pending', label: 'En revue' },
+            { id: 'auto', label: 'Auto-validables' },
+            { id: 'ingested', label: 'Ingeres' },
+            { id: 'failed_ingestion', label: 'Erreurs d ingestion' },
+            { id: 'rejected', label: 'Rejetes' },
+        ],
+        [],
+    )
+    const sourceOptions = useMemo(
+        () =>
+            (Array.isArray(sources) ? sources : []).map((source) => ({
+                value: toDisplayString(source.source_key || source.key),
+                label: toDisplayString(source.source_name, 'source'),
+            })),
+        [sources],
+    )
+    const reviewPanelTitle = useMemo(() => {
+        const current = reviewTabs.find((tab) => tab.id === reviewTab)
+        return current?.label || 'File de revue'
+    }, [reviewTab, reviewTabs])
     const pipelineLogs = useMemo(
         () =>
             (Array.isArray(ingestStatus?.logs) ? ingestStatus.logs : [])
@@ -375,11 +547,12 @@ export default function KnowledgeVault() {
 
     return (
         <div className="h-full overflow-y-auto p-4 space-y-4 animate-fade-in">
-            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
                 <MetricTile label="En revue" value={ingestStatus?.counts?.pending ?? 0} tone="amber" />
-                <MetricTile label="Valides" value={ingestStatus?.counts?.approved ?? 0} tone="matrix" />
+                <MetricTile label="Approuves" value={ingestStatus?.counts?.approved ?? 0} tone="matrix" />
                 <MetricTile label="Rejetes" value={ingestStatus?.counts?.rejected ?? 0} tone="pink" />
                 <MetricTile label="Ingeres" value={ingestStatus?.counts?.ingested ?? 0} tone="matrix" />
+                <MetricTile label="Echecs ingestion" value={ingestStatus?.counts?.failed_ingestion ?? 0} tone="pink" />
                 <MetricTile label="Sources" value={sources.length} tone="cyan" />
                 <MetricTile label="Doublons" value={`${Math.round((ingestStatus?.duplicate_rate || 0) * 100)}%`} tone="pink" />
             </div>
@@ -391,17 +564,43 @@ export default function KnowledgeVault() {
                             <div className="text-[9px] uppercase tracking-[0.2em] text-matrix/40">Controle connaissance</div>
                             <h3 className="font-display text-lg font-black tracking-[0.08em] text-white/80 mt-1">Researcher et Memory Bridge</h3>
                             <p className="text-[10px] text-white/25 mt-2 max-w-3xl">
-                                La collecte academique et actualite passe par une revue obligatoire avant ingestion durable dans la memoire.
+                                La collecte academique et actualite passe par une revue pilotee. Les sources fiables, comme arXiv et Google News Marches, peuvent etre auto-validees sans masquer les echecs d ingestion durable.
                             </p>
                         </div>
-                        <button
-                            onClick={handleSync}
-                            disabled={busyAction !== null}
-                            className="cyber-btn text-[9px] px-3 py-2 disabled:opacity-40"
-                        >
-                            <RefreshCw size={12} className={busyAction === 'sync' ? 'animate-spin' : ''} />
-                            <span>Synchroniser les sources</span>
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                            <button
+                                onClick={handleSync}
+                                disabled={busyAction !== null}
+                                className="cyber-btn text-[9px] px-3 py-2 disabled:opacity-40"
+                            >
+                                <RefreshCw size={12} className={busyAction === 'sync' ? 'animate-spin' : ''} />
+                                <span>Synchroniser les sources</span>
+                            </button>
+                            <button
+                                onClick={handleAutoApproveArxiv}
+                                disabled={busyAction !== null}
+                                className="cyber-btn text-[9px] px-3 py-2 disabled:opacity-40"
+                            >
+                                <CheckCircle2 size={12} className={busyAction === 'auto-approve' ? 'animate-pulse' : ''} />
+                                <span>Auto-valider arXiv</span>
+                            </button>
+                            <button
+                                onClick={handleAutoApproveTrusted}
+                                disabled={busyAction !== null}
+                                className="cyber-btn text-[9px] px-3 py-2 disabled:opacity-40"
+                            >
+                                <ShieldCheck size={12} className={busyAction === 'auto-approve-trusted' ? 'animate-pulse' : ''} />
+                                <span>Auto-valider sources fiables</span>
+                            </button>
+                            <button
+                                onClick={handleRetryFailedIngestions}
+                                disabled={busyAction !== null || reviewTab !== 'failed_ingestion'}
+                                className="cyber-btn text-[9px] px-3 py-2 disabled:opacity-40"
+                            >
+                                <RefreshCw size={12} className={busyAction === 'retry-bulk' ? 'animate-spin' : ''} />
+                                <span>Retenter les erreurs</span>
+                            </button>
+                        </div>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -562,24 +761,82 @@ export default function KnowledgeVault() {
                     <div className="cyber-panel hud-corners p-4 space-y-3">
                         <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-cyber-amber/60">
                             <Clock3 size={14} />
-                            <span>File de revue</span>
+                            <span>{reviewPanelTitle}</span>
                         </div>
                         <div className="text-[10px] text-white/25">
                             Run: {ingestStatus?.active_run?.status || 'idle'} | Derniere sync: {formatDate(String(((ingestStatus?.last_run as Record<string, unknown> | null)?.finished_at as string | undefined) || ingestStatus?.active_run?.updated_at || ''))}
                         </div>
+                        <div className="flex flex-wrap gap-2">
+                            {reviewTabs.map((tab) => (
+                                <button
+                                    key={tab.id}
+                                    onClick={() => setReviewTab(tab.id)}
+                                    className={`px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] border ${
+                                        reviewTab === tab.id
+                                            ? 'border-cyber-amber/30 bg-cyber-amber/10 text-cyber-amber'
+                                            : 'border-white/10 text-white/30'
+                                    }`}
+                                >
+                                    {tab.label}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                            <select
+                                value={reviewFilters.sourceKey}
+                                onChange={(event) => setReviewFilters((current) => ({ ...current, sourceKey: event.target.value }))}
+                                className="bg-black/50 border border-white/10 px-3 py-2 text-[11px] text-white/70 outline-none"
+                            >
+                                <option value="">Toutes les sources</option>
+                                {sourceOptions.map((source) => (
+                                    <option key={source.value} value={source.value}>
+                                        {source.label}
+                                    </option>
+                                ))}
+                            </select>
+                            <select
+                                value={reviewFilters.family}
+                                onChange={(event) => setReviewFilters((current) => ({ ...current, family: event.target.value }))}
+                                className="bg-black/50 border border-white/10 px-3 py-2 text-[11px] text-white/70 outline-none"
+                            >
+                                <option value="">Toutes les familles</option>
+                                <option value="academique">Academique</option>
+                                <option value="actualite">Actualite</option>
+                            </select>
+                            <select
+                                value={reviewFilters.reviewMode}
+                                onChange={(event) => setReviewFilters((current) => ({ ...current, reviewMode: event.target.value }))}
+                                className="bg-black/50 border border-white/10 px-3 py-2 text-[11px] text-white/70 outline-none"
+                            >
+                                <option value="">Tous les modes</option>
+                                <option value="auto">Auto</option>
+                                <option value="manual">Manuel</option>
+                            </select>
+                            <input
+                                value={reviewFilters.search}
+                                onChange={(event) => setReviewFilters((current) => ({ ...current, search: event.target.value }))}
+                                placeholder="Texte, tag ou titre..."
+                                className="bg-black/50 border border-white/10 px-3 py-2 text-[11px] text-white/70 outline-none focus:border-cyber-amber/40"
+                            />
+                        </div>
                         <div className="space-y-3 max-h-[520px] overflow-y-auto custom-scrollbar pr-1">
-                            {pendingItems.length === 0 ? (
+                            {reviewItems.length === 0 ? (
                                 <div className="border border-dashed border-white/10 p-4 text-[10px] text-white/25">
-                                    Aucun candidat en attente de revue.
+                                    Aucun candidat pour cette vue.
                                 </div>
                             ) : (
-                                pendingItems.map((item) => (
+                                reviewItems.map((item) => (
                                     <ReviewCard
                                         key={item.id}
                                         item={item}
-                                        busy={busyAction === `approve:${item.id}` || busyAction === `reject:${item.id}`}
+                                        busy={
+                                            busyAction === `approve:${item.id}`
+                                            || busyAction === `reject:${item.id}`
+                                            || busyAction === `retry:${item.id}`
+                                        }
                                         onApprove={handleApprove}
                                         onReject={handleReject}
+                                        onRetry={handleRetry}
                                     />
                                 ))
                             )}
@@ -676,7 +933,7 @@ export default function KnowledgeVault() {
                 <section className="cyber-panel hud-corners p-4 space-y-3">
                     <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-matrix/60">
                         <CheckCircle2 size={14} />
-                        <span>Connaissance approuvee</span>
+                        <span>Connaissance ingeree</span>
                     </div>
                     <div className="space-y-2 max-h-[240px] overflow-y-auto custom-scrollbar pr-1">
                         {approvedItems.length === 0 ? (

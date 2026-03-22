@@ -65,7 +65,7 @@ COPY src/shared /app/shared
 RUN pip install --no-cache-dir /app/shared
 
 COPY src/eva-lab /app/eva-lab
-RUN pip install --no-cache-dir --no-deps /app/eva-lab
+RUN pip install --no-cache-dir /app/eva-lab
 
 # Verrouille la pile JAX en derniere couche pour eviter qu'une dependance
 # transitive remonte vers une version incompatible avec Haiku.

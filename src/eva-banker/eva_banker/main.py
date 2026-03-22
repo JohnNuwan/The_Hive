@@ -352,6 +352,32 @@ async def _publish_trading_status_snapshot(payload: dict[str, Any]) -> None:
         logger.debug("Publication du statut trading ignoree: %s", exc)
 
 
+async def _read_consultative_market_context(symbol: str, family: str | None) -> dict[str, Any] | None:
+    """
+    Lit un contexte marche consultatif structure depuis Redis.
+
+    Args:
+        symbol (str): Symbole cible.
+        family (str | None): Famille d'actifs associee.
+
+    Returns:
+        dict[str, Any] | None: Snapshot de contexte si disponible.
+    """
+    normalized_symbol = str(symbol or "").strip().upper()
+    normalized_family = str(family or "mixed").strip().lower() or "mixed"
+    if not normalized_symbol:
+        return None
+    try:
+        redis = get_redis_client()
+        payload = await redis.cache_get(
+            f"eva:state:intelligence:market_context:{normalized_family}:{normalized_symbol}"
+        )
+        return payload if isinstance(payload, dict) else None
+    except Exception as exc:
+        logger.debug("Lecture du contexte consultatif ignoree pour %s: %s", normalized_symbol, exc)
+        return None
+
+
 async def _cancel_background_tasks(tasks: list[asyncio.Task[Any]]) -> None:
     """
     Annule proprement les taches de fond du Banker.
@@ -1047,6 +1073,40 @@ async def get_trading_status():
     execution_mechanics = app.state.auto_engine.get_execution_mechanics_status()
     decision_audit = app.state.auto_engine.get_decision_audit_snapshot()
     live_universe_status = app.state.auto_engine.get_live_universe_status()
+    live_family = str(
+        execution_mechanics.get("live_family")
+        or live_universe_status.get("live_family")
+        or "mixed"
+    ).strip().lower() or "mixed"
+    tracked_symbols: list[str] = []
+    for symbol in list(execution_mechanics.get("live_top_symbols") or []):
+        normalized_symbol = str(symbol).strip().upper()
+        if normalized_symbol and normalized_symbol not in tracked_symbols:
+            tracked_symbols.append(normalized_symbol)
+    for position in positions:
+        normalized_symbol = str(position.symbol).strip().upper()
+        if normalized_symbol and normalized_symbol not in tracked_symbols:
+            tracked_symbols.append(normalized_symbol)
+    market_context: dict[str, Any] = {}
+    for symbol in tracked_symbols[:8]:
+        payload = await _read_consultative_market_context(symbol, live_family)
+        if payload:
+            market_context[symbol] = payload
+    event_blockers = {
+        symbol: context
+        for symbol, context in market_context.items()
+        if bool(context.get("blocked", False))
+    }
+    risk_overrides = {
+        symbol: {
+            "blocked": bool(context.get("blocked", False)),
+            "event_risk": context.get("event_risk"),
+            "geo_risk": context.get("geo_risk"),
+            "macro_bias": context.get("macro_bias"),
+            "confidence": context.get("confidence"),
+        }
+        for symbol, context in market_context.items()
+    }
 
     payload = {
         "status": "offline" if account is None else "online",
@@ -1095,6 +1155,11 @@ async def get_trading_status():
         "live_family": execution_mechanics.get("live_family"),
         "live_champion_id_muzero": execution_mechanics.get("live_champion_id_muzero"),
         "live_champion_id_dreamer": execution_mechanics.get("live_champion_id_dreamer"),
+        "research_mode": "consultatif",
+        "live_data_source": live_universe_status.get("source") or execution_mechanics.get("selection_policy_required"),
+        "market_context": market_context,
+        "event_blockers": event_blockers,
+        "risk_overrides": risk_overrides,
         "degraded_fallback_reason": (
             ((decision_audit.get("recent") or [{}])[-1]).get("degraded_fallback_reason")
             if decision_audit.get("recent")

@@ -216,6 +216,38 @@ async def _fetch_lab_snapshot(path: str) -> dict[str, Any] | None:
     return None
 
 
+async def _fetch_researcher_snapshot(path: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """
+    Interroge The Researcher pour un snapshot consultatif.
+
+    Args:
+        path (str): Route absolue du service researcher.
+        params (dict[str, Any] | None): Parametres de requete optionnels.
+
+    Returns:
+        dict[str, Any] | None: JSON retourne par researcher si disponible.
+    """
+    import httpx
+
+    settings: Settings = app.state.settings
+    researcher_host = getattr(settings, "researcher_api_host", "researcher")
+    researcher_port = getattr(settings, "researcher_api_port", 9300)
+    researcher_url = f"http://{researcher_host}:{researcher_port}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                researcher_url,
+                params=params,
+                headers=get_internal_headers("core"),
+            )
+            if response.status_code == 200:
+                payload = response.json()
+                return payload if isinstance(payload, dict) else None
+    except Exception as exc:
+        logger.debug("Lecture Researcher impossible sur %s: %s", path, exc)
+    return None
+
+
 def _format_connectors(connectors: dict[str, Any]) -> str:
     """
     Formate les connecteurs pour une reponse EVA lisible.
@@ -1271,5 +1303,56 @@ async def intelligence_status() -> dict[str, Any]:
             "last_snapshot_at": autonomy_snapshot.get("generated_at"),
         },
     }
+
+
+@app.get("/intelligence/market-context", tags=["Intelligence"])
+async def intelligence_market_context(symbol: str, family: str = "mixed") -> dict[str, Any]:
+    """
+    Retourne le dernier contexte marche consultatif connu pour un symbole.
+
+    Args:
+        symbol (str): Symbole cible.
+        family (str): Famille d'actifs associee.
+
+    Returns:
+        dict[str, Any]: Snapshot de contexte marche.
+    """
+    cached = await _read_cached_state(
+        f"eva:state:intelligence:market_context:{str(family).lower()}:{str(symbol).upper()}"
+    )
+    if cached is not None:
+        return cached
+    payload = await _fetch_researcher_snapshot(
+        "/market-context/latest",
+        params={"symbol": symbol, "family": family},
+    )
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"Contexte marche introuvable pour {symbol}.")
+    return payload
+
+
+@app.get("/intelligence/investment-thesis", tags=["Intelligence"])
+async def intelligence_investment_thesis(symbol: str) -> dict[str, Any]:
+    """
+    Retourne la derniere these investissement consultative pour un symbole.
+
+    Args:
+        symbol (str): Symbole cible.
+
+    Returns:
+        dict[str, Any]: Snapshot de these investissement.
+    """
+    cached = await _read_cached_state(
+        f"eva:state:intelligence:investment_thesis:{str(symbol).upper()}"
+    )
+    if cached is not None:
+        return cached
+    payload = await _fetch_researcher_snapshot(
+        "/investment-thesis/latest",
+        params={"symbol": symbol},
+    )
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"These investissement introuvable pour {symbol}.")
+    return payload
 
 

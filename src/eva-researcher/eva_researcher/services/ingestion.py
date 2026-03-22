@@ -5,8 +5,9 @@ Cette v1 couvre deux familles:
 - academique via arXiv;
 - actualite via des flux RSS/news curies.
 
-Les collectes alimentent une file de revue obligatoire. Seuls les elements
-approuves sont ecrits durablement via MemoryBridge vers Qdrant et Neo4j.
+Les collectes alimentent une file de revue. Certaines sources peuvent etre
+auto-validees par politique explicite, puis ingerees durablement via
+MemoryBridge vers Qdrant et Neo4j.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from fnmatch import fnmatchcase
 from hashlib import sha256
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -77,6 +79,21 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _normalize_source_key(value: Any, default: str = "unknown") -> str:
+    """Normalise une cle source pour les compteurs et filtres.
+
+    Args:
+        value (Any): Valeur brute de cle source.
+        default (str): Valeur de repli si la cle est vide.
+
+    Returns:
+        str: Cle source normalisee en minuscules.
+    """
+
+    token = str(value or "").strip().lower()
+    return token or default
+
+
 class KnowledgeCandidate(BaseModel):
     """Represente un candidat de connaissance en attente de revue."""
 
@@ -104,6 +121,8 @@ class KnowledgeCandidate(BaseModel):
     reviewed_by: str | None = None
     rejection_reason: str | None = None
     ingested_at: str | None = None
+    failed_ingestion_at: str | None = None
+    ingestion_error: str | None = None
 
 
 class SyncSourcesRequest(BaseModel):
@@ -120,6 +139,14 @@ class ReviewDecisionRequest(BaseModel):
 
     reviewed_by: str = "manual"
     reason: str = ""
+
+
+class AutoApproveRequest(BaseModel):
+    """Controle une validation automatique ciblee de la file de revue."""
+
+    source_pattern: str | None = None
+    limit: int = Field(default=250, ge=1, le=5000)
+    reviewed_by: str = "policy:auto"
 
 
 @dataclass(slots=True)
@@ -184,6 +211,17 @@ class KnowledgeIngestionService:
                     )
                 )
             )
+        if self.settings.researcher_ingestion_auto_approve_backlog_on_startup:
+            auto_summary = await self.auto_approve_pending_items(
+                AutoApproveRequest(
+                    reviewed_by=self.settings.researcher_ingestion_auto_approve_reviewer,
+                )
+            )
+            if auto_summary["ingested"] > 0:
+                self._append_log(
+                    "info",
+                    f"Rattrapage automatique au demarrage: {auto_summary['ingested']} element(s) ingeres.",
+                )
         self._append_log("info", "Collectes planifiees demarrees.")
 
     async def stop_background_tasks(self) -> None:
@@ -231,6 +269,16 @@ class KnowledgeIngestionService:
                     stats["duplicates"] += result["duplicates"]
                     stats["errors"] += result["errors"]
                     stats["sources"].append({"name": "news", **result})
+
+                auto_summary = await self.auto_approve_pending_items(
+                    AutoApproveRequest(
+                        reviewed_by=self.settings.researcher_ingestion_auto_approve_reviewer,
+                        limit=max(1, min(max_items * max(len(stats["sources"]), 1), 5000)),
+                    )
+                )
+                stats["auto_approved"] = _safe_int(auto_summary.get("approved"))
+                stats["auto_ingested"] = _safe_int(auto_summary.get("ingested"))
+                stats["auto_errors"] = _safe_int(auto_summary.get("errors"))
 
                 finished_at = _utc_now_iso()
                 await self._update_run_state(
@@ -337,6 +385,11 @@ class KnowledgeIngestionService:
         review_status: str = "pending",
         limit: int = 50,
         offset: int = 0,
+        source_key: str | None = None,
+        family: str | None = None,
+        trust_level: str | None = None,
+        review_mode: str | None = None,
+        search: str | None = None,
     ) -> dict[str, Any]:
         """Retourne une liste paginee d'elements de revue."""
         state = await self._load_state()
@@ -345,10 +398,45 @@ class KnowledgeIngestionService:
             "approved": state["approved_ids"],
             "rejected": state["rejected_ids"],
             "ingested": state["ingested_ids"],
+            "failed_ingestion": state["failed_ingestion_ids"],
         }
         selected_ids = list(status_to_ids.get(review_status, []))
         items = await self._load_items(selected_ids)
-        items.sort(
+        normalized_source_key = _normalize_source_key(source_key, default="") if source_key else ""
+        normalized_family = str(family or "").strip().lower()
+        normalized_trust_level = str(trust_level or "").strip().lower()
+        normalized_review_mode = str(review_mode or "").strip().lower()
+        search_terms = [term for term in re.split(r"\s+", str(search or "").strip().lower()) if term]
+
+        filtered_items: list[dict[str, Any]] = []
+        for item in items:
+            item_policy = self._source_policy(item)
+            item_source_key = self._resolve_source_key(item)
+            item_family = str(item.get("family") or "").strip().lower()
+            if normalized_source_key and item_source_key != normalized_source_key and not item_source_key.startswith(f"{normalized_source_key}:"):
+                continue
+            if normalized_family and item_family != normalized_family:
+                continue
+            if normalized_trust_level and item_policy["trust_level"] != normalized_trust_level:
+                continue
+            if normalized_review_mode and item_policy["review_mode"] != normalized_review_mode:
+                continue
+            if search_terms:
+                haystack = " ".join(
+                    [
+                        str(item.get("title") or ""),
+                        str(item.get("summary_curated") or ""),
+                        str(item.get("summary_raw") or ""),
+                        str(item.get("origin") or ""),
+                        str(item.get("url") or ""),
+                        " ".join(str(tag) for tag in (item.get("tags") or [])),
+                    ]
+                ).lower()
+                if not all(term in haystack for term in search_terms):
+                    continue
+            filtered_items.append({**item, **item_policy, "source_key": item_source_key})
+
+        filtered_items.sort(
             key=lambda item: (
                 float(item.get("priority_score", 0.0)),
                 item.get("collected_at", ""),
@@ -358,8 +446,15 @@ class KnowledgeIngestionService:
         return {
             "status": "ok",
             "review_status": review_status,
-            "total": len(selected_ids),
-            "items": items[offset : offset + limit],
+            "total": len(filtered_items),
+            "items": filtered_items[offset : offset + limit],
+            "filters": {
+                "source_key": source_key,
+                "family": family,
+                "trust_level": trust_level,
+                "review_mode": review_mode,
+                "search": search,
+            },
         }
 
     async def approve_item(self, item_id: str, decision: ReviewDecisionRequest) -> dict[str, Any]:
@@ -373,9 +468,20 @@ class KnowledgeIngestionService:
             item["reviewed_at"] = _utc_now_iso()
             item["reviewed_by"] = decision.reviewed_by
             item["rejection_reason"] = None
+            item["ingestion_error"] = None
             await self._move_item_state(item_id, previous_status, "approved")
             await self._save_item(item)
-        await self._ingest_candidate(item_id)
+        await self._increment_item_source_stats(
+            item,
+            approved=True,
+            auto_approved=decision.reviewed_by.startswith("policy:"),
+        )
+        try:
+            await self._ingest_candidate(item_id)
+        except Exception as exc:
+            failed_item = await self._mark_ingestion_failure(item_id, str(exc))
+            self._append_log("error", f"Echec d'ingestion durable pour {item_id}: {exc}")
+            return {"status": "degraded", "item": failed_item, "reason": str(exc)}
         ingested = await self._load_item(item_id)
         self._append_log("info", f"Candidat approuve et ingere: {item_id}")
         return {"status": "ok", "item": ingested}
@@ -393,8 +499,69 @@ class KnowledgeIngestionService:
             item["rejection_reason"] = decision.reason or "Rejet manuel"
             await self._move_item_state(item_id, previous_status, "rejected")
             await self._save_item(item)
+        await self._increment_item_source_stats(item, rejected=True)
         self._append_log("info", f"Candidat rejete: {item_id}")
         return {"status": "ok", "item": item}
+
+    async def auto_approve_pending_items(self, request: AutoApproveRequest | None = None) -> dict[str, Any]:
+        """Applique les politiques d'auto-approbation sur la file en attente."""
+
+        payload = request or AutoApproveRequest(
+            reviewed_by=self.settings.researcher_ingestion_auto_approve_reviewer,
+        )
+        if not self.settings.researcher_ingestion_auto_approve_enabled:
+            return {
+                "status": "disabled",
+                "source_pattern": payload.source_pattern,
+                "matched": 0,
+                "approved": 0,
+                "ingested": 0,
+                "errors": 0,
+                "items": [],
+            }
+        state = await self._load_state()
+        matched_ids: list[str] = []
+        for item_id in list(state.get("pending_ids", [])):
+            item = await self._load_item(item_id)
+            if item is None:
+                continue
+            if self._matches_auto_approve_policy(item, source_pattern=payload.source_pattern):
+                matched_ids.append(item_id)
+
+        summary = {
+            "status": "ok",
+            "source_pattern": payload.source_pattern or self.settings.researcher_ingestion_auto_approve_sources,
+            "matched": len(matched_ids),
+            "approved": 0,
+            "ingested": 0,
+            "errors": 0,
+            "items": [],
+        }
+        for item_id in matched_ids[: payload.limit]:
+            try:
+                result = await self.approve_item(
+                    item_id,
+                    ReviewDecisionRequest(
+                        reviewed_by=payload.reviewed_by,
+                        reason="Validation automatique par politique de source.",
+                    ),
+                )
+                summary["approved"] += 1
+                item = result.get("item") or {}
+                if item.get("review_status") == "ingested":
+                    summary["ingested"] += 1
+                summary["items"].append({"id": item_id, "status": item.get("review_status", "approved")})
+            except Exception as exc:
+                summary["errors"] += 1
+                summary["items"].append({"id": item_id, "status": "error", "reason": str(exc)})
+                self._append_log("error", f"Echec d'auto-validation pour {item_id}: {exc}")
+        if summary["approved"] > 0:
+            self._append_log(
+                "info",
+                f"Auto-validation terminee: {summary['approved']} candidat(s) approuves, "
+                f"{summary['ingested']} ingere(s).",
+            )
+        return summary
 
     async def list_approved_items(self, limit: int = 50) -> dict[str, Any]:
         """Retourne les derniers elements valides."""
@@ -402,23 +569,78 @@ class KnowledgeIngestionService:
         item_ids = list(reversed(state["ingested_ids"]))[:limit]
         return {"status": "ok", "total": len(item_ids), "items": await self._load_items(item_ids)}
 
+    async def retry_failed_ingestion(self, item_id: str, reviewed_by: str = "manual:retry") -> dict[str, Any]:
+        """Retente l'ingestion durable d'un element en erreur.
+
+        Args:
+            item_id (str): Identifiant du candidat cible.
+            reviewed_by (str): Auteur logique de la reprise.
+
+        Returns:
+            dict[str, Any]: Etat final du candidat apres tentative.
+
+        Raises:
+            KeyError: Si l'identifiant n'existe pas.
+            ValueError: Si l'item n'est pas dans un etat retentable.
+        """
+
+        async with self._state_lock:
+            item = await self._load_item(item_id)
+            if item is None:
+                raise KeyError(item_id)
+            previous_status = str(item.get("review_status") or "pending")
+            if previous_status not in {"failed_ingestion", "approved"}:
+                raise ValueError("La reprise d'ingestion n'est autorisee que depuis un etat en erreur.")
+            item["review_status"] = "approved"
+            item["reviewed_by"] = reviewed_by
+            item["reviewed_at"] = _utc_now_iso()
+            item["ingestion_error"] = None
+            item["failed_ingestion_at"] = None
+            await self._move_item_state(item_id, previous_status, "approved")
+            await self._save_item(item)
+        try:
+            await self._ingest_candidate(item_id)
+        except Exception as exc:
+            failed_item = await self._mark_ingestion_failure(item_id, str(exc))
+            return {"status": "degraded", "item": failed_item, "reason": str(exc)}
+        ingested = await self._load_item(item_id)
+        self._append_log("info", f"Ingestion durable retentee avec succes: {item_id}")
+        return {"status": "ok", "item": ingested}
+
     async def get_sources(self) -> dict[str, Any]:
         """Expose les sources configurees et leur dernier etat."""
         state = await self._load_state()
         source_stats = state.get("source_stats", {})
+        dependencies = await self._dependency_status()
+        durable_ingestion_ready = all(bool(status.get("ok")) for status in dependencies.values())
         sources = []
         for source in self._configured_sources():
             if source["source_type"] == "arxiv":
                 stats = self._aggregate_source_stats(source_stats, prefix="arxiv:")
             else:
                 stats = source_stats.get(source["key"], {})
+            source_policy = self._source_policy(source)
             sources.append(
                 {
                     **source,
+                    "source_key": source["key"],
                     "last_sync": stats.get("last_sync"),
                     "queued": _safe_int(stats.get("queued")),
+                    "approved": _safe_int(stats.get("approved")),
+                    "rejected": _safe_int(stats.get("rejected")),
+                    "ingested": _safe_int(stats.get("ingested")),
+                    "failed_ingestion": _safe_int(stats.get("failed_ingestion")),
+                    "auto_approved": _safe_int(stats.get("auto_approved")),
+                    "auto_ingested": _safe_int(stats.get("auto_ingested")),
                     "duplicates": _safe_int(stats.get("duplicates")),
                     "errors": _safe_int(stats.get("errors")),
+                    "last_error": stats.get("last_error"),
+                    "ingestion_errors": _safe_int(stats.get("ingestion_errors")),
+                    "auto_approve": source_policy["review_mode"] == "auto",
+                    "auto_approve_pattern": source_policy["auto_approve_pattern"],
+                    "review_mode": source_policy["review_mode"],
+                    "trust_level": source_policy["trust_level"],
+                    "durable_ingestion_ready": durable_ingestion_ready,
                 }
             )
         return {"status": "ok", "sources": sources}
@@ -426,6 +648,14 @@ class KnowledgeIngestionService:
     async def get_status(self, tail: int = 30) -> dict[str, Any]:
         """Retourne l'etat global de la pipeline d'ingestion."""
         state = await self._load_state()
+        dependencies = await self._dependency_status()
+        policies = [
+            {
+                "source_key": source["key"],
+                **self._source_policy(source),
+            }
+            for source in self._configured_sources()
+        ]
         return {
             "status": "ok",
             "counts": {
@@ -433,12 +663,20 @@ class KnowledgeIngestionService:
                 "approved": len(state["approved_ids"]),
                 "rejected": len(state["rejected_ids"]),
                 "ingested": len(state["ingested_ids"]),
+                "failed_ingestion": len(state["failed_ingestion_ids"]),
+            },
+            "auto_review": {
+                "enabled": self.settings.researcher_ingestion_auto_approve_enabled,
+                "sources": self._auto_approve_patterns(),
+                "policies": policies,
             },
             "active_run": state.get("active_run"),
             "last_run": state.get("last_run"),
             "source_stats": state.get("source_stats", {}),
+            "pending_by_source": await self._build_pending_by_source(state),
             "duplicate_rate": self._compute_duplicate_rate(state.get("source_stats", {})),
-            "dependencies": await self._dependency_status(),
+            "dependencies": dependencies,
+            "durable_ingestion_ready": all(bool(status.get("ok")) for status in dependencies.values()),
             "logs": list(state.get("logs", []))[-max(1, min(tail, 100)) :],
         }
 
@@ -448,6 +686,7 @@ class KnowledgeIngestionService:
             "approved_ids": [],
             "rejected_ids": [],
             "ingested_ids": [],
+            "failed_ingestion_ids": [],
             "hash_index": {},
             "url_index": {},
             "title_index": {},
@@ -540,9 +779,10 @@ class KnowledgeIngestionService:
 
     async def _queue_candidates(self, candidates: list[KnowledgeCandidate]) -> dict[str, Any]:
         """Ajoute des candidats a la file apres deduplication stricte."""
-        summary = {"queued": 0, "duplicates": 0, "errors": 0, "items": []}
+        summary = {"queued": 0, "duplicates": 0, "errors": 0, "auto_approved": 0, "auto_ingested": 0, "items": []}
         if not candidates:
             return summary
+        auto_approve_ids: list[str] = []
         async with self._state_lock:
             state = await self._load_state()
             for candidate in candidates:
@@ -565,13 +805,32 @@ class KnowledgeIngestionService:
                     source_key = candidate.metadata.get("source_key", candidate.source_name)
                     self._bump_source_stats(state, source_key, queued=True)
                     summary["queued"] += 1
-                    summary["items"].append({"id": candidate.id, "status": "queued"})
+                    candidate_status = "queued"
+                    if self._matches_auto_approve_policy(candidate.model_dump()):
+                        auto_approve_ids.append(candidate.id)
+                        candidate_status = "auto_queued"
+                    summary["items"].append({"id": candidate.id, "status": candidate_status})
                 except Exception as exc:
                     summary["errors"] += 1
                     source_key = candidate.metadata.get("source_key", candidate.source_name)
                     self._bump_source_stats(state, source_key, error=True)
                     self._append_log("error", f"Echec de mise en file {candidate.source_name}: {exc}")
             await self._save_state(state)
+        for item_id in auto_approve_ids:
+            try:
+                result = await self.approve_item(
+                    item_id,
+                    ReviewDecisionRequest(
+                        reviewed_by=self.settings.researcher_ingestion_auto_approve_reviewer,
+                        reason="Validation automatique par politique de source.",
+                    ),
+                )
+                summary["auto_approved"] += 1
+                if (result.get("item") or {}).get("review_status") == "ingested":
+                    summary["auto_ingested"] += 1
+            except Exception as exc:
+                summary["errors"] += 1
+                self._append_log("error", f"Echec d'auto-approbation pour {item_id}: {exc}")
         return summary
 
     def _detect_duplicate(self, state: dict[str, Any], candidate: KnowledgeCandidate) -> QueueResult:
@@ -623,8 +882,47 @@ class KnowledgeIngestionService:
             previous_status = refreshed.get("review_status", "approved")
             refreshed["review_status"] = "ingested"
             refreshed["ingested_at"] = _utc_now_iso()
+            refreshed["failed_ingestion_at"] = None
+            refreshed["ingestion_error"] = None
             await self._move_item_state(item_id, previous_status, "ingested")
             await self._save_item(refreshed)
+        await self._increment_item_source_stats(
+            refreshed,
+            ingested=True,
+            auto_ingested=str(refreshed.get("reviewed_by") or "").startswith("policy:"),
+        )
+
+    async def _mark_ingestion_failure(self, item_id: str, reason: str) -> dict[str, Any]:
+        """Marque un candidat comme echec d'ingestion durable.
+
+        Args:
+            item_id (str): Identifiant du candidat.
+            reason (str): Cause de l'echec durable.
+
+        Returns:
+            dict[str, Any]: Item mis a jour.
+
+        Raises:
+            KeyError: Si l'item n'existe pas.
+        """
+
+        async with self._state_lock:
+            item = await self._load_item(item_id)
+            if item is None:
+                raise KeyError(item_id)
+            previous_status = str(item.get("review_status") or "approved")
+            item["review_status"] = "failed_ingestion"
+            item["failed_ingestion_at"] = _utc_now_iso()
+            item["ingestion_error"] = reason
+            await self._move_item_state(item_id, previous_status, "failed_ingestion")
+            await self._save_item(item)
+        await self._increment_item_source_stats(
+            item,
+            failed_ingestion=True,
+            error=True,
+            ingestion_error=reason,
+        )
+        return item
 
     def _build_memory_content(self, item: dict[str, Any]) -> str:
         """Construit le contenu propre a injecter en memoire."""
@@ -655,11 +953,11 @@ class KnowledgeIngestionService:
         ]
         if not categories:
             return collected
-        async with httpx.AsyncClient(timeout=25) as client:
+        async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
             for category in categories:
                 await self._update_run_state(current_source=f"arxiv:{category}", updated_at=_utc_now_iso())
                 response = await client.get(
-                    "http://export.arxiv.org/api/query",
+                    "https://export.arxiv.org/api/query",
                     params={
                         "search_query": f"cat:{category}",
                         "max_results": max_items,
@@ -698,7 +996,11 @@ class KnowledgeIngestionService:
     async def _collect_news_candidates(self, max_items: int) -> list[KnowledgeCandidate]:
         """Collecte les derniers articles a partir des flux news/RSS configures."""
         collected: list[KnowledgeCandidate] = []
-        async with httpx.AsyncClient(timeout=25, headers={"User-Agent": "THE-HIVE-Researcher/1.0"}) as client:
+        async with httpx.AsyncClient(
+            timeout=25,
+            headers={"User-Agent": "THE-HIVE-Researcher/1.0"},
+            follow_redirects=True,
+        ) as client:
             for source in self._configured_sources():
                 if source["source_type"] == "arxiv":
                     continue
@@ -862,13 +1164,35 @@ class KnowledgeIngestionService:
 
     def _aggregate_source_stats(self, source_stats: dict[str, Any], prefix: str) -> dict[str, Any]:
         """Agrege les compteurs d'un groupe de sources partageant un prefixe."""
-        aggregate = {"queued": 0, "duplicates": 0, "errors": 0, "last_sync": None}
+        aggregate = {
+            "queued": 0,
+            "approved": 0,
+            "rejected": 0,
+            "ingested": 0,
+            "failed_ingestion": 0,
+            "auto_approved": 0,
+            "auto_ingested": 0,
+            "duplicates": 0,
+            "errors": 0,
+            "ingestion_errors": 0,
+            "last_error": None,
+            "last_sync": None,
+        }
         for key, stats in source_stats.items():
             if not key.startswith(prefix):
                 continue
             aggregate["queued"] += _safe_int(stats.get("queued"))
+            aggregate["approved"] += _safe_int(stats.get("approved"))
+            aggregate["rejected"] += _safe_int(stats.get("rejected"))
+            aggregate["ingested"] += _safe_int(stats.get("ingested"))
+            aggregate["failed_ingestion"] += _safe_int(stats.get("failed_ingestion"))
+            aggregate["auto_approved"] += _safe_int(stats.get("auto_approved"))
+            aggregate["auto_ingested"] += _safe_int(stats.get("auto_ingested"))
             aggregate["duplicates"] += _safe_int(stats.get("duplicates"))
             aggregate["errors"] += _safe_int(stats.get("errors"))
+            aggregate["ingestion_errors"] += _safe_int(stats.get("ingestion_errors"))
+            if stats.get("last_error"):
+                aggregate["last_error"] = stats.get("last_error")
             last_sync = stats.get("last_sync")
             if last_sync and (aggregate["last_sync"] is None or last_sync > aggregate["last_sync"]):
                 aggregate["last_sync"] = last_sync
@@ -876,30 +1200,37 @@ class KnowledgeIngestionService:
 
     async def _dependency_status(self) -> dict[str, Any]:
         """Retourne l'etat operationnel des dependances utiles."""
-        redis_status = {"ok": False, "detail": "indisponible"}
+        redis_status = {"ok": False, "status": "error", "detail": "indisponible"}
         try:
             await self.redis.connect()
-            redis_status = {"ok": True, "detail": "connecte"}
+            redis_status = {"ok": True, "status": "ok", "detail": "connecte"}
         except Exception as exc:
-            redis_status = {"ok": False, "detail": str(exc)}
-        qdrant_status = {"ok": False, "detail": "indisponible"}
+            redis_status = {"ok": False, "status": "error", "detail": str(exc)}
+        qdrant_status = {"ok": False, "status": "error", "detail": "indisponible"}
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 response = await client.get(
                     f"http://{self.settings.qdrant_host}:{self.settings.qdrant_port}/collections"
                 )
-                qdrant_status = {"ok": response.status_code == 200, "detail": f"http:{response.status_code}"}
+                qdrant_ok = response.status_code == 200
+                qdrant_status = {
+                    "ok": qdrant_ok,
+                    "status": "ok" if qdrant_ok else "error",
+                    "detail": f"http:{response.status_code}",
+                }
         except Exception as exc:
-            qdrant_status = {"ok": False, "detail": str(exc)}
-        neo4j_status = {"ok": False, "detail": "indisponible"}
+            qdrant_status = {"ok": False, "status": "error", "detail": str(exc)}
+        neo4j_status = {"ok": False, "status": "error", "detail": "indisponible"}
         try:
             await self.memory_bridge.graph.connect()
+            neo4j_ok = self.memory_bridge.graph.driver is not None
             neo4j_status = {
-                "ok": self.memory_bridge.graph.driver is not None,
-                "detail": "connecte" if self.memory_bridge.graph.driver is not None else "non_connecte",
+                "ok": neo4j_ok,
+                "status": "ok" if neo4j_ok else "error",
+                "detail": "connecte" if neo4j_ok else "non_connecte",
             }
         except Exception as exc:
-            neo4j_status = {"ok": False, "detail": str(exc)}
+            neo4j_status = {"ok": False, "status": "error", "detail": str(exc)}
         return {"redis": redis_status, "qdrant": qdrant_status, "neo4j": neo4j_status}
 
     def _bump_source_stats(
@@ -908,21 +1239,171 @@ class KnowledgeIngestionService:
         source_name: str,
         *,
         queued: bool = False,
+        approved: bool = False,
+        rejected: bool = False,
+        ingested: bool = False,
+        failed_ingestion: bool = False,
+        auto_approved: bool = False,
+        auto_ingested: bool = False,
         duplicate: bool = False,
         error: bool = False,
+        ingestion_error: str | None = None,
     ) -> None:
         """Met a jour les compteurs par source."""
         stats = state["source_stats"].setdefault(
             source_name,
-            {"queued": 0, "duplicates": 0, "errors": 0, "last_sync": None},
+            {
+                "queued": 0,
+                "approved": 0,
+                "rejected": 0,
+                "ingested": 0,
+                "failed_ingestion": 0,
+                "auto_approved": 0,
+                "auto_ingested": 0,
+                "duplicates": 0,
+                "errors": 0,
+                "ingestion_errors": 0,
+                "last_error": None,
+                "last_sync": None,
+            },
         )
         if queued:
             stats["queued"] += 1
+        if approved:
+            stats["approved"] += 1
+        if rejected:
+            stats["rejected"] += 1
+        if ingested:
+            stats["ingested"] += 1
+        if failed_ingestion:
+            stats["failed_ingestion"] += 1
+        if auto_approved:
+            stats["auto_approved"] += 1
+        if auto_ingested:
+            stats["auto_ingested"] += 1
         if duplicate:
             stats["duplicates"] += 1
         if error:
             stats["errors"] += 1
+        if ingestion_error:
+            stats["ingestion_errors"] += 1
+            stats["last_error"] = ingestion_error
         stats["last_sync"] = _utc_now_iso()
+
+    def _auto_approve_patterns(self) -> list[str]:
+        """Retourne les motifs actifs d'auto-approbation."""
+
+        return [
+            entry.strip().lower()
+            for entry in self.settings.researcher_ingestion_auto_approve_sources.split(",")
+            if entry.strip()
+        ]
+
+    def _source_policy(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Retourne la politique de revue applicable a une source.
+
+        Args:
+            item (dict[str, Any]): Source ou candidat a decrire.
+
+        Returns:
+            dict[str, Any]: Mode de revue, niveau de confiance et motif actif.
+        """
+
+        pattern = self._first_matching_auto_pattern(item)
+        review_mode = "auto" if pattern else "manual"
+        return {
+            "review_mode": review_mode,
+            "trust_level": "trusted" if review_mode == "auto" else "review_required",
+            "auto_approve_pattern": pattern,
+        }
+
+    def _candidate_policy_tokens(self, item: dict[str, Any]) -> set[str]:
+        """Construit les jetons de matching d'une source de connaissance."""
+
+        metadata = dict(item.get("metadata") or {})
+        tokens: set[str] = set()
+        source_type = str(item.get("source_type") or "").strip().lower()
+        source_name = str(item.get("source_name") or "").strip().lower()
+        source_key = str(metadata.get("source_key") or item.get("key") or "").strip().lower()
+        category = str(metadata.get("category") or "").strip().lower()
+        family = str(item.get("family") or "").strip().lower()
+        categories = [str(entry).strip().lower() for entry in (item.get("categories") or []) if str(entry).strip()]
+
+        if source_type:
+            tokens.add(source_type)
+        if source_name:
+            tokens.add(source_name)
+        if source_key:
+            tokens.add(source_key)
+            if ":" in source_key:
+                tokens.add(source_key.split(":", maxsplit=1)[0])
+        if source_type and category:
+            tokens.add(f"{source_type}:{category}")
+        for listed_category in categories:
+            if source_type:
+                tokens.add(f"{source_type}:{listed_category}")
+        if family:
+            tokens.add(f"family:{family}")
+        return {token for token in tokens if token}
+
+    def _first_matching_auto_pattern(self, item: dict[str, Any]) -> str | None:
+        """Retourne le premier motif auto-approbation applicable."""
+
+        if not self.settings.researcher_ingestion_auto_approve_enabled:
+            return None
+        tokens = self._candidate_policy_tokens(item)
+        for pattern in self._auto_approve_patterns():
+            if any(fnmatchcase(token, pattern) for token in tokens):
+                return pattern
+        return None
+
+    def _matches_auto_approve_policy(
+        self,
+        item: dict[str, Any],
+        source_pattern: str | None = None,
+    ) -> bool:
+        """Indique si un item doit etre auto-approuve selon la politique active."""
+
+        if not self.settings.researcher_ingestion_auto_approve_enabled:
+            return False
+        patterns = [source_pattern.strip().lower()] if source_pattern and source_pattern.strip() else self._auto_approve_patterns()
+        tokens = self._candidate_policy_tokens(item)
+        return any(fnmatchcase(token, pattern) for pattern in patterns for token in tokens)
+
+    def _resolve_source_key(self, item: dict[str, Any]) -> str:
+        """Retourne la cle source de reference pour les compteurs."""
+
+        metadata = dict(item.get("metadata") or {})
+        return _normalize_source_key(
+            metadata.get("source_key") or item.get("source_name") or item.get("source_type") or "unknown"
+        )
+
+    async def _increment_item_source_stats(self, item: dict[str, Any], **flags: bool) -> None:
+        """Met a jour durablement les compteurs associes a un item."""
+
+        async with self._state_lock:
+            state = await self._load_state()
+            self._bump_source_stats(state, self._resolve_source_key(item), **flags)
+            await self._save_state(state)
+
+    async def _build_pending_by_source(self, state: dict[str, Any]) -> dict[str, int]:
+        """Construit les volumes en attente par source stable.
+
+        Args:
+            state (dict[str, Any]): Etat courant de la pipeline.
+
+        Returns:
+            dict[str, int]: Volumes en attente par ``source_key``.
+        """
+
+        counts: dict[str, int] = {}
+        for item_id in list(state.get("pending_ids", [])):
+            item = await self._load_item(item_id)
+            if item is None:
+                continue
+            source_key = self._resolve_source_key(item)
+            counts[source_key] = counts.get(source_key, 0) + 1
+        return counts
 
     async def _update_run_state(self, **updates: Any) -> None:
         """Met a jour l'etat du run actif."""
@@ -938,13 +1419,37 @@ class KnowledgeIngestionService:
                 state["last_run"] = updates["last_run"]
             await self._save_state(state)
 
+    def _normalize_state_payload(self, state: dict[str, Any] | None) -> dict[str, Any]:
+        """Normalise un etat brut pour assurer la compatibilite ascendante.
+
+        Args:
+            state (dict[str, Any] | None): Etat brut charge.
+
+        Returns:
+            dict[str, Any]: Etat complet avec toutes les cles attendues.
+        """
+
+        defaults = self._build_default_state()
+        payload = deepcopy(state or {})
+        normalized = deepcopy(defaults)
+        normalized.update(payload)
+        for key in ("pending_ids", "approved_ids", "rejected_ids", "ingested_ids", "failed_ingestion_ids"):
+            normalized[key] = list(payload.get(key) or normalized.get(key) or [])
+        for key in ("hash_index", "url_index", "title_index", "source_stats"):
+            normalized[key] = dict(payload.get(key) or normalized.get(key) or {})
+        active_run = dict(defaults.get("active_run") or {})
+        active_run.update(dict(payload.get("active_run") or {}))
+        normalized["active_run"] = active_run
+        normalized["logs"] = list(payload.get("logs") or normalized.get("logs") or [])
+        return normalized
+
     async def _load_state(self) -> dict[str, Any]:
         """Charge l'etat global depuis Redis ou la memoire locale."""
         try:
             await self.redis.connect()
             payload = await self.redis.get(self.STATE_KEY)
             if payload:
-                state = json.loads(payload)
+                state = self._normalize_state_payload(json.loads(payload))
                 local_logs = list(self._local_state.get("logs", []))
                 remote_logs = list(state.get("logs", []))
                 if len(local_logs) > len(remote_logs):
@@ -952,10 +1457,11 @@ class KnowledgeIngestionService:
                 return state
         except Exception:
             pass
-        return deepcopy(self._local_state)
+        return self._normalize_state_payload(deepcopy(self._local_state))
 
     async def _save_state(self, state: dict[str, Any]) -> None:
         """Sauvegarde l'etat global."""
+        state = self._normalize_state_payload(state)
         local_logs = list(self._local_state.get("logs", []))
         remote_logs = list(state.get("logs", []))
         if len(local_logs) > len(remote_logs):
@@ -1007,6 +1513,7 @@ class KnowledgeIngestionService:
             "approved": list(state["approved_ids"]),
             "rejected": list(state["rejected_ids"]),
             "ingested": list(state["ingested_ids"]),
+            "failed_ingestion": list(state["failed_ingestion_ids"]),
         }
         if from_status in mappings and item_id in mappings[from_status]:
             mappings[from_status] = [existing for existing in mappings[from_status] if existing != item_id]
@@ -1018,6 +1525,7 @@ class KnowledgeIngestionService:
                 "approved_ids": mappings["approved"],
                 "rejected_ids": mappings["rejected"],
                 "ingested_ids": mappings["ingested"],
+                "failed_ingestion_ids": mappings["failed_ingestion"],
             }
         )
         await self._save_state(state)

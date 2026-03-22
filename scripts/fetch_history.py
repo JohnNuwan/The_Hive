@@ -113,12 +113,13 @@ class TimescaleWriter:
 
         try:
             with psycopg2.connect(self._build_dsn()) as connection:
+                self._ensure_schema(connection)
                 with connection.cursor() as cursor:
                     execute_values(
                         cursor,
                         """
-                        INSERT INTO market_ohlc (
-                            time,
+                        INSERT INTO market.market_bars (
+                            timestamp,
                             symbol,
                             timeframe,
                             open,
@@ -127,17 +128,21 @@ class TimescaleWriter:
                             close,
                             tick_volume,
                             real_volume,
-                            spread
+                            spread,
+                            source,
+                            ingested_at
                         )
                         VALUES %s
-                        ON CONFLICT (symbol, timeframe, time) DO UPDATE SET
+                        ON CONFLICT (symbol, timeframe, timestamp) DO UPDATE SET
                             open = EXCLUDED.open,
                             high = EXCLUDED.high,
                             low = EXCLUDED.low,
                             close = EXCLUDED.close,
                             tick_volume = EXCLUDED.tick_volume,
                             real_volume = EXCLUDED.real_volume,
-                            spread = EXCLUDED.spread
+                            spread = EXCLUDED.spread,
+                            source = EXCLUDED.source,
+                            ingested_at = EXCLUDED.ingested_at
                         """,
                         rows,
                         page_size=TIMESCALE_BATCH_SIZE,
@@ -185,6 +190,8 @@ class TimescaleWriter:
                     int(getattr(row, "tick_volume", 0) or 0),
                     int(getattr(row, "real_volume", 0) or 0),
                     int(getattr(row, "spread", 0) or 0),
+                    "mt5",
+                    pd.Timestamp.utcnow().to_pydatetime(),
                 )
             )
         return rows
@@ -196,15 +203,62 @@ class TimescaleWriter:
         Returns:
             str: DSN de connexion TimescaleDB.
         """
-        host = os.getenv("TIMESCALE_HOST", "localhost")
-        port = os.getenv("TIMESCALE_PORT", "5432")
-        database = os.getenv("TIMESCALE_DB", "thehive")
-        user = os.getenv("TIMESCALE_USER", "eva")
-        password = os.getenv("TIMESCALE_PASSWORD", "")
+        host = os.getenv("TRAINING_TIMESCALE_HOST", os.getenv("TIMESCALE_HOST", "localhost"))
+        port = os.getenv("TRAINING_TIMESCALE_PORT", os.getenv("TIMESCALE_PORT", "5432"))
+        database = os.getenv("TRAINING_TIMESCALE_DB", os.getenv("TIMESCALE_DB", "thehive"))
+        user = os.getenv("TRAINING_TIMESCALE_USER", os.getenv("TIMESCALE_USER", "eva"))
+        password = os.getenv("TRAINING_TIMESCALE_PASSWORD", os.getenv("TIMESCALE_PASSWORD", ""))
         return (
             f"host={host} port={port} dbname={database} "
             f"user={user} password={password}"
         )
+
+    @staticmethod
+    def _ensure_schema(connection: Any) -> None:
+        """Cree le schema et la table canonique si necessaire."""
+
+        with connection.cursor() as cursor:
+            cursor.execute('CREATE SCHEMA IF NOT EXISTS "market"')
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS market.market_bars (
+                    timestamp TIMESTAMPTZ NOT NULL,
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    open DOUBLE PRECISION NOT NULL,
+                    high DOUBLE PRECISION NOT NULL,
+                    low DOUBLE PRECISION NOT NULL,
+                    close DOUBLE PRECISION NOT NULL,
+                    tick_volume BIGINT NOT NULL DEFAULT 0,
+                    real_volume BIGINT NOT NULL DEFAULT 0,
+                    spread INTEGER NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT 'mt5',
+                    ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (symbol, timeframe, timestamp)
+                )
+                """
+            )
+            cursor.execute("DROP VIEW IF EXISTS public.market_ohlc")
+            cursor.execute(
+                """
+                CREATE VIEW public.market_ohlc AS
+                SELECT
+                    timestamp AS time,
+                    symbol,
+                    timeframe,
+                    open,
+                    high,
+                    low,
+                    close,
+                    tick_volume,
+                    real_volume,
+                    spread,
+                    source,
+                    ingested_at
+                FROM market.market_bars
+                """
+            )
+        connection.commit()
 
 
 def parse_args() -> argparse.Namespace:
