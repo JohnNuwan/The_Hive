@@ -1,4 +1,4 @@
-⚔️ CAHIER DES CHARGES : MODULE "WAR ROOMS" (THE HIVE v3.0)
+ CAHIER DES CHARGES : MODULE "WAR ROOMS" (THE HIVE v3.0)
 Objectif : Créer des environnements de débat éphémères où plusieurs sous-agents (Experts) confrontent leurs analyses avant toute décision critique, réduisant le taux d'erreur par le Consensus Protocol.
 1. ARCHITECTURE TECHNIQUE "WAR ROOM"
 Pour ne pas saturer la VRAM (6 Go), la War Room n'est pas un lieu physique permanent, mais un Processus Temporaire instancié par l'orchestrateur OpenClaw.
@@ -16,7 +16,7 @@ Le système ne déclenche la War Room que si le niveau de risque l'exige (pour �
 5. Dissolution : La mémoire de la War Room est résumée, archivée dans Mem0, et la RAM est libérée.
 --------------------------------------------------------------------------------
 2. DÉTAIL DES WAR ROOMS PAR SERVICE
-🏛️ WAR ROOM 1 : "THE COUNCIL" (Service BANKER)
+ WAR ROOM 1 : "THE COUNCIL" (Service BANKER)
 Type : Prise de Décision Stratégique & Gestion de Crise.
 • Déclencheur :
     ◦ Opportunité de trade > 2% du capital (Loi 2).
@@ -27,7 +27,7 @@ Type : Prise de Décision Stratégique & Gestion de Crise.
     ◦ SHADOW (Contradicteur) : Cherche les pièges fondamentaux ("Attention, discours de la FED dans 10 min").
     ◦ QUANT (Vérificateur) : Lance une simulation Monte Carlo rapide pour valider le risque de ruine.
 • Source Théorique : Le principe de "Confluence" et la lutte contre les biais cognitifs de foule.
-🛡️ WAR ROOM 2 : "THE DOJO" (Service SENTINEL)
+ WAR ROOM 2 : "THE DOJO" (Service SENTINEL)
 Type : Red Teaming & Simulation d'Attaque.
 • Déclencheur :
     ◦ Avant chaque déploiement de nouveau code (Sprint Builder).
@@ -37,7 +37,7 @@ Type : Red Teaming & Simulation d'Attaque.
     ◦ BUILDER (Blue Team / Défenseur) : Justifie ses choix de code et propose des patchs en temps réel.
     ◦ CORE (Arbitre / Purple Team) : Juge qui gagne et valide la mise en production si Sentinel échoue à pénétrer.
 • Source Théorique : La doctrine de cybersécurité offensive (Red/Blue Teaming) décrite dans les thèses sur le hacking.
-⚖️ WAR ROOM 3 : "THE HIGH COURT" (Service ADVOCATE)
+ WAR ROOM 3 : "THE HIGH COURT" (Service ADVOCATE)
 Type : Conformité Légale & Éthique.
 • Déclencheur :
     ◦ Lancement d'un nouveau scraper de données (Shadow).
@@ -47,7 +47,7 @@ Type : Conformité Légale & Éthique.
     ◦ ADVOCATE (Procureur) : Vérifie la conformité au RGPD (Minimisation des données, consentement) et à l'AI Act.
     ◦ SAGE (Éthique) : Vérifie l'alignement avec la Loi 1 (Bienveillance).
 • Source Théorique : Les principes de "Privacy by Design" et les bacs à sable réglementaires (Sandbox).
-🧘 WAR ROOM 4 : "THE QUIET ROOM" (Service CORE)
+ WAR ROOM 4 : "THE QUIET ROOM" (Service CORE)
 Type : Maintenance Psychologique & Nettoyage.
 • Déclencheur :
     ◦ Après une perte financière significative (Drawdown).

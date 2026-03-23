@@ -1,0 +1,91 @@
+﻿# ===================================================================
+# THE HIVE - eva-trainer
+# Conteneur GPU isole pour les entrainements MTF-GNN + MuZero/DreamerV3
+# Base: PyTorch 2.1.2 + CUDA 11.8 + JAX (GPU) + Julia 1.10
+# ===================================================================
+
+FROM pytorch/pytorch:2.1.2-cuda11.8-cudnn8-devel
+
+LABEL maintainer="TheHive" description="Conteneur d'entrainement nocturne des modeles IA"
+
+# Dependances systeme
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget curl git build-essential \
+    libopenblas-dev libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Julia 1.10 LTS
+ARG JULIA_VERSION=1.10.2
+RUN curl -fsSL "https://julialang-s3.julialang.org/bin/linux/x64/1.10/julia-${JULIA_VERSION}-linux-x86_64.tar.gz" \
+    | tar -xz -C /opt && \
+    ln -s /opt/julia-${JULIA_VERSION}/bin/julia /usr/local/bin/julia
+
+# Packages Julia pour le preprocessing et les indicateurs
+RUN julia -e 'using Pkg; Pkg.add(["DataFrames", "CSV", "Statistics", "LinearAlgebra", "CUDA"]); Pkg.precompile()'
+
+# Dependances Python / PyTorch
+RUN pip install --no-cache-dir --upgrade \
+    torch==2.1.2 \
+    torchvision \
+    torchaudio \
+    torch-geometric \
+    torch-scatter \
+    torch-sparse \
+    -f https://data.pyg.org/whl/torch-2.1.2+cu118.html
+
+# JAX avec CUDA 11.8
+RUN pip install --no-cache-dir --upgrade \
+    jax==0.4.23 \
+    jaxlib==0.4.23+cuda11.cudnn86 \
+    -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+# Pile Dreamer / MuZero compatible avec JAX 0.4.23
+RUN pip install --no-cache-dir \
+    dm-haiku==0.0.11 \
+    optax==0.1.7 \
+    chex==0.1.85 \
+    gymnasium \
+    "scipy<1.13"
+
+# Utilitaires ML
+RUN pip install --no-cache-dir \
+    numpy pandas colorama tqdm rich \
+    flax==0.8.4 \
+    orbax-checkpoint==0.5.16 \
+    nest_asyncio==1.6.0
+
+# TA-Lib est optionnel dans cette image: l'entrainement principal repose sur shared.indicators.
+RUN pip install --no-cache-dir ta-lib-python || true
+
+# Code applicatif
+WORKDIR /app
+ENV PYTHONPATH=/app/eva-lab:/app/shared
+
+COPY src/shared /app/shared
+RUN pip install --no-cache-dir /app/shared
+
+COPY src/eva-lab /app/eva-lab
+RUN pip install --no-cache-dir --no-deps /app/eva-lab
+
+# Verrouille la pile JAX en derniere couche pour eviter qu'une dependance
+# transitive remonte vers une version incompatible avec Haiku.
+RUN pip install --no-cache-dir --upgrade --no-deps \
+    jax==0.4.23 \
+    jaxlib==0.4.23+cuda11.cudnn86 \
+    dm-haiku==0.0.11 \
+    optax==0.1.7 \
+    chex==0.1.85 \
+    flax==0.8.4 \
+    orbax-checkpoint==0.5.16 \
+    nest_asyncio==1.6.0 \
+    -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && \
+    python -c "import importlib.metadata as md; import jax, haiku, flax, optax, chex; assert jax.__version__ == '0.4.23'; assert md.version('jaxlib') == '0.4.23+cuda11.cudnn86'; print('Pile JAX verrouillee:', jax.__version__, md.version('jaxlib'), haiku.__version__, flax.__version__, optax.__version__, chex.__version__)"
+
+# Scripts Julia pour les indicateurs
+COPY src/eva-lab/scripts/julia /app/julia_scripts
+
+WORKDIR /app/eva-lab
+
+# Commande par defaut: entrainement GNN, surchargeable par docker compose run
+CMD ["python", "scripts/train_gnn.py"]
+

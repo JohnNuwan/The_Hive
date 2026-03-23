@@ -1,4 +1,4 @@
-import aiohttp
+import requests
 import logging
 import os
 import asyncio
@@ -30,66 +30,59 @@ class TelegramClient:
             self.enabled = True
             logger.info(f"📢 Telegram Bot initialized (Chat: {self.chat_id} | Topic: {self.topic_id})")
 
-    async def send_message(self, message: str):
-        """Sends a text message to the configured chat/topic."""
-        if not self.enabled:
-            return
-
+    def _send_sync_internal(self, message: str):
+        """Internal synchronous method to send a message."""
+        if not self.enabled: return
         payload = {
             "chat_id": self.chat_id,
             "text": message,
             "parse_mode": "Markdown",
             "disable_web_page_preview": True
         }
-        
         if self.topic_id:
             payload["message_thread_id"] = self.topic_id
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.base_url, json=payload, timeout=10) as resp:
-                    if resp.status != 200:
-                        logger.error(f"Telegram Send Error: {resp.status} - {await resp.text()}")
+            resp = requests.post(self.base_url, json=payload, timeout=10)
+            if resp.status_code != 200:
+                logger.error(f"Telegram Send Error: {resp.status_code} - {resp.text}")
+        except Exception as e:
+            logger.error(f"Telegram Connection Error: {e}")
+
+    async def send_message(self, message: str):
+        """Sends a text message to the configured chat/topic."""
+        if not self.enabled: return
+        await asyncio.to_thread(self._send_sync_internal, message)
+
+    def _send_photo_sync_internal(self, photo: bytes, caption: str):
+        if not self.enabled: return
+        url = f"https://api.telegram.org/bot{self.token}/sendPhoto"
+        
+        data = {"chat_id": self.chat_id, "caption": caption, "parse_mode": "Markdown"}
+        if self.topic_id:
+            data["message_thread_id"] = self.topic_id
+            
+        files = {"photo": ("image.png", photo, "image/png")}
+        
+        try:
+            resp = requests.post(url, data=data, files=files, timeout=30)
+            if resp.status_code != 200:
+                logger.error(f"Telegram SendPhoto Error: {resp.status_code} - {resp.text}")
         except Exception as e:
             logger.error(f"Telegram Connection Error: {e}")
 
     async def send_photo(self, photo: bytes, caption: str):
         """Sends a photo to the configured chat/topic."""
-        if not self.enabled:
-            return
-
-        url = f"https://api.telegram.org/bot{self.token}/sendPhoto"
-        
-        data = aiohttp.FormData()
-        data.add_field("chat_id", self.chat_id)
-        if self.topic_id:
-            data.add_field("message_thread_id", str(self.topic_id))
-        data.add_field("caption", caption)
-        data.add_field("parse_mode", "Markdown")
-        data.add_field("photo", photo, filename="image.png", content_type="image/png")
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, data=data, timeout=30) as resp:
-                    if resp.status != 200:
-                        logger.error(f"Telegram SendPhoto Error: {resp.status} - {await resp.text()}")
-        except Exception as e:
-            logger.error(f"Telegram Connection Error: {e}")
+        if not self.enabled: return
+        await asyncio.to_thread(self._send_photo_sync_internal, photo, caption)
 
     def send_sync(self, message: str):
         """Synchronous wrapper for sending messages (fire & forget)."""
         if not self.enabled: return
         try:
             loop = asyncio.get_running_loop()
-            # We're inside an async context — schedule as a task
-            loop.create_task(self.send_message(message))
+            loop.run_in_executor(None, self._send_sync_internal, message)
         except RuntimeError:
-            # No running loop (e.g. shutting down or called from sync context)
-            try:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(self.send_message(message))
-                loop.close()
-            except Exception:
-                pass  # Silently fail during shutdown
+            self._send_sync_internal(message)
         except Exception as e:
             logger.error(f"Telegram Sync Error: {e}")

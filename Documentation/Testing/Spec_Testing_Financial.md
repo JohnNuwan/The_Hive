@@ -1,9 +1,9 @@
 # Tech Spec: Financial & Trading Testing (The Validator)
 
-## 💹 1. Concept
+##  1. Concept
 On ne déploie JAMAIS un algorithme de trading sans qu'il ait prouvé sa robustesse statistique. C'est le rôle de la triple validation : **Backtest -> Forward Test -> Monte Carlo**.
 
-## 🏗️ 2. Protocole de Validation
+##  2. Protocole de Validation
 
 ### A. Backtesting Statistique (Historique)
 *   **Moteur** : Julia (pour la vitesse) ou Backtrader (Python).
@@ -22,9 +22,9 @@ On ne déploie JAMAIS un algorithme de trading sans qu'il ait prouvé sa robuste
 *   Lancer 10,000 simulations en mélangeant aléatoirement l'ordre des trades passés.
 *   *Objectif* : Vérifier la probabilité de "ruine" (Drawdown > 8%). Elle doit être < 0.1%.
 
-## 🛡️ 3. Stress Tests (Black Swan Simulation)
+##  3. Stress Tests (Black Swan Simulation)
 *   On injecte des sauts de prix artificiels (Slippage de 50 points, Gap de 100 points) pour vérifier que les Stop-Loss du Kernel Rust se déclenchent correctement même en cas de panique marché.
 
-## 🗓️ Roadmap
+##  Roadmap
 *   **Phase 1** : Script de backtest simple sur 1 an de Gold.
 *   **Phase 2** : Automatisation du rapport Monte Carlo hebdomadaire.

@@ -109,3 +109,9 @@ muzero_ref/
 data/muzero/
 data/history/
 data/checkpoints/
+
+# Banker runtime state
+.banker_startup_alert
+
+# Builder runtime state
+data/builder/

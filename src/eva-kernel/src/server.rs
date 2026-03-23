@@ -8,7 +8,7 @@
 //! - Audit Trail (Black Box)
 
 use axum::{
-    extract::{Json, State},
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Json, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -17,8 +17,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::{error, info};
+use tokio::sync::{broadcast, Mutex};
+use tracing::{error, info, warn};
 
 use crate::audit::AuditTrail;
 use crate::kill_switch::{KillSwitch, KillSwitchStatus};
@@ -36,6 +36,7 @@ pub struct AppState {
     pub kill_switch: Arc<Mutex<KillSwitch>>,
     pub constitution: Arc<Mutex<Constitution>>,
     pub audit_trail: Arc<Mutex<AuditTrail>>,
+    pub tx: broadcast::Sender<String>, // Pour le broadcast WebSocket
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -62,6 +63,18 @@ pub struct KillSwitchResponse {
     pub success: bool,
     pub status: KillSwitchStatus,
     pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AgentFeedMessage {
+    pub id: String,
+    pub agent: String,
+    pub company: String,
+    pub r#type: String, // "thought", "action", "message", "result", "error"
+    pub content: String,
+    pub timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -218,6 +231,68 @@ pub async fn get_audit_trail(State(state): State<AppState>) -> impl IntoResponse
     (StatusCode::OK, Json(serialized))
 }
 
+#[derive(Debug, Serialize)]
+pub struct RecentFeedResponse {
+    pub messages: Vec<AgentFeedMessage>,
+}
+
+/// GET /feed/recent — Retourne les derniers messages du feed (pour le polling frontend)
+pub async fn get_recent_feed() -> Json<RecentFeedResponse> {
+    // Pour l'instant on retourne une liste vide pour éviter les 404/502
+    // Le WebSocket est le canal privilégié.
+    Json(RecentFeedResponse {
+        messages: vec![],
+    })
+}
+
+/// GET /ws/feed — WebSocket pour le flux d'activité des agents
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_socket(socket, state))
+}
+
+async fn handle_socket(mut socket: WebSocket, state: AppState) {
+    let mut rx = state.tx.subscribe();
+    
+    info!("🔌 Client WebSocket connecté au feed");
+
+    loop {
+        tokio::select! {
+            // Envoyer les messages du broadcast channel au client
+            msg_res = rx.recv() => {
+                match msg_res {
+                    Ok(msg) => {
+                        if socket.send(Message::Text(msg)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("⚠️ WebSocket client en retard de {} messages", n);
+                    }
+                    Err(_) => break,
+                }
+            }
+            // Gérer les pings/pongs ou la déconnexion
+            Some(result) = socket.recv() => {
+                match result {
+                    Ok(Message::Close(_)) => break,
+                    Ok(Message::Ping(_)) => {
+                        if socket.send(Message::Pong(vec![])).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+    
+    info!("🔌 Client WebSocket déconnecté du feed");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // LANCEMENT DU SERVEUR
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -228,12 +303,14 @@ pub async fn start_kernel_server(
     kill_switch: Arc<Mutex<KillSwitch>>,
     constitution: Arc<Mutex<Constitution>>,
     audit_trail: Arc<Mutex<AuditTrail>>,
+    tx: broadcast::Sender<String>,
 ) {
     let state = AppState {
         validator,
         kill_switch,
         constitution,
         audit_trail,
+        tx,
     };
 
     let app = Router::new()
@@ -242,6 +319,8 @@ pub async fn start_kernel_server(
         .route("/kill-switch", get(get_kill_switch_status).post(manage_kill_switch))
         .route("/constitution", get(get_constitution))
         .route("/audit", get(get_audit_trail))
+        .route("/feed/recent", get(get_recent_feed))
+        .route("/ws/feed", get(ws_handler))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));

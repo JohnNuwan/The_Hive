@@ -65,7 +65,7 @@ SYMBOL_PATTERNS = {
     re.compile(r"(eurusd|eur/usd|euro.dollar)", re.IGNORECASE): "EURUSD",
     re.compile(r"(gbpusd|gbp/usd|livre.dollar)", re.IGNORECASE): "GBPUSD",
     re.compile(r"(usdjpy|usd/jpy|dollar.yen)", re.IGNORECASE): "USDJPY",
-    re.compile(r"(nasdaq|nas100|nq)", re.IGNORECASE): "NAS100",
+    re.compile(r"(nasdaq|nas100|nq|us100)", re.IGNORECASE): "US100.cash",
     re.compile(r"(us30|dow.jones|dji)", re.IGNORECASE): "US30",
 }
 

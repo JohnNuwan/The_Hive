@@ -5,19 +5,19 @@
 
 ---
 
-## 📊 Vue d'Ensemble
+##  Vue d'Ensemble
 
 Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ---
 
-## 🖥️ Dashboard Principal - Panopticon
+##  Dashboard Principal - Panopticon
 
 ### Panneau 1: Statut Système Global
 
 ```json
 {
-  "title": "🏠 Statut THE HIVE",
+  "title": " Statut THE HIVE",
   "type": "stat",
   "datasource": "Prometheus",
   "targets": [
@@ -34,8 +34,8 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
   "fieldConfig": {
     "defaults": {
       "mappings": [
-        {"type": "value", "value": 1, "text": "🟢 EN LIGNE"},
-        {"type": "value", "value": 0, "text": "🔴 HORS LIGNE"}
+        {"type": "value", "value": 1, "text": " EN LIGNE"},
+        {"type": "value", "value": 0, "text": " HORS LIGNE"}
       ],
       "thresholds": {
         "steps": [
@@ -52,7 +52,7 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ```json
 {
-  "title": "🌡️ Température GPU",
+  "title": " Température GPU",
   "type": "gauge",
   "datasource": "Prometheus",
   "targets": [
@@ -83,7 +83,7 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ```json
 {
-  "title": "💾 VRAM GPU",
+  "title": " VRAM GPU",
   "type": "timeseries",
   "datasource": "Prometheus",
   "targets": [
@@ -110,13 +110,13 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ---
 
-## 💰 Dashboard Trading
+##  Dashboard Trading
 
 ### Panneau 1: P&L Journalier
 
 ```json
 {
-  "title": "💵 P&L Journalier",
+  "title": " P&L Journalier",
   "type": "stat",
   "datasource": "TimescaleDB",
   "targets": [
@@ -144,7 +144,7 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ```json
 {
-  "title": "📉 Drawdown",
+  "title": " Drawdown",
   "type": "gauge",
   "datasource": "TimescaleDB",
   "targets": [
@@ -179,7 +179,7 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ```json
 {
-  "title": "📊 Positions Ouvertes",
+  "title": " Positions Ouvertes",
   "type": "table",
   "datasource": "TimescaleDB",
   "targets": [
@@ -213,7 +213,7 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ```json
 {
-  "title": "⚠️ Protections Actives",
+  "title": " Protections Actives",
   "type": "stat",
   "datasource": "TimescaleDB",
   "targets": [
@@ -229,8 +229,8 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
   "fieldConfig": {
     "defaults": {
       "mappings": [
-        {"type": "value", "value": 0, "text": "🟢 OK"},
-        {"type": "value", "value": 1, "text": "🔴 ACTIF"}
+        {"type": "value", "value": 0, "text": " OK"},
+        {"type": "value", "value": 1, "text": " ACTIF"}
       ]
     }
   }
@@ -241,7 +241,7 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ```json
 {
-  "title": "📈 Historique Trades",
+  "title": " Historique Trades",
   "type": "timeseries",
   "datasource": "TimescaleDB",
   "targets": [
@@ -271,13 +271,13 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ---
 
-## 🛡️ Dashboard Sécurité
+##  Dashboard Sécurité
 
 ### Panneau 1: Alertes Récentes
 
 ```json
 {
-  "title": "🚨 Alertes Sécurité (24h)",
+  "title": " Alertes Sécurité (24h)",
   "type": "table",
   "datasource": "TimescaleDB",
   "targets": [
@@ -294,10 +294,10 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
           {
             "id": "mappings",
             "value": [
-              {"type": "value", "value": "critical", "text": "🔴 CRITIQUE"},
-              {"type": "value", "value": "high", "text": "🟠 HAUTE"},
-              {"type": "value", "value": "medium", "text": "🟡 MOYENNE"},
-              {"type": "value", "value": "low", "text": "🟢 BASSE"}
+              {"type": "value", "value": "critical", "text": " CRITIQUE"},
+              {"type": "value", "value": "high", "text": " HAUTE"},
+              {"type": "value", "value": "medium", "text": " MOYENNE"},
+              {"type": "value", "value": "low", "text": " BASSE"}
             ]
           }
         ]
@@ -311,7 +311,7 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ```json
 {
-  "title": "🚫 IPs Bloquées Actives",
+  "title": " IPs Bloquées Actives",
   "type": "stat",
   "datasource": "TimescaleDB",
   "targets": [
@@ -338,7 +338,7 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ```json
 {
-  "title": "🔒 Intégrité Kernel",
+  "title": " Intégrité Kernel",
   "type": "stat",
   "datasource": "Prometheus",
   "targets": [
@@ -350,8 +350,8 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
   "fieldConfig": {
     "defaults": {
       "mappings": [
-        {"type": "value", "value": 1, "text": "✅ VÉRIFIÉ"},
-        {"type": "value", "value": 0, "text": "❌ COMPROMIS"}
+        {"type": "value", "value": 1, "text": " VÉRIFIÉ"},
+        {"type": "value", "value": 0, "text": " COMPROMIS"}
       ],
       "thresholds": {
         "steps": [
@@ -366,13 +366,13 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ---
 
-## 🤖 Dashboard EVA Core
+##  Dashboard EVA Core
 
 ### Panneau 1: Requêtes par Minute
 
 ```json
 {
-  "title": "📨 Requêtes API/min",
+  "title": " Requêtes API/min",
   "type": "timeseries",
   "datasource": "Prometheus",
   "targets": [
@@ -393,7 +393,7 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ```json
 {
-  "title": "⏱️ Latence LLM",
+  "title": "⏱ Latence LLM",
   "type": "timeseries",
   "datasource": "Prometheus",
   "targets": [
@@ -429,7 +429,7 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ```json
 {
-  "title": "🎯 Distribution Intents",
+  "title": " Distribution Intents",
   "type": "piechart",
   "datasource": "Prometheus",
   "targets": [
@@ -443,7 +443,7 @@ Ce document définit les dashboards Grafana pour le monitoring de THE HIVE.
 
 ---
 
-## 📁 Provisioning Grafana
+##  Provisioning Grafana
 
 ### Fichier datasources.yaml
 
@@ -491,7 +491,7 @@ providers:
 
 ---
 
-## 🔔 Alertes Grafana
+##  Alertes Grafana
 
 ### Alerte GPU Température
 
@@ -504,7 +504,7 @@ providers:
     severity: critical
     service: system
   annotations:
-    summary: "🔥 GPU température critique: {{ $value }}°C"
+    summary: " GPU température critique: {{ $value }}°C"
     description: "La température GPU dépasse 90°C depuis 30s. Loi 0 - Intégrité Systémique"
 ```
 
@@ -519,7 +519,7 @@ providers:
     severity: warning
     service: trading
   annotations:
-    summary: "⚠️ Drawdown journalier: {{ $value }}%"
+    summary: " Drawdown journalier: {{ $value }}%"
     description: "Proche de la limite de 4%. Loi 2 - Protection du Capital"
 
 - alert: DrawdownJournalierCritique
@@ -529,6 +529,6 @@ providers:
     severity: critical
     service: trading
   annotations:
-    summary: "🚨 KILL-SWITCH DÉCLENCHÉ: {{ $value }}%"
+    summary: " KILL-SWITCH DÉCLENCHÉ: {{ $value }}%"
     description: "Limite 4% atteinte. Toutes positions fermées. Trading désactivé."
 ```

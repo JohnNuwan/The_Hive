@@ -22,6 +22,7 @@ import httpx
 from dateutil import parser
 
 from shared.telegram_client import TelegramClient
+from shared.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class NewsFilterService:
         self.is_active = False
         self.blocked_until: Optional[datetime] = None
         self.current_blocking_event: Optional[str] = None
+        self.current_blocking_currency: str = "ALL"
         self.high_impact_events: List[Dict[str, Any]] = []
         self._running = True
         self.last_fetch_time: Optional[datetime] = None
@@ -74,13 +76,26 @@ class NewsFilterService:
                     self.is_active = True
                     self.blocked_until = window_end
                     self.current_blocking_event = event["name"]
+                    self.current_blocking_currency = event.get("currency", "ALL").upper()
+                    
+                    # Compute Affected vs Active Symbols
+                    all_symbols = get_settings().banker_symbols
+                    affected = [s for s in all_symbols if self.current_blocking_currency in s] if self.current_blocking_currency != "ALL" else all_symbols
+                    active = [s for s in all_symbols if s not in affected]
+                    
+                    # Formatting
+                    aff_str = ", ".join(affected) if affected else "Aucun"
+                    act_str = ", ".join(active) if active else "Aucun"
+                    
                     msg = (
                         f"🚨 *NEWS FILTER ACTIVÉ*\n\n"
-                        f"Événement: `{event['name']}` ({event.get('currency', 'ALL')})\n"
-                        f"Impact: {event.get('impact', 'HIGH')}\n"
-                        f"Trading bloqué jusqu'à {window_end.strftime('%H:%M')}"
+                        f"📰 *Événement*: `{event['name']}` ({self.current_blocking_currency})\n"
+                        f"💥 *Impact*: {event.get('impact', 'HIGH')}\n"
+                        f"⏳ *Durée*: Jusqu'à {window_end.strftime('%H:%M')}\n\n"
+                        f"🛑 *Trading Suspendu*:\n{aff_str}\n\n"
+                        f"✅ *Trading Actif*:\n{act_str}"
                     )
-                    logger.warning(msg.replace("\n", " - "))
+                    logger.warning(f"News Filter activated for {self.current_blocking_currency} until {window_end.strftime('%H:%M')}")
                     asyncio.create_task(TelegramClient().send_message(msg))
                 return
 
@@ -90,8 +105,23 @@ class NewsFilterService:
             self.blocked_until = None
             msg = f"✅ *NEWS FILTER DÉSACTIVÉ*\nL'événement `{self.current_blocking_event}` est terminé.\nReprise du Trading."
             self.current_blocking_event = None
+            self.current_blocking_currency = "ALL"
             logger.info(msg.replace("\n", " "))
             asyncio.create_task(TelegramClient().send_message(msg))
+
+    def should_block_trading(self, symbol: str = "") -> bool:
+        """Retourne True si le trading doit être bloqué pour ce symbole."""
+        if not self.is_active: return False
+        
+        curr = self.current_blocking_currency
+        if curr == "ALL" or not curr:
+            return True
+            
+        # Bloque uniquement si la devise impactée fait partie du symbole
+        if curr.upper() in symbol.upper():
+            return True
+            
+        return False
 
     async def _fetch_economic_calendar(self) -> List[Dict[str, Any]]:
         """
@@ -108,6 +138,12 @@ class NewsFilterService:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(url)
+                
+                if response.status_code == 429:
+                    logger.warning("⚠️ News Filter: ForexFactory Rate Limit (429). Backing off 15 min.")
+                    self.last_fetch_time = now - timedelta(seconds=14400 - 900) # retry in 15 min
+                    return self.high_impact_events
+                    
                 response.raise_for_status()
                 data = response.json()
                 
@@ -131,14 +167,17 @@ class NewsFilterService:
                 self.high_impact_events = events
                 return events
                 
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                 logger.warning("⚠️ News Filter: 429 Rate Limit hit. Backing off.")
+                 self.last_fetch_time = now - timedelta(seconds=14400 - 900)
+            else:
+                 logger.error(f"News Filter API error: {e}")
+            return self.high_impact_events
         except Exception as e:
             logger.error(f"Impossible de joindre ForexFactory: {e}")
             # Renvoie le cache précédent si échec au lieu de vider la mémoire
             return self.high_impact_events
-
-    def should_block_trading(self) -> bool:
-        """Retourne True si le trading doit être bloqué."""
-        return self.is_active
 
     def get_status(self) -> Dict[str, Any]:
         """Retourne l'état complet du filtre."""

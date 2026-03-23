@@ -5,7 +5,7 @@
 
 ---
 
-## 📋 Instructions
+##  Instructions
 
 1. Copiez ce fichier : `cp env_example.md .env`
 2. Remplissez toutes les valeurs `CHANGE_ME`
@@ -14,7 +14,7 @@
 
 ---
 
-## 🌐 Network & General
+##  Network & General
 
 ```bash
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -40,7 +40,7 @@ TAILSCALE_HOSTNAME=the-hive
 
 ---
 
-## 🧠 EVA Core
+##  EVA Core
 
 ```bash
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -91,7 +91,7 @@ QDRANT_COLLECTION_DOCUMENTS=documents
 
 ---
 
-## 💰 The Banker (Trading)
+##  The Banker (Trading)
 
 ```bash
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -145,7 +145,7 @@ FOREX_FACTORY_API_URL=https://nfs.faireconomy.media/ff_calendar_thisweek.json
 
 ---
 
-## 🛡️ The Sentinel (Security)
+##  The Sentinel (Security)
 
 ```bash
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -172,7 +172,7 @@ SHODAN_API_KEY=CHANGE_ME
 
 ---
 
-## 📱 Notifications
+##  Notifications
 
 ```bash
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -191,7 +191,7 @@ TELEGRAM_CHAT_ID=CHANGE_ME
 
 ---
 
-## 🔒 Hardware Security
+##  Hardware Security
 
 ```bash
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -219,7 +219,7 @@ WATCHDOG_TIMEOUT_SECONDS=60
 
 ---
 
-## 🔧 Development
+##  Development
 
 ```bash
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -240,7 +240,7 @@ GITHUB_TOKEN=ghp_CHANGE_ME
 
 ---
 
-## 📊 Monitoring & Observability
+##  Monitoring & Observability
 
 ```bash
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -259,7 +259,7 @@ GRAFANA_ADMIN_PASSWORD=CHANGE_ME
 
 ---
 
-## ⚠️ Security Notes
+##  Security Notes
 
 > [!CAUTION]
 > **Ne JAMAIS** :

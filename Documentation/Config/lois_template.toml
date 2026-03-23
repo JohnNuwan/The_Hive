@@ -186,7 +186,7 @@ symbols_whitelist = [
     "USDJPY",
     "USDCHF",
     "AUDUSD",
-    "NAS100",
+    "US100",
     "US30",
 ]
 

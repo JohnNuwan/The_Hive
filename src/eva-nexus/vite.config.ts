@@ -121,5 +121,20 @@ export default defineConfig({
     build: {
         outDir: 'dist',
         sourcemap: true,
+        rollupOptions: {
+            output: {
+                manualChunks(id) {
+                    if (!id.includes('node_modules')) {
+                        return undefined
+                    }
+
+                    // Isole le graphe GNN pour eviter qu'il gonfle le bundle initial.
+                    if (id.includes('react-force-graph-2d') || id.includes('d3-') || id.includes('three')) {
+                        return 'vendor-graph'
+                    }
+                    return undefined
+                },
+            },
+        },
     },
 })

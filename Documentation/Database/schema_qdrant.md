@@ -6,7 +6,7 @@
 
 ---
 
-## 📦 Collections
+##  Collections
 
 ### 1. `conversations` - Mémoire Conversationnelle
 
@@ -210,7 +210,7 @@ Base de connaissances de The Sentinel pour la threat intelligence.
 
 ---
 
-## 🔧 Configuration de l'Embedding Model
+##  Configuration de l'Embedding Model
 
 ### Model: `all-MiniLM-L6-v2` (Sentence Transformers)
 - **Dimension**: 384 (Note: upgrade vers 1024 avec Llama embedding recommandé)
@@ -224,7 +224,7 @@ Base de connaissances de The Sentinel pour la threat intelligence.
 
 ---
 
-## 📊 Politiques de Rétention (RGPD Compliance)
+##  Politiques de Rétention (RGPD Compliance)
 
 | Collection | Rétention | Trigger |
 |------------|-----------|---------|
@@ -254,7 +254,7 @@ client.delete(
 
 ---
 
-## 🔒 Sécurité
+##  Sécurité
 
 1. **Accès**: Uniquement depuis `vmbr1` (réseau interne)
 2. **Auth**: API Key configurée dans `.env`
@@ -263,7 +263,7 @@ client.delete(
 
 ---
 
-## 📋 Scripts d'Initialisation
+##  Scripts d'Initialisation
 
 ### Créer toutes les collections
 ```bash

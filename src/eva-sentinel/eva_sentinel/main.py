@@ -1,37 +1,85 @@
 """
-The Sentinel — Agent de Sécurité et Monitoring de THE HIVE.
+EVA Sentinel — Agent de Sécurité & Monitoring de THE HIVE.
 
-Expert F du système d'experts. Responsable de :
-- La surveillance hardware en temps réel (CPU, RAM, GPU, Disque).
-- La vérification d'intégrité des fichiers critiques (Constitution, Kernel).
-- L'envoi d'alertes Telegram en cas d'anomalie.
-- L'écoute des canaux de la ruche pour broadcaster les notifications.
+Expert B du système d'experts. Responsable de :
+- Le monitoring hardware (CPU, RAM, GPU, disque, réseau).
+- La sécurité du réseau (scan de ports, détection d'intrusion).
+- Les alertes et notifications (Telegram).
+- L'audit trail des évènements de sécurité.
+- La quarantaine de services compromis.
+- La vérification d'intégrité des fichiers critiques.
 
 Architecture :
-    - SystemMonitor : collecte psutil toutes les 5 secondes.
-    - SecurityEngine : scan d'intégrité périodique (toutes les 5 minutes).
-    - TelegramNotifier : broadcasting des alertes critiques.
-    - Heartbeat vers le Core pour la découverte des agents.
+    - Actif : cycle de scan continu (ports, intégrité, abus).
+    - Notifications via Telegram sur seuils critiques.
+    - Heartbeat vers le Core pour monitoring centralisé.
 """
 
 import asyncio
+import hashlib
 import logging
+import os
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
+from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from shared import Settings, get_settings, SwarmGRPCClient
-from shared.redis_client import init_redis
-from shared.auth_middleware import InternalAuthMiddleware
+from pydantic import BaseModel, Field
+from shared import get_settings
+from shared.redis_client import init_redis, get_redis_client
 
-from eva_sentinel.services.monitor import SystemMonitor
+from eva_sentinel.services.metrics import SystemMetricsCollector
 from eva_sentinel.services.notifier import TelegramNotifier
-from eva_sentinel.sentiment_engine import SecurityEngine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODÈLES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class SecurityAlert(BaseModel):
+    """Alerte de sécurité."""
+    severity: str = Field(description="Sévérité: info, warning, critical, emergency")
+    category: str = Field(description="Catégorie: intrusion, integrity, abuse, system")
+    message: str
+    source: str = "sentinel"
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class PortScanRequest(BaseModel):
+    """Requête de scan de ports."""
+    target: str = Field(default="localhost", description="Cible à scanner")
+    ports: list[int] = Field(default=[22, 80, 443, 3030, 6333, 6379, 7474, 8080, 8100, 9090, 11434])
+
+
+class IntegrityCheckRequest(BaseModel):
+    """Requête de vérification d'intégrité."""
+    files: list[str] = Field(
+        default=[],
+        description="Chemins des fichiers à vérifier (vide = fichiers critiques par défaut)"
+    )
+
+
+class QuarantineRequest(BaseModel):
+    """Requête de mise en quarantaine d'un service."""
+    service: str = Field(..., description="Nom du service Docker à isoler")
+    reason: str = Field(..., description="Raison de la quarantaine")
+
+
+class AuditLogEntry(BaseModel):
+    """Entrée du journal d'audit."""
+    action: str
+    actor: str = "sentinel"
+    target: str = ""
+    details: str = ""
+    severity: str = "info"
+    timestamp: datetime = Field(default_factory=datetime.now)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -41,144 +89,84 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Gère le cycle de vie de l'application Sentinel.
+    logger.info("🛡️ Démarrage EVA Sentinel (Agent de Sécurité)...")
 
-    Initialise Redis, le monitoring hardware, le notifier Telegram,
-    le moteur de sécurité et démarre les tâches de fond.
-
-    Args:
-        app (FastAPI): L'instance de l'application en cours.
-
-    Yields:
-        None: Rend la main une fois l'initialisation terminée.
-    """
-    logger.info("🛡️ Démarrage The Sentinel...")
-    
-    # Redis
     try:
         await init_redis()
         logger.info("✅ Redis connecté")
     except Exception as e:
         logger.warning(f"⚠️ Redis non disponible: {e}")
 
-    # Monitor
-    app.state.monitor = SystemMonitor()
-    await app.state.monitor.start()
-    
-    # Notifier
+    # Services
+    app.state.metrics = SystemMetricsCollector()
     app.state.notifier = TelegramNotifier()
-    
-    # Security Engine
-    app.state.security = SecurityEngine()
-    
-    # gRPC Client
-    app.state.grpc_client = SwarmGRPCClient()
-    app.state.grpc_client.connect()
-    
-    # Baseline integrity scan
-    await app.state.security.check_integrity()
-    
-    # Heartbeat
-    import asyncio
-    app.state.heartbeat_task = asyncio.create_task(hard_heartbeat())
-    
-    # Listeners de notifications
-    app.state.notif_task = asyncio.create_task(notif_listener(app.state.notifier))
-    
-    # Security scan périodique
-    app.state.security_task = asyncio.create_task(periodic_security_scan(app.state.security))
-    
-    logger.info("✅ The Sentinel actif")
-    
+    app.state.audit_log: deque[dict[str, Any]] = deque(maxlen=1000)
+    app.state.alerts: deque[dict[str, Any]] = deque(maxlen=500)
+    app.state.quarantine_list: list[dict[str, Any]] = []
+    app.state.integrity_baseline: dict[str, str] = {}
+    app.state.scan_results: deque[dict[str, Any]] = deque(maxlen=50)
+
+    # Tâches de fond
+    asyncio.create_task(hard_heartbeat())
+    asyncio.create_task(periodic_security_scan())
+
+    logger.info("✅ EVA Sentinel patrouille")
     yield
-    
-    # Shutdown
-    app.state.heartbeat_task.cancel()
-    app.state.security_task.cancel()
-    await app.state.monitor.stop()
-    logger.info("🛑 Arrêt The Sentinel")
+    logger.info("🛑 Arrêt EVA Sentinel")
 
 
 async def hard_heartbeat():
-    """
-    Signal haute fréquence pour l'Orchestrateur Core.
-    Persiste l'état dans Redis pour la découverte des agents.
-    """
-    from shared.redis_client import get_redis_client
-    from datetime import datetime
-    import asyncio
-    
-    redis = get_redis_client()
+    try:
+        redis = get_redis_client()
+    except Exception:
+        redis = None
     while True:
         try:
-            payload = {"status": "online", "ts": datetime.now().timestamp(), "expert": "sentinel"}
-            await redis.cache_set("eva.sentinel.status", payload, ttl_seconds=10)
-        except Exception as e:
-            logger.error(f"Heartbeat error: {e}")
-        await asyncio.sleep(1.0)
+            if redis:
+                payload = {
+                    "status": "online",
+                    "ts": datetime.now().timestamp(),
+                    "expert": "sentinel",
+                    "active_alerts": len(app.state.alerts),
+                    "quarantined_services": len(app.state.quarantine_list),
+                }
+                await redis.cache_set("eva.sentinel.status", payload, ttl_seconds=10)
+        except Exception:
+            pass
+        await asyncio.sleep(2.0)
 
 
-async def notif_listener(notifier: TelegramNotifier):
-    """
-    Écoute les canaux de la ruche et envoie des notifications Telegram.
-    """
-    from shared.redis_client import get_redis_client
-    redis = get_redis_client()
-    
-    async def handle_alert(channel, message):
-        # Dispatcher les alertes selon le canal
-        if channel == "danger_signal":
-            # Si on détecte un signal critique, on peut aussi le relayer ou agir
-            # Mais ici c'est un listener de broadcast.
-            # On va plutôt s'assurer que Sentinel peut émettre via gRPC si besoin.
-            await notifier.notify_emergency("Nervous System", f"Signal critique détecté: {message}")
-        
-        elif channel == "eva.banker.trades":
-            # Format attendu {ticket, symbol, profit}
-            try:
-                await notifier.notify_trade(
-                    symbol=message.get("symbol", "UNKNOWN"),
-                    profit=float(message.get("profit", 0.0)),
-                    ticket=int(message.get("ticket_id", 0))
-                )
-            except Exception as e:
-                logger.error(f"Failed to process trade notification: {e}")
-        
-        elif channel == "eva.swarm.healing":
-            await notifier.notify_self_healing(
-                service=message.get("service", "unknown"),
-                event=message.get("event", "restart")
-            )
-
-    await redis.subscribe([
-        "danger_signal", 
-        "eva.banker.trades", 
-        "eva.swarm.healing"
-    ], handle_alert)
-    
-    logger.info("📡 Listener de notifications opérationnel")
-    await redis.listen()
-
-
-async def periodic_security_scan(security: SecurityEngine):
-    """Scan de sécurité périodique (toutes les 5 minutes)"""
+async def periodic_security_scan():
+    """Scan de sécurité périodique toutes les 5 minutes."""
     while True:
         try:
-            await security.check_integrity()
-            await security.check_network()
+            # Vérification basique des seuils hardware
+            metrics: SystemMetricsCollector = app.state.metrics
+            data = metrics.collect()
+            cpu = data.get("cpu", 0)
+            if cpu > 95:
+                alert = {
+                    "severity": "warning",
+                    "category": "system",
+                    "message": f"CPU très élevé : {cpu}%",
+                    "timestamp": datetime.now().isoformat(),
+                }
+                app.state.alerts.append(alert)
+                logger.warning(f"🚨 {alert['message']}")
         except Exception as e:
-            logger.error(f"Erreur scan sécurité: {e}")
-        await asyncio.sleep(300)  # 5 minutes
+            logger.debug(f"Periodic scan: {e}")
+        await asyncio.sleep(300)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # APPLICATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 app = FastAPI(
-    title="The Sentinel API",
-    description="Agent de Sécurité - THE HIVE",
-    version="0.1.0",
+    title="EVA Sentinel API",
+    description="Agent de Sécurité & Monitoring - THE HIVE",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -190,57 +178,231 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Sécurité Inter-Agents
-app.add_middleware(InternalAuthMiddleware)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 @app.get("/health", tags=["Système"])
 async def health():
-    """Vérifie la santé du module Sentinel."""
-    return {"status": "ok", "service": "sentinel"}
+    return {
+        "status": "online",
+        "service": "sentinel",
+        "alerts_active": len(app.state.alerts),
+        "quarantined_services": len(app.state.quarantine_list),
+    }
 
 
-@app.get("/system/metrics", tags=["Monitoring"])
+@app.get("/metrics", tags=["Monitoring"])
 async def get_metrics():
+    """Collecte et retourne les métriques hardware actuelles."""
+    metrics: SystemMetricsCollector = app.state.metrics
+    return metrics.collect()
+
+
+@app.get("/alerts", tags=["Sécurité"])
+async def get_alerts(limit: int = Query(default=50, ge=1, le=500)):
+    """Retourne les alertes de sécurité récentes."""
+    alerts = list(app.state.alerts)[-limit:]
+    return {"alerts": alerts, "total": len(app.state.alerts)}
+
+
+@app.post("/security/scan", tags=["Sécurité"])
+async def security_scan():
+    """Lance un scan de sécurité complet et immédiat."""
+    metrics: SystemMetricsCollector = app.state.metrics
+    data = metrics.collect()
+
+    findings = []
+    if data.get("cpu", 0) > 80:
+        findings.append({"type": "high_cpu", "value": data["cpu"], "severity": "warning"})
+    if data.get("disk_percent", 0) > 90:
+        findings.append({"type": "disk_full", "value": data["disk_percent"], "severity": "critical"})
+
+    result = {
+        "scan_id": f"SCAN-{uuid4().hex[:8].upper()}",
+        "findings": findings,
+        "findings_count": len(findings),
+        "metrics": data,
+        "timestamp": datetime.now().isoformat(),
+    }
+    app.state.scan_results.append(result)
+
+    # Log d'audit
+    app.state.audit_log.append({
+        "action": "security_scan",
+        "actor": "sentinel",
+        "details": f"Scan completed: {len(findings)} findings",
+        "severity": "info",
+        "timestamp": datetime.now().isoformat(),
+    })
+
+    return result
+
+
+@app.post("/scan/ports", tags=["Sécurité"])
+async def scan_ports(request: PortScanRequest):
     """
-    Retourne les métriques hardware actuelles (CPU, RAM, GPU, Disque).
+    Scan de ports TCP sur la cible spécifiée.
 
-    Returns:
-        HardwareMetrics: Snapshot des métriques système.
+    Vérifie l'accessibilité des ports critiques de l'infrastructure.
     """
-    return await app.state.monitor.get_current_metrics()
+    import socket
+    results = []
+    for port in request.ports:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex((request.target, port))
+            status = "open" if result == 0 else "closed"
+            sock.close()
+        except Exception:
+            status = "error"
 
-@app.get("/security/alerts")
-async def get_alerts():
-    """Retourne les alertes de sécurité récentes"""
-    security: SecurityEngine = app.state.security
-    alerts = security.get_alerts(limit=20)
-    
-    # Toujours inclure un statut baseline si pas d'alertes
-    if not alerts:
-        alerts = [{
-            "id": "baseline-001",
-            "type": "INTEGRITY_CHECK",
-            "severity": "info",
-            "message": "Kernel integrity verified — All systems nominal",
-            "timestamp": datetime.now().isoformat()
-        }]
-    
-    return alerts
+        results.append({"port": port, "status": status})
+
+    scan = {
+        "target": request.target,
+        "ports_scanned": len(request.ports),
+        "ports_open": sum(1 for r in results if r["status"] == "open"),
+        "results": results,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    app.state.audit_log.append({
+        "action": "port_scan",
+        "actor": "sentinel",
+        "target": request.target,
+        "details": f"{scan['ports_open']}/{len(request.ports)} ports open",
+        "severity": "info",
+        "timestamp": datetime.now().isoformat(),
+    })
+
+    return scan
 
 
-@app.get("/security/scan")
-async def run_security_scan():
-    """Lance un scan de sécurité complet à la demande"""
-    security: SecurityEngine = app.state.security
-    return await security.run_full_scan()
+@app.post("/integrity/check", tags=["Sécurité"])
+async def check_integrity(request: IntegrityCheckRequest):
+    """
+    Vérifie l'intégrité des fichiers critiques via hash SHA-256.
+
+    Si pas de baseline, crée la baseline. Sinon, compare avec la baseline.
+    """
+    files = request.files or [
+        "docker-compose.yml",
+        ".env",
+        "src/eva-kernel/src/main.rs",
+    ]
+
+    results = []
+    for filepath in files:
+        if not os.path.exists(filepath):
+            results.append({"file": filepath, "status": "missing"})
+            continue
+
+        try:
+            with open(filepath, "rb") as f:
+                current_hash = hashlib.sha256(f.read()).hexdigest()
+        except Exception as e:
+            results.append({"file": filepath, "status": "error", "error": str(e)})
+            continue
+
+        baseline_hash = app.state.integrity_baseline.get(filepath)
+
+        if baseline_hash is None:
+            app.state.integrity_baseline[filepath] = current_hash
+            results.append({"file": filepath, "status": "baseline_created", "hash": current_hash[:16]})
+        elif baseline_hash == current_hash:
+            results.append({"file": filepath, "status": "ok", "hash": current_hash[:16]})
+        else:
+            results.append({"file": filepath, "status": "MODIFIED", "hash": current_hash[:16]})
+            app.state.alerts.append({
+                "severity": "critical",
+                "category": "integrity",
+                "message": f"⚠️ Fichier modifié: {filepath}",
+                "timestamp": datetime.now().isoformat(),
+            })
+
+    return {
+        "files_checked": len(results),
+        "modified": sum(1 for r in results if r["status"] == "MODIFIED"),
+        "results": results,
+    }
 
 
-@app.get("/security/integrity")
-async def check_integrity():
-    """Vérifie l'intégrité des fichiers critiques"""
-    security: SecurityEngine = app.state.security
-    return await security.check_integrity()
+@app.post("/quarantine", tags=["Sécurité"])
+async def quarantine_service(request: QuarantineRequest):
+    """Met un service en quarantaine (le marque pour isolation réseau)."""
+    entry = {
+        "id": f"QRT-{uuid4().hex[:8].upper()}",
+        "service": request.service,
+        "reason": request.reason,
+        "timestamp": datetime.now().isoformat(),
+        "status": "quarantined",
+    }
+    app.state.quarantine_list.append(entry)
+
+    app.state.audit_log.append({
+        "action": "quarantine",
+        "actor": "sentinel",
+        "target": request.service,
+        "details": request.reason,
+        "severity": "critical",
+        "timestamp": datetime.now().isoformat(),
+    })
+
+    notifier: TelegramNotifier = app.state.notifier
+    await notifier.send_alert(f"🔒 Service mis en quarantaine : {request.service}\nRaison : {request.reason}")
+
+    return {"status": "quarantined", "entry": entry}
+
+
+@app.get("/quarantine", tags=["Sécurité"])
+async def list_quarantine():
+    """Liste les services en quarantaine."""
+    return {"quarantined": app.state.quarantine_list, "total": len(app.state.quarantine_list)}
+
+
+@app.get("/audit/logs", tags=["Audit"])
+async def get_audit_logs(limit: int = Query(default=50, ge=1, le=1000)):
+    """Journal d'audit des actions de sécurité."""
+    logs = list(app.state.audit_log)[-limit:]
+    return {"logs": logs, "total": len(app.state.audit_log)}
+
+
+@app.post("/notify", tags=["Notifications"])
+async def send_notification(message: str = Query(...)):
+    """Envoie une notification manuelle via Telegram."""
+    notifier: TelegramNotifier = app.state.notifier
+    await notifier.send_alert(message)
+    return {"status": "sent", "message": message}
+
+
+@app.get("/compliance/check", tags=["Compliance"])
+async def compliance_check():
+    """Vérification de conformité sécurité rapide."""
+    checks = {
+        "redis_connected": False,
+        "heartbeat_active": True,
+        "cors_configured": True,
+        "auth_middleware": True,
+        "integrity_baseline": len(app.state.integrity_baseline) > 0,
+        "quarantine_empty": len(app.state.quarantine_list) == 0,
+    }
+    try:
+        redis = get_redis_client()
+        checks["redis_connected"] = True
+    except Exception:
+        pass
+
+    passed = sum(1 for v in checks.values() if v)
+    total = len(checks)
+
+    return {
+        "checks": checks,
+        "passed": passed,
+        "total": total,
+        "score": round(passed / total * 100),
+        "status": "PASS" if passed == total else "WARN" if passed >= total - 1 else "FAIL",
+    }

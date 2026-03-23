@@ -4,33 +4,36 @@ EVA Accountant — L'Auditeur Financier de THE HIVE.
 Ce module gère la comptabilité opérationnelle de l'entité :
 - Suivi du ROI net (profits bruts - taxes - dépenses).
 - Enregistrement des dépenses d'exploitation (API, infra, électricité).
-- Synchronisation avec le Keeper (Compliance) pour les données fiscales.
-- Persistance sur disque via un fichier ledger JSON.
+- Synchronisation avec le Keeper (Compliance) pour les taxes.
+- Réception des PnL du Banker avec contrôle de drawdown.
+- Projections financières et prévisions.
+- Export des données (CSV/JSON).
+- Dashboard financier consolidé.
 
 Architecture :
-    - Passif : agrège les données financières et expose des rapports.
-    - Se synchronise avec Compliance pour les provisions fiscales.
-    - Heartbeat vers le Core pour la découverte des agents.
+    - Passif : écoute les mises à jour PnL du Banker.
+    - Persistance sur disque (accountant_ledger.json).
+    - Heartbeat vers le Core avec ROI net.
 """
 
-import logging
 import asyncio
 import json
+import logging
 import os
-from datetime import datetime
+from collections import deque
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from datetime import datetime
+from typing import Any
+
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from shared.redis_client import init_redis, get_redis_client
 from shared.auth_middleware import InternalAuthMiddleware
-from shared import BaseHealthResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Chemin du fichier de persistance des données financières
-LEDGER_FILE = "ledger.json"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -39,19 +42,80 @@ LEDGER_FILE = "ledger.json"
 
 
 class OperatingExpense(BaseModel):
-    """
-    Représente une dépense d'exploitation.
-
-    Attributes:
-        description: Description humaine de la dépense.
-        amount: Montant en euros.
-        category: Catégorie (infrastructure, api, software, electricity).
-        timestamp: Date/heure de l'enregistrement.
-    """
+    """Représente une dépense d'exploitation."""
     description: str
     amount: float
-    category: str  # infrastructure, api, software, electricity
+    category: str = Field(description="Catégorie: infrastructure, api, software, electricity, other")
     timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class PnLReport(BaseModel):
+    """Bilan quotidien ou PnL envoyé par le Banker."""
+    timestamp: datetime = Field(default_factory=datetime.now)
+    symbol: str = "GLOBAL"
+    profit_loss: float
+    balance: float
+    equity: float
+
+
+class ProjectionRequest(BaseModel):
+    """Requête de projection financière."""
+    months: int = Field(default=3, ge=1, le=24, description="Nombre de mois à projeter")
+    growth_rate: float = Field(default=0.0, ge=-1.0, le=10.0, description="Taux de croissance mensuel estimé")
+    include_expenses: bool = True
+
+
+class CurrencyConversion(BaseModel):
+    """Conversion de devises simplifiée."""
+    amount: float = Field(..., gt=0)
+    from_currency: str = Field(default="EUR")
+    to_currency: str = Field(default="USD")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VARIABLES D'ÉTAT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+LEDGER_FILE = "accountant_ledger.json"
+DAILY_DRAWDOWN_LIMIT = 0.04  # 4% max drawdown / jour
+
+ledger = {
+    "gross_profit": 0.0,
+    "total_taxes": 0.0,
+    "total_expenses": 0.0,
+    "net_roi": 0.0,
+    "expenses": [],
+    "pnl_history": [],
+    "daily_start_balance": None,
+    "currency": "EUR",
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PERSISTANCE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def save_ledger():
+    """Sauvegarde l'état financier sur disque."""
+    try:
+        with open(LEDGER_FILE, "w") as f:
+            json.dump(ledger, f, indent=4, default=str)
+    except Exception as e:
+        logger.error(f"❌ Erreur sauvegarde ledger: {e}")
+
+
+def load_ledger():
+    """Charge le ledger depuis le disque."""
+    global ledger
+    if os.path.exists(LEDGER_FILE):
+        try:
+            with open(LEDGER_FILE, "r") as f:
+                loaded = json.load(f)
+                ledger.update(loaded)
+                logger.info("📂 Ledger Accountant chargé")
+        except Exception as e:
+            logger.error(f"❌ Erreur chargement ledger: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -61,39 +125,45 @@ class OperatingExpense(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Gère le cycle de vie de l'application Accountant.
+    logger.info("📊 Démarrage EVA Accountant (L'Auditeur)...")
 
-    Charge le ledger depuis le disque, initialise Redis et
-    démarre le heartbeat de présence.
-
-    Args:
-        app (FastAPI): L'instance de l'application en cours.
-
-    Yields:
-        None: Rend la main une fois l'initialisation terminée.
-    """
-    logger.info("💰 Démarrage EVA Accountant (L'Auditeur)...")
-
-    # Redis — tolérant aux pannes au démarrage
     try:
         await init_redis()
         logger.info("✅ Redis connecté")
     except Exception as e:
         logger.warning(f"⚠️ Redis non disponible: {e}")
 
-    # Charger les données persistantes
     load_ledger()
 
-    # Heartbeat
+    app.state.monthly_summaries: deque[dict[str, Any]] = deque(maxlen=24)
+    app.state.daily_snapshots: deque[dict[str, Any]] = deque(maxlen=365)
+
     asyncio.create_task(hard_heartbeat())
-
-    logger.info("✅ EVA Accountant prêt")
+    logger.info("✅ EVA Accountant en veille comptable")
     yield
-
-    # Sauvegarder à l'arrêt
     save_ledger()
     logger.info("🛑 Arrêt EVA Accountant")
+
+
+async def hard_heartbeat():
+    """Signal de présence avec ROI net courant."""
+    try:
+        redis = get_redis_client()
+    except Exception:
+        redis = None
+    while True:
+        try:
+            if redis:
+                payload = {
+                    "status": "online",
+                    "ts": datetime.now().timestamp(),
+                    "expert": "accountant",
+                    "net_roi": ledger["net_roi"],
+                }
+                await redis.cache_set("eva.accountant.status", payload, ttl_seconds=10)
+        except Exception:
+            pass
+        await asyncio.sleep(2.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -104,7 +174,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="EVA Accountant API",
     description="L'Auditeur Financier - THE HIVE",
-    version="0.1.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -120,218 +190,242 @@ app.add_middleware(InternalAuthMiddleware)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ÉTAT FINANCIER & PERSISTANCE
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-# État financier global en mémoire
-financial_state: dict = {
-    "gross_profit": 0.0,
-    "tax_provision": 0.0,
-    "operating_expenses": 0.0,
-    "net_roi": 0.0,
-    "expenses_detail": [],
-}
-
-
-def save_ledger():
-    """Sauvegarde l'état financier sur disque (fichier JSON)."""
-    try:
-        with open(LEDGER_FILE, "w", encoding="utf-8") as f:
-            json.dump(financial_state, f, indent=4, default=str)
-        logger.info("💾 Ledger sauvegardé")
-    except Exception as e:
-        logger.error(f"❌ Erreur sauvegarde ledger: {e}")
-
-
-def load_ledger():
-    """
-    Charge le ledger depuis le disque.
-
-    Si le fichier n'existe pas, démarre avec un état vierge.
-    """
-    global financial_state
-    if os.path.exists(LEDGER_FILE):
-        try:
-            with open(LEDGER_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                financial_state.update(data)
-            logger.info("📂 Ledger chargé avec succès")
-        except Exception as e:
-            logger.error(f"❌ Erreur chargement ledger: {e}")
-    else:
-        logger.info("🆕 Aucun ledger trouvé, démarrage à zéro.")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TÂCHES DE FOND
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-async def hard_heartbeat():
-    """
-    Signal de présence pour l'Orchestrateur Core.
-
-    Inclut le ROI net courant dans le payload pour le monitoring.
-    """
-    redis = get_redis_client()
-    while True:
-        try:
-            payload = {
-                "status": "online",
-                "ts": datetime.now().timestamp(),
-                "expert": "accountant",
-                "net_roi": financial_state["net_roi"],
-            }
-            await redis.cache_set("eva.accountant.status", payload, ttl_seconds=10)
-        except Exception as e:
-            logger.error(f"Heartbeat error: {e}")
-        await asyncio.sleep(2.0)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-@app.get("/health", response_model=BaseHealthResponse, tags=["Système"])
+@app.get("/health", tags=["Système"])
 async def health():
-    """Vérifie la santé du module Accountant."""
-    return BaseHealthResponse(status="online")
-
-
-@app.get("/report", tags=["Comptabilité"])
-async def get_report():
-    """
-    Bilan financier consolidé.
-
-    Returns:
-        dict: Résumé (brut, taxes, dépenses, net) + détail des dépenses.
-    """
     return {
-        "summary": {
-            "gross": financial_state["gross_profit"],
-            "tax": financial_state["tax_provision"],
-            "expenses": financial_state["operating_expenses"],
-            "net": financial_state["net_roi"],
-        },
-        "expenses": financial_state["expenses_detail"],
-        "timestamp": datetime.now().isoformat(),
+        "status": "online",
+        "service": "accountant",
+        "net_roi": ledger["net_roi"],
     }
 
 
-@app.post("/expense", tags=["Comptabilité"])
+@app.get("/report", tags=["Bilan"])
+async def get_report():
+    """Bilan financier consolidé."""
+    return {
+        "gross_profit": ledger["gross_profit"],
+        "total_taxes": ledger["total_taxes"],
+        "total_expenses": ledger["total_expenses"],
+        "net_roi": ledger["net_roi"],
+        "expense_count": len(ledger["expenses"]),
+        "pnl_entries": len(ledger["pnl_history"]),
+        "currency": ledger["currency"],
+        "generated_at": datetime.now().isoformat(),
+    }
+
+
+@app.post("/expense", tags=["Dépenses"])
 async def register_expense(expense: OperatingExpense):
-    """
-    Enregistre une nouvelle dépense d'exploitation.
-
-    Recalcule automatiquement le ROI net après enregistrement.
-
-    Args:
-        expense (OperatingExpense): Détails de la dépense.
-
-    Returns:
-        dict: Statut et nouveau ROI net.
-    """
-    financial_state["operating_expenses"] += expense.amount
-    financial_state["expenses_detail"].append(expense.model_dump())
-
-    # Recalcul ROI
-    financial_state["net_roi"] = (
-        financial_state["gross_profit"]
-        - financial_state["tax_provision"]
-        - financial_state["operating_expenses"]
-    )
-
+    """Enregistre une dépense d'exploitation et recalcule le ROI net."""
+    entry = expense.model_dump(mode="json")
+    ledger["expenses"].append(entry)
+    ledger["total_expenses"] += expense.amount
+    ledger["net_roi"] = ledger["gross_profit"] - ledger["total_taxes"] - ledger["total_expenses"]
     save_ledger()
-    logger.info(f"💸 Dépense enregistrée : {expense.description} ({expense.amount} €)")
-    return {"status": "recorded", "new_net_roi": financial_state["net_roi"]}
+    logger.info(f"💸 Dépense: {expense.description} — {expense.amount}€ ({expense.category})")
+    return {"status": "registered", "net_roi": ledger["net_roi"]}
 
 
-class PnLReport(BaseModel):
-    """Bilan quotidien ou PnL envoyé par le Banker"""
-    timestamp: datetime = Field(default_factory=datetime.now)
-    symbol: str = "GLOBAL"
-    profit_loss: float
-    balance: float
-    equity: float
+@app.get("/expenses", tags=["Dépenses"])
+async def list_expenses(category: str = Query(default=""), limit: int = Query(default=50, ge=1, le=500)):
+    """Liste les dépenses d'exploitation, filtrable par catégorie."""
+    expenses = ledger["expenses"]
+    if category:
+        expenses = [e for e in expenses if e.get("category") == category]
+    return {"expenses": expenses[-limit:], "total": len(expenses)}
 
-@app.post("/pnl", tags=["Trading"])
+
+@app.post("/pnl", tags=["PnL"])
 async def receive_pnl(report: PnLReport):
     """
-    Reçoit les mises à jour de PnL du Banker (E.V.A).
-    Vérifie le Max Drawdown Journalier (ex: 4%).
+    Reçoit les mises à jour de PnL du Banker.
+    Vérifie le Max Drawdown Journalier (4%).
     """
-    financial_state["gross_profit"] += report.profit_loss
-    
-    # 1. Update High Water Mark & Current Drawdown
-    if report.equity > financial_state.get("high_water_mark", 0):
-        financial_state["high_water_mark"] = report.equity
-        financial_state["current_drawdown_pct"] = 0.0
+    entry = report.model_dump(mode="json")
+    ledger["pnl_history"].append(entry)
+
+    # Mise à jour du profit brut
+    if report.profit_loss > 0:
+        ledger["gross_profit"] += report.profit_loss
+
+    # Check drawdown journalier
+    alert = None
+    if ledger["daily_start_balance"] is None:
+        ledger["daily_start_balance"] = report.balance
     else:
-        if financial_state.get("high_water_mark", 0) > 0:
-            dd_amount = financial_state["high_water_mark"] - report.equity
-            financial_state["current_drawdown_pct"] = (dd_amount / financial_state["high_water_mark"]) * 100
-            
-    # Max Drawdown record
-    if financial_state.get("current_drawdown_pct", 0) > financial_state.get("max_drawdown_pct", 0):
-        financial_state["max_drawdown_pct"] = financial_state["current_drawdown_pct"]
+        start = ledger["daily_start_balance"]
+        if start > 0:
+            drawdown = (start - report.equity) / start
+            if drawdown >= DAILY_DRAWDOWN_LIMIT:
+                alert = {
+                    "type": "DRAWDOWN_LIMIT",
+                    "drawdown_percent": round(drawdown * 100, 2),
+                    "limit_percent": DAILY_DRAWDOWN_LIMIT * 100,
+                    "message": f"🚨 DRAWDOWN {drawdown*100:.1f}% ≥ {DAILY_DRAWDOWN_LIMIT*100}% — KILL SWITCH recommandé",
+                }
+                logger.warning(alert["message"])
 
-    # 2. Daily Drawdown Limit Check (Default 4.0%)
-    MAX_DAILY_DD = float(os.getenv("MAX_DD_DAILY", "4.0"))
-    
-    if financial_state.get("current_drawdown_pct", 0) >= MAX_DAILY_DD:
-        logger.error(f"🚨 HARD LIMIT BREACH! Drawdown: {financial_state['current_drawdown_pct']:.2f}% (Limit: {MAX_DAILY_DD}%)")
-        redis = get_redis_client()
-        if redis:
-            payload = {
-                "command": "GLOBAL_STOP",
-                "issuer": "accountant",
-                "reason": f"Max Daily Drawdown Reached: {financial_state['current_drawdown_pct']:.2f}%",
-                "timestamp": datetime.now().isoformat()
-            }
-            # Broadcast on the swarm command channel
-            await redis.publish("eva.all.swarm_command", payload)
-            logger.critical("🛑 SENT GLOBAL_STOP TO ALL EXPERTS")
-
-    # Recalcul ROI Net
-    financial_state["net_roi"] = (
-        financial_state["gross_profit"]
-        - financial_state["tax_provision"]
-        - financial_state["operating_expenses"]
-    )
-
+    ledger["net_roi"] = ledger["gross_profit"] - ledger["total_taxes"] - ledger["total_expenses"]
     save_ledger()
-    return {"status": "pnl_recorded", "drawdown_pct": financial_state.get("current_drawdown_pct", 0)}
 
-@app.post("/sync-ledger", tags=["Comptabilité"])
+    response = {"status": "received", "net_roi": ledger["net_roi"]}
+    if alert:
+        response["alert"] = alert
+    return response
+
+
+@app.post("/sync", tags=["Bilan"])
 async def sync_with_compliance(data: dict):
     """
     Synchronise les données avec le Keeper (Compliance).
 
-    Met à jour les profits bruts et les provisions fiscales, puis
-    recalcule le ROI net.
-
-    Args:
-        data (dict): Données du Compliance (total_profit, total_tax).
-
-    Returns:
-        dict: Statut de synchronisation et ROI net actualisé.
+    Met à jour les profits bruts et provisions fiscales.
     """
-    # Si le profit vient du compliance, on ne l'écrase pas violemment, on synchronise
-    # Mais par sécurité pour ce POC, on garde gross_profit localement maître s'il est plus grand
-    compliance_profit = data.get("total_profit", 0.0)
-    if compliance_profit > financial_state["gross_profit"]:
-        financial_state["gross_profit"] = compliance_profit
-        
-    financial_state["tax_provision"] = data.get("total_tax", 0.0)
-
-    # Recalcul ROI
-    financial_state["net_roi"] = (
-        financial_state["gross_profit"]
-        - financial_state["tax_provision"]
-        - financial_state["operating_expenses"]
-    )
-
+    if "total_profit" in data:
+        ledger["gross_profit"] = data["total_profit"]
+    if "total_tax" in data:
+        ledger["total_taxes"] = data["total_tax"]
+    ledger["net_roi"] = ledger["gross_profit"] - ledger["total_taxes"] - ledger["total_expenses"]
     save_ledger()
-    return {"status": "synchronized", "net_roi": financial_state["net_roi"]}
+    return {"status": "synced", "net_roi": ledger["net_roi"]}
+
+
+# ─── PROJECTIONS ──────────────────────────────────────────────────────────────
+
+
+@app.post("/projections", tags=["Projections"])
+async def get_projections(request: ProjectionRequest):
+    """
+    Projections financières sur N mois.
+
+    Basées sur le ROI actuel, le taux de croissance estimé,
+    et les dépenses récurrentes.
+    """
+    current_roi = ledger["net_roi"]
+    monthly_expenses = ledger["total_expenses"] / max(1, len(set(
+        e.get("timestamp", "")[:7] for e in ledger["expenses"]
+    ))) if ledger["expenses"] else 0
+
+    projections = []
+    cumulated = current_roi
+    for month in range(1, request.months + 1):
+        growth = cumulated * request.growth_rate if request.growth_rate else 0
+        expenses = monthly_expenses if request.include_expenses else 0
+        cumulated += growth - expenses
+        projections.append({
+            "month": month,
+            "projected_roi": round(cumulated, 2),
+            "growth": round(growth, 2),
+            "expenses": round(expenses, 2),
+        })
+
+    return {
+        "current_roi": current_roi,
+        "growth_rate": request.growth_rate,
+        "monthly_expenses": round(monthly_expenses, 2),
+        "projections": projections,
+    }
+
+
+# ─── EXPORT ───────────────────────────────────────────────────────────────────
+
+
+@app.get("/export", tags=["Export"])
+async def export_data(format: str = Query(default="json", description="Format: json, csv")):
+    """Exporte les données comptables en JSON ou CSV."""
+    if format == "csv":
+        lines = ["date,type,amount,category,description"]
+        for e in ledger["expenses"]:
+            lines.append(f"{e.get('timestamp','')},expense,{e.get('amount',0)},{e.get('category','')},{e.get('description','')}")
+        for p in ledger["pnl_history"]:
+            lines.append(f"{p.get('timestamp','')},pnl,{p.get('profit_loss',0)},{p.get('symbol','')},PnL Update")
+        csv_content = "\n".join(lines)
+        return JSONResponse(
+            content={"format": "csv", "data": csv_content, "rows": len(lines) - 1},
+            headers={"Content-Type": "application/json"},
+        )
+
+    return {
+        "format": "json",
+        "data": {
+            "summary": {
+                "gross_profit": ledger["gross_profit"],
+                "total_taxes": ledger["total_taxes"],
+                "total_expenses": ledger["total_expenses"],
+                "net_roi": ledger["net_roi"],
+            },
+            "expenses": ledger["expenses"],
+            "pnl_history": ledger["pnl_history"],
+        },
+        "exported_at": datetime.now().isoformat(),
+    }
+
+
+# ─── DASHBOARD ────────────────────────────────────────────────────────────────
+
+
+@app.get("/dashboard", tags=["Dashboard"])
+async def get_dashboard():
+    """Tableau de bord financier consolidé."""
+    # Répartition des dépenses par catégorie
+    expense_by_category: dict[str, float] = {}
+    for e in ledger["expenses"]:
+        cat = e.get("category", "other")
+        expense_by_category[cat] = expense_by_category.get(cat, 0) + e.get("amount", 0)
+
+    # PnL tendance (dernières entrées)
+    recent_pnl = ledger["pnl_history"][-10:]
+
+    return {
+        "summary": {
+            "gross_profit": ledger["gross_profit"],
+            "total_taxes": ledger["total_taxes"],
+            "total_expenses": ledger["total_expenses"],
+            "net_roi": ledger["net_roi"],
+            "currency": ledger["currency"],
+        },
+        "expenses_by_category": expense_by_category,
+        "recent_pnl": recent_pnl,
+        "expense_count": len(ledger["expenses"]),
+        "pnl_count": len(ledger["pnl_history"]),
+    }
+
+
+# ─── DEVISE ───────────────────────────────────────────────────────────────────
+
+
+@app.post("/currency/convert", tags=["Devises"])
+async def convert_currency(conversion: CurrencyConversion):
+    """
+    Conversion de devises simplifiée (taux fixes).
+
+    En production, utiliser un service comme ExchangeRate-API.
+    """
+    rates = {
+        ("EUR", "USD"): 1.09,
+        ("USD", "EUR"): 0.917,
+        ("EUR", "GBP"): 0.855,
+        ("GBP", "EUR"): 1.17,
+        ("EUR", "CHF"): 0.96,
+        ("CHF", "EUR"): 1.04,
+    }
+
+    key = (conversion.from_currency.upper(), conversion.to_currency.upper())
+    rate = rates.get(key)
+
+    if rate is None:
+        return {"status": "error", "message": f"Paire {key} non supportée. Paires: {list(rates.keys())}"}
+
+    converted = round(conversion.amount * rate, 2)
+    return {
+        "original": conversion.amount,
+        "from": conversion.from_currency,
+        "to": conversion.to_currency,
+        "rate": rate,
+        "converted": converted,
+        "mode": "FIXED_RATE",
+    }

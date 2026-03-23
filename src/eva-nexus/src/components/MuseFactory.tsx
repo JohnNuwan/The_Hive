@@ -1,418 +1,236 @@
-import { useState, useEffect } from 'react';
+﻿import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Activity, Camera, Film, Gauge, Image, Lock, RefreshCw, Sparkles } from 'lucide-react'
+
 import {
-    Zap, Image, Video, Film, TrendingUp,
-    Power, RefreshCw, Lock, Eye, ChevronDown, ChevronUp,
-    Clock, Target, Download, PlayCircle
-} from 'lucide-react';
+    checkNodeHealth,
+    getMuseNiches,
+    getMuseNicheScores,
+    getMuseStats,
+    type MuseNiche,
+    type MuseStats,
+    type NodeHealth,
+} from '../services/api'
 
-// ─── Types ──────────────────────────────────────────────────────────────────
-
-interface Niche {
-    id: string;
-    label: string;
-    description: string;
-    base_prompt?: string;
-    enabled: boolean;
-    is_nsfw: boolean;
-    post_interval_hours: number;
-    recommended_loras: { filename: string; strength: number }[];
-    trend_score?: number;
+function formatPercent(score?: number): string {
+    if (typeof score !== 'number' || Number.isNaN(score)) {
+        return 'indisponible'
+    }
+    return `${Math.round(score * 100)}%`
 }
 
-type ContentType = 'image' | 'video';
+function HealthBadge({ status }: { status: string }) {
+    const tone = status === 'online'
+        ? 'text-matrix border-matrix/20 bg-matrix/10'
+        : status === 'degraded'
+            ? 'text-cyber-amber border-cyber-amber/20 bg-cyber-amber/10'
+            : 'text-cyber-pink border-cyber-pink/20 bg-cyber-pink/10'
 
-// ─── Main Component ───────────────────────────────────────────────────────────
+    return <span className={`px-3 py-1 text-[9px] font-black uppercase tracking-[0.18em] border ${tone}`}>{status}</span>
+}
 
-export default function MuseFactory() {
-    const MUSE_API = 'http://192.168.1.5:9100';
-
-    const [niches, setNiches] = useState<Niche[]>([]);
-    const [trendScores, setTrendScores] = useState<Record<string, number>>({});
-    const [selectedNiche, setSelectedNiche] = useState<Niche | null>(null);
-    const [contentType, setContentType] = useState<ContentType>('image');
-    const [prompt, setPrompt] = useState('');
-    const [privateMode, setPrivateMode] = useState(false);
-    const [faceSwap, setFaceSwap] = useState(false);
-    const [loading, setLoading] = useState(false);
-    const [loadingScores, setLoadingScores] = useState(false);
-    const [outputUrl, setOutputUrl] = useState<string | null>(null);
-    const [outputType, setOutputType] = useState<'image' | 'video'>('image');
-    const [expanded, setExpanded] = useState<string | null>(null);
-    const [autoMode, setAutoMode] = useState(false);
-
-    // Load niches from API
-    useEffect(() => {
-        fetch(`${MUSE_API}/niches`)
-            .then(r => r.json())
-            .then(data => {
-                const loaded: Niche[] = data.niches || [];
-                setNiches(loaded);
-                if (loaded.length > 0) setSelectedNiche(loaded[0]);
-            })
-            .catch(() => {
-                // Fallback hardcoded niches while API loads
-                const fallback: Niche[] = [
-                    { id: 'girlfriend', label: '💕 Girlfriend Experience', description: 'Sweet, intimate, candid', enabled: true, is_nsfw: false, post_interval_hours: 6, recommended_loras: [] },
-                    { id: 'fitness', label: '🏋️ Fitness & Athletic', description: 'Sport, athletic, energetic', enabled: true, is_nsfw: false, post_interval_hours: 8, recommended_loras: [] },
-                    { id: 'dominatrice', label: '⛓️ Dominatrice', description: 'BDSM dominant, latex, leather', enabled: true, is_nsfw: true, post_interval_hours: 12, recommended_loras: [] },
-                    { id: 'soumise', label: '🎀 Douce & Soumise', description: 'Shy, submissive, pastel', enabled: true, is_nsfw: true, post_interval_hours: 10, recommended_loras: [] },
-                    { id: 'pied', label: '🦶 Foot Fetish', description: 'Elegant feet, pedicure, close-up', enabled: true, is_nsfw: false, post_interval_hours: 12, recommended_loras: [] },
-                    { id: 'rousse', label: '🦊 Rousse', description: 'Red hair, freckles, natural', enabled: true, is_nsfw: false, post_interval_hours: 8, recommended_loras: [] },
-                    { id: 'petite', label: '🌸 Petite & Cute', description: 'Small frame, playful, kawaii', enabled: true, is_nsfw: false, post_interval_hours: 8, recommended_loras: [] },
-                    { id: 'milf', label: '👑 MILF & Mature', description: 'Mature, confident, elegant', enabled: true, is_nsfw: false, post_interval_hours: 10, recommended_loras: [] },
-                    { id: 'cosplay', label: '🎮 Cosplay & Anime', description: 'Gaming, anime, costume', enabled: true, is_nsfw: false, post_interval_hours: 12, recommended_loras: [] },
-                    { id: 'furry', label: '🦊 Furry Anthro', description: 'Anthropomorphic art', enabled: true, is_nsfw: false, post_interval_hours: 12, recommended_loras: [] },
-                ];
-                setNiches(fallback);
-                setSelectedNiche(fallback[0]);
-            });
-    }, []);
-
-    const loadTrendScores = async () => {
-        setLoadingScores(true);
-        try {
-            const res = await fetch(`${MUSE_API}/niches/scores`);
-            const data = await res.json();
-            setTrendScores(data.scores || {});
-        } catch (e) {
-            console.error('Could not load trend scores', e);
-        } finally {
-            setLoadingScores(false);
-        }
-    };
-
-    const nichesWithScores = niches
-        .map(n => ({ ...n, trend_score: trendScores[n.id] }))
-        .sort((a, b) => (b.trend_score ?? 0) - (a.trend_score ?? 0));
-
-    const handleGenerate = async () => {
-        if (!selectedNiche || !prompt.trim()) return;
-        setLoading(true);
-        setOutputUrl(null);
-
-        const finalPrompt = privateMode
-            ? `${selectedNiche.base_prompt ?? prompt}, nsfw, boudoir, seductive, extremely intimate, private selfie`
-            : prompt || selectedNiche.description;
-
-        try {
-            if (contentType === 'image') {
-                const res = await fetch(`${MUSE_API}/generate/influencer`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        influencer_id: 'inf-001',
-                        prompt: finalPrompt,
-                        onlyfans_mode: privateMode,
-                        use_faceswap: faceSwap,
-                        niche_id: selectedNiche.id,
-                    }),
-                });
-                if (!res.ok) throw new Error(await res.text());
-                const blob = await res.blob();
-                setOutputUrl(URL.createObjectURL(blob));
-                setOutputType('image');
-            } else {
-                const res = await fetch(`${MUSE_API}/generate/video`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        prompt: finalPrompt,
-                        niche_id: selectedNiche.id,
-                        use_faceswap: faceSwap,
-                        influencer_id: 'inf-001',
-                    }),
-                });
-                if (!res.ok) throw new Error(await res.text());
-                const blob = await res.blob();
-                setOutputUrl(URL.createObjectURL(blob));
-                setOutputType('video');
-            }
-        } catch (e: any) {
-            console.error(e);
-            alert(`Error: ${e.message}`);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const TrendBar = ({ score }: { score?: number }) => {
-        const pct = score !== undefined ? Math.round(score * 100) : 0;
-        const color = pct > 80 ? '#00ff41' : pct > 60 ? '#ffd700' : '#ff6b35';
-        return (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
-                <div style={{ flex: 1, height: '3px', background: '#1a1a2e', borderRadius: '2px' }}>
-                    <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: '2px', transition: 'width 0.6s ease' }} />
-                </div>
-                {score !== undefined && <span style={{ fontSize: '10px', color, fontFamily: 'monospace', minWidth: '28px' }}>{pct}%</span>}
-            </div>
-        );
-    };
+function MetricCard({ label, value, meta, tone = 'matrix' }: { label: string; value: string; meta?: string; tone?: 'matrix' | 'cyan' | 'amber' }) {
+    const toneClass = {
+        matrix: 'text-matrix',
+        cyan: 'text-cyber-cyan',
+        amber: 'text-cyber-amber',
+    }[tone]
 
     return (
-        <div style={{ display: 'flex', height: '100%', gap: '16px', padding: '16px', background: '#060611', color: '#e0e0e0', fontFamily: "'Inter', sans-serif" }}>
-
-            {/* LEFT — Niche Roster */}
-            <div style={{ width: '340px', display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto' }}>
-
-                {/* Header */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <Target size={14} color="#00ff41" />
-                        <span style={{ fontSize: '12px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase' }}>Niche Roster</span>
-                    </div>
-                    <div style={{ display: 'flex', gap: '6px' }}>
-                        <button
-                            onClick={loadTrendScores}
-                            disabled={loadingScores}
-                            style={{ background: 'none', border: '1px solid #1a2a3a', borderRadius: '4px', padding: '4px 8px', color: '#888', cursor: 'pointer', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
-                        >
-                            <RefreshCw size={10} style={{ animation: loadingScores ? 'spin 1s linear infinite' : 'none' }} />
-                            {loadingScores ? 'Analyse...' : 'Score marché'}
-                        </button>
-                    </div>
-                </div>
-
-                {/* Niche Cards */}
-                {nichesWithScores.map(niche => (
-                    <div
-                        key={niche.id}
-                        onClick={() => { setSelectedNiche(niche); setPrompt(niche.description); }}
-                        style={{
-                            background: selectedNiche?.id === niche.id ? '#0d1f35' : '#0a0a1a',
-                            border: `1px solid ${selectedNiche?.id === niche.id ? '#00ff41' : '#1a2a3a'}`,
-                            borderRadius: '6px',
-                            padding: '10px 12px',
-                            cursor: 'pointer',
-                            transition: 'all 0.15s ease',
-                        }}
-                    >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '13px', fontWeight: 600 }}>{niche.label}</span>
-                            <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                                {niche.is_nsfw && (
-                                    <span style={{ fontSize: '9px', background: '#2a0a2a', color: '#ff69b4', border: '1px solid #4a0a4a', borderRadius: '3px', padding: '1px 4px' }}>NSFW</span>
-                                )}
-                                <Clock size={10} color="#555" />
-                                <span style={{ fontSize: '10px', color: '#555' }}>{niche.post_interval_hours}h</span>
-                            </div>
-                        </div>
-                        <p style={{ fontSize: '11px', color: '#666', margin: '3px 0 0', lineHeight: 1.4 }}>{niche.description}</p>
-                        <TrendBar score={niche.trend_score} />
-                    </div>
-                ))}
-            </div>
-
-            {/* CENTER — Generator */}
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '12px', overflowY: 'auto' }}>
-
-                <div style={{ fontSize: '12px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Zap size={14} />
-                    Studio — {selectedNiche?.label || 'Sélectionne une niche'}
-                </div>
-
-                {/* Content Type Toggle */}
-                <div style={{ display: 'flex', background: '#0a0a1a', border: '1px solid #1a2a3a', borderRadius: '6px', padding: '3px' }}>
-                    {(['image', 'video'] as ContentType[]).map(type => (
-                        <button
-                            key={type}
-                            onClick={() => setContentType(type)}
-                            style={{
-                                flex: 1, border: 'none', borderRadius: '4px',
-                                background: contentType === type ? '#00ff41' : 'none',
-                                color: contentType === type ? '#000' : '#555',
-                                padding: '7px', cursor: 'pointer', fontSize: '12px',
-                                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
-                                fontWeight: contentType === type ? 700 : 400
-                            }}
-                        >
-                            {type === 'image' ? <Image size={13} /> : <Film size={13} />}
-                            {type === 'image' ? 'Image' : 'Vidéo (AnimateDiff)'}
-                        </button>
-                    ))}
-                </div>
-
-                {/* Prompt */}
-                <div>
-                    <label style={{ fontSize: '11px', color: '#444', letterSpacing: '1px', display: 'block', marginBottom: '6px' }}>PROMPT</label>
-                    <textarea
-                        value={prompt}
-                        onChange={e => setPrompt(e.target.value)}
-                        rows={3}
-                        placeholder={selectedNiche?.description || 'Décris le contenu à générer...'}
-                        style={{
-                            width: '100%', background: '#0a0a1a', border: '1px solid #1a2a3a', borderRadius: '6px',
-                            color: '#c0c0c0', padding: '10px 12px', fontSize: '13px', resize: 'vertical',
-                            outline: 'none', boxSizing: 'border-box', lineHeight: 1.5
-                        }}
-                    />
-                </div>
-
-                {/* Toggles */}
-                <div style={{ display: 'flex', gap: '10px' }}>
-
-                    {/* Private Mode */}
-                    <div
-                        onClick={() => setPrivateMode(v => !v)}
-                        style={{
-                            flex: 1, padding: '10px 14px', borderRadius: '6px', cursor: 'pointer',
-                            border: `1px solid ${privateMode ? '#ff1493' : '#1a2a3a'}`,
-                            background: privateMode ? '#1a0015' : '#0a0a1a',
-                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                        }}
-                    >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <Lock size={13} color={privateMode ? '#ff1493' : '#444'} />
-                            <div>
-                                <div style={{ fontSize: '12px', color: privateMode ? '#ff1493' : '#888' }}>Contenu Privé</div>
-                                <div style={{ fontSize: '10px', color: '#444' }}>Mode OnlyFans / NSFW</div>
-                            </div>
-                        </div>
-                        <div style={{ width: '34px', height: '18px', background: privateMode ? '#ff1493' : '#1a2a3a', borderRadius: '9px', position: 'relative', transition: 'all 0.2s' }}>
-                            <div style={{ position: 'absolute', top: '2px', left: privateMode ? '16px' : '2px', width: '14px', height: '14px', background: '#fff', borderRadius: '50%', transition: 'all 0.2s' }} />
-                        </div>
-                    </div>
-
-                    {/* Face Swap */}
-                    <div
-                        onClick={() => setFaceSwap(v => !v)}
-                        style={{
-                            flex: 1, padding: '10px 14px', borderRadius: '6px', cursor: 'pointer',
-                            border: `1px solid ${faceSwap ? '#00bfff' : '#1a2a3a'}`,
-                            background: faceSwap ? '#001a2a' : '#0a0a1a',
-                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                        }}
-                    >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <Eye size={13} color={faceSwap ? '#00bfff' : '#444'} />
-                            <div>
-                                <div style={{ fontSize: '12px', color: faceSwap ? '#00bfff' : '#888' }}>ReActor FaceSwap</div>
-                                <div style={{ fontSize: '10px', color: '#444' }}>Injecte l'identité</div>
-                            </div>
-                        </div>
-                        <div style={{ width: '34px', height: '18px', background: faceSwap ? '#00bfff' : '#1a2a3a', borderRadius: '9px', position: 'relative', transition: 'all 0.2s' }}>
-                            <div style={{ position: 'absolute', top: '2px', left: faceSwap ? '16px' : '2px', width: '14px', height: '14px', background: '#fff', borderRadius: '50%', transition: 'all 0.2s' }} />
-                        </div>
-                    </div>
-                </div>
-
-                {/* LoRAs Info */}
-                {selectedNiche && selectedNiche.recommended_loras.length > 0 && (
-                    <div style={{ background: '#0a0a1a', border: '1px solid #1a2a3a', borderRadius: '6px', padding: '10px 12px' }}>
-                        <div style={{ fontSize: '11px', color: '#444', letterSpacing: '1px', marginBottom: '6px' }}>LORAS ACTIFS</div>
-                        {selectedNiche.recommended_loras.map((l, i) => (
-                            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#666', padding: '2px 0' }}>
-                                <span>{l.filename}</span>
-                                <span style={{ color: '#00ff41' }}>×{l.strength}</span>
-                            </div>
-                        ))}
-                    </div>
-                )}
-
-                {/* Generate Button */}
-                <button
-                    onClick={handleGenerate}
-                    disabled={loading || !selectedNiche}
-                    style={{
-                        padding: '14px', border: 'none', borderRadius: '6px',
-                        background: loading ? '#1a2a3a' : '#00ff41',
-                        color: loading ? '#444' : '#000', fontWeight: 700,
-                        fontSize: '13px', cursor: loading ? 'wait' : 'pointer',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
-                        letterSpacing: '1px', textTransform: 'uppercase',
-                        transition: 'all 0.2s'
-                    }}
-                >
-                    {loading ? (
-                        <><RefreshCw size={14} style={{ animation: 'spin 1s linear infinite' }} /> Génération en cours...</>
-                    ) : contentType === 'video' ? (
-                        <><PlayCircle size={14} /> Générer Clip Vidéo</>
-                    ) : (
-                        <><Zap size={14} /> Générer Image</>
-                    )}
-                </button>
-            </div>
-
-            {/* RIGHT — Output */}
-            <div style={{ width: '380px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-
-                <div style={{ fontSize: '12px', letterSpacing: '2px', color: '#00ff41', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <TrendingUp size={14} />
-                    Studio Output
-                </div>
-
-                <div style={{
-                    flex: 1, minHeight: '380px', background: '#0a0a1a', border: '1px solid #1a2a3a',
-                    borderRadius: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    position: 'relative', overflow: 'hidden'
-                }}>
-                    {outputUrl ? (
-                        outputType === 'video' ? (
-                            <video controls src={outputUrl} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
-                        ) : (
-                            <img src={outputUrl} alt="Output" style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
-                        )
-                    ) : (
-                        <div style={{ textAlign: 'center', color: '#2a2a3a' }}>
-                            {loading ? (
-                                <div>
-                                    <div style={{ width: '40px', height: '40px', border: '2px solid #1a2a3a', borderTop: '2px solid #00ff41', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 12px' }} />
-                                    <div style={{ fontSize: '12px', color: '#444' }}>{contentType === 'video' ? 'AnimateDiff generating...' : 'ComfyUI generating...'}</div>
-                                </div>
-                            ) : (
-                                <>
-                                    {contentType === 'video' ? <Video size={40} style={{ marginBottom: '12px' }} /> : <Image size={40} style={{ marginBottom: '12px' }} />}
-                                    <div style={{ fontSize: '12px' }}>En attente de génération</div>
-                                </>
-                            )}
-                        </div>
-                    )}
-                </div>
-
-                {outputUrl && (
-                    <a
-                        href={outputUrl}
-                        download={outputType === 'video' ? 'hive_clip.mp4' : 'hive_img.png'}
-                        style={{
-                            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
-                            padding: '10px', border: '1px solid #1a2a3a', borderRadius: '6px',
-                            color: '#00ff41', textDecoration: 'none', fontSize: '12px'
-                        }}
-                    >
-                        <Download size={13} /> Télécharger
-                    </a>
-                )}
-
-                {/* Niche Stats */}
-                {selectedNiche && (
-                    <div style={{ background: '#0a0a1a', border: '1px solid #1a2a3a', borderRadius: '6px', padding: '12px' }}>
-                        <div style={{ fontSize: '11px', color: '#444', letterSpacing: '1px', marginBottom: '8px' }}>NICHE STATS</div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                                <span style={{ color: '#666' }}>Posting Schedule</span>
-                                <span style={{ color: '#aaa' }}>Every {selectedNiche.post_interval_hours}h</span>
-                            </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                                <span style={{ color: '#666' }}>Content Rating</span>
-                                <span style={{ color: selectedNiche.is_nsfw ? '#ff69b4' : '#00ff41' }}>{selectedNiche.is_nsfw ? 'NSFW' : 'SFW'}</span>
-                            </div>
-                            {trendScores[selectedNiche.id] !== undefined && (
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                                    <span style={{ color: '#666' }}>Trend Score</span>
-                                    <span style={{ color: '#ffd700' }}>{Math.round((trendScores[selectedNiche.id] || 0) * 100)}%</span>
-                                </div>
-                            )}
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                                <span style={{ color: '#666' }}>LoRAs chargés</span>
-                                <span style={{ color: '#aaa' }}>{selectedNiche.recommended_loras.length}</span>
-                            </div>
-                        </div>
-                    </div>
-                )}
-            </div>
-
-            <style>{`
-        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-      `}</style>
+        <div className="cyber-panel hud-corners p-4">
+            <div className="text-[8px] uppercase tracking-[0.2em] text-white/20 mb-1">{label}</div>
+            <div className={`text-xl font-bold ${toneClass}`}>{value}</div>
+            {meta ? <div className="text-[9px] text-white/25 mt-2">{meta}</div> : null}
         </div>
-    );
+    )
+}
+
+export default function MuseFactory() {
+    const [health, setHealth] = useState<NodeHealth | null>(null)
+    const [stats, setStats] = useState<MuseStats | null>(null)
+    const [niches, setNiches] = useState<MuseNiche[]>([])
+    const [scores, setScores] = useState<Record<string, number>>({})
+    const [isLoading, setIsLoading] = useState(true)
+    const [isRefreshing, setIsRefreshing] = useState(false)
+
+    const loadMuse = useCallback(async (refreshScores = false) => {
+        if (refreshScores) {
+            setIsRefreshing(true)
+        } else {
+            setIsLoading(true)
+        }
+
+        const [healthPayload, statsPayload, nichesPayload, scoresPayload] = await Promise.all([
+            checkNodeHealth('Muse', '/api/muse/health'),
+            getMuseStats(),
+            getMuseNiches(),
+            getMuseNicheScores(),
+        ])
+
+        setHealth(healthPayload)
+        setStats(statsPayload)
+        setNiches(nichesPayload)
+        setScores(scoresPayload)
+        setIsLoading(false)
+        setIsRefreshing(false)
+    }, [])
+
+    useEffect(() => {
+        void loadMuse()
+        const interval = setInterval(() => {
+            void loadMuse(true)
+        }, 20000)
+        return () => clearInterval(interval)
+    }, [loadMuse])
+
+    const rankedNiches = useMemo(
+        () => [...niches].sort((left, right) => (scores[right.id] || 0) - (scores[left.id] || 0)),
+        [niches, scores],
+    )
+
+    return (
+        <div className="h-full overflow-y-auto p-4 space-y-4 animate-fade-in">
+            <div className="cyber-panel hud-corners p-5 lg:p-6">
+                <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                    <div>
+                        <div className="flex items-center gap-3 text-cyber-cyan/70">
+                            <Camera size={18} />
+                            <span className="text-[10px] uppercase tracking-[0.2em] font-bold">Muse Factory</span>
+                        </div>
+                        <h2 className="mt-3 font-display text-2xl font-black tracking-[0.08em] text-white/85">
+                            Cockpit media en lecture seule
+                        </h2>
+                        <p className="mt-3 max-w-3xl text-[11px] leading-relaxed text-white/30">
+                            Cette vue expose l etat du service Muse, les niches actives, les scores de marche et le modele courant. Les actions de generation restent volontairement desactivees pendant le run trading.
+                        </p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                        <HealthBadge status={health?.status || 'offline'} />
+                        <button
+                            onClick={() => void loadMuse(true)}
+                            disabled={isRefreshing}
+                            className="cyber-btn text-[9px] px-3 py-2 disabled:opacity-40"
+                        >
+                            <RefreshCw size={12} className={isRefreshing ? 'animate-spin' : ''} />
+                            <span>Rafraichir</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-2 xl:grid-cols-5 gap-3">
+                <MetricCard label="Service" value={health?.status || 'offline'} tone={health?.status === 'online' ? 'matrix' : 'amber'} meta={`latence ${health?.latency ?? -1} ms`} />
+                <MetricCard label="Generations" value={String(stats?.total_generations || 0)} tone="matrix" />
+                <MetricCard label="Templates" value={String(stats?.available_templates || 0)} tone="cyan" />
+                <MetricCard label="Mode" value={stats?.mode || 'indisponible'} tone="amber" />
+                <MetricCard label="Modele" value={stats?.model || 'indisponible'} tone="matrix" />
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-[0.95fr_1.05fr] gap-4">
+                <section className="cyber-panel hud-corners p-4 lg:p-5 space-y-4">
+                    <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-matrix/50">
+                        <Gauge size={14} />
+                        <span>Statut de fonctionnement</span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="border border-white/[0.05] bg-white/[0.02] p-4">
+                            <div className="text-[8px] uppercase tracking-[0.18em] text-white/20">Mode d execution</div>
+                            <div className="mt-2 text-[12px] font-bold text-cyber-cyan">Observation / dry-run</div>
+                            <div className="mt-2 text-[9px] text-white/25">Les commandes de generation sont masquees pendant le run.</div>
+                        </div>
+                        <div className="border border-white/[0.05] bg-white/[0.02] p-4">
+                            <div className="text-[8px] uppercase tracking-[0.18em] text-white/20">Etat du modele</div>
+                            <div className="mt-2 text-[12px] font-bold text-matrix">{stats?.model || 'indisponible'}</div>
+                            <div className="mt-2 text-[9px] text-white/25">Mode {stats?.mode || 'indisponible'}</div>
+                        </div>
+                    </div>
+                    <div className="border border-white/[0.05] bg-black/30 p-4">
+                        <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-cyber-amber/60 mb-2">
+                            <Lock size={14} />
+                            <span>Garde-fou run actif</span>
+                        </div>
+                        <div className="text-[10px] text-white/35 leading-relaxed">
+                            Les ecrans media restent consultatifs tant que le trainer occupe les ressources critiques. Les generations image, video et viralisation ne sont pas exposees ici pendant cette fenetre.
+                        </div>
+                    </div>
+                </section>
+
+                <section className="cyber-panel hud-corners p-4 lg:p-5 space-y-4">
+                    <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-cyber-cyan/60">
+                        <Sparkles size={14} />
+                        <span>Niches et scores de marche</span>
+                    </div>
+                    {isLoading ? (
+                        <div className="border border-dashed border-white/10 p-4 text-[10px] text-white/25">Chargement de l inventaire Muse...</div>
+                    ) : rankedNiches.length === 0 ? (
+                        <div className="border border-dashed border-white/10 p-4 text-[10px] text-white/25">Inventaire des niches indisponible.</div>
+                    ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {rankedNiches.map((niche) => (
+                                <div key={niche.id} className="border border-white/[0.05] bg-white/[0.02] p-4 space-y-3">
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div>
+                                            <div className="text-[11px] font-bold text-white/75">{niche.label}</div>
+                                            <div className="text-[8px] text-white/20 uppercase tracking-[0.15em]">{niche.id}</div>
+                                        </div>
+                                        <span className={`px-2 py-0.5 text-[8px] uppercase tracking-[0.18em] border ${niche.is_nsfw ? 'border-cyber-pink/20 bg-cyber-pink/10 text-cyber-pink/70' : 'border-matrix/20 bg-matrix/10 text-matrix/70'}`}>
+                                            {niche.is_nsfw ? 'nsfw' : 'safe'}
+                                        </span>
+                                    </div>
+                                    <p className="text-[10px] text-white/35 leading-relaxed">{niche.description}</p>
+                                    <div className="grid grid-cols-2 gap-2 text-[9px] text-white/30">
+                                        <div className="border border-white/[0.05] bg-black/30 p-2">
+                                            <div className="uppercase tracking-[0.15em] text-white/20">Score</div>
+                                            <div className="mt-1 text-cyber-cyan font-bold">{formatPercent(scores[niche.id])}</div>
+                                        </div>
+                                        <div className="border border-white/[0.05] bg-black/30 p-2">
+                                            <div className="uppercase tracking-[0.15em] text-white/20">Cadence</div>
+                                            <div className="mt-1 text-matrix font-bold">{niche.post_interval_hours}h</div>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2 flex-wrap text-[8px] uppercase tracking-[0.15em]">
+                                        <span className={`px-2 py-0.5 border ${niche.enabled ? 'border-matrix/20 bg-matrix/10 text-matrix/70' : 'border-white/10 bg-white/[0.03] text-white/30'}`}>
+                                            {niche.enabled ? 'active' : 'inactive'}
+                                        </span>
+                                        <span className="px-2 py-0.5 border border-white/10 bg-white/[0.03] text-white/30">
+                                            loras {niche.recommended_loras.length}
+                                        </span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </section>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="cyber-panel hud-corners p-4">
+                    <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-white/40 mb-3">
+                        <Image size={14} />
+                        <span>Atelier image</span>
+                    </div>
+                    <div className="text-[10px] text-white/35 leading-relaxed">
+                        Mode consultation. Les prompts et generations image restent hors execution pendant le run trading.
+                    </div>
+                </div>
+                <div className="cyber-panel hud-corners p-4">
+                    <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-white/40 mb-3">
+                        <Film size={14} />
+                        <span>Atelier video</span>
+                    </div>
+                    <div className="text-[10px] text-white/35 leading-relaxed">
+                        Les pipelines AnimateDiff / media sont visibles via le service, mais aucune generation n est declenchee depuis cet ecran.
+                    </div>
+                </div>
+                <div className="cyber-panel hud-corners p-4">
+                    <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-white/40 mb-3">
+                        <Activity size={14} />
+                        <span>Publication</span>
+                    </div>
+                    <div className="text-[10px] text-white/35 leading-relaxed">
+                        Historique de publication indisponible sur cette API. L ecran reste donc strictement observatoire pour eviter toute fausse metrique.
+                    </div>
+                </div>
+            </div>
+        </div>
+    )
 }

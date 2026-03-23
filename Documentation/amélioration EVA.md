@@ -1,4 +1,4 @@
-📝 CAHIER DES CHARGES TECHNIQUES MIS À JOUR (v3.0 - "The Sovereign Stack")
+ CAHIER DES CHARGES TECHNIQUES MIS À JOUR (v3.0 - "The Sovereign Stack")
 Voici le plan d'attaque révisé avec ces nouvelles technologies "Futuristes".
 1. Stack Matérielle & Logicielle (Optimisée RTX 2060)
 • Moteur d'Inférence : vLLM (supporte nativement EAGLE-3 et les kernels Marlin pour l'AWQ 4-bit).
@@ -7,46 +7,46 @@ Voici le plan d'attaque révisé avec ces nouvelles technologies "Futuristes".
 • Mémoire : HippoRAG 2 (Graphe Neo4j + Vecteurs Qdrant) piloté par Mem0.
 2. Architecture des Experts (Refonte)
 Expert
-	
+
 Ancienne Tech
-	
+
 Nouvelle Tech 2026
-	
+
 Avantage
 CORE
-	
+
 Llama 3
-	
+
 Gemma 3 (4B)
-	
+
 Multimodal natif (voit & lit), 128k contexte.
 BANKER
-	
+
 DeepSeek-Coder
-	
+
 Gemma 3 + EAGLE-3
-	
+
 Latence divisée par 3 pour le scalping.
 SHADOW
-	
+
 GraphRAG
-	
+
 HippoRAG 2
-	
+
 Découverte de liens cachés type "hippocampe".
 BUILDER
-	
+
 Custom Scripts
-	
+
 OpenClaw Skills
-	
+
 Utilisation de skills pré-codés (Vercel, Git).
 MEMORY
-	
+
 Vector DB
-	
+
 Mem0 + Graph
-	
+
 Gestion automatique des conflits de mémoire.
 3. Sprints de Développement (Mise à jour)
 Sprint 1 : Le Moteur Hybride (Semaine 1)
@@ -72,8 +72,8 @@ Dans votre fichier de configuration (probablement dans .env ou config.toml gér�
 2. Ce que vous utilisez maintenant (Le "Low-Cost World Model")
 Tant que DreamerV3 est "endormi", vous le remplacez par l'approche légère de la v3.0 :
 • Au lieu de "Rêver" (DreamerV3) : Qui simule des millions de scénarios dans un espace latent (très lourd en VRAM).
-• Vous faites de la "Planification" (OpenClaw + RLM) : L'agent utilise EAGLE-3 pour générer rapidement 3 ou 4 scénarios textuels ("Si je fais ça, il se passe quoi ?") et choisit le meilleur. C'est beaucoup moins coûteux et ça tourne sur la 2060.
-3. Pourquoi garder le code maintenant ?
+ Vous faites de la "Planification" (OpenClaw + RLM) : L'agent utilise EAGLE-3 pour gnrer rapidement 3 ou 4 scnarios textuels ("Si je fais a, il se passe quoi -") et choisit le meilleur. C'est beaucoup moins coteux et a tourne sur la 2060.
+3. Pourquoi garder le code maintenant -
 Il est crucial de garder les traces de DreamerV3 et MuZero dans le module eva-lab pour deux raisons :
 1. L'Architecture : Votre système est conçu pour être modulaire (MoE). Si vous supprimez le code maintenant, vous devrez recréer toute l'interface entre le "Cerveau" (Core) et le "Laboratoire" (Lab) plus tard.
 2. Le "Shadow Learning" : Même si vous ne lancez pas l'entraînement, vous pouvez commencer à collecter les données (logs de trading, réactions du marché) dans le format qu'attend DreamerV3. Ainsi, le jour où vous branchez la 3090, elle aura déjà des mois de données formatées pour apprendre immédiatement.

@@ -48,20 +48,32 @@ class RedisClient:
         Raises:
             ConnectionError: Si le serveur Redis est inaccessible.
         """
-        if self._client is None:
-            self._client = redis.from_url(self.url, decode_responses=True)
-            await self._client.ping()
-            logger.info(f"Connecté à Redis: {self.url}")
+        if self._client is not None:
+            try:
+                await self._client.ping()
+                return
+            except Exception:
+                await self.disconnect()
+
+        self._client = redis.from_url(self.url, decode_responses=True)
+        await self._client.ping()
+        logger.info(f"Connecté à Redis: {self.url}")
 
     async def disconnect(self) -> None:
         """
         Ferme proprement la connexion Redis et les abonnements PubSub.
         """
         if self._pubsub:
-            await self._pubsub.close()
+            try:
+                await self._pubsub.close()
+            finally:
+                self._pubsub = None
         if self._client:
-            await self._client.close()
-            logger.info("Déconnecté de Redis")
+            try:
+                await self._client.close()
+                logger.info("Déconnecté de Redis")
+            finally:
+                self._client = None
 
     async def publish(self, channel: str, message: AgentMessage | dict) -> int:
         """

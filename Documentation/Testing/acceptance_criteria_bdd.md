@@ -1,13 +1,13 @@
 # Critères d'Acceptation BDD (Given/When/Then)
 
-> **Format**: Gherkin (Étant donné/Quand/Alors)  
+> **Format**: Gherkin (Étant donné/Quand/Alors)
 > **Version**: 1.0.0
 
 Ce document enrichit les User Stories avec des critères d'acceptation testables.
 
 ---
 
-## 📋 Story 00 : Infrastructure
+##  Story 00 : Infrastructure
 
 ### TASK-00-01 : Installation Proxmox
 
@@ -128,7 +128,7 @@ Fonctionnalité: Configuration Repository
 
 ---
 
-## 📋 Story 01 : EVA Core
+##  Story 01 : EVA Core
 
 ### TASK-01-01 : Routeur LangGraph
 
@@ -146,7 +146,7 @@ Fonctionnalité: Classification d'Intent
     Et le message doit être routé vers "banker"
 
   Scénario: Fallback Chat Général
-    Étant donné qu'un utilisateur envoie "Comment ça va aujourd'hui ?"
+    tant donn qu'un utilisateur envoie "Comment a va aujourd'hui -"
     Quand le Core traite le message
     Alors l'intent doit être classifié comme "GENERAL_CHAT"
     Et la réponse doit venir directement du Core
@@ -175,7 +175,7 @@ Fonctionnalité: Mémoire RAG
 
 ---
 
-## 📋 Story 02 : The Banker
+##  Story 02 : The Banker
 
 ### TASK-02-01 : Validation Risque
 
@@ -255,7 +255,7 @@ Fonctionnalité: Exécution de Trade
 
 ---
 
-## 📋 Story 03 : The Sentinel
+##  Story 03 : The Sentinel
 
 ### TASK-03-01 : Détection d'Intrusion
 
@@ -281,7 +281,7 @@ Fonctionnalité: Détection Brute Force
 
 ---
 
-## 📋 Story 04 : The Nexus (UI)
+##  Story 04 : The Nexus (UI)
 
 ### TASK-04-01 : Commande Vocale
 
@@ -293,7 +293,7 @@ Fonctionnalité: Entrée Vocale
 
   Scénario: Reconnaissance Vocale
     Étant donné que le microphone est actif
-    Quand je dis "EVA, quel est le statut de mes positions ?"
+    Quand je dis "EVA, quel est le statut de mes positions -"
     Alors l'audio doit être transcrit
     Et le texte doit être envoyé à l'API Core
     Et je dois recevoir une réponse audio

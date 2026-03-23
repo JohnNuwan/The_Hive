@@ -1,17 +1,17 @@
 # Fixtures de Test - THE HIVE
 
-> **Version**: 1.0.0  
+> **Version**: 1.0.0
 > **Usage**: Données de test pour développement et CI/CD
 
 ---
 
-## 📋 Vue d'Ensemble
+##  Vue d'Ensemble
 
 Ce fichier contient les données de test standardisées pour tous les composants.
 
 ---
 
-## 💰 Fixtures Trading
+##  Fixtures Trading
 
 ### Comptes de Test
 
@@ -164,7 +164,7 @@ POSITION_EURO_EN_PERTE = {
 
 ---
 
-## 🧠 Fixtures EVA Core
+##  Fixtures EVA Core
 
 ### Messages Chat
 
@@ -186,7 +186,7 @@ MESSAGE_INTENT_TRADING = {
 MESSAGE_INTENT_CHAT = {
     "id": UUID("b2b2b2b2-c3c3-d4d4-e5e5-f6f6f6f6f6f6"),
     "session_id": UUID("11111111-2222-3333-4444-555555555555"),
-    "content": "Comment ça va aujourd'hui EVA ?",
+    "content": "Comment a va aujourd'hui EVA -",
     "role": "user",
     "timestamp": datetime.now(),
     "metadata": {
@@ -265,7 +265,7 @@ INTENT_MEMORY_RECALL = {
 
 ---
 
-## 🛡️ Fixtures Sécurité
+##  Fixtures Sécurité
 
 ### Événements de Sécurité
 
@@ -322,7 +322,7 @@ EVENEMENT_KERNEL_INTEGRITY_OK = {
 
 ---
 
-## ⚙️ Fixtures Système
+##  Fixtures Système
 
 ### Métriques Hardware
 
@@ -364,7 +364,7 @@ METRIQUES_CPU_RAM = {
 
 ---
 
-## 🔧 Utilisation dans les Tests
+##  Utilisation dans les Tests
 
 ### Exemple pytest
 
@@ -386,14 +386,14 @@ def compte_demo():
 def test_ordre_valide_approuve(validateur_risque, compte_demo):
     """Un ordre avec risque < 1% doit être approuvé"""
     resultat = validateur_risque.valider(ORDRE_VALIDE_BUY_GOLD, compte_demo)
-    
+
     assert resultat.approuve == True
     assert resultat.raison is None
 
 def test_ordre_risque_excessif_rejete(validateur_risque, compte_demo):
     """Un ordre avec risque > 1% doit être rejeté (Loi 2)"""
     resultat = validateur_risque.valider(ORDRE_RISQUE_EXCESSIF, compte_demo)
-    
+
     assert resultat.approuve == False
     assert resultat.code_erreur == "EVA-TRD-002"
     assert "Loi 2" in resultat.reference_constitution

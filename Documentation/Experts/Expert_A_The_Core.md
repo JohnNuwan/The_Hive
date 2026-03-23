@@ -7,13 +7,13 @@
 
 ## 2. Architecture Technique
 *   **Modèle LLM** : `Meta-Llama-3-8B-Instruct` (Quantized AWQ 4-bit).
-    *   *Pourquoi ?* Compromis idéal vitesse/intelligence pour le routing.
+    *   *Pourquoi -* Compromis idal vitesse/intelligence pour le routing.
 *   **Framework** : **LangGraph** (State Machine).
 *   **Entrées** :
     *   `HumanMessage` (Texte/Voix transcrite).
     *   `SystemEvent` (Alerte Sentinel, Info Banker).
 *   **Sorties** :
-    *   `Route` (Vers quel expert ?).
+    *   `Route` (Vers quel expert -).
     *   `FinalResponse` (Synthèse pour l'humain).
 
 ## 3. Workflow Décisionnel (The Router)
@@ -27,7 +27,7 @@
 ## 4. Gestion de la Mémoire (RAG)
 *   **Court Terme** : Fenêtre de contexte du LLM (8k tokens).
 *   **Long Terme** : Interrogation systématique de Qdrant avant de répondre.
-    *   *Query*: "Qu'a dit l'utilisateur sur le Gold hier ?" -> Retrieval -> Context Injection.
+    *   *Query*: "Qu'a dit l'utilisateur sur le Gold hier -" -> Retrieval -> Context Injection.
 
 ## 5. Roadmap Dév
 *   **J1** : Setup vLLM avec Llama-3-8B.

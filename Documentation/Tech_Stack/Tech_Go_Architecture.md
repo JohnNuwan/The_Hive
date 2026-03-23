@@ -1,9 +1,9 @@
 # Tech Architect: GO (The Network)
 
-## 📌 Rôle
+##  Rôle
 Go (Golang) est utilisé pour la **Connectivité Temps Réel**, les **Microservices légers**, et l'**Infrastructure Réseau**. C'est le "Système Circulatoire".
 
-## 🏗️ Composants Go
+##  Composants Go
 
 ### 1. The Nexus Backend (`eva-nexus`)
 *   **Type** : Serveur WebSocket / HTTP.
@@ -22,9 +22,9 @@ Go (Golang) est utilisé pour la **Connectivité Temps Réel**, les **Microservi
     *   La vérification des Tokens JWT/Macaroons.
     *   La compression Gzip.
 
-## 🛡️ Règles de Dév Go
+##  Règles de Dév Go
 *   **Simplicité** : Code idiomatique ("Effective Go"). Pas d'abstraction inutile.
 *   **Channels** : Utilisation des channels pour la synchronisation, pas de Mutex si possible ("Share memory by communicating").
 
-## 🔄 Interaction
+##  Interaction
 *   Go sert de "Buffer" entre le monde extérieur (Internet sale) et le monde intérieur (Python/Rust). Il absorbe les attaques DDoS légères.

@@ -1,83 +1,138 @@
-import sys
-import io
+﻿"""Execution securisee de scripts Python pour `eva-builder`."""
+
+from __future__ import annotations
+
+import ast
 import contextlib
+import io
 import logging
 import traceback
-import ast
-from typing import Dict, Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Whitelist of safe modules
 SAFE_MODULES = {
+    "collections",
+    "datetime",
+    "functools",
+    "itertools",
+    "json",
     "math",
     "random",
-    "datetime",
-    "json",
     "re",
-    "collections",
-    "itertools",
-    "functools",
     "typing",
 }
 
-# Dangerous attributes to block via AST check
 DANGEROUS_ATTRS = {
-    "__class__",
     "__bases__",
-    "__subclasses__",
-    "__globals__",
-    "__code__",
-    "__closure__",
-    "__func__",
-    "__self__",
-    "__module__",
-    "__dict__",
     "__builtins__",
-    "func_globals",
-    "func_code",
-    "func_closure",
+    "__class__",
+    "__closure__",
+    "__code__",
+    "__dict__",
+    "__func__",
+    "__globals__",
     "__import__",
+    "__module__",
+    "__self__",
+    "__subclasses__",
+    "func_closure",
+    "func_code",
+    "func_globals",
 }
 
-class SecurityScanner(ast.NodeVisitor):
-    def visit_Attribute(self, node):
-        if node.attr in DANGEROUS_ATTRS:
-            raise SecurityError(f"Access to attribute '{node.attr}' is forbidden.")
-        self.generic_visit(node)
+BLOCKED_CALLS = {
+    "compile",
+    "eval",
+    "exec",
+    "globals",
+    "input",
+    "locals",
+    "open",
+}
 
-    def visit_Name(self, node):
-        if node.id == "__builtins__":
-             raise SecurityError("Access to '__builtins__' is forbidden.")
-        self.generic_visit(node)
 
 class SecurityError(Exception):
-    pass
+    """Signale une violation de la politique de securite CyberForge."""
 
-def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
-    if name in SAFE_MODULES:
-        return __import__(name, globals, locals, fromlist, level)
-    raise ImportError(f"Import of module '{name}' is restricted by CyberForge security policy.")
+
+class SecurityScanner(ast.NodeVisitor):
+    """Analyse statiquement le code avant execution."""
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        """Bloque l'acces aux attributs introspectifs dangereux."""
+        if node.attr in DANGEROUS_ATTRS:
+            raise SecurityError(f"Acces interdit a l'attribut '{node.attr}'.")
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        """Bloque l'acces direct a `__builtins__`."""
+        if node.id == "__builtins__":
+            raise SecurityError("Acces interdit a '__builtins__'.")
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        """Autorise uniquement une liste reduite de modules."""
+        for alias in node.names:
+            root_name = alias.name.split(".", maxsplit=1)[0]
+            if root_name not in SAFE_MODULES:
+                raise SecurityError(f"Import interdit: '{alias.name}'.")
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        """Controle les imports `from ... import ...`."""
+        module_name = (node.module or "").split(".", maxsplit=1)[0]
+        if module_name not in SAFE_MODULES:
+            raise SecurityError(f"Import interdit: '{node.module}'.")
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        """Bloque certaines primitives dangereuses meme si elles etaient exposees."""
+        if isinstance(node.func, ast.Name) and node.func.id in BLOCKED_CALLS:
+            raise SecurityError(f"Appel interdit: '{node.func.id}'.")
+        self.generic_visit(node)
+
 
 class SafeLogger:
-    """Safe wrapper for logging to preventing access to underlying Logger internals."""
-    def info(self, msg):
-        logger.info(msg)
+    """Expose un logger minimal sans introspection du logger Python reel."""
 
-    def error(self, msg):
-        logger.error(msg)
+    def info(self, message: str) -> None:
+        """Journalise un message informatif."""
+        logger.info(message)
 
-    def warning(self, msg):
-        logger.warning(msg)
+    def error(self, message: str) -> None:
+        """Journalise un message d'erreur."""
+        logger.error(message)
 
-    def debug(self, msg):
-        logger.debug(msg)
+    def warning(self, message: str) -> None:
+        """Journalise un avertissement."""
+        logger.warning(message)
 
-# Whitelist of safe builtins
-# Removed: object, type, getattr, setattr, delattr, property, staticmethod, classmethod, super
-# to prevent introspection and attribute manipulation bypasses.
+    def debug(self, message: str) -> None:
+        """Journalise un message de debug."""
+        logger.debug(message)
+
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    """Autorise uniquement les imports declares comme surs."""
+    root_name = name.split(".", maxsplit=1)[0]
+    if root_name in SAFE_MODULES:
+        return __import__(name, globals, locals, fromlist, level)
+    raise ImportError(f"Import restreint par la politique CyberForge: '{name}'.")
+
+
 SAFE_BUILTINS = {
     "__import__": guarded_import,
+    "Exception": Exception,
+    "AttributeError": AttributeError,
+    "ImportError": ImportError,
+    "IndexError": IndexError,
+    "KeyError": KeyError,
+    "NameError": NameError,
+    "RuntimeError": RuntimeError,
+    "SyntaxError": SyntaxError,
+    "TypeError": TypeError,
+    "ValueError": ValueError,
     "abs": abs,
     "all": all,
     "any": any,
@@ -126,87 +181,78 @@ SAFE_BUILTINS = {
     "str": str,
     "sum": sum,
     "tuple": tuple,
-    "vars": vars, # vars() without args is locals(), with args is __dict__. Might be risky if allowed on objects.
     "zip": zip,
-    "Exception": Exception,
-    "ValueError": ValueError,
-    "TypeError": TypeError,
-    "IndexError": IndexError,
-    "KeyError": KeyError,
-    "AttributeError": AttributeError,
-    "NameError": NameError,
-    "SyntaxError": SyntaxError,
-    "RuntimeError": RuntimeError,
-    "ImportError": ImportError,
 }
 
-# vars(obj) is equivalent to obj.__dict__. Since we block __dict__, we should block vars on objects.
-# vars() returns locals.
-# To be safe, let's remove vars from builtins.
-if "vars" in SAFE_BUILTINS:
-    del SAFE_BUILTINS["vars"]
 
 class CyberForge:
-    """
-    La Forge de l'Architecte.
-    Permet à E.V.A. de coder et tester ses propres scripts d'analyse.
-    """
-    def __init__(self):
-        self.history = []
+    """Execute et trace des scripts Python dans un environnement restreint."""
 
-    def _validate_context(self, context: Dict) -> None:
-        """Ensures context only contains safe data types."""
-        ALLOWED_TYPES = (str, int, float, bool, list, dict, tuple, set, type(None))
+    def __init__(self) -> None:
+        """Initialise l'historique des executions."""
+        self.history: list[dict[str, Any]] = []
+
+    def _validate_context(self, context: dict[str, Any]) -> None:
+        """Verifie que le contexte ne contient que des types simples.
+
+        Args:
+            context (dict[str, Any]): Variables injectees dans l'execution.
+
+        Raises:
+            SecurityError: Si une valeur du contexte a un type interdit.
+        """
+        allowed_types = (str, int, float, bool, list, dict, tuple, set, type(None))
         for key, value in context.items():
-            if not isinstance(value, ALLOWED_TYPES):
-                raise SecurityError(f"Context variable '{key}' has unsafe type '{type(value).__name__}'.")
+            if not isinstance(value, allowed_types):
+                raise SecurityError(
+                    f"Variable de contexte '{key}' avec type interdit '{type(value).__name__}'.",
+                )
 
-    def forge_and_test(self, script_name: str, code: str, context: Optional[Dict] = None) -> Dict[str, Any]:
+    def forge_and_test(
+        self,
+        script_name: str,
+        code: str,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Execute un script dans un environnement Python restreint.
+
+        Args:
+            script_name (str): Nom logique du script.
+            code (str): Code source a executer.
+            context (dict[str, Any] | None): Variables simples injectees.
+
+        Returns:
+            dict[str, Any]: Resultat d'execution avec sortie et erreur eventuelle.
         """
-        Exécute un script généré dans un environnement supervisé et restreint.
-        """
-        logger.info(f"CyberForge: Forging script '{script_name}'...")
-        
-        # Capture de la sortie standard
+        logger.info("CyberForge: demarrage du script '%s'.", script_name)
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
-        
         success = False
         output = ""
         error = None
 
         try:
-            # 1. AST Static Analysis
-            tree = ast.parse(code)
-            scanner = SecurityScanner()
-            scanner.visit(tree)
+            syntax_tree = ast.parse(code, filename=script_name)
+            SecurityScanner().visit(syntax_tree)
 
-            # 2. Prepare restricted execution environment
             exec_globals = {"__builtins__": SAFE_BUILTINS.copy()}
-
             if context:
                 self._validate_context(context)
                 exec_globals.update(context)
+            exec_globals.update({"__name__": "__cyberforge__", "logger": SafeLogger()})
 
-            # Provide safe logger wrapper
-            exec_globals.update({
-                "__name__": "__cyberforge__",
-                "logger": SafeLogger(),
-            })
-
-            # 3. Execution supervisée
+            compiled_code = compile(syntax_tree, script_name, "exec")
             with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
-                exec(code, exec_globals)
-            
+                exec(compiled_code, exec_globals)
+
             success = True
             output = stdout_capture.getvalue()
-            logger.info(f"CyberForge: Script '{script_name}' executed successfully.")
+            logger.info("CyberForge: script '%s' execute avec succes.", script_name)
         except Exception:
-            success = False
-            # Capture both validation errors and execution errors
             error = traceback.format_exc()
-            logger.error(f"CyberForge Error in '{script_name}': {error}")
+            logger.error("CyberForge: erreur sur le script '%s': %s", script_name, error)
         finally:
+            stderr_text = stderr_capture.getvalue()
             stdout_capture.close()
             stderr_capture.close()
 
@@ -214,11 +260,12 @@ class CyberForge:
             "script_name": script_name,
             "success": success,
             "output": output,
-            "error": error
+            "stderr": stderr_text,
+            "error": error,
         }
-        
         self.history.append(result)
         return result
 
-    def get_forge_history(self):
+    def get_forge_history(self) -> list[dict[str, Any]]:
+        """Retourne l'historique des executions CyberForge."""
         return self.history

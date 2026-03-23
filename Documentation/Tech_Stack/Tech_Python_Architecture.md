@@ -1,9 +1,9 @@
 # Tech Architect: PYTHON (The Brain)
 
-## 📌 Rôle
+##  Rôle
 Python est le langage principal pour l'**Orchestration**, l'**IA**, et la **Logique Métier**. C'est le "Système Nerveux" d'EVA.
 
-## 🏗️ Architecture des Services
+##  Architecture des Services
 Nous utilisons une architecture modulaire basée sur `FastAPI` et `LangGraph`.
 
 ### 1. Structure du Code
@@ -35,6 +35,6 @@ Nous utilisons une architecture modulaire basée sur `FastAPI` et `LangGraph`.
 *   **Docstrings** : Google Style.
 *   **Erreurs** : Pas de `try/except: pass`. Log every error.
 
-## 🔄 Interaction
+##  Interaction
 *   Python ne parle **JAMAIS** directement au Hardware critique (Reset Switch) ou à la Mémoire Protégée (Vault) sans passer par l'API du Kernel Rust.
 *   Python **PEUT** appeler des librairies C++/Rust via `PyO3` si besoin de performance extrême.

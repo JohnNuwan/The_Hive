@@ -3,7 +3,7 @@ Voici comment les nouvelles sources modifient l'architecture d'E.V.A. pour en fa
 1. Remplacer le Cerveau du "Banker" : Adieu LSTM, Bonjour TFT-GNN
 Les nouvelles sources indiquent que les modèles classiques (LSTM/RNN) sont obsolètes pour la prévision moderne car ils "oublient" les dépendances à long terme et gèrent mal les relations entre actifs.
 • L'architecture cible : TFT-GNN (Hybrid Temporal Fusion Transformer + Graph Neural Network).
-    ◦ Pourquoi ? Votre protocole "Hydra" gère plusieurs actifs (Gold, US30, etc.). Un simple Transformer traite chaque actif isolément. Une architecture GNN (Graph Neural Network) modélise les relations invisibles entre eux (ex: si NVDA chute, quel impact sur le NASDAQ et le Bitcoin ?).
+     Pourquoi - Votre protocole "Hydra" gre plusieurs actifs (Gold, US30, etc.). Un simple Transformer traite chaque actif isolment. Une architecture GNN (Graph Neural Network) modlise les relations invisibles entre eux (ex: si NVDA chute, quel impact sur le NASDAQ et le Bitcoin -).
     ◦ L'avantage E.V.A. : Selon les benchmarks, le modèle hybride TFT-GNN surclasse toutes les autres méthodes (ARIMA, LSTM, Transformer seul) en capturant à la fois la dynamique temporelle (TFT) et la structure du marché (GNN).
     ◦ Action Git : Dans eva-banker, remplacez les modèles séquentiels par une implémentation PyTorch Geometric pour le GNN couplée à un Temporal Fusion Transformer.
 2. Intégrer le Risque dans le Cerveau (Adaptive Risk Metrics)
@@ -18,49 +18,49 @@ Puisque E.V.A. ne fait pas de HFT, elle a le temps de "réfléchir" la nuit ou e
 4. Vérification de la "Pensée" : Sondes Linéaires (Othello-GPT)
 Puisque vous utilisez des LLM (Llama 3) pour l'orchestration, vous courrez le risque d'hallucination (ex: le LLM invente une justification pour un trade hasardeux).
 • L'apport de la recherche Othello : Les papiers sur Othello-GPT prouvent que l'on peut entraîner de petites "Sondes Linéaires" (Linear Probes) pour vérifier l'état interne réel du modèle.
-• Application E.V.A. : Avant d'exécuter un trade proposé par "The Banker", une sonde légère vérifie si les activations internes du réseau neuronal sont cohérentes avec la décision (ex: "Est-ce que le modèle 'voit' vraiment une tendance haussière, ou est-ce qu'il hallucine ?"). C'est un garde-fou cognitif pour votre Loi Deux.
+ Application E.V.A. : Avant d'excuter un trade propos par "The Banker", une sonde lgre vrifie si les activations internes du rseau neuronal sont cohrentes avec la dcision (ex: "Est-ce que le modle 'voit' vraiment une tendance haussire, ou est-ce qu'il hallucine -"). C'est un garde-fou cognitif pour votre Loi Deux.
 Résumé de la nouvelle stratégie technique (Non-HFT)
 Module
-	
+
 Ancienne Piste
-	
+
 Nouvelle Recommandation (Basée sur sources)
-	
+
 Objectif
 Trading Core
-	
+
 LSTM / RNN
-	
+
 TFT-GNN (Graph + Transformer)
-	
+
 Comprendre les corrélations inter-actifs (Hydra).
 Latence
-	
+
 Optimisation C++ (HFT)
-	
+
 Gestion de flux asynchrone Python/Rust
-	
+
 Stabilité et robustesse plutôt que vitesse pure.
 Simulation
-	
+
 Backtest classique
-	
+
 World Models avec FSQ
-	
+
 Simuler des futurs alternatifs la nuit ("Rêve").
 Données
-	
+
 Prix (OHLCV)
-	
+
 Prix + VaR/CVaR + Sentiment
-	
+
 Trading conscient du risque par design.
 Sécurité
-	
+
 Kill-Switch Rust
-	
+
 Kill-Switch + Linear Probes
-	
+
 Vérifier la "sincérité" neuronale de l'IA.
 
 

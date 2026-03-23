@@ -36,6 +36,19 @@ def client(mock_redis):
     mock_self_healing.start_monitoring = AsyncMock()
 
     mock_system_monitor = MagicMock()
+    mock_autonomy_service = MagicMock()
+    mock_autonomy_service.start_monitoring = AsyncMock()
+    mock_autonomy_service.get_snapshot.return_value = {
+        "generated_at": "2026-03-11T10:00:00",
+        "posture": {
+            "status": "ready",
+            "recommended_mode": "assisted_live",
+            "blockers": [],
+        },
+    }
+    mock_autonomy_service.refresh_snapshot = AsyncMock(
+        return_value=mock_autonomy_service.get_snapshot.return_value
+    )
 
     # Patch all external services and lifespan dependencies
     with patch.object(shared.redis_client, "_redis_client", mock_redis), \
@@ -52,6 +65,7 @@ def client(mock_redis):
          patch("eva_core.main.EVAMQTTClient") as MockMQTT, \
          patch("eva_core.main.StrategyOrchestrator", return_value=mock_strategy_orchestrator), \
          patch("eva_core.main.SelfHealingService") as MockHealing, \
+         patch("eva_core.main.AutonomyService", return_value=mock_autonomy_service), \
          patch("eva_core.main.SystemMonitor", return_value=mock_system_monitor):
 
         # Configure AsyncMocks for awaited methods
@@ -75,6 +89,7 @@ def client(mock_redis):
         app.state.strategy_orchestrator = MagicMock()
         app.state.self_healing = mock_healing_instance
         app.state.system_monitor = MagicMock()
+        app.state.autonomy_service = mock_autonomy_service
 
         with TestClient(app) as c:
             yield c

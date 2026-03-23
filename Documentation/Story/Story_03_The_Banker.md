@@ -1,14 +1,14 @@
 # Story 03: The Banker (The Money)
 
-## 📌 Context
+##  Context
 The primary revenue generator. It must be robust, fast, and fail-safe.
 
-## 🎯 Objectives
+##  Objectives
 - Connect Python to MT5.
 - Implement data ingestion.
 - Execute the first "Paper Trade".
 
-## 📋 Epic/Tasks Breakdown
+##  Epic/Tasks Breakdown
 
 ### TASK-03-01: Windows VM & MT5 Setup
 - **Role**: SysAdmin

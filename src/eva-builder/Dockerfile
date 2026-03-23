@@ -9,8 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY src/shared /app/shared
+COPY src/openclaw /app/openclaw
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir /app/shared
+    && pip install --no-cache-dir aiohttp \
+    && pip install --no-cache-dir /app/shared \
+    && pip install --no-cache-dir /app/openclaw
 
 COPY src/eva-builder /app/eva-builder
 RUN pip install --no-cache-dir /app/eva-builder

@@ -193,7 +193,7 @@ def start_infrastructure():
     for i in range(15):
         try:
             import redis
-            r = redis.Redis(host="localhost", port=6379, password="devpassword", socket_timeout=2)
+            r = redis.Redis(host="localhost", port=6379, password=os.getenv("REDIS_PASSWORD", "devpassword"), socket_timeout=2)
             r.ping()
             log("Redis prêt", C.GREEN)
             return True

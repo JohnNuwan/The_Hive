@@ -60,7 +60,7 @@ export default function LoginPage() {
             <div className="relative z-10 w-full max-w-md p-6">
                 {/* Logo */}
                 <div className="text-center mb-8">
-                    <div className="text-5xl mb-3 animate-glow-pulse inline-block">🐝</div>
+                    <div className="text-5xl mb-3 animate-glow-pulse inline-block"></div>
                     <h1 className="font-display text-3xl font-black tracking-[0.3em] neon-text">THE HIVE</h1>
                     <div className="text-[9px] text-matrix/40 tracking-[0.5em] mt-1">NEURAL COMMAND INTERFACE</div>
                 </div>
@@ -98,7 +98,7 @@ export default function LoginPage() {
                             {/* Error message */}
                             {error && (
                                 <div className="p-3 border border-cyber-pink/30 bg-cyber-pink/5 text-cyber-pink text-[11px] text-center animate-fade-in">
-                                    ⚠ {error}
+                                     {error}
                                 </div>
                             )}
 
@@ -127,7 +127,7 @@ export default function LoginPage() {
                                     Mot de passe
                                 </label>
                                 <div className="flex items-center border border-matrix/15 focus-within:border-matrix focus-within:shadow-[0_0_10px_rgba(0,255,65,0.1)] transition-all bg-black/40">
-                                    <span className="text-matrix/40 text-[11px] pl-3 shrink-0">🔒</span>
+                                    <span className="text-matrix/40 text-[11px] pl-3 shrink-0"></span>
                                     <input
                                         type="password"
                                         value={password}

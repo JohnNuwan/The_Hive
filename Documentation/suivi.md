@@ -25,25 +25,25 @@ Ce document récapitule l'état actuel du système EVA et les étapes futures.
 
 ## Ce qu'il reste à faire
 
-### Sprint 3.3 : Polyglot Hardening (Performance) - 🟡 EN COURS
+### Sprint 3.3 : Polyglot Hardening (Performance) -  EN COURS
 - [x] **Sentinel (Rust)** : Hardened P2P communication (libp2p & Redis fix).
 - [ ] **Nervous (Go)** : Migration gRPC pour un routage < 1ms.
 - [ ] **Quant-Lab (Julia)** : Intégration pour simulations de portefeuille lourdes.
 
-### Sprint 3.0-Reboot (Sovereign Stack V3.0) - ✅ TERMINÉ
+### Sprint 3.0-Reboot (Sovereign Stack V3.0) -  TERMINÉ
 - [x] **Architecture** : vLLM + Gemma 3 + EAGLE-3 (Moteur Hybride).
 - [x] **Mémoire** : HippoRAG 2 (Neo4j).
 - [x] **Mémoire Suite** : Mem0 (Bridge intégré).
 - [x] **OpenClaw** : Agentivité (Kernel + Skills + Teams).
 - [x] **War Rooms** : Débat contradictoire DEFCON + Scénarios (Dojo, Council, Quiet Room).
 
-### Sprint 4 : L'Auto-Évolution (RLM) - ✅ TERMINÉ
+### Sprint 4 : L'Auto-Évolution (RLM) -  TERMINÉ
 - [x] **Evaluator** : Scan logs (regex), probes Docker, détection patterns récurrents.
 - [x] **Patcher** : Génération patches via LLM, backup/rollback, diff, auto-commit Git.
 - [x] **Evolver** : Boucle complète scan → diagnose → patch → validate → apply → learn.
 - [x] **Intégration Phoenix Protocol** : Hook Self-Healing → resurrection_events pour RLM.
 
-### Sprint 5 : World Model (Activation Conditionnelle) - ✅ TERMINÉ
+### Sprint 5 : World Model (Activation Conditionnelle) -  TERMINÉ
 - [x] **Feature Flag** : `ENABLE_DREAMER_TRAINING` dans Settings + .env.
 - [x] **Shadow Learning** : Collecte passive (buffer circulaire 10k, flush JSONL, trade/signal/probe).
 - [x] **DreamerGate** : Gating conditionnel (inference-only RTX 2060 / training RTX 3090).

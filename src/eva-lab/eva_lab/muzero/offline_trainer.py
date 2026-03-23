@@ -1,242 +1,618 @@
+﻿"""Entraine DreamerV3 hors ligne a partir des historiques de marche."""
+
+from __future__ import annotations
+
+import json
 import logging
 import os
-import glob
-import pandas as pd
-import numpy as np
-import jax
-import time
+import pickle
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Iterable
 
+import numpy as np
+import pandas as pd
+
+from eva_lab.champion_promoter import ChampionPromoter
 from eva_lab.muzero.config import MuZeroConfigV3
-from eva_lab.muzero.dreamer_trainer import DreamerTrainerJAX
 from eva_lab.muzero.dreamer_networks import make_dreamer_networks
-from eva_lab.muzero.replay_buffer import PrioritizedReplayBuffer, GameHistory
+from eva_lab.muzero.dreamer_trainer import DreamerTrainerJAX
+from eva_lab.muzero.replay_buffer import GameHistory, PrioritizedReplayBuffer
+from eva_lab.shadow_dataset import load_shadow_games
+from eva_lab.timescale_store import record_arena_result, record_training_dataset
+from eva_lab.training_status import append_training_log, mark_step_running
+from eva_lab.training_utils import load_history_frame
 from shared.indicators import IndicatorFactory
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 class OfflineTrainer:
-    def __init__(self, data_dir="data/history"):
+    """Charge les historiques et orchestre le pre-entrainement DreamerV3."""
+
+    def __init__(self, data_dir: str = "data/history") -> None:
+        """Initialise DreamerV3 avec le contexte V4 par famille et horizon.
+
+        Args:
+            data_dir (str): Dossier contenant les historiques CSV de secours.
+        """
         self.data_dir = data_dir
-        self.config = MuZeroConfigV3()
+        hidden_dims = [
+            int(value.strip())
+            for value in os.getenv("DREAMER_NETWORK_HIDDEN_DIMS", "256,256").split(",")
+            if value.strip()
+        ]
+        self.sequence_length = int(os.getenv("DREAMER_SEQUENCE_LENGTH", "64"))
+        self.sequence_stride = int(
+            os.getenv("DREAMER_SEQUENCE_STRIDE", str(max(16, self.sequence_length // 2)))
+        )
+        self.replay_capacity = int(os.getenv("DREAMER_REPLAY_MAX_GAMES", "2500"))
+        self.shadow_data_dirs = [
+            item.strip()
+            for item in os.getenv("DREAMER_SHADOW_DATA_DIRS", "data/shadow_learning").split(os.pathsep)
+            if item.strip()
+        ]
+        self.horizon = str(
+            os.getenv("DREAMER_HORIZON")
+            or os.getenv("MUZERO_HORIZON")
+            or os.getenv("DREAMER_DEFAULT_HORIZON")
+            or "scalp"
+        ).strip().lower()
+        self.config = MuZeroConfigV3(
+            horizon=self.horizon,
+            model_family=os.getenv("MUZERO_MODEL_FAMILY", "") or None,
+            batch_size=int(os.getenv("DREAMER_BATCH_SIZE", "8")),
+            hidden_state_size=int(os.getenv("DREAMER_HIDDEN_STATE_SIZE", "128")),
+            num_unroll_steps=int(os.getenv("DREAMER_NUM_UNROLL_STEPS", "3")),
+            network_hidden_dims=hidden_dims or [256, 256],
+        )
+        self.config.dreamer_max_start_states = int(os.getenv("DREAMER_MAX_START_STATES", "256"))
         self.transformed = make_dreamer_networks(self.config)
         self.trainer = DreamerTrainerJAX(self.config, self.transformed)
-        self.replay_buffer = PrioritizedReplayBuffer(max_games=5000) # Larger buffer for history
-        
-        # Init params
+        self.replay_buffer = PrioritizedReplayBuffer(max_games=self.replay_capacity)
+        self.promoter = ChampionPromoter()
+        self.weights_dir = Path(self.config.weights_path)
+        self.results_dir = Path(self.config.results_path)
+        self.weights_dir.mkdir(parents=True, exist_ok=True)
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+
         sample_obs = np.zeros((1, *self.config.observation_shape))
         self.params, _ = self.trainer.init_params(sample_obs)
         self.trainer.params["wm"] = self.params
 
-    def load_and_process_data(self):
-        """Loads CSVs, computes features, creates GameHistories."""
-        files = glob.glob(f"{self.data_dir}/*.csv")
-        logger.info(f"Found {len(files)} historical files.")
-        
-        total_steps = 0
-        
-        for file in files:
-            symbol = os.path.basename(file).split('_')[0]
-            logger.info(f"Processing {symbol} from {file}...")
-            
-            df = pd.read_csv(file)
-            
-            # Compute Indicators
-            closes = df['close'].tolist()
-            highs = df['high'].tolist()
-            lows = df['low'].tolist()
-            volumes = df['tick_volume'].tolist()
-            
-            # Batch computation if possible
-            # New Vectorized IndicatorFactory expects Pandas Series
-            
-            # Pre-compute columns (Vectorized = Instant)
-            try:
-                # Vectorized calculations for speed
-                # RSI
-                df['rsi'] = IndicatorFactory.rsi(df['close'], 14)
-                
-                # MACD
-                macd_res = IndicatorFactory.macd(df['close'])
-                df['macd'] = macd_res['macd']
-                df['macd_signal'] = macd_res['signal']
-                df['macd_hist'] = macd_res['histogram']
-                
-                # VWAP
-                df['vwap'] = IndicatorFactory.vwap(df['high'], df['low'], df['close'], df['tick_volume'])
-                
-                # OBV & Momentum
-                df['obv'] = IndicatorFactory.obv(df['close'], df['tick_volume'])
-                df['momentum'] = IndicatorFactory.momentum(df['close'])
-                df['trix'] = IndicatorFactory.trix(df['close'])
-                
-                # Stochastic
-                stoch_res = IndicatorFactory.stochastic(df['high'], df['low'], df['close'])
-                df['stoch_k'] = stoch_res['percent_k']
-                df['stoch_d'] = stoch_res['percent_d']
-                
-                # CCI & ADX
-                df['cci'] = IndicatorFactory.cci(df['high'], df['low'], df['close'])
-                adx_res = IndicatorFactory.adx(df['high'], df['low'], df['close'])
-                df['adx'] = adx_res['adx']
-                df['adx_plus_di'] = adx_res['plus_di']
-                df['adx_minus_di'] = adx_res['minus_di']
-                
-                # Ichimoku
-                ichi_res = IndicatorFactory.ichimoku(df['high'], df['low'], df['close'])
-                df['ichi_tenkan'] = ichi_res['tenkan_sen']
-                df['ichi_kijun'] = ichi_res['kijun_sen']
-                df['ichi_senkou_a'] = ichi_res['senkou_span_a']
-                df['ichi_senkou_b'] = ichi_res['senkou_span_b']
-                
-                # Fill NaN from rolling windows (start of file)
-                df = df.fillna(method='bfill').fillna(0.0)
-            except Exception as e:
-                logger.error(f"Error computing indicators for {file}: {e}")
+        self.family = str(getattr(self.config, "model_family", "") or "mixed")
+        self.dataset_descriptor = dict(getattr(self.config, "dataset_descriptor", {}) or {})
+        self.dataset_id = str(self.dataset_descriptor.get("dataset_id") or "")
+        self.dataset_source = str(getattr(self.config, "dataset_source", "csv") or "csv")
+        self.dataset_coverage = dict(getattr(self.config, "dataset_coverage", {}) or {})
+        self.feature_profile = dict(getattr(self.config, "feature_profile", {}) or {})
+        self.feature_profile_name = str(self.feature_profile.get("profile_name") or "dreamer_default")
+        self.mechanics_profile = dict(getattr(self.config, "position_mechanics_profile", {}) or {})
+        self.mechanics_profile_version = str(
+            getattr(self.config, "mechanics_profile_version", "")
+            or self.mechanics_profile.get("profile_version")
+            or "v1"
+        )
+        self.ga_status = str(os.getenv("TRAINING_GA_STATUS", "")).strip() or None
+        self.ga_generation = (
+            int(os.getenv("TRAINING_GA_GENERATION", "0"))
+            if str(os.getenv("TRAINING_GA_GENERATION", "")).strip()
+            else None
+        )
+        self.ga_trial = str(os.getenv("TRAINING_GA_TRIAL", "")).strip() or None
+        self.trial_mode = str(os.getenv("TRAINING_TRIAL_MODE", "")).strip() or self.ga_status or "full"
+        self.trial_cost_profile = (
+            str(os.getenv("TRAINING_TRIAL_COST_PROFILE", "")).strip()
+            or ("proxy" if self.trial_mode == "proxy_ga" else "full")
+        )
+        self.replay_cache_key = (
+            f"dreamer:{self.horizon}:{self.family}:{self.mechanics_profile_version}:{self.feature_profile_name}"
+        )
+        self.replay_cache_status = "cold_start"
+        self.action_counts = {"BUY": 0, "SELL": 0, "HOLD": 0}
+        self.total_steps = 0
+        self.total_shadow_games = 0
+        self.last_training_metrics: dict[str, Any] = {}
+
+    def _build_status_kwargs(self, **overrides: Any) -> dict[str, Any]:
+        """Construit le socle de statut commun pour DreamerV3.
+
+        Args:
+            **overrides (Any): Surcharges specifiques a l'etape courante.
+
+        Returns:
+            dict[str, Any]: Arguments compatibles avec ``mark_step_running``.
+        """
+        payload: dict[str, Any] = {
+            "engine": "dreamer",
+            "horizon": self.horizon,
+            "family": self.family,
+            "dataset_id": self.dataset_id or None,
+            "dataset_source": self.dataset_source or None,
+            "feature_profile": self.feature_profile_name or None,
+            "mechanics_profile_version": self.mechanics_profile_version or None,
+            "ga_status": self.ga_status,
+            "ga_generation": self.ga_generation,
+            "ga_trial": self.ga_trial,
+            "trial_mode": self.trial_mode,
+            "trial_cost_profile": self.trial_cost_profile,
+            "replay_cache_status": self.replay_cache_status,
+            "replay_cache_key": self.replay_cache_key,
+            "replay_cache_entries": self.replay_buffer.size,
+            "replay_cache_source": "local_disk",
+            "shadow_buffer_size": self.replay_buffer.size,
+            "sequence_length": self.sequence_length,
+            "sequence_stride": self.sequence_stride,
+            "world_model_steps": int(self.last_training_metrics.get("world_model_steps", 0) or 0),
+            "dataset_coverage": self.dataset_coverage,
+        }
+        payload.update(overrides)
+        return payload
+
+    def _iter_history_frames(self) -> Iterable[tuple[str, pd.DataFrame]]:
+        """Retourne les historiques compatibles pour la famille courante.
+
+        Yields:
+            Iterable[tuple[str, pd.DataFrame]]: Couple symbole/historique exploitable.
+        """
+        timeframe = str(self.config.primary_timeframe or "M5").upper()
+        for symbol in list(getattr(self.config, "symbols", []) or []):
+            frame = load_history_frame(symbol, timeframe, data_dir=self.data_dir)
+            if frame is None or frame.empty:
+                logger.warning("Historique Dreamer indisponible pour %s sur %s.", symbol, timeframe)
                 continue
-            
-            # Simulating episodes with Synthetic Actions/Rewards
-            segment_length = 200 # 200 steps per game
-            
-            # Vectorized operations for speed
-            closes_seg = df['close'].values
-            volumes_seg = df['tick_volume'].values
-            
-            for start_idx in range(0, len(df) - segment_length, segment_length):
+            yield symbol, frame.copy()
+
+    @staticmethod
+    def _compute_indicators(frame: pd.DataFrame) -> pd.DataFrame:
+        """Calcule les indicateurs utiles au pre-entrainement Dreamer.
+
+        Args:
+            frame (pd.DataFrame): Historique brut OHLCV.
+
+        Returns:
+            pd.DataFrame: Historique enrichi des indicateurs utilises.
+        """
+        enriched = frame.copy()
+        enriched["rsi"] = IndicatorFactory.rsi(enriched["close"], 14)
+        macd_res = IndicatorFactory.macd(enriched["close"])
+        enriched["macd"] = macd_res["macd"]
+        enriched["macd_signal"] = macd_res["signal"]
+        enriched["macd_hist"] = macd_res["histogram"]
+        enriched["vwap"] = IndicatorFactory.vwap(
+            enriched["high"],
+            enriched["low"],
+            enriched["close"],
+            enriched["tick_volume"],
+        )
+        enriched["obv"] = IndicatorFactory.obv(enriched["close"], enriched["tick_volume"])
+        enriched["momentum"] = IndicatorFactory.momentum(enriched["close"])
+        enriched["trix"] = IndicatorFactory.trix(enriched["close"])
+        stoch_res = IndicatorFactory.stochastic(enriched["high"], enriched["low"], enriched["close"])
+        enriched["stoch_k"] = stoch_res["percent_k"]
+        enriched["stoch_d"] = stoch_res["percent_d"]
+        enriched["cci"] = IndicatorFactory.cci(enriched["high"], enriched["low"], enriched["close"])
+        adx_res = IndicatorFactory.adx(enriched["high"], enriched["low"], enriched["close"])
+        enriched["adx"] = adx_res["adx"]
+        enriched["adx_plus_di"] = adx_res["plus_di"]
+        enriched["adx_minus_di"] = adx_res["minus_di"]
+        ichi_res = IndicatorFactory.ichimoku(enriched["high"], enriched["low"], enriched["close"])
+        enriched["ichi_tenkan"] = ichi_res["tenkan_sen"]
+        enriched["ichi_kijun"] = ichi_res["kijun_sen"]
+        enriched["ichi_senkou_a"] = ichi_res["senkou_span_a"]
+        enriched["ichi_senkou_b"] = ichi_res["senkou_span_b"]
+        return enriched.bfill().fillna(0.0)
+
+    def load_and_process_data(self) -> None:
+        """Charge les historiques, calcule les indicateurs et construit les episodes."""
+        symbols = list(getattr(self.config, "symbols", []) or [])
+        logger.info("Dreamer V4 charge %s symboles sur %s.", len(symbols), self.horizon)
+        append_training_log(
+            f"Dreamer {self.horizon}: chargement de {len(symbols)} symboles pour la famille {self.family}.",
+            source="dreamer",
+        )
+        mark_step_running(
+            "dreamer_offline",
+            phase="chargement_donnees",
+            symbol_total=len(symbols),
+            **self._build_status_kwargs(),
+        )
+
+        total_steps = 0
+        for symbol_index, (symbol, frame) in enumerate(self._iter_history_frames(), start=1):
+            logger.info("Traitement Dreamer de %s (%s/%s).", symbol, symbol_index, len(symbols))
+            append_training_log(
+                f"Dreamer {self.horizon}: preparation de {symbol} ({symbol_index}/{len(symbols)}).",
+                source="dreamer",
+            )
+            mark_step_running(
+                "dreamer_offline",
+                phase="collecte",
+                symbol=symbol,
+                symbol_index=symbol_index,
+                symbol_total=len(symbols),
+                **self._build_status_kwargs(),
+            )
+
+            try:
+                df = self._compute_indicators(frame)
+            except Exception as exc:
+                logger.error("Calcul des indicateurs impossible pour %s: %s", symbol, exc)
+                continue
+
+            segment_length = self.sequence_length
+            closes_seg = df["close"].values
+            for start_idx in range(0, len(df) - segment_length, self.sequence_stride):
                 end_idx = start_idx + segment_length
-                if end_idx > len(df): break
-                
+                if end_idx > len(df):
+                    break
+
                 seg_closes = closes_seg[start_idx:end_idx]
-                seg_vols = volumes_seg[start_idx:end_idx]
-                
                 game = GameHistory()
-                
-                # Generate random actions for the whole segment to teach the model
-                # about consequences of actions.
-                # We want balanced classes: 40% Hold, 30% Buy, 30% Sell
-                # We want balanced classes: 40% Hold, 30% Buy, 30% Sell
-                actions = np.random.choice([0, 1, 2], size=segment_length, p=[0.4, 0.3, 0.3])
-                
-                # Virtual Account for Drawdown Simulation
+                actions = np.random.choice([0, 1, 2], size=segment_length, p=[0.35, 0.325, 0.325])
                 initial_balance = 10000.0
                 balance = initial_balance
                 peak_balance = initial_balance
-                position = 0 # 1=Long, -1=Short, 0=None
+                position = 0
                 entry_price = 0.0
-                
-                for i in range(segment_length):
-                    idx = start_idx + i
-                    price = seg_closes[i]
-                    
+
+                for index_in_segment in range(segment_length):
+                    idx = start_idx + index_in_segment
+                    price = seg_closes[index_in_segment]
                     obs_vec = np.zeros(self.config.observation_shape)
-                    obs_vec[0] = price / 3000.0 # Normalize 
-                    obs_vec[1] = df['rsi'].values[idx] / 100.0
-                    
-                    # Mirroring brain.py indicator iteration exactly
+                    obs_vec[0] = price / 3000.0
+                    obs_vec[1] = df["rsi"].values[idx] / 100.0
                     features_list = [
-                        df['rsi'].values[idx],
-                        df['macd_hist'].values[idx],
-                        df['macd_signal'].values[idx],
-                        df['vwap'].values[idx],
-                        df['obv'].values[idx] / 10000.0, # Scaled down
-                        df['momentum'].values[idx],
-                        df['trix'].values[idx],
-                        df['stoch_k'].values[idx],
-                        df['stoch_d'].values[idx],
-                        df['cci'].values[idx],
-                        df['adx'].values[idx],
-                        df['adx_plus_di'].values[idx],
-                        df['adx_minus_di'].values[idx],
-                        df['ichi_tenkan'].values[idx],
-                        df['ichi_kijun'].values[idx],
-                        df['ichi_senkou_a'].values[idx],
-                        df['ichi_senkou_b'].values[idx]
+                        df["rsi"].values[idx],
+                        df["macd_hist"].values[idx],
+                        df["macd_signal"].values[idx],
+                        df["vwap"].values[idx],
+                        df["obv"].values[idx] / 10000.0,
+                        df["momentum"].values[idx],
+                        df["trix"].values[idx],
+                        df["stoch_k"].values[idx],
+                        df["stoch_d"].values[idx],
+                        df["cci"].values[idx],
+                        df["adx"].values[idx],
+                        df["adx_plus_di"].values[idx],
+                        df["adx_minus_di"].values[idx],
+                        df["ichi_tenkan"].values[idx],
+                        df["ichi_kijun"].values[idx],
+                        df["ichi_senkou_a"].values[idx],
+                        df["ichi_senkou_b"].values[idx],
                     ]
-                    
-                    for f_idx, f_val in enumerate(features_list):
-                        if f_idx + 2 < self.config.observation_shape[0]:
-                            obs_vec[f_idx + 2] = f_val
-                    
-                    action_val = actions[i]
-                    
-                    # Simulated Execution & Reward Calculation
+                    for feature_index, feature_value in enumerate(features_list):
+                        if feature_index + 2 < self.config.observation_shape[0]:
+                            obs_vec[feature_index + 2] = feature_value
+
+                    action_val = int(actions[index_in_segment])
                     reward = 0.0
-                    if i < segment_length - 1:
-                        next_price = seg_closes[i+1]
-                        ret = (next_price - price) / price * 100 # % Return
-                        
-                        if action_val == 1: # BUY
-                            reward = ret - 0.02 # Spread cost
-                            if position == 0: 
-                                position = 1; entry_price = price
-                        elif action_val == 2: # SELL
-                            reward = -ret - 0.02 # Spread cost
-                            if position == 0: 
-                                position = -1; entry_price = price
-                        elif action_val == 0: # HOLD
-                            reward = 0.0
-                            if position != 0:
-                                # Track running PNL
-                                trade_pnl = (price - entry_price) / entry_price * 100 if position == 1 else (entry_price - price) / entry_price * 100
-                                balance += (balance * trade_pnl / 100)
-                                position = 0
-                                
-                        # Update peak & drawdown
-                        if balance > peak_balance:
-                            peak_balance = balance
-                        drawdown_pct = (peak_balance - balance) / peak_balance * 100
-                        
-                        # Kill-Switch Penalty !
+                    if action_val == 1:
+                        self.action_counts["BUY"] += 1
+                    elif action_val == 2:
+                        self.action_counts["SELL"] += 1
+                    else:
+                        self.action_counts["HOLD"] += 1
+
+                    if index_in_segment < segment_length - 1:
+                        next_price = seg_closes[index_in_segment + 1]
+                        ret = (next_price - price) / max(price, 1e-9) * 100
+                        if action_val == 1:
+                            reward = ret - 0.02
+                            if position == 0:
+                                position = 1
+                                entry_price = price
+                        elif action_val == 2:
+                            reward = -ret - 0.02
+                            if position == 0:
+                                position = -1
+                                entry_price = price
+                        elif action_val == 0 and position != 0:
+                            trade_pnl = (
+                                (price - entry_price) / max(entry_price, 1e-9) * 100
+                                if position == 1
+                                else (entry_price - price) / max(entry_price, 1e-9) * 100
+                            )
+                            balance += balance * trade_pnl / 100
+                            position = 0
+
+                        peak_balance = max(peak_balance, balance)
+                        drawdown_pct = (peak_balance - balance) / max(peak_balance, 1e-9) * 100
                         if drawdown_pct >= 4.0:
-                            reward -= 15.0 # Massive penalty for breaching Accountant Limit
-                            
+                            reward -= 15.0
+
                     action_one_hot = np.zeros(self.config.action_space_size)
                     action_one_hot[action_val] = 1.0
-                    
-                    game.store(obs_vec, action_one_hot, reward, [1/3]*3, 0.0)
-            
+                    game.store(obs_vec, action_one_hot, reward, [1 / 3] * 3, 0.0)
+
                 self.replay_buffer.save_game(game)
                 total_steps += segment_length
-            
-        logger.info(f"Loaded {self.replay_buffer.size} episodes ({total_steps} steps).")
 
-    def train_loop(self, epochs=5000):
-        logger.info("🎓 Starting Offline Training...")
-        
+        shadow_games = load_shadow_games(
+            self.shadow_data_dirs,
+            observation_size=self.config.observation_shape[0],
+            action_space_size=self.config.action_space_size,
+        )
+        for game in shadow_games:
+            self.replay_buffer.save_game(game)
+            total_steps += len(game)
+        self.total_shadow_games = len(shadow_games)
+        self.total_steps = total_steps
+        self.replay_cache_status = "warm" if self.replay_buffer.size > 0 else "empty"
+
+        logger.info(
+            "Episodes hors-ligne charges: %s (%s pas de temps).",
+            self.replay_buffer.size,
+            total_steps,
+        )
+        append_training_log(
+            f"Dreamer: {self.replay_buffer.size} episodes charges pour {total_steps} pas de temps.",
+            source="dreamer",
+        )
+
+    def train_loop(self, epochs: int = 5000) -> dict[str, Any]:
+        """Execute la boucle d'optimisation Dreamer.
+
+        Args:
+            epochs (int): Nombre d'epochs a executer.
+
+        Returns:
+            dict[str, Any]: Resume simple d'optimisation.
+
+        Raises:
+            RuntimeError: Si le buffer Dreamer est vide.
+        """
+        logger.info("Demarrage de l'entrainement hors-ligne DreamerV3...")
+        append_training_log(
+            f"Dreamer: demarrage de l'entrainement sur {epochs} epochs.",
+            source="dreamer",
+        )
+        if self.replay_buffer.size == 0:
+            raise RuntimeError("Le buffer Dreamer est vide. Aucun historique n'a ete charge.")
+
+        avg_loss = 0.0
+        total_updates = 0
         for epoch in range(epochs):
-            loss_sum = 0
+            mark_step_running(
+                "dreamer_offline",
+                phase="optimisation",
+                epoch_current=epoch + 1,
+                epoch_total=epochs,
+                **self._build_status_kwargs(world_model_steps=total_updates),
+            )
+            loss_sum = 0.0
             steps = 0
-            
-            # Iterate through buffer? No, random sampling.
-            # Number of updates per epoch = buffer_size / batch_size
-            updates_per_epoch = int(self.replay_buffer.size / self.config.batch_size)
-            
+            effective_batch_size = min(self.config.batch_size, self.replay_buffer.size)
+            updates_per_epoch = max(1, self.replay_buffer.size // max(effective_batch_size, 1))
             for _ in range(updates_per_epoch):
-                samples = self.replay_buffer.sample(self.config.batch_size)
-                # Unpack (game, start_idx, idx) -> game
-                games = [s[0] for s in samples]
+                samples = self.replay_buffer.sample(effective_batch_size)
+                games = [sample[0] for sample in samples]
                 batch = self.trainer.prepare_batch(games)
-                
                 metrics = self.trainer.train_step(batch)
-                loss_sum += metrics["loss_total"]
+                loss_sum += float(metrics["loss_total"])
                 steps += 1
-                
-            avg_loss = loss_sum / steps if steps > 0 else 0
-            logger.info(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}")
-            
-    def save_checkpoint(self, path="checkpoints/offline_v1"):
-        # Save params via orbax or pickle for now
-        import pickle
-        if not os.path.exists(os.path.dirname(path)):
-            os.makedirs(os.path.dirname(path))
-            
-        with open(path + ".pkl", "wb") as f:
-            pickle.dump(self.trainer.params, f)
-        logger.info(f"Saved checkpoint to {path}.pkl")
+                total_updates += 1
+            avg_loss = loss_sum / steps if steps > 0 else 0.0
+            logger.info("Epoch %s/%s - Loss: %.4f", epoch + 1, epochs, avg_loss)
+            if epoch == 0 or (epoch + 1) % 10 == 0 or epoch + 1 == epochs:
+                append_training_log(
+                    f"Dreamer: epoch {epoch + 1}/{epochs} | loss={avg_loss:.4f}",
+                    source="dreamer",
+                )
+
+        self.last_training_metrics = {
+            "epochs": epochs,
+            "avg_loss": avg_loss,
+            "world_model_steps": total_updates,
+            "buffer_size": self.replay_buffer.size,
+        }
+        return dict(self.last_training_metrics)
+
+    def save_checkpoint(self, path: str) -> str:
+        """Sauvegarde un checkpoint local Dreamer.
+
+        Args:
+            path (str): Prefixe du fichier de sortie sans extension.
+
+        Returns:
+            str: Chemin final du checkpoint serialise.
+        """
+        target = Path(path).with_suffix(".pkl")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "wb") as file_obj:
+            pickle.dump(self.trainer.params, file_obj)
+        logger.info("Checkpoint Dreamer sauvegarde dans %s", target)
+        return str(target)
+
+    def _build_placeholder_battle_report(self, challenger_id: str, challenger_path: str) -> dict[str, Any]:
+        """Construit un rapport provisoire coherent pour le pipeline V4.
+
+        Args:
+            challenger_id (str): Identifiant du candidat Dreamer.
+            challenger_path (str): Checkpoint candidat.
+
+        Returns:
+            dict[str, Any]: Rapport compatible avec le promoteur V4.
+        """
+        total_actions = sum(self.action_counts.values())
+        long_entries = float(self.action_counts["BUY"])
+        short_entries = float(self.action_counts["SELL"])
+        long_share = long_entries / total_actions if total_actions else 0.0
+        short_share = short_entries / total_actions if total_actions else 0.0
+        directional_imbalance = abs(long_share - short_share)
+        if total_actions == 0:
+            directional_bias = "inactive"
+        elif long_share >= 0.8:
+            directional_bias = "buy_heavy"
+        elif short_share >= 0.8:
+            directional_bias = "sell_heavy"
+        else:
+            directional_bias = "balanced"
+
+        metrics = {
+            "family": self.family,
+            "feature_profile": self.feature_profile_name,
+            "dataset_id": self.dataset_id,
+            "dataset_source": self.dataset_source,
+            "mechanics_profile_version": self.mechanics_profile_version,
+            "dataset_coverage": self.dataset_coverage,
+            "evaluation_games": 0.0,
+            "evaluation_symbols": float(len(getattr(self.config, "symbols", []) or [])),
+            "win_rate": 0.0,
+            "return_pct": 0.0,
+            "net_realized_pct": 0.0,
+            "profit_factor": 0.0,
+            "total_trades": 0.0,
+            "expectancy_pct": 0.0,
+            "max_drawdown_pct": 100.0,
+            "positive_episode_rate": 0.0,
+            "long_entries": long_entries,
+            "short_entries": short_entries,
+            "long_entry_share": round(long_share, 6),
+            "short_entry_share": round(short_share, 6),
+            "directional_imbalance": round(directional_imbalance, 6),
+            "directional_bias": directional_bias,
+            "metrics_by_position_mechanics": {
+                "split_efficiency": 0.0,
+                "pyramid_efficiency": 0.0,
+                "slbe_capture_rate": 0.0,
+                "hold_drag_score": 1.0,
+                "close_quality_score": 0.0,
+                "split_executed": 0.0,
+                "pyramids_opened": 0.0,
+                "slbe_triggered": 0.0,
+                "close_winner_count": 0.0,
+                "close_loser_count": 0.0,
+            },
+        }
+        return {
+            "outcome": "DEFEAT",
+            "validation": {
+                "sample_size_ok": False,
+                "reason": "dreamer_validation_pending",
+            },
+            "challenger": {
+                "id": challenger_id,
+                "path": challenger_path,
+                "metrics": metrics,
+            },
+            "champion": {
+                "id": None,
+                "path": None,
+                "metrics": {},
+            },
+        }
+
+    def finalize_run(self, training_metrics: dict[str, Any]) -> dict[str, Any]:
+        """Ecrit les artefacts V4 d'un candidat Dreamer.
+
+        Args:
+            training_metrics (dict[str, Any]): Resume d'optimisation courant.
+
+        Returns:
+            dict[str, Any]: Rapport final ecrit sur disque.
+        """
+        latest_prefix = self.weights_dir / f"dreamer_{self.horizon}_{self.family}_latest"
+        latest_checkpoint = self.save_checkpoint(str(latest_prefix))
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        challenger_id = f"gen_dreamer_{self.horizon}_{timestamp}"
+        challenger_checkpoint = self.save_checkpoint(str(self.weights_dir / challenger_id))
+        battle_report = self._build_placeholder_battle_report(challenger_id, challenger_checkpoint)
+        promotion_gate = self.promoter.evaluate_promotion_gate(battle_report)
+        promotion_result = {
+            "status": "skipped",
+            "reason": "dreamer_validation_pending",
+            "engine": "dreamer",
+            "horizon": self.horizon,
+            "source_path": challenger_checkpoint,
+            "champion_paths": [],
+            "promotion_gate": promotion_gate,
+        }
+        report_payload = {
+            "engine": "dreamer",
+            "horizon": self.horizon,
+            "family": self.family,
+            "feature_profile": self.feature_profile_name,
+            "mechanics_profile_version": self.mechanics_profile_version,
+            "dataset_id": self.dataset_id,
+            "dataset_source": self.dataset_source,
+            "dataset_descriptor": self.dataset_descriptor,
+            "dataset_coverage": self.dataset_coverage,
+            "latest_checkpoint": latest_checkpoint,
+            "challenger_path": challenger_checkpoint,
+            "shadow_buffer_size": self.replay_buffer.size,
+            "sequence_length": self.sequence_length,
+            "sequence_stride": self.sequence_stride,
+            "world_model_steps": training_metrics.get("world_model_steps", 0),
+            "ga_status": self.ga_status,
+            "ga_generation": self.ga_generation,
+            "ga_trial": self.ga_trial,
+            "battle_report": battle_report,
+            "promotion": promotion_result,
+            "training_metrics": training_metrics,
+        }
+        report_path = self.promoter.get_arena_report_path(self.horizon, engine="dreamer")
+        report_path.write_text(json.dumps(report_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        manifest_payload = {
+            "status": "candidate_only",
+            "promoted_at": None,
+            "engine": "dreamer",
+            "horizon": self.horizon,
+            "family": self.family,
+            "feature_profile": self.feature_profile_name,
+            "dataset_id": self.dataset_id,
+            "dataset_source": self.dataset_source,
+            "mechanics_profile_version": self.mechanics_profile_version,
+            "dataset_coverage": self.dataset_coverage,
+            "selection_policy": "champion_only",
+            "engine_label": self.promoter.get_engine_label("dreamer", variant="blocked"),
+            "challenger_id": challenger_id,
+            "source_path": challenger_checkpoint,
+            "latest_checkpoint": latest_checkpoint,
+            "champion_path": None,
+            "battle_report": battle_report,
+            "training_metrics": training_metrics,
+            "promotion_gate": promotion_gate,
+        }
+        manifest_path = self.promoter.get_manifest_path(self.horizon, engine="dreamer")
+        manifest_path.write_text(json.dumps(manifest_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        record_arena_result(
+            report_payload,
+            metadata={
+                "engine": "dreamer",
+                "run_trigger": str(os.getenv("TRAINING_RUN_TRIGGER", "manual") or "manual"),
+                "ga_status": self.ga_status,
+                "ga_generation": self.ga_generation,
+                "ga_trial": self.ga_trial,
+            },
+        )
+        return report_payload
+
+
+def main() -> dict[str, Any]:
+    """Execute le pipeline DreamerV3 V4 complet.
+
+    Returns:
+        dict[str, Any]: Rapport final du candidat Dreamer genere.
+    """
+    epochs = int(os.getenv("DREAMER_EPOCHS", "5000"))
+    trainer = OfflineTrainer()
+    record_training_dataset(
+        dict(trainer.dataset_descriptor),
+        metadata={
+            "engine": "dreamer",
+            "run_trigger": str(os.getenv("TRAINING_RUN_TRIGGER", "manual") or "manual"),
+            "ga_status": trainer.ga_status,
+            "ga_generation": trainer.ga_generation,
+            "ga_trial": trainer.ga_trial,
+        },
+    )
+    trainer.load_and_process_data()
+    metrics = trainer.train_loop(epochs=epochs)
+    return trainer.finalize_run(metrics)
+
 
 if __name__ == "__main__":
-    trainer = OfflineTrainer()
-    trainer.load_and_process_data()
-    trainer.train_loop(epochs=5000) # Hunger Mode: Massive heavy training
-    trainer.save_checkpoint("data/checkpoints/dreamer_pretrained")
+    summary = main()
+    logger.info("DreamerV3 termine: %s", summary.get("challenger_path"))

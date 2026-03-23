@@ -1,159 +1,449 @@
-import logging
+"""Strategiste macro du banker.
+
+Ce module centralise la lecture du contexte macro local, l'appel optionnel au
+LLM de contexte et la fusion prudente des biais ``Cortex + GNN``.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import json
+import logging
+import math
+import os
+import unicodedata
+import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any
 
-from shared.llm_client import LLMClient
 from eva_banker.services.mt5 import MT5Service
+from shared import get_settings
 from shared.indicators import IndicatorFactory
+from shared.llm_client import LLMClient
+from shared.redis_client import get_redis_client
 
 logger = logging.getLogger(__name__)
 
+
 class Strategist:
+    """Analyse le contexte macro M15 et produit un biais exploitable.
+
+    En mode standard, le strategist interroge le Cortex LLM puis fusionne son
+    biais avec le GNN multi-horizon.
+
+    En mode `cpu_live`, le strategist n'appelle plus le Cortex. Il garde un
+    contexte local lisible, expose le biais GNN, mais interdit toute surcouche
+    de veto directionnel fort afin que le live continue sans dependance `vLLM`.
     """
-    The Cortex: High-Level Strategic planner using LLM (Gemma 3).
-    Analyzes Macro Trends (M15/H1) to guide the Subconscious (Dreamer).
-    """
+
     def __init__(self, mt5_service: MT5Service):
+        """Initialise le strategist.
+
+        Args:
+            mt5_service (MT5Service): Service MT5 utilise pour lire les bougies.
+        """
         self.mt5 = mt5_service
-        self.cortex = LLMClient(model="gemma3:4b") # Default model
-        self.latest_strategy: Dict[str, Any] = {}
+        settings = get_settings()
+        self._training_compat_mode = self._resolve_training_compat_mode(
+            os.getenv("BANKER_TRAINING_COMPAT_MODE", "disabled")
+        )
+        self._cpu_live_mode = self._training_compat_mode == "cpu_live"
+        self.cortex_model = self._resolve_cortex_model(settings)
+        self.cortex = None if self._cpu_live_mode else LLMClient(model=self.cortex_model)
+        self.latest_strategy: dict[str, dict[str, Any]] = {}
         self.last_update: datetime = datetime.min
 
-    async def analyze_market_context(self, symbol: str) -> Dict[str, Any]:
-        """
-        Fetches M15 data, calculates macro indicators, and asks LLM for strategy.
-        """
-        logger.info(f"🧠 Cortex: Analyzing Macro Context for {symbol}...")
-        
-        # 1. Fetch M15 Data (Macro View)
-        candles = await self.mt5.get_recent_candles(symbol, timeframe=15, count=50)
-        if not candles:
-            logger.warning("Cortex: No M15 data available.")
-            return {"action": "NEUTRAL", "reason": "No Data"}
+        if self._cpu_live_mode:
+            logger.info(
+                "Mode cpu_live actif: Cortex desactive, GNN consultatif, contexte local uniquement."
+            )
+        else:
+            logger.info("Cortex bancaire initialise avec le modele: %s", self.cortex_model)
 
-        # 2. Calculate Macro Indicators
+    @staticmethod
+    def _resolve_training_compat_mode(raw_mode: str) -> str:
+        """Normalise le mode de compatibilite trading/training.
+
+        Args:
+            raw_mode (str): Valeur brute issue de l'environnement.
+
+        Returns:
+            str: Mode retenu (`disabled` ou `cpu_live`).
+        """
+        normalized = str(raw_mode or "").strip().lower()
+        if normalized in {"", "0", "false", "off", "none"}:
+            return "disabled"
+        if normalized == "cpu_live":
+            return normalized
+        logger.warning(
+            "Mode de compatibilite banker inconnu (%s). Repli sur disabled.",
+            raw_mode,
+        )
+        return "disabled"
+
+    @staticmethod
+    def _resolve_cortex_model(settings) -> str:
+        """Resout le modele LLM du Cortex.
+
+        Args:
+            settings: Configuration partagee.
+
+        Returns:
+            str: Identifiant du modele a utiliser.
+        """
+        direct_model = os.getenv("BANKER_CORTEX_MODEL", "").strip()
+        if direct_model:
+            return direct_model
+
+        if settings.llm_backend == "vllm":
+            candidate = os.getenv("COUNCIL_MODEL_BANKER", settings.council_model_banker).strip()
+            if candidate and ":" in candidate and "/" not in candidate:
+                logger.warning(
+                    "COUNCIL_MODEL_BANKER=%s ressemble a un modele Ollama; repli sur %s.",
+                    candidate,
+                    settings.vllm_model,
+                )
+                return settings.vllm_model
+            return candidate or settings.vllm_model
+
+        return settings.ollama_model
+
+    @staticmethod
+    def _strip_json_fence(content: str) -> str:
+        """Retire les balises Markdown autour d'un JSON eventuel.
+
+        Args:
+            content (str): Texte brut renvoye par le LLM.
+
+        Returns:
+            str: Texte nettoye.
+        """
+        cleaned = (content or "").strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`").strip()
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].strip()
+        return cleaned.strip()
+
+    @staticmethod
+    def _sanitize_reasoning_text(content: str) -> str:
+        """Normalise un texte libre pour les logs et Telegram.
+
+        Args:
+            content (str): Texte a nettoyer.
+
+        Returns:
+            str: Texte ASCII compact.
+        """
+        cleaned = " ".join(str(content or "").replace("\n", " ").split()).strip(" -:")
+        ascii_cleaned = (
+            unicodedata.normalize("NFKD", cleaned).encode("ascii", "ignore").decode("ascii")
+        )
+        return ascii_cleaned.strip(" -:")
+
+    @classmethod
+    def _parse_cortex_response(cls, response: str) -> tuple[str, str]:
+        """Extrait un biais et une synthese depuis la reponse du Cortex.
+
+        Args:
+            response (str): Reponse brute du modele.
+
+        Returns:
+            tuple[str, str]: Biais normalise et raison courte.
+        """
+        cleaned = cls._strip_json_fence(response)
+        if not cleaned:
+            return "NEUTRAL", "Synthese Cortex indisponible."
+
+        payload_text = cleaned
+        if "{" in cleaned and "}" in cleaned:
+            payload_text = cleaned[cleaned.find("{") : cleaned.rfind("}") + 1]
+
+        parsed: dict[str, Any] = {}
+        try:
+            parsed = json.loads(payload_text)
+        except json.JSONDecodeError:
+            parsed = {}
+
+        bias_source = str(parsed.get("bias", cleaned)).upper()
+        reason = str(parsed.get("reason", cleaned)).strip()
+        details = str(parsed.get("details", "")).strip()
+
+        bias = "NEUTRAL"
+        if "BULLISH" in bias_source:
+            bias = "BULLISH"
+        elif "BEARISH" in bias_source:
+            bias = "BEARISH"
+        elif "RANGING" in bias_source or "RANGE" in bias_source:
+            bias = "RANGING"
+
+        normalized_reason = cls._sanitize_reasoning_text(reason)
+        normalized_details = cls._sanitize_reasoning_text(details)
+        if (
+            normalized_details
+            and normalized_details.lower() != normalized_reason.lower()
+            and normalized_details.lower() not in normalized_reason.lower()
+        ):
+            normalized_reason = f"{normalized_reason}. {normalized_details}".strip(". ")
+        if not normalized_reason:
+            normalized_reason = "Synthese Cortex indisponible."
+
+        return bias, normalized_reason
+
+    async def analyze_market_context(self, symbol: str) -> dict[str, Any]:
+        """Analyse le contexte M15 et retourne un biais macro fusionne.
+
+        Args:
+            symbol (str): Symbole a analyser.
+
+        Returns:
+            dict[str, Any]: Biais Cortex, biais GNN, biais final et metadonnees.
+        """
+        logger.info("Cortex: analyse du contexte macro pour %s.", symbol)
+
+        candles = await self.mt5.get_recent_candles(symbol, timeframe=15, count=100)
+        if not candles:
+            logger.warning("Cortex: aucune donnee M15 disponible pour %s.", symbol)
+            strategy = {
+                "symbol": symbol,
+                "cortex_bias": "NEUTRAL",
+                "gnn_bias": "NEUTRAL",
+                "gnn_scalp_bias": "NEUTRAL",
+                "gnn_intraday_bias": "NEUTRAL",
+                "gnn_swing_bias": "NEUTRAL",
+                "gnn_confidence": 0.0,
+                "bias": "NEUTRAL",
+                "bias_alignment": "no_data",
+                "bias_strength": "weak",
+                "raw_thought": "Aucune donnee M15 disponible.",
+                "raw_response": "",
+                "compat_mode": self._training_compat_mode,
+                "cortex_required": not self._cpu_live_mode,
+                "timestamp": datetime.now().isoformat(),
+            }
+            self.latest_strategy[symbol] = strategy
+            return strategy
+
         closes = [c["close"] for c in candles]
         highs = [c["high"] for c in candles]
         lows = [c["low"] for c in candles]
         volumes = [c["tick_volume"] for c in candles]
-        
-        rsi = IndicatorFactory.rsi(closes, 14).iloc[-1]
-        trend_ema = IndicatorFactory.ema(closes, 50).iloc[-1]
-        current_price = closes[-1]
-        
-        # New Advanced Indicators (VWAP, ADX, Fibs)
-        vwap = IndicatorFactory.vwap(highs, lows, closes, volumes).iloc[-1]
+
+        rsi = float(IndicatorFactory.rsi(closes, 14).iloc[-1])
+        trend_ema = float(IndicatorFactory.ema(closes, 50).iloc[-1])
+        current_price = float(closes[-1])
+        vwap = float(IndicatorFactory.vwap(highs, lows, closes, volumes).iloc[-1])
         adx_data = IndicatorFactory.adx(highs, lows, closes, 14)
-        adx_val = adx_data["adx"].iloc[-1]
+        adx_val = float(adx_data["adx"].iloc[-1])
         fibs = IndicatorFactory.get_fibonacci_levels(highs, lows, 50)
-        
+
         trend = "BULLISH" if current_price > trend_ema else "BEARISH"
-        
-        # 3. Formulate Prompt for Gemma
         context = {
             "symbol": symbol,
             "timeframe": "M15",
             "price": current_price,
             "trend_50ema": trend,
             "rsi_14": round(rsi, 2),
-            "vwap": round(vwap, 2) if not __import__("math").isnan(vwap) else current_price,
+            "vwap": round(vwap, 2) if not math.isnan(vwap) else current_price,
             "adx_trend_strength": round(adx_val, 2),
             "fib_382": round(fibs.get("fib_382", 0), 2),
             "fib_618": round(fibs.get("fib_618", 0), 2),
-            "last_5_candles": [round(c["close"], 2) for c in candles[-5:]]
+            "last_5_candles": [round(c["close"], 2) for c in candles[-5:]],
         }
-        
-        prompt = (
-            f"Review the M15 market structure for {symbol}. "
-            f"Trend is {trend}. RSI is {rsi:.1f}. ADX (Trend Strength) is {adx_val:.1f}. "
-            f"Price is at {current_price:.2f} relative to VWAP {context['vwap']:.2f}. "
-            f"Key Fib support/resistances lie at {context['fib_382']:.2f} and {context['fib_618']:.2f}. "
-            "Determine the strategic bias: BULLISH (Buy Dips), BEARISH (Sell Rallies), or RANGING (Scalp Both). "
-            "Consider VWAP rejections and ADX > 25 for strong trend continuation. "
-            "Output JSON: {\"bias\": \"...\", \"reason\": \"...\"}"
-        )
 
-        # 4. Ask Cortex
-        response = await self.cortex.analyze(json.dumps(context), prompt)
-        
-        # 5. Parse Response (Simple heuristic parsing if JSON fails)
-        cortex_bias = "NEUTRAL"
-        if "BULLISH" in response.upper(): cortex_bias = "BULLISH"
-        elif "BEARISH" in response.upper(): cortex_bias = "BEARISH"
-        elif "RANGING" in response.upper(): cortex_bias = "RANGING"
-        
-        # 6. Ask Proxmox GNN via REST API
-        gnn_bias = "NEUTRAL"
+        response = ""
+        if self._cpu_live_mode or self.cortex is None:
+            cortex_bias = "NEUTRAL"
+            cortex_reason = (
+                "Mode CPU live: Cortex desactive pendant l'entrainement GPU. "
+                "Le GNN reste consultatif et ne force aucune direction."
+            )
+        else:
+            prompt = (
+                f"Analyse la structure M15 de {symbol}. "
+                f"La tendance 50 EMA est {trend}. RSI={rsi:.1f}. ADX={adx_val:.1f}. "
+                f"Le prix vaut {current_price:.2f} pour une VWAP a {context['vwap']:.2f}. "
+                f"Les niveaux de Fibonacci clefs sont {context['fib_382']:.2f} et {context['fib_618']:.2f}. "
+                "Determine le biais strategique parmi BULLISH, BEARISH ou RANGING. "
+                "Tiens compte des rejets de VWAP et du seuil ADX > 25 pour la poursuite de tendance. "
+                "Reponds en JSON strict sur une seule ligne, sans Markdown, avec "
+                "{\"bias\":\"BULLISH|BEARISH|RANGING\",\"reason\":\"premiere phrase courte en francais\","
+                "\"details\":\"seconde phrase courte en francais avec le niveau ou le signal cle\"}."
+            )
+            response = await self.cortex.analyze(json.dumps(context), prompt)
+            cortex_bias, cortex_reason = self._parse_cortex_response(response)
+
+        gnn_intraday = "NEUTRAL"
+        gnn_scalp = "NEUTRAL"
+        gnn_swing = "NEUTRAL"
         gnn_confidence = 0.0
         try:
             import aiohttp
-            import os
+
             lab_host = os.getenv("LAB_HOST", "localhost")
             url = f"http://{lab_host}:8600/gnn/predict"
-            # We mock the feature tensor here for the API structure
             payload = {
                 "assets_data": {
-                    symbol: [closes[-15:]] # Mock 15 features
+                    f"{symbol}_5": [closes[-15:]],
+                    f"{symbol}_60": [closes[-15:]],
+                    f"{symbol}_1440": [closes[-15:]],
                 }
             }
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, timeout=5.0) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        gnn_bias = data.get("bias", "NEUTRAL")
-                        gnn_confidence = data.get("confidence", 0.0)
+                        gnn_scalp = str(data.get("scalp", {}).get("bias", "NEUTRAL"))
+                        gnn_intraday = str(data.get("intraday", {}).get("bias", "NEUTRAL"))
+                        gnn_swing = str(data.get("swing", {}).get("bias", "NEUTRAL"))
+                        gnn_confidence = float(
+                            data.get("intraday", {}).get("confidence", 0.0) or 0.0
+                        )
                     else:
-                        logger.warning(f"⚠️ GNN a retourné HTTP {resp.status}")
-        except Exception as e:
-            logger.warning(f"⚠️ Impossible de joindre le GNN sur le Lab: {e.__class__.__name__} - {e}")
-            
-        # 7. Merge Biases (If GNN is confident, it overrides/validates)
+                        logger.warning("GNN indisponible pour %s: HTTP %s.", symbol, resp.status)
+        except Exception as exc:
+            logger.warning("Connexion GNN impossible pour %s: %s.", symbol, exc.__class__.__name__)
+
+        gnn_bias = gnn_intraday
         final_bias = cortex_bias
-        if gnn_bias != "NEUTRAL" and gnn_confidence > 0.5:
-            if gnn_bias == cortex_bias:
-                 # Synergy!
-                 pass 
+        bias_alignment = "cortex_only"
+        bias_strength = "weak"
+
+        if cortex_bias in {"BULLISH", "BEARISH"}:
+            bias_strength = "moderate"
+
+        if gnn_swing != "NEUTRAL" and cortex_bias in {"BULLISH", "BEARISH"}:
+            if gnn_swing == cortex_bias:
+                bias_alignment = "swing_confirme"
+                bias_strength = "strong"
             else:
-                 # GNN overrides or forces ranging if contradictions
-                 final_bias = "RANGING" if gnn_confidence < 0.8 else gnn_bias
+                final_bias = "RANGING"
+                bias_alignment = "swing_conflict"
+                bias_strength = "weak"
+        elif gnn_bias != "NEUTRAL" and gnn_confidence >= 0.55:
+            if gnn_bias == cortex_bias and cortex_bias in {"BULLISH", "BEARISH"}:
+                bias_alignment = "aligned"
+                bias_strength = "strong" if gnn_confidence >= 0.75 else "moderate"
+            elif cortex_bias in {"NEUTRAL", "RANGING"}:
+                if gnn_confidence >= 0.90 and gnn_swing in {"NEUTRAL", gnn_bias}:
+                    final_bias = gnn_bias
+                    bias_alignment = "gnn_confirmed"
+                    bias_strength = "moderate"
+                else:
+                    final_bias = cortex_bias
+                    bias_alignment = "gnn_soft_hint"
+                    bias_strength = "weak"
+            else:
+                final_bias = "RANGING"
+                bias_alignment = "intraday_conflict"
+                bias_strength = "weak"
+
+        if self._cpu_live_mode:
+            if gnn_bias != "NEUTRAL" and gnn_confidence >= 0.55:
+                final_bias = "RANGING"
+                bias_alignment = "cpu_live_gnn_consultatif"
+            else:
+                final_bias = "NEUTRAL"
+                bias_alignment = "cpu_live_neutral"
+            bias_strength = "weak"
 
         strategy = {
             "symbol": symbol,
             "cortex_bias": cortex_bias,
             "gnn_bias": gnn_bias,
+            "gnn_scalp_bias": gnn_scalp,
+            "gnn_intraday_bias": gnn_intraday,
+            "gnn_swing_bias": gnn_swing,
+            "gnn_confidence": float(gnn_confidence or 0.0),
             "bias": final_bias,
-            "raw_thought": response,
-            "timestamp": datetime.now().isoformat()
+            "bias_alignment": bias_alignment,
+            "bias_strength": bias_strength,
+            "raw_thought": cortex_reason,
+            "raw_response": response,
+            "compat_mode": self._training_compat_mode,
+            "cortex_required": not self._cpu_live_mode,
+            "timestamp": datetime.now().isoformat(),
         }
-        
         self.latest_strategy[symbol] = strategy
-        
-        # --- COMMAND LINE LOGGING ---
-        from colorama import Fore, Style, init
-        init(autoreset=True)
-        sym_color = Fore.CYAN if "XAU" in symbol else (Fore.YELLOW if "BTC" in symbol else Fore.WHITE)
-        
-        def get_color(b):
-            if b == "BULLISH": return Fore.GREEN
-            if b == "BEARISH": return Fore.RED
-            if b == "RANGING": return Fore.MAGENTA
-            return Fore.LIGHTBLACK_EX
-            
-        cb_color = get_color(cortex_bias)
-        gb_color = get_color(gnn_bias)
-        fb_color = get_color(final_bias)
-        
+        self.last_update = datetime.now()
+
         logger.info(
-            f"🧠 {Fore.MAGENTA}Cortex Strategy{Style.RESET_ALL} -> {sym_color}{symbol:<8}{Style.RESET_ALL} | "
-            f"Cortex: {cb_color}[{cortex_bias}]{Style.RESET_ALL} | "
-            f"GNN: {gb_color}[{gnn_bias}]{Style.RESET_ALL} -> "
-            f"Final: {fb_color}[{final_bias}]{Style.RESET_ALL} "
+            "Strategie %s: cortex=%s gnn=%s final=%s alignement=%s mode=%s",
+            symbol,
+            cortex_bias,
+            gnn_bias,
+            final_bias,
+            bias_alignment,
+            self._training_compat_mode,
         )
-        # ----------------------------
-        
+
+        try:
+            redis = get_redis_client()
+            asyncio.create_task(
+                redis.publish(
+                    "eva.cortex.feed",
+                    {
+                        "id": str(uuid.uuid4()),
+                        "source_agent": "Strategist",
+                        "action": (
+                            f"Cortex M15 {symbol}: {final_bias} "
+                            f"(Cortex={cortex_bias}, GNN={gnn_bias}) -> {cortex_reason[:100]}"
+                        ),
+                        "timestamp": datetime.now().isoformat(),
+                        "type": "thought",
+                    },
+                )
+            )
+        except Exception as exc:
+            logger.debug("Publication feed strategist impossible: %s", exc)
+
         return strategy
 
     def get_bias(self, symbol: str) -> str:
+        """Retourne le dernier biais connu pour un symbole.
+
+        Args:
+            symbol (str): Symbole cible.
+
+        Returns:
+            str: Biais courant ou `NEUTRAL`.
+        """
         return self.latest_strategy.get(symbol, {}).get("bias", "NEUTRAL")
+
+    async def get_micro_reasoning(self, symbol: str, action: str, indicators: dict) -> str:
+        """Genere une synthese courte pour Telegram.
+
+        Args:
+            symbol (str): Symbole traite.
+            action (str): Action candidate.
+            indicators (dict): Indicateurs utiles au commentaire.
+
+        Returns:
+            str: Phrase courte exploitable dans Telegram.
+        """
+        rsi = float(indicators.get("RSI", 50) or 50)
+        adx = float(indicators.get("adx", 25) or 25)
+        macd = float(indicators.get("MACD_Hist", 0) or 0)
+
+        if self._cpu_live_mode or self.cortex is None:
+            return (
+                f"Mode CPU live: {action} sur {symbol} conserve en demo avec RSI {rsi:.1f}, "
+                f"ADX {adx:.1f} et MACD {macd:.4f}."
+            )
+
+        prompt = (
+            f"Explique en une seule phrase courte, en francais, pourquoi ouvrir un {action} sur {symbol}. "
+            f"Contexte: RSI={rsi:.1f}, ADX={adx:.1f}, MACD hist={macd:.4f}. "
+            "Reponds uniquement avec la phrase finale, sans JSON, sans puce et sans titre."
+        )
+
+        try:
+            reasoning = await self.cortex.analyze(f"Action: {action} on {symbol}", prompt)
+            cleaned = " ".join(str(reasoning).replace("*", " ").split())
+            return (
+                cleaned.split(". ")[0][:200].strip(" -:")
+                or "Le signal technique reste coherent avec le contexte courant."
+            )
+        except Exception as exc:
+            logger.warning("Generation du micro-raisonnement impossible: %s", exc)
+            return "Le signal technique reste coherent avec le contexte courant."

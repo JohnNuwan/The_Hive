@@ -5,7 +5,7 @@
 
 ---
 
-## 📊 Vue d'ensemble
+##  Vue d'ensemble
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -31,7 +31,7 @@
 
 ---
 
-## 🖥️ VM EVA-Core (10.0.1.100)
+##  VM EVA-Core (10.0.1.100)
 
 | Port | Service | Protocole | Description |
 |------|---------|-----------|-------------|
@@ -54,7 +54,7 @@ iptables -A INPUT -j DROP
 
 ---
 
-## 💰 VM Trading Floor (10.0.1.200)
+##  VM Trading Floor (10.0.1.200)
 
 | Port | Service | Protocole | Description |
 |------|---------|-----------|-------------|
@@ -68,7 +68,7 @@ iptables -A INPUT -j DROP
 
 ---
 
-## 🛡️ VM Sentinel (10.0.1.150)
+##  VM Sentinel (10.0.1.150)
 
 | Port | Service | Protocole | Description |
 |------|---------|-----------|-------------|
@@ -79,7 +79,7 @@ iptables -A INPUT -j DROP
 
 ---
 
-## 🌐 Services Exposés (WAN via Nginx)
+##  Services Exposés (WAN via Nginx)
 
 | Port Externe | Port Interne | Service | Notes |
 |--------------|--------------|---------|-------|
@@ -104,7 +104,7 @@ server {
 
 ---
 
-## 🔐 Tailscale VPN
+##  Tailscale VPN
 
 Tous les accès administratifs passent par Tailscale (100.x.x.x):
 
@@ -117,7 +117,7 @@ Tous les accès administratifs passent par Tailscale (100.x.x.x):
 
 ---
 
-## 📡 Communication Inter-Services
+##  Communication Inter-Services
 
 ### Redis Pub/Sub Topics
 
@@ -133,7 +133,7 @@ Tous les accès administratifs passent par Tailscale (100.x.x.x):
 
 ---
 
-## ⚠️ Ports à NE JAMAIS Exposer
+##  Ports à NE JAMAIS Exposer
 
 | Port | Service | Raison |
 |------|---------|--------|
