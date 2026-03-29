@@ -262,6 +262,12 @@ def _build_connector_status(app: FastAPI) -> dict[str, Any]:
             live_inference_url = str(auto_engine._resolve_live_inference_url() or "")
         except Exception:
             live_inference_url = ""
+    cortex_status = {}
+    if hasattr(getattr(auto_engine, "cortex", None), "get_runtime_status"):
+        try:
+            cortex_status = dict(auto_engine.cortex.get_runtime_status() or {})
+        except Exception:
+            cortex_status = {}
 
     mt5_mode = ConnectorMode.LIVE if mt5_service.is_connected and not mt5_service.mock_mode else ConnectorMode.PAPER
     if not mt5_service.is_connected and not mt5_service.mock_mode:
@@ -302,6 +308,15 @@ def _build_connector_status(app: FastAPI) -> dict[str, Any]:
             "mode": gnn_mode.value,
             "stub": gnn_stub,
             "role": "consultatif" if bool(getattr(auto_engine, "_cpu_live_mode", False)) else "fusionne",
+        },
+        "cortex": {
+            "mode": str(cortex_status.get("mode") or "disabled"),
+            "backend": str(cortex_status.get("backend") or "none"),
+            "required": bool(cortex_status.get("required", not bool(getattr(auto_engine, "_cpu_live_mode", False)))),
+            "consultative": bool(cortex_status.get("consultative", bool(getattr(auto_engine, "_cpu_live_mode", False)))),
+            "model": cortex_status.get("model"),
+            "endpoint": cortex_status.get("endpoint"),
+            "timeout_seconds": cortex_status.get("timeout_seconds"),
         },
         "vllm": {
             "mode": vllm_mode.value,
@@ -451,6 +466,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.mt5_service = get_mt5_service()
     app.state.risk_validator = get_risk_validator()
+    await app.state.risk_validator.load_state()
     app.state.binance_service = BinanceService()
     app.state.tr_service = TradeRepublicService()
     app.state.background_tasks = []
@@ -918,7 +934,10 @@ async def get_risk_status() -> RiskStatus:
     risk_validator: RiskValidator = app.state.risk_validator
     account, positions = await _read_mt5_snapshot(mt5_service)
     if account is not None:
-        risk_validator.update_account_balance(Decimal(str(account.balance)))
+        risk_validator.update_account_balance(
+            Decimal(str(account.balance)),
+            equity=Decimal(str(account.equity)),
+        )
     risk_validator.update_positions_count(len(positions))
     risk = await risk_validator.get_current_status()
     if account is None:
@@ -957,6 +976,25 @@ async def check_risk(request: RiskCheckRequest) -> RiskCheckResponse:
         reason=result.get("reason"),
         details=result,
     )
+
+
+@app.post("/risk/reset-day", tags=["Risque"])
+async def reset_risk_day() -> dict[str, Any]:
+    """
+    Reinitialise explicitement la session de risque du jour.
+
+    Returns:
+        dict[str, Any]: Confirmation et nouvel etat du gouverneur.
+    """
+    risk_validator: RiskValidator = app.state.risk_validator
+    risk_validator.reset_day_session()
+    await risk_validator.save_state()
+    status = await risk_validator.get_current_status()
+    return {
+        "status": "ok",
+        "message": "Session de risque reinitialisee.",
+        "risk": status.model_dump(),
+    }
 
 
 @app.post("/risk/kill-switch", tags=["Risque"])
@@ -1064,15 +1102,21 @@ async def get_trading_status():
 
     account, positions = await _read_mt5_snapshot(mt5_service)
     if account is not None:
-        risk_validator.update_account_balance(Decimal(str(account.balance)))
+        risk_validator.update_account_balance(
+            Decimal(str(account.balance)),
+            equity=Decimal(str(account.equity)),
+        )
     risk_validator.update_positions_count(len(positions))
     risk = await risk_validator.get_current_status()
     if account is None:
         risk = risk.model_copy(update={"trading_allowed": False})
     runtime_status = app.state.auto_engine.get_runtime_mode_status()
     execution_mechanics = app.state.auto_engine.get_execution_mechanics_status()
+    connector_status = _build_connector_status(app)
     decision_audit = app.state.auto_engine.get_decision_audit_snapshot()
     live_universe_status = app.state.auto_engine.get_live_universe_status()
+    latest_review = app.state.auto_engine.get_latest_trading_review_summary()
+    nemesis_status = app.state.nemesis.get_status()
     live_family = str(
         execution_mechanics.get("live_family")
         or live_universe_status.get("live_family")
@@ -1110,6 +1154,10 @@ async def get_trading_status():
 
     payload = {
         "status": "offline" if account is None else "online",
+        "runtime_profile": runtime_status.get("runtime_profile"),
+        "shadow_learning_mode": runtime_status.get("shadow_learning_mode"),
+        "intraday_retrain_allowed": runtime_status.get("intraday_retrain_allowed"),
+        "intraday_promotion_allowed": runtime_status.get("intraday_promotion_allowed"),
         "runtime": runtime_status,
         "connection": {
             "mt5_connected": mt5_service.is_connected,
@@ -1120,7 +1168,7 @@ async def get_trading_status():
             "server_role": "modeles_supervision_memoire",
             "runtime_mode": _derive_runtime_mode(app.state.auto_engine).value,
         },
-        "connectors": _build_connector_status(app),
+        "connectors": connector_status,
         "account": {
             "equity": float(account.equity) if account is not None else 0.0,
             "balance": float(account.balance) if account is not None else 0.0,
@@ -1143,10 +1191,31 @@ async def get_trading_status():
         ],
         "risk": {
             "daily_drawdown_percent": float(risk.daily_drawdown_percent),
+            "daily_realized_pnl": float(risk.daily_realized_pnl),
+            "day_open_balance": float(risk.day_open_balance),
+            "day_open_equity": float(risk.day_open_equity),
+            "daily_realized_drawdown_percent": float(risk.daily_realized_drawdown_percent),
+            "daily_equity_drawdown_percent": float(risk.daily_equity_drawdown_percent),
             "trading_allowed": risk.trading_allowed,
             "open_positions": risk.open_positions_count,
             "anti_tilt_active": risk.anti_tilt_active,
             "news_filter_active": risk.news_filter_active,
+            "kill_switch_state": risk.kill_switch_state,
+            "kill_switch_reason": risk.kill_switch_reason,
+            "flatten_state": risk.flatten_state,
+            "thresholds": risk.thresholds,
+        },
+        "risk_governor": {
+            "trading_allowed": risk.trading_allowed,
+            "kill_switch_state": risk.kill_switch_state,
+            "kill_switch_reason": risk.kill_switch_reason,
+            "daily_realized_pnl": float(risk.daily_realized_pnl),
+            "day_open_balance": float(risk.day_open_balance),
+            "day_open_equity": float(risk.day_open_equity),
+            "daily_realized_drawdown_percent": float(risk.daily_realized_drawdown_percent),
+            "daily_equity_drawdown_percent": float(risk.daily_equity_drawdown_percent),
+            "flatten_state": risk.flatten_state,
+            "thresholds": risk.thresholds,
         },
         "execution_mechanics": execution_mechanics,
         "decisions": app.state.auto_engine.latest_decisions,
@@ -1156,6 +1225,11 @@ async def get_trading_status():
         "live_champion_id_muzero": execution_mechanics.get("live_champion_id_muzero"),
         "live_champion_id_dreamer": execution_mechanics.get("live_champion_id_dreamer"),
         "research_mode": "consultatif",
+        "cortex": connector_status.get("cortex", {}),
+        "vllm": connector_status.get("vllm", {}),
+        "gnn": connector_status.get("gnn", {}),
+        "nemesis": nemesis_status,
+        "latest_review": latest_review,
         "live_data_source": live_universe_status.get("source") or execution_mechanics.get("selection_policy_required"),
         "market_context": market_context,
         "event_blockers": event_blockers,
@@ -1175,6 +1249,33 @@ async def get_trading_status():
     await _publish_trading_status_snapshot(payload)
     return payload
 
+
+@app.get("/trading/review/latest", tags=["Trading"])
+async def get_latest_trading_review():
+    """
+    Retourne la derniere revue journaliere persistee par le banker.
+
+    Returns:
+        dict[str, Any]: Rapport complet si disponible.
+
+    Raises:
+        HTTPException: Si aucun rapport n'a encore ete genere.
+    """
+    review = app.state.auto_engine.get_latest_trading_review()
+    if review is None:
+        raise HTTPException(status_code=404, detail="Aucune revue journaliere disponible.")
+    return review
+
+
+@app.post("/trading/review/generate", tags=["Trading"])
+async def generate_trading_review():
+    """
+    Genere immediatement une revue journaliere et la persiste.
+
+    Returns:
+        dict[str, Any]: Rapport complet nouvellement genere.
+    """
+    return await app.state.auto_engine.generate_trading_review()
 
 
 @app.get("/performance/models", tags=["Trading"])

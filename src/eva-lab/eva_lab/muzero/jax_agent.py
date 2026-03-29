@@ -5,7 +5,11 @@ from __future__ import annotations
 import logging
 import os
 import pickle
+import re
+import time
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -52,45 +56,184 @@ class JAXMuZeroAgent:
         """Execute l'inference recurrente MuZero sur un etat latent."""
         return self.recurrent_apply(params, None, hidden_state, action_onehot)
 
-    def play_game(self, env, exploration: bool = True) -> GameHistory:
-        """Joue une partie complete dans l'environnement et alimente le replay buffer."""
+    def play_game(
+        self,
+        env,
+        exploration: bool = True,
+        collection_mode: str = "mcts",
+        max_wall_time_seconds: float | None = None,
+    ) -> GameHistory:
+        """Joue une partie complete et alimente le replay buffer.
+
+        Args:
+            env (Any): Environnement de trading MuZero.
+            exploration (bool): Active la stochasticite de collecte.
+            collection_mode (str): Mode de collecte ``mcts`` ou ``policy_only``.
+            max_wall_time_seconds (float | None): Garde-fou de duree
+                maximale pour un episode de collecte.
+
+        Returns:
+            GameHistory: Partie collecte, potentiellement tronquee si un
+                garde-fou de duree s'active.
+
+        Raises:
+            ValueError: Si le mode de collecte demande est inconnu.
+        """
         game = GameHistory()
         obs, _ = env.reset()
         done = False
         steps = 0
+        started_at = time.perf_counter()
 
         while not done and steps < self.config.max_moves:
+            if (
+                max_wall_time_seconds is not None
+                and max_wall_time_seconds > 0.0
+                and (time.perf_counter() - started_at) >= max_wall_time_seconds
+            ):
+                logger.warning(
+                    "[JAXMuZeroAgent] Collecte interrompue apres %.1fs au pas %s (mode=%s).",
+                    max_wall_time_seconds,
+                    steps,
+                    collection_mode,
+                )
+                break
             steps += 1
             obs_jax = jnp.array(obs).reshape(1, -1)
-            hidden_state, _, _ = self._jit_init(self.params, obs_jax)
+            hidden_state, logits, value_tensor = self._jit_init(self.params, obs_jax)
 
-            mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
-            root = mcts.run(hidden_state, add_exploration_noise=exploration)
-
-            action = self._select_action(root, exploration)
-            policy = self._get_policy_distribution(root)
-            value = float(root.value)
+            if collection_mode == "mcts":
+                mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
+                root = mcts.run(hidden_state, add_exploration_noise=exploration)
+                action = self._select_action(root, exploration)
+                policy = self._get_policy_distribution(root)
+                value = float(root.value)
+            elif collection_mode == "policy_only":
+                policy = self._policy_from_logits(logits)
+                action = self._select_action_from_policy(policy, exploration)
+                value = self._tensor_to_scalar(value_tensor)
+            else:
+                raise ValueError(f"Mode de collecte MuZero inconnu: {collection_mode}")
 
             next_obs, reward, done, _, _ = env.step(action)
             game.store(obs, action, reward, policy, value)
             obs = next_obs
 
-        self.replay_buffer.save_game(game)
+        if len(game) > 0:
+            self.replay_buffer.save_game(game)
         return game
 
-    def train_step(self):
-        """Execute une mise a jour MuZero a partir du replay buffer."""
+    def _policy_from_logits(self, logits: Any) -> np.ndarray:
+        """Convertit des logits reseau en distribution de politique stable.
+
+        Args:
+            logits (Any): Sortie brute du reseau de politique.
+
+        Returns:
+            np.ndarray: Distribution normalisee sur l'espace d'actions.
+        """
+        logits_np = np.asarray(jax.device_get(logits), dtype=np.float32).reshape(-1)
+        if logits_np.size != self.config.action_space_size:
+            logits_np = np.resize(logits_np, self.config.action_space_size)
+        logits_np = logits_np - np.max(logits_np)
+        probs = np.exp(logits_np).astype(np.float32)
+        total = float(np.sum(probs))
+        if not np.isfinite(total) or total <= 0.0:
+            return np.full(
+                self.config.action_space_size,
+                1.0 / max(self.config.action_space_size, 1),
+                dtype=np.float32,
+            )
+        return (probs / total).astype(np.float32)
+
+    def _select_action_from_policy(self, policy: np.ndarray, exploration: bool) -> int:
+        """Selectionne une action directement depuis la politique reseau.
+
+        Args:
+            policy (np.ndarray): Distribution de politique normalisee.
+            exploration (bool): Active l'echantillonnage stochastique.
+
+        Returns:
+            int: Action discrete choisie.
+        """
+        if exploration:
+            return int(np.random.choice(np.arange(len(policy)), p=policy))
+        return int(np.argmax(policy))
+
+    def _tensor_to_scalar(self, value_tensor: Any) -> float:
+        """Materialise un scalaire JAX/Numpy en ``float`` Python.
+
+        Args:
+            value_tensor (Any): Tenseur source.
+
+        Returns:
+            float: Valeur scalaire materialisee.
+        """
+        value_np = np.asarray(jax.device_get(value_tensor), dtype=np.float32).reshape(-1)
+        if value_np.size <= 0:
+            return 0.0
+        return float(value_np[0])
+
+    def train_step(
+        self,
+        trace_hook: Callable[[str], None] | None = None,
+    ) -> dict[str, Any] | None:
+        """Execute une mise a jour MuZero de facon synchrone et tracable.
+
+        Args:
+            trace_hook (Callable[[str], None] | None): Callback optionnel
+                appele a chaque sous-phase critique.
+
+        Returns:
+            dict[str, Any] | None: Metriques Python materialisees et durees
+                par sous-phase, ou ``None`` si le buffer est trop faible.
+        """
         if self.replay_buffer.size < self.config.batch_size // 10:
             return None
 
+        phase_durations_ms: dict[str, float] = {}
+
+        if trace_hook is not None:
+            trace_hook("sample")
+        sample_started_at = time.perf_counter()
         samples = self.replay_buffer.sample(self.config.batch_size)
+        phase_durations_ms["sample"] = round((time.perf_counter() - sample_started_at) * 1000.0, 3)
+
+        if trace_hook is not None:
+            trace_hook("prepare_batch")
+        prepare_started_at = time.perf_counter()
         batch = self.trainer.prepare_batch(samples)
+        phase_durations_ms["prepare_batch"] = round(
+            (time.perf_counter() - prepare_started_at) * 1000.0,
+            3,
+        )
+
+        if trace_hook is not None:
+            trace_hook("update_fn")
+        update_started_at = time.perf_counter()
         self.params, self.opt_state, metrics = self.trainer.update_fn(
             self.params,
             self.opt_state,
             batch,
         )
-        return metrics
+        metrics = jax.tree_util.tree_map(jax.block_until_ready, metrics)
+        phase_durations_ms["update_fn"] = round((time.perf_counter() - update_started_at) * 1000.0, 3)
+
+        if trace_hook is not None:
+            trace_hook("materialize_metrics")
+        materialize_started_at = time.perf_counter()
+        materialized_metrics = self._materialize_metrics(metrics)
+        phase_durations_ms["materialize_metrics"] = round(
+            (time.perf_counter() - materialize_started_at) * 1000.0,
+            3,
+        )
+        if trace_hook is not None:
+            trace_hook("completed")
+        return {
+            "metrics": materialized_metrics,
+            "phase_durations_ms": phase_durations_ms,
+            "buffer_size": self.replay_buffer.size,
+        }
 
     def reanalyze_game(self, game: GameHistory) -> None:
         """Recalcule politiques et valeurs d'une partie avec le reseau courant."""
@@ -236,17 +379,93 @@ class JAXMuZeroAgent:
             "simulations": self.config.num_simulations,
         }
 
-    def save(self, path: str) -> None:
-        """Sauvegarde les poids et l'etat de l'optimiseur."""
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as file_obj:
-            pickle.dump({"params": self.params, "opt_state": self.opt_state}, file_obj)
-        logger.info("[JAXMuZeroAgent] Checkpoint sauvegarde: %s", path)
+    def _materialize_metrics(self, metrics: dict[str, Any]) -> dict[str, Any]:
+        """Convertit les metriques JAX en scalaires Python synchrones."""
 
-    def load(self, path: str) -> None:
-        """Recharge les poids et l'etat de l'optimiseur depuis un checkpoint."""
+        materialized = jax.device_get(metrics)
+        payload: dict[str, Any] = {}
+        for key, value in dict(materialized).items():
+            array_value = np.asarray(value)
+            if array_value.ndim == 0:
+                payload[key] = float(array_value)
+            else:
+                payload[key] = array_value.tolist()
+        return payload
+
+    def _infer_checkpoint_step(self, path: str) -> int | None:
+        """Infere le numero de step a partir du nom du checkpoint."""
+
+        stem = Path(path).stem
+        for pattern in (r"_ckpt_(\d+)$", r"_gold_precheck_(\d+)$"):
+            match = re.search(pattern, stem)
+            if match:
+                return int(match.group(1))
+        return None
+
+    def save(
+        self,
+        path: str,
+        *,
+        step: int | None = None,
+        run_id: str | None = None,
+        trial_id: str | None = None,
+        gate_profile: str | None = None,
+        focus_symbols: list[str] | None = None,
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Sauvegarde les poids, l'optimiseur et les metadonnees de reprise.
+
+        Args:
+            path (str): Chemin de destination du checkpoint.
+            step (int | None): Etape exacte associee au snapshot.
+            run_id (str | None): Identifiant du run courant.
+            trial_id (str | None): Identifiant logique du trial.
+            gate_profile (str | None): Gate de promotion associee.
+            focus_symbols (list[str] | None): Univers reduit du run.
+            created_at (str | None): Horodatage ISO de creation.
+
+        Returns:
+            dict[str, Any]: Metadonnees persistées avec le checkpoint.
+        """
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        metadata = {
+            "step": step if step is not None else self._infer_checkpoint_step(path),
+            "run_id": run_id,
+            "trial_id": trial_id,
+            "gate_profile": gate_profile,
+            "focus_symbols": [str(item).strip() for item in focus_symbols or [] if str(item).strip()],
+            "created_at": created_at or datetime.now().isoformat(),
+        }
+        with open(path, "wb") as file_obj:
+            pickle.dump(
+                {
+                    "params": self.params,
+                    "opt_state": self.opt_state,
+                    "metadata": metadata,
+                },
+                file_obj,
+            )
+        logger.info("[JAXMuZeroAgent] Checkpoint sauvegarde: %s", path)
+        return metadata
+
+    def load(self, path: str) -> dict[str, Any]:
+        """Recharge les poids et l'etat de l'optimiseur depuis un checkpoint.
+
+        Args:
+            path (str): Chemin du checkpoint a relire.
+
+        Returns:
+            dict[str, Any]: Metadonnees de reprise reconstruites.
+        """
         with open(path, "rb") as file_obj:
             data = pickle.load(file_obj)
         self.params = data["params"]
         self.opt_state = data["opt_state"]
+        metadata = dict(data.get("metadata") or {})
+        metadata.setdefault("step", self._infer_checkpoint_step(path))
+        metadata.setdefault("focus_symbols", [])
+        metadata.setdefault("gate_profile", None)
+        metadata.setdefault("trial_id", None)
+        metadata.setdefault("run_id", None)
         logger.info("[JAXMuZeroAgent] Checkpoint charge: %s", path)
+        return metadata

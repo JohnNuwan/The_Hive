@@ -66,6 +66,7 @@ SYNC_FILES = [
     Path("src/shared/shared/redis_client.py"),
     Path("src/eva-banker/eva_banker/brain.py"),
     Path("src/eva-banker/eva_banker/main.py"),
+    Path("src/eva-banker/eva_banker/nemesis.py"),
     Path("src/eva-banker/eva_banker/strategist.py"),
     Path("src/eva-banker/eva_banker/services/risk.py"),
     Path("src/eva-banker/eva_banker/services/traderepublic_client.py"),

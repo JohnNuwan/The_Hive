@@ -11,12 +11,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,22 +32,138 @@ from eva_lab.timescale_store import record_ga_trial, record_run_window
 from eva_lab.training_status import (
     V4_SEQUENCE_PID_PATH,
     append_training_log,
+    finalize_training_status,
     load_sequence_state,
     load_terminal_summary,
     load_training_status,
+    merge_training_status,
     persist_sequence_state,
+    write_terminal_summary,
 )
 
 
 REMOTE_SCRIPT = ROOT / "scripts" / "run_nightly_training_remote.sh"
 RESULTS_DIR = ROOT / "data" / "checkpoints" / "v4_ga"
 LAB_INTERNAL_URL = str(os.getenv("TRAINING_LAB_INTERNAL_URL") or "http://127.0.0.1:8600").rstrip("/")
+LOCK_PATH = ROOT / "data" / "checkpoints" / "nightly_training.lock"
+LOCK_DIR = ROOT / "data" / "checkpoints" / "nightly_training.lock.d"
+MUZERO_WEIGHTS_DIR = ROOT / "data" / "muzero" / "weights"
+DEFAULT_STALL_TIMEOUT_SECONDS = max(60, int(os.getenv("TRAINING_STALL_TIMEOUT_SECONDS", "600")))
+SOFT_HANG_FAILURE_MODE = "soft_hang"
 
 
 def _now_iso() -> str:
     """Retourne l'horodatage courant au format ISO."""
 
     return datetime.now().isoformat()
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    """Convertit une valeur ISO en ``datetime`` si possible.
+
+    Args:
+        value (Any): Valeur brute a interpreter.
+
+    Returns:
+        datetime | None: Horodatage parse ou ``None`` si la conversion echoue.
+    """
+
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _split_profile(profile: str | None) -> tuple[str, str]:
+    """Extrait horizon et famille depuis un profil V4.
+
+    Args:
+        profile (str | None): Profil cible, par exemple ``scalp_metals_v2``.
+
+    Returns:
+        tuple[str, str]: Horizon et famille inferes.
+    """
+
+    normalized = str(profile or "").strip().lower()
+    parts = [part for part in normalized.split("_") if part]
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    if parts:
+        return parts[0], "unknown"
+    return "unknown", "unknown"
+
+
+def _extract_checkpoint_step(path: Path) -> int | None:
+    """Extrait le numero d'etape depuis un nom de checkpoint.
+
+    Args:
+        path (Path): Chemin du checkpoint.
+
+    Returns:
+        int | None: Numero d'etape si present, sinon ``None``.
+    """
+
+    stem = path.stem
+    for pattern in (r"_ckpt_(\d+)$", r"_gold_precheck_(\d+)$"):
+        match = re.search(pattern, stem)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _to_trainer_checkpoint_path(path: Path | str | None) -> str | None:
+    """Convertit un chemin hote en chemin exploitable par le conteneur trainer.
+
+    Args:
+        path (Path | str | None): Chemin hote absolu ou relatif.
+
+    Returns:
+        str | None: Chemin relatif au projet si possible, sinon la valeur brute.
+    """
+
+    if path is None:
+        return None
+    candidate = Path(path)
+    try:
+        return candidate.resolve().relative_to(ROOT.resolve()).as_posix()
+    except ValueError:
+        return str(candidate).replace("\\", "/")
+
+
+def _find_latest_muzero_checkpoint(
+    horizon: str,
+    *,
+    max_step: int | None = None,
+) -> tuple[str | None, int | None]:
+    """Retourne le checkpoint MuZero le plus avance pour un horizon.
+
+    Args:
+        horizon (str): Horizon cible, par exemple ``scalp``.
+        max_step (int | None): Etape maximale autorisee pour la reprise.
+
+    Returns:
+        tuple[str | None, int | None]: Chemin trainer-visible et numero d'etape.
+    """
+
+    best_path: Path | None = None
+    best_step = -1
+    for candidate in MUZERO_WEIGHTS_DIR.glob(f"muzero_{horizon}_ckpt_*.pkl"):
+        step = _extract_checkpoint_step(candidate)
+        if max_step is not None and (step is None or step > max_step):
+            continue
+        if step is None or step <= best_step:
+            continue
+        best_path = candidate
+        best_step = step
+    if best_path is None:
+        return None, None
+    return _to_trainer_checkpoint_path(best_path), best_step
 
 
 def _load_dotenv(path: Path) -> None:
@@ -77,7 +194,7 @@ def _bootstrap_timescale_env() -> None:
 
     defaults = {
         "TRAINING_TIMESCALE_ENABLED": "1",
-        "TRAINING_TIMESCALE_HOST": os.getenv("TRAINING_TIMESCALE_HOST", "127.0.0.1"),
+        "TRAINING_TIMESCALE_HOST": os.getenv("TRAINING_TIMESCALE_HOST", "timescaledb"),
         "TRAINING_TIMESCALE_PORT": os.getenv("TIMESCALE_PORT", "5432"),
         "TRAINING_TIMESCALE_DB": os.getenv("TIMESCALE_DB", "thehive"),
         "TRAINING_TIMESCALE_USER": os.getenv("TIMESCALE_USER", "eva"),
@@ -321,6 +438,75 @@ def _build_trial_env(
     return overrides
 
 
+def _resolve_resume_overrides(
+    *,
+    config: dict[str, Any],
+    state: dict[str, Any],
+    overrides: dict[str, str],
+) -> dict[str, str]:
+    """Injecte un checkpoint de reprise si la fenetre courante l'exige.
+
+    Args:
+        config (dict[str, Any]): Configuration complete de sequence.
+        state (dict[str, Any]): Etat courant de la fenetre.
+        overrides (dict[str, str]): Variables runtime de base du trial.
+
+    Returns:
+        dict[str, str]: Overrides enrichis avec les variables de reprise si
+        necessaire.
+    """
+
+    resolved = dict(overrides)
+    resume_checkpoint_path: str | None = None
+    resume_step: int | None = None
+
+    resume_trial = dict(config.get("resume_trial") or {})
+    if (
+        str(state.get("engine") or "").strip().lower() == "muzero"
+        and not bool(resume_trial.get("consumed"))
+        and str(resume_trial.get("trial_id") or "").strip() == str(state.get("trial_id") or "").strip()
+        and str(resume_trial.get("profile") or "").strip() == str(state.get("profile") or "").strip()
+        and str(resume_trial.get("mode") or "").strip() == str(state.get("mode") or "").strip()
+    ):
+        checkpoint_candidate = Path(str(resume_trial.get("checkpoint_path") or "").strip())
+        if checkpoint_candidate.exists():
+            resume_checkpoint_path = _to_trainer_checkpoint_path(checkpoint_candidate)
+            resume_step = int(resume_trial.get("resume_step") or _extract_checkpoint_step(checkpoint_candidate) or 0)
+            if bool(resume_trial.get("consume_once", True)):
+                resume_trial["consumed"] = True
+                config["resume_trial"] = resume_trial
+    elif (
+        str(state.get("engine") or "").strip().lower() == "muzero"
+        and int(state.get("retry_count") or 0) > 0
+    ):
+        horizon, _family = _split_profile(str(state.get("profile") or ""))
+        current_resume_path = str(state.get("resumed_from_checkpoint") or "").strip() or None
+        current_resume_step = int(state.get("resume_step") or 0)
+        if current_resume_path and current_resume_step > 0:
+            checkpoint_candidate = Path(current_resume_path)
+            if checkpoint_candidate.exists():
+                resume_checkpoint_path = _to_trainer_checkpoint_path(checkpoint_candidate)
+                resume_step = current_resume_step
+        if not resume_checkpoint_path:
+            search_ceiling = current_resume_step if current_resume_step > 0 else None
+            resume_checkpoint_path, resume_step = _find_latest_muzero_checkpoint(
+                horizon,
+                max_step=search_ceiling,
+            )
+
+    if resume_checkpoint_path and resume_step:
+        resolved["MUZERO_RESUME_CHECKPOINT_PATH"] = resume_checkpoint_path
+        resolved["MUZERO_RESUME_STEP"] = str(resume_step)
+        state["resumed_from_checkpoint"] = resume_checkpoint_path
+        state["resume_step"] = resume_step
+    else:
+        resolved.pop("MUZERO_RESUME_CHECKPOINT_PATH", None)
+        resolved.pop("MUZERO_RESUME_STEP", None)
+        state["resumed_from_checkpoint"] = None
+        state["resume_step"] = None
+    return resolved
+
+
 def _read_run_snapshot() -> dict[str, Any]:
     """Retourne une vue compacte du run courant selon `training_status.json`."""
 
@@ -330,35 +516,358 @@ def _read_run_snapshot() -> dict[str, Any]:
         "active": bool(payload.get("active")),
         "status": str(payload.get("status") or "").strip() or None,
         "engine": str(payload.get("engine") or "").strip() or None,
+        "reason": str(payload.get("reason") or "").strip() or None,
+        "family": str(payload.get("family") or "").strip() or None,
+        "feature_profile": str(payload.get("feature_profile") or "").strip() or None,
+        "dataset_id": str(payload.get("dataset_id") or "").strip() or None,
+        "dataset_source": str(payload.get("dataset_source") or "").strip() or None,
+        "focus_symbols": list(payload.get("focus_symbols") or []),
+        "gate_profile": str(payload.get("gate_profile") or "").strip() or None,
         "sequence_id": str(payload.get("sequence_id") or "").strip() or None,
         "window_id": str(payload.get("window_id") or "").strip() or None,
         "trial_id": str(payload.get("trial_id") or "").strip() or None,
         "terminal_summary_path": str(payload.get("terminal_summary_path") or "").strip() or None,
         "failed_step": dict(payload.get("failed_step") or {}),
+        "current_step": dict(payload.get("current_step") or {}),
+        "last_successful_step": payload.get("last_successful_step"),
+        "last_successful_step_at": payload.get("last_successful_step_at"),
+        "train_step_phase": str(payload.get("train_step_phase") or "").strip() or None,
+        "phase_durations_ms": dict(payload.get("phase_durations_ms") or {}),
+        "resume_checkpoint_path": str(payload.get("resume_checkpoint_path") or "").strip() or None,
+        "resume_step": payload.get("resume_step"),
+        "stall_detected": bool(payload.get("stall_detected")),
+        "stall_reason": str(payload.get("stall_reason") or "").strip() or None,
     }
 
 
-def _wait_existing_run(window_id: str, state: dict[str, Any], poll_seconds: int = 15) -> dict[str, Any]:
-    """Attend la fin d'un run deja actif pour la fenetre courante."""
+def _interrupt_active_run(
+    *,
+    reason: str,
+    final_status: str,
+    failure_mode: str,
+    failed_step: str,
+) -> None:
+    """Interrompt le trainer actif et nettoie les verrous locaux.
 
+    Args:
+        reason (str): Motif explicite de l'interruption.
+        final_status (str): Statut terminal a appliquer au run courant.
+        failure_mode (str): Mode d'echec a publier.
+        failed_step (str): Etape de pipeline consideree en echec.
+    """
+
+    lock_payload = _load_json(LOCK_PATH)
+    lock_pid = lock_payload.get("pid")
+    if isinstance(lock_pid, int):
+        subprocess.run(["kill", "-TERM", str(lock_pid)], cwd=ROOT, check=False)
+        time.sleep(2)
+
+    trainers = subprocess.run(
+        ["bash", "-lc", "docker ps --format '{{.Names}}' | grep '^the_hive-eva-trainer-run-' || true"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    trainer_names = [line.strip() for line in trainers.stdout.splitlines() if line.strip()]
+    for trainer_name in trainer_names:
+        subprocess.run(["docker", "stop", trainer_name], cwd=ROOT, check=False)
+
+    subprocess.run(
+        ["bash", "-lc", "pkill -TERM -f 'run_nightly_training_remote.sh' || true"],
+        cwd=ROOT,
+        check=False,
+    )
+    if LOCK_DIR.exists():
+        subprocess.run(["rm", "-rf", str(LOCK_DIR)], cwd=ROOT, check=False)
+    if LOCK_PATH.exists():
+        try:
+            LOCK_PATH.unlink()
+        except OSError:
+            pass
+
+    merge_training_status(
+        {
+            "stall_detected": failure_mode == SOFT_HANG_FAILURE_MODE,
+            "stall_reason": reason,
+            "train_step_phase": "watchdog_abort",
+            "failed_step": {
+                "name": failed_step,
+                "error": reason,
+                "updated_at": _now_iso(),
+            },
+            "failure_mode": failure_mode,
+        }
+    )
+    finalize_training_status(final_status, reason=reason)
+    append_training_log(
+        f"Sequence V4: run interrompu ({failure_mode}) | statut={final_status} | raison={reason}",
+        level="ERROR" if final_status == "error" else "WARNING",
+        source="sequence",
+    )
+
+
+def _build_soft_hang_terminal_summary(
+    *,
+    state: dict[str, Any],
+    run_snapshot: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    """Construit un resume terminal synthetique pour un gel watchdog.
+
+    Args:
+        state (dict[str, Any]): Etat courant de la sequence.
+        run_snapshot (dict[str, Any]): Vue du run au moment du gel.
+        reason (str): Motif du watchdog.
+
+    Returns:
+        dict[str, Any]: Resume terminal persiste et rechargé.
+    """
+
+    horizon, family = _split_profile(str(state.get("profile") or ""))
+    resume_checkpoint_path = str(state.get("resumed_from_checkpoint") or run_snapshot.get("resume_checkpoint_path") or "").strip() or None
+    resume_step = state.get("resume_step") or run_snapshot.get("resume_step") or run_snapshot.get("last_successful_step")
+    summary = {
+        "run_id": run_snapshot.get("run_id") or state.get("last_run_id"),
+        "sequence_id": state.get("sequence_id"),
+        "sequence_profile": state.get("profile"),
+        "window_id": state.get("window_id"),
+        "trial_id": state.get("trial_id"),
+        "engine": state.get("engine"),
+        "horizon": horizon,
+        "family": run_snapshot.get("family") or family,
+        "feature_profile": run_snapshot.get("feature_profile"),
+        "ga_trial": state.get("trial_id"),
+        "trial_mode": state.get("mode"),
+        "dataset_id": run_snapshot.get("dataset_id"),
+        "dataset_source": run_snapshot.get("dataset_source"),
+        "focus_symbols": list(run_snapshot.get("focus_symbols") or []),
+        "gate_profile": run_snapshot.get("gate_profile") or state.get("gate_profile"),
+        "terminal_status": "error",
+        "failed_step": "optimisation",
+        "failure_mode": SOFT_HANG_FAILURE_MODE,
+        "arena_outcome": None,
+        "promotion_gate": {
+            "allowed": False,
+            "status": "blocked",
+            "reason": "soft_hang_retry_exhausted",
+            "failure_mode": SOFT_HANG_FAILURE_MODE,
+            "gate_profile": run_snapshot.get("gate_profile") or state.get("gate_profile"),
+        },
+        "metrics": {},
+        "metrics_by_symbol": {},
+        "metrics_by_position_mechanics": {},
+        "artifact_state": {
+            "arena_report_present": False,
+            "battle_report_present": False,
+            "promotion_present": False,
+            "candidate_checkpoint_present": bool(resume_checkpoint_path),
+        },
+        "resume_checkpoint_path": resume_checkpoint_path,
+        "resume_step": resume_step,
+        "latest_candidate": None,
+        "latest_verdict": {
+            "status": "infra_error",
+            "reason": reason,
+            "failure_mode": SOFT_HANG_FAILURE_MODE,
+        },
+    }
+    path = write_terminal_summary(summary)
+    return load_terminal_summary(path=path) or {**summary, "path": str(path)}
+
+
+def _detect_soft_hang_reason(
+    *,
+    window_id: str,
+    run_snapshot: dict[str, Any],
+    stall_timeout_seconds: int,
+) -> str | None:
+    """Retourne une raison de gel si le run ne progresse plus.
+
+    Args:
+        window_id (str): Fenetre supervisee.
+        run_snapshot (dict[str, Any]): Etat courant du run.
+        stall_timeout_seconds (int): Timeout de stagnation.
+
+    Returns:
+        str | None: Motif explicite si un soft-hang est detecte.
+    """
+
+    if not run_snapshot.get("active"):
+        return None
+    if str(run_snapshot.get("window_id") or "") != window_id:
+        return None
+    phase = str((run_snapshot.get("current_step") or {}).get("phase") or "").strip().lower()
+    if phase != "optimisation":
+        return None
+    last_successful_step_at = _parse_iso_datetime(run_snapshot.get("last_successful_step_at"))
+    if last_successful_step_at is None:
+        return None
+    elapsed = (datetime.now(timezone.utc) - last_successful_step_at).total_seconds()
+    if elapsed < stall_timeout_seconds:
+        return None
+    last_successful_step = run_snapshot.get("last_successful_step")
+    train_step_phase = str(run_snapshot.get("train_step_phase") or "unknown")
+    return (
+        f"soft_hang_watchdog: aucune progression reelle depuis {int(elapsed)}s "
+        f"(step={last_successful_step}, sous_phase={train_step_phase})"
+    )
+
+
+def _watch_run_until_terminal(
+    *,
+    window_id: str,
+    state: dict[str, Any],
+    process: subprocess.Popen[str] | None,
+    retry_limit: int,
+    stall_timeout_seconds: int,
+    poll_seconds: int = 15,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Surveille un run actif jusqu'a son etat terminal.
+
+    Args:
+        window_id (str): Fenetre courante.
+        state (dict[str, Any]): Etat sequence mutable.
+        process (subprocess.Popen[str] | None): Processus du launcher si disponible.
+        retry_limit (int): Nombre maximal de retries infra.
+        stall_timeout_seconds (int): Timeout de stagnation.
+        poll_seconds (int): Delai entre deux sondes.
+
+    Returns:
+        tuple[dict[str, Any], dict[str, Any] | None]: Snapshot terminal et
+        resume synthetique eventuel.
+    """
+
+    synthetic_summary: dict[str, Any] | None = None
     while True:
         run_snapshot = _read_run_snapshot()
         state["supervisor_heartbeat"] = _now_iso()
-        state["last_run_id"] = run_snapshot.get("run_id")
+        if run_snapshot.get("window_id") == window_id and run_snapshot.get("run_id"):
+            state["last_run_id"] = run_snapshot.get("run_id")
         _persist_window_state(state)
+
+        stall_reason = _detect_soft_hang_reason(
+            window_id=window_id,
+            run_snapshot=run_snapshot,
+            stall_timeout_seconds=stall_timeout_seconds,
+        )
+        if stall_reason:
+            if str(state.get("engine") or "").strip().lower() == "muzero":
+                horizon, _family = _split_profile(str(state.get("profile") or ""))
+                last_successful_step = int(run_snapshot.get("last_successful_step") or 0)
+                checkpoint_path, checkpoint_step = _find_latest_muzero_checkpoint(
+                    horizon,
+                    max_step=last_successful_step if last_successful_step > 0 else None,
+                )
+                if checkpoint_path and checkpoint_step:
+                    state["resumed_from_checkpoint"] = checkpoint_path
+                    state["resume_step"] = checkpoint_step
+            retries_used = int(state.get("retry_count") or 0)
+            if retries_used >= retry_limit:
+                synthetic_summary = _build_soft_hang_terminal_summary(
+                    state=state,
+                    run_snapshot=run_snapshot,
+                    reason=stall_reason,
+                )
+                _interrupt_active_run(
+                    reason=stall_reason,
+                    final_status="error",
+                    failure_mode=SOFT_HANG_FAILURE_MODE,
+                    failed_step="optimisation",
+                )
+            else:
+                _interrupt_active_run(
+                    reason=stall_reason,
+                    final_status="aborted",
+                    failure_mode=SOFT_HANG_FAILURE_MODE,
+                    failed_step="optimisation",
+                )
+            deadline = time.time() + 90
+            while time.time() < deadline:
+                if process is not None and process.poll() is not None:
+                    break
+                run_snapshot = _read_run_snapshot()
+                if not run_snapshot.get("active"):
+                    break
+                time.sleep(5)
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            final_snapshot = _read_run_snapshot()
+            if process is not None:
+                final_snapshot["returncode"] = process.poll()
+            return final_snapshot, synthetic_summary
+
         if not run_snapshot.get("active") or run_snapshot.get("window_id") != window_id:
-            return run_snapshot
+            if process is not None and process.poll() is None:
+                try:
+                    process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+            final_snapshot = _read_run_snapshot()
+            if process is not None:
+                final_snapshot["returncode"] = process.poll()
+            return final_snapshot, synthetic_summary
+
+        if process is not None and process.poll() is not None:
+            final_snapshot = _read_run_snapshot()
+            if final_snapshot.get("active") and final_snapshot.get("window_id") == window_id:
+                state["last_run_id"] = final_snapshot.get("run_id") or state.get("last_run_id")
+                _persist_window_state(state)
+                process = None
+                continue
+            final_snapshot["returncode"] = process.returncode
+            return final_snapshot, synthetic_summary
         time.sleep(max(5, poll_seconds))
 
 
-def _run_trial(overrides: dict[str, str], state: dict[str, Any]) -> dict[str, Any]:
+def _wait_existing_run(
+    window_id: str,
+    state: dict[str, Any],
+    *,
+    retry_limit: int,
+    stall_timeout_seconds: int,
+    poll_seconds: int = 15,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Attend la fin d'un run deja actif pour la fenetre courante."""
+
+    return _watch_run_until_terminal(
+        window_id=window_id,
+        state=state,
+        process=None,
+        retry_limit=retry_limit,
+        stall_timeout_seconds=stall_timeout_seconds,
+        poll_seconds=poll_seconds,
+    )
+
+
+def _run_trial(
+    overrides: dict[str, str],
+    state: dict[str, Any],
+    *,
+    retry_limit: int,
+    stall_timeout_seconds: int,
+) -> dict[str, Any]:
     """Execute ou rattache un trial V4 puis retourne son etat terminal."""
 
     window_id = str(state.get("window_id") or "")
     run_snapshot = _read_run_snapshot()
+    synthetic_summary: dict[str, Any] | None = None
     if run_snapshot.get("active") and run_snapshot.get("window_id") == window_id:
         print(f"[sequence] Reprise du run actif {run_snapshot.get('run_id')} pour {window_id}.", flush=True)
-        final_snapshot = _wait_existing_run(window_id, state)
+        final_snapshot, synthetic_summary = _wait_existing_run(
+            window_id,
+            state,
+            retry_limit=retry_limit,
+            stall_timeout_seconds=stall_timeout_seconds,
+        )
     elif run_snapshot.get("active"):
         raise RuntimeError(
             f"Un autre run est deja actif ({run_snapshot.get('run_id')}) pour {run_snapshot.get('window_id')}."
@@ -380,20 +889,21 @@ def _run_trial(overrides: dict[str, str], state: dict[str, Any]) -> dict[str, An
             ["bash", str(REMOTE_SCRIPT)],
             cwd=ROOT,
             env=env,
+            text=True,
         )
-        while process.poll() is None:
-            run_snapshot = _read_run_snapshot()
-            state["supervisor_heartbeat"] = _now_iso()
-            if run_snapshot.get("window_id") == window_id and run_snapshot.get("run_id"):
-                state["last_run_id"] = run_snapshot.get("run_id")
-            _persist_window_state(state)
-            time.sleep(15)
-        final_snapshot = _read_run_snapshot()
-        final_snapshot["returncode"] = process.returncode
+        final_snapshot, synthetic_summary = _watch_run_until_terminal(
+            window_id=window_id,
+            state=state,
+            process=process,
+            retry_limit=retry_limit,
+            stall_timeout_seconds=stall_timeout_seconds,
+        )
 
     run_id = final_snapshot.get("run_id") or state.get("last_run_id")
     summary = None
     summary_path = str(final_snapshot.get("terminal_summary_path") or "").strip() or None
+    if synthetic_summary is not None:
+        summary = synthetic_summary
     if summary_path:
         summary = load_terminal_summary(path=summary_path)
     if summary is None and run_id:
@@ -404,6 +914,7 @@ def _run_trial(overrides: dict[str, str], state: dict[str, Any]) -> dict[str, An
         "status": str(final_snapshot.get("status") or "unknown"),
         "failed_step": dict(final_snapshot.get("failed_step") or {}),
         "returncode": final_snapshot.get("returncode"),
+        "reason": str(final_snapshot.get("reason") or "").strip() or None,
         "terminal_summary": summary,
         "terminal_summary_path": summary_path or (summary or {}).get("path"),
     }
@@ -421,11 +932,16 @@ def _handle_terminal_without_summary(
     retry_count = int(state.get("retry_count") or 0)
     if terminal_status == "aborted" and retry_count < retry_limit:
         state["retry_count"] = retry_count + 1
+        state["restart_count"] = int(state.get("restart_count") or 0) + 1
         state["status"] = "retrying"
-        state["last_error"] = "resume_terminal_absent_apres_aborted"
+        state["retry_reason"] = str(outcome.get("reason") or "resume_terminal_absent_apres_aborted")
+        state["last_error"] = state["retry_reason"]
         _persist_window_state(state)
         append_training_log(
-            f"Sequence V4: retry du trial {state.get('trial_id')} apres aborted sans resume terminal.",
+            (
+                f"Sequence V4: retry du trial {state.get('trial_id')} apres aborted "
+                f"sans resume terminal ({state['retry_reason']})."
+            ),
             level="WARNING",
             source="sequence",
         )
@@ -483,6 +999,8 @@ def _record_scored_trial(
         "terminal_status": terminal_status,
         "summary_path": terminal_summary.get("path"),
         "precheck_summary_path": ((terminal_summary.get("gold_precheck") or {}).get("path")),
+        "resume_checkpoint_path": terminal_summary.get("resume_checkpoint_path"),
+        "resume_step": terminal_summary.get("resume_step"),
         "focus_symbols": list(terminal_summary.get("focus_symbols") or []),
         "gate_profile": terminal_summary.get("gate_profile"),
         "metrics": metrics,
@@ -531,20 +1049,27 @@ def _record_scored_trial(
 
 def _write_finalists(
     *,
+    config: dict[str, Any],
     sequence_id: str,
     profile: str,
     engine: str,
     proxy_results_path: Path,
 ) -> list[dict[str, Any]]:
-    """Construit et persiste les deux meilleurs finalistes proxy."""
+    """Construit et persiste les meilleurs finalistes proxy eligibles."""
 
     proxy_results = _load_result_entries(proxy_results_path)
+    finalist_limit = max(
+        1,
+        int((((config.get("full_finalist_limits") or {}).get(engine)) or 2)),
+    )
     eligible_results = [
         item
         for item in proxy_results
         if not bool(item.get("killed_after_precheck"))
+        and str(item.get("failure_mode") or "").strip() not in {"soft_hang", "infra_error"}
+        and str(item.get("terminal_status") or "").strip().lower() not in {"error", "aborted"}
     ]
-    finalists = eligible_results[:2]
+    finalists = eligible_results[:finalist_limit]
     _write_json(
         _finalists_path(profile, engine),
         {
@@ -611,6 +1136,10 @@ def _execute_window(
 
     sequence_id = str(config.get("sequence_id") or "")
     retry_limit = int(config.get("retry_limit", 1))
+    stall_timeout_seconds = max(
+        60,
+        int(config.get("stall_timeout_seconds") or DEFAULT_STALL_TIMEOUT_SECONDS),
+    )
     results_path = _results_snapshot_path(profile, engine, mode)
     completed_entries = _load_result_entries(results_path)
     completed_trial_ids = {
@@ -695,27 +1224,36 @@ def _execute_window(
             }
         )
         _persist_window_state(sequence_state)
-
-        runtime_overrides = dict(trial.get("runtime_overrides") or {})
+        base_runtime_overrides = dict(trial.get("runtime_overrides") or {})
         if mode == "full":
-            runtime_overrides = _resolve_full_runtime_overrides(
+            base_runtime_overrides = _resolve_full_runtime_overrides(
                 config,
                 profile=profile,
                 engine=engine,
                 trial_id=raw_trial_id,
                 finalist_rank=generation,
-            ) or runtime_overrides
-        runtime_overrides["TRAINING_GA_GENERATION"] = str(generation)
-        trial_overrides = _build_trial_env(
-            runtime_overrides,
-            sequence_id=sequence_id,
-            sequence_profile=profile,
-            window_id=window_id,
-            trial_id=raw_trial_id,
-        )
+            ) or base_runtime_overrides
+        base_runtime_overrides["TRAINING_GA_GENERATION"] = str(generation)
 
         while True:
-            outcome = _run_trial(trial_overrides, sequence_state)
+            runtime_overrides = _resolve_resume_overrides(
+                config=config,
+                state=sequence_state,
+                overrides=base_runtime_overrides,
+            )
+            trial_overrides = _build_trial_env(
+                runtime_overrides,
+                sequence_id=sequence_id,
+                sequence_profile=profile,
+                window_id=window_id,
+                trial_id=raw_trial_id,
+            )
+            outcome = _run_trial(
+                trial_overrides,
+                sequence_state,
+                retry_limit=retry_limit,
+                stall_timeout_seconds=stall_timeout_seconds,
+            )
             terminal_summary = dict(outcome.get("terminal_summary") or {})
             if not terminal_summary:
                 if _handle_terminal_without_summary(outcome, sequence_state, retry_limit=retry_limit):
@@ -743,6 +1281,7 @@ def _execute_window(
                     "precheck_status": result_entry.get("precheck_status"),
                     "precheck_score": result_entry.get("precheck_score"),
                     "proxy_terminal_score": result_entry.get("proxy_terminal_score"),
+                    "retry_reason": None,
                     "supervisor_heartbeat": _now_iso(),
                     "last_error": None,
                 }
@@ -785,6 +1324,7 @@ def _execute_window(
 
     if mode == "proxy_ga":
         finalists = _write_finalists(
+            config=config,
             sequence_id=sequence_id,
             profile=profile,
             engine=engine,

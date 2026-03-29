@@ -156,6 +156,24 @@ services:
     networks:
       - hive-net
 
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - hive-net
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
   comfyui:
     image: ghcr.io/ai-dock/comfyui:latest-cuda
     ports:
@@ -815,6 +833,7 @@ volumes:
   timescale_data: null
   mosquitto_data: null
   neo4j_data: null
+  ollama_data: null
   trainer_models: {}
 
 

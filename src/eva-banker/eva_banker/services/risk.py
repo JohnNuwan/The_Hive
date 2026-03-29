@@ -27,6 +27,7 @@ class RiskValidator:
     Le validateur controle notamment:
     - le risque maximal par trade ;
     - les drawdowns journalier et total ;
+    - le gouverneur de drawdown intraday sur l'equity ;
     - l'anti-tilt ;
     - la disponibilite de la session de marche.
     """
@@ -58,13 +59,29 @@ class RiskValidator:
         self.anti_tilt_losses = anti_tilt_losses
         self.anti_tilt_hours = anti_tilt_hours
         self.settings = get_settings()
+        self.block_new_entries_drawdown = Decimal(str(self.settings.risk_max_daily_drawdown_percent))
+        self.flatten_progressive_drawdown = Decimal(
+            str(getattr(self.settings, "risk_flatten_progressive_drawdown_percent", 2.25))
+        )
+        self.flatten_immediate_drawdown = Decimal(
+            str(getattr(self.settings, "risk_flatten_immediate_drawdown_percent", 2.50))
+        )
 
         self._consecutive_losses = 0
         self._anti_tilt_until: datetime | None = None
         self._daily_pnl = Decimal("0")
+        self._daily_pnl_date = self._get_market_now().date()
         self._total_pnl = Decimal("0")
         self._open_positions_count = 0
         self._account_balance = Decimal("100000")
+        self._account_equity = Decimal("100000")
+        self._day_open_balance = Decimal("0")
+        self._day_open_equity = Decimal("0")
+        self._kill_switch_state = "normal"
+        self._kill_switch_reason: str | None = None
+        self._flatten_started_at: datetime | None = None
+        self._flatten_last_action_at: datetime | None = None
+        self._flatten_action_count = 0
         self._session_log_states: dict[str, str] = {}
         self._symbol_asset_classes: dict[str, str] = {}
 
@@ -91,6 +108,7 @@ class RiskValidator:
             "risk_percent": Decimal("0"),
             "checks": [],
         }
+        self._roll_daily_window_if_needed()
 
         if order.stop_loss_price is None:
             result["allowed"] = False
@@ -127,10 +145,10 @@ class RiskValidator:
             return result
         result["checks"].append(("anti_tilt", True, "Anti-Tilt inactif"))
 
-        if self._get_daily_drawdown_percent() >= self.max_daily_drawdown:
+        if self.should_block_new_entries():
             result["allowed"] = False
-            result["reason"] = (
-                f"Drawdown journalier limite atteinte ({self.max_daily_drawdown}%)"
+            result["reason"] = self._kill_switch_reason or (
+                f"Drawdown journalier limite atteinte ({self.block_new_entries_drawdown}%)"
             )
             result["checks"].append(("daily_drawdown", False, result["reason"]))
             return result
@@ -138,7 +156,11 @@ class RiskValidator:
             (
                 "daily_drawdown",
                 True,
-                f"DD journalier {self._get_daily_drawdown_percent():.2f}% OK",
+                (
+                    "DD journalier realise "
+                    f"{self._get_daily_realized_drawdown_percent():.2f}% | "
+                    f"DD equity {self._get_daily_equity_drawdown_percent():.2f}%"
+                ),
             )
         )
 
@@ -411,9 +433,38 @@ class RiskValidator:
         Returns:
             Decimal: Drawdown journalier.
         """
-        if self._account_balance <= 0 or self._daily_pnl >= 0:
+        return max(
+            self._get_daily_realized_drawdown_percent(),
+            self._get_daily_equity_drawdown_percent(),
+        )
+
+    def _get_daily_realized_drawdown_percent(self) -> Decimal:
+        """
+        Retourne le drawdown realise journalier en pourcentage.
+
+        Returns:
+            Decimal: Drawdown realise par rapport au solde d'ouverture.
+        """
+        self._roll_daily_window_if_needed()
+        reference_balance = self._day_open_balance or self._account_balance
+        if reference_balance <= 0 or self._daily_pnl >= 0:
             return Decimal("0")
-        return (abs(self._daily_pnl) / self._account_balance * 100).quantize(
+        return (abs(self._daily_pnl) / reference_balance * 100).quantize(
+            Decimal("0.01")
+        )
+
+    def _get_daily_equity_drawdown_percent(self) -> Decimal:
+        """
+        Retourne le drawdown intraday calcule sur l'equity.
+
+        Returns:
+            Decimal: Drawdown d'equity par rapport a l'ouverture de jour.
+        """
+        self._roll_daily_window_if_needed()
+        reference_equity = self._day_open_equity or self._account_equity
+        if reference_equity <= 0 or self._account_equity >= reference_equity:
+            return Decimal("0")
+        return ((reference_equity - self._account_equity) / reference_equity * 100).quantize(
             Decimal("0.01")
         )
 
@@ -437,6 +488,7 @@ class RiskValidator:
         Args:
             profit (Decimal): Profit ou perte du trade.
         """
+        self._roll_daily_window_if_needed()
         self._daily_pnl += profit
         self._total_pnl += profit
 
@@ -446,6 +498,7 @@ class RiskValidator:
                 self._activate_anti_tilt()
         else:
             self._consecutive_losses = 0
+        self._refresh_governor_state()
 
     def _activate_anti_tilt(self) -> None:
         """Active le mode anti-tilt."""
@@ -461,14 +514,201 @@ class RiskValidator:
         """
         self._open_positions_count = count
 
-    def update_account_balance(self, balance: Decimal) -> None:
+    def update_account_balance(self, balance: Decimal, equity: Decimal | None = None) -> None:
         """
-        Met a jour le solde de reference du compte.
+        Met a jour l'etat financier de reference du compte.
 
         Args:
-            balance (Decimal): Solde ou equity de reference.
+            balance (Decimal): Solde de reference.
+            equity (Decimal | None): Equity courante si disponible.
         """
+        self._roll_daily_window_if_needed()
         self._account_balance = balance
+        self._account_equity = equity if equity is not None else balance
+        self._ensure_day_open_snapshot()
+        self._refresh_governor_state()
+
+    def should_block_new_entries(self) -> bool:
+        """
+        Indique si les nouvelles entrees doivent etre bloquees.
+
+        Returns:
+            bool: ``True`` si le drawdown journalier impose un stop.
+        """
+        self._refresh_governor_state()
+        return self._kill_switch_state in {
+            "blocked_new_entries",
+            "flatten_progressive",
+            "flatten_immediate",
+        }
+
+    def should_flatten_progressive(self) -> bool:
+        """
+        Indique si un flatten progressif doit etre applique.
+
+        Returns:
+            bool: ``True`` si le drawdown d'equity impose un flatten progressif.
+        """
+        self._refresh_governor_state()
+        return self._kill_switch_state == "flatten_progressive"
+
+    def should_flatten_immediate(self) -> bool:
+        """
+        Indique si un flatten immediat doit etre applique.
+
+        Returns:
+            bool: ``True`` si le drawdown d'equity impose un flatten total.
+        """
+        self._refresh_governor_state()
+        return self._kill_switch_state == "flatten_immediate"
+
+    def can_run_progressive_flatten(self, cooldown_seconds: int = 120) -> bool:
+        """
+        Indique si un nouveau cycle de flatten progressif peut partir.
+
+        Args:
+            cooldown_seconds (int): Cooldown minimal entre deux clotures.
+
+        Returns:
+            bool: ``True`` si une nouvelle cloture peut etre tentee.
+        """
+        if not self.should_flatten_progressive():
+            return False
+        if self._flatten_last_action_at is None:
+            return True
+        return (datetime.now() - self._flatten_last_action_at).total_seconds() >= max(
+            30,
+            cooldown_seconds,
+        )
+
+    def note_flatten_action(self, mode: str) -> None:
+        """
+        Enregistre une action de flatten pour l'observabilite.
+
+        Args:
+            mode (str): Mode applique (`progressive` ou `immediate`).
+        """
+        now = datetime.now()
+        if self._flatten_started_at is None:
+            self._flatten_started_at = now
+        self._flatten_last_action_at = now
+        self._flatten_action_count += 1
+        logger.warning("Flatten %s execute a %s.", mode, now.isoformat())
+
+    def reset_day_session(self) -> None:
+        """
+        Reinitialise explicitement la session de risque courante.
+        """
+        self._daily_pnl = Decimal("0")
+        self._daily_pnl_date = self._get_market_now().date()
+        self._day_open_balance = self._account_balance
+        self._day_open_equity = self._account_equity
+        self._kill_switch_state = "normal"
+        self._kill_switch_reason = None
+        self._flatten_started_at = None
+        self._flatten_last_action_at = None
+        self._flatten_action_count = 0
+        logger.warning("Session de risque reinitialisee manuellement.")
+
+    async def save_state(self) -> None:
+        """
+        Persiste l'etat de risque pour survivre aux redemarrages du banker.
+
+        Le coupe-circuit journalier perd toute sa valeur si un redemarrage
+        efface les pertes realisees de la session. Cette persistance garde la
+        memoire du PnL journalier, du PnL total et de l'anti-tilt.
+        """
+        try:
+            from shared.redis_client import get_redis_client
+
+            redis = get_redis_client()
+            await redis.cache_set(
+                "banker:risk:state",
+                {
+                    "daily_pnl": str(self._daily_pnl),
+                    "daily_pnl_date": self._daily_pnl_date.isoformat(),
+                    "total_pnl": str(self._total_pnl),
+                    "day_open_balance": str(self._day_open_balance),
+                    "day_open_equity": str(self._day_open_equity),
+                    "account_balance": str(self._account_balance),
+                    "account_equity": str(self._account_equity),
+                    "consecutive_losses": self._consecutive_losses,
+                    "anti_tilt_until": (
+                        self._anti_tilt_until.isoformat()
+                        if self._anti_tilt_until
+                        else None
+                    ),
+                    "kill_switch_state": self._kill_switch_state,
+                    "kill_switch_reason": self._kill_switch_reason,
+                    "flatten_started_at": (
+                        self._flatten_started_at.isoformat()
+                        if self._flatten_started_at
+                        else None
+                    ),
+                    "flatten_last_action_at": (
+                        self._flatten_last_action_at.isoformat()
+                        if self._flatten_last_action_at
+                        else None
+                    ),
+                    "flatten_action_count": self._flatten_action_count,
+                },
+                ttl_seconds=7 * 86400,
+            )
+        except Exception:
+            pass
+
+    async def load_state(self) -> None:
+        """
+        Recharge l'etat de risque persiste si disponible.
+
+        Returns:
+            None: L'etat interne est mis a jour en place.
+        """
+        try:
+            from shared.redis_client import get_redis_client
+
+            redis = get_redis_client()
+            state = await redis.cache_get("banker:risk:state")
+            if not state:
+                return
+
+            self._daily_pnl = Decimal(str(state.get("daily_pnl", "0")))
+            raw_daily_date = state.get("daily_pnl_date")
+            if raw_daily_date:
+                self._daily_pnl_date = datetime.fromisoformat(raw_daily_date).date()
+            self._total_pnl = Decimal(str(state.get("total_pnl", "0")))
+            self._day_open_balance = Decimal(str(state.get("day_open_balance", "0")))
+            self._day_open_equity = Decimal(str(state.get("day_open_equity", "0")))
+            self._account_balance = Decimal(str(state.get("account_balance", str(self._account_balance))))
+            self._account_equity = Decimal(str(state.get("account_equity", str(self._account_equity))))
+            self._consecutive_losses = int(state.get("consecutive_losses", 0))
+
+            raw_anti_tilt_until = state.get("anti_tilt_until")
+            self._anti_tilt_until = (
+                datetime.fromisoformat(raw_anti_tilt_until)
+                if raw_anti_tilt_until
+                else None
+            )
+            self._kill_switch_state = str(state.get("kill_switch_state", "normal") or "normal")
+            self._kill_switch_reason = str(state.get("kill_switch_reason") or "").strip() or None
+            raw_flatten_started_at = state.get("flatten_started_at")
+            self._flatten_started_at = (
+                datetime.fromisoformat(raw_flatten_started_at)
+                if raw_flatten_started_at
+                else None
+            )
+            raw_flatten_last_action_at = state.get("flatten_last_action_at")
+            self._flatten_last_action_at = (
+                datetime.fromisoformat(raw_flatten_last_action_at)
+                if raw_flatten_last_action_at
+                else None
+            )
+            self._flatten_action_count = int(state.get("flatten_action_count", 0) or 0)
+            self._roll_daily_window_if_needed()
+            self._refresh_governor_state()
+            logger.info("Etat de risque recharge depuis Redis.")
+        except Exception:
+            pass
 
     def calculate_lot_size(
         self,
@@ -522,9 +762,11 @@ class RiskValidator:
         Returns:
             RiskStatus: Etat consolide du validateur.
         """
+        self._roll_daily_window_if_needed()
+        self._refresh_governor_state()
         trading_allowed = (
             not self._is_anti_tilt_active()
-            and self._get_daily_drawdown_percent() < self.max_daily_drawdown
+            and not self.should_block_new_entries()
             and self._get_total_drawdown_percent() < self.max_total_drawdown
             and self._open_positions_count < self.max_open_positions
         )
@@ -532,11 +774,136 @@ class RiskValidator:
             account_id=uuid4(),
             daily_drawdown_percent=self._get_daily_drawdown_percent(),
             total_drawdown_percent=self._get_total_drawdown_percent(),
+            daily_realized_pnl=self._daily_pnl.quantize(Decimal("0.01")),
+            day_open_balance=self._day_open_balance.quantize(Decimal("0.01")),
+            day_open_equity=self._day_open_equity.quantize(Decimal("0.01")),
+            daily_realized_drawdown_percent=self._get_daily_realized_drawdown_percent(),
+            daily_equity_drawdown_percent=self._get_daily_equity_drawdown_percent(),
             open_positions_count=self._open_positions_count,
             anti_tilt_active=self._is_anti_tilt_active(),
             anti_tilt_expires_at=self._anti_tilt_until,
             trading_allowed=trading_allowed,
+            kill_switch_state=self._kill_switch_state,
+            kill_switch_reason=self._kill_switch_reason,
+            flatten_state=self._build_flatten_state(),
+            thresholds=self._build_thresholds_payload(),
         )
+
+    def _roll_daily_window_if_needed(self) -> None:
+        """
+        Reinitialise le PnL journalier quand une nouvelle journee commence.
+
+        Le drawdown journalier doit suivre la session locale courante et non
+        cumuler les pertes des jours precedents. Sans cette remise a zero, le
+        coupe-circuit devient soit trop permissif apres redemarrage, soit trop
+        bloquant apres plusieurs jours.
+        """
+        market_date = self._get_market_now().date()
+        if market_date == self._daily_pnl_date:
+            return
+
+        logger.info(
+            "Nouvelle journee de risque detectee: remise a zero du PnL journalier (%s -> %s).",
+            self._daily_pnl_date,
+            market_date,
+        )
+        self._daily_pnl = Decimal("0")
+        self._daily_pnl_date = market_date
+        self._day_open_balance = self._account_balance
+        self._day_open_equity = self._account_equity
+        self._kill_switch_state = "normal"
+        self._kill_switch_reason = None
+        self._flatten_started_at = None
+        self._flatten_last_action_at = None
+        self._flatten_action_count = 0
+
+    def _ensure_day_open_snapshot(self) -> None:
+        """
+        Initialise le snapshot d'ouverture de jour si necessaire.
+        """
+        if self._day_open_balance <= 0:
+            self._day_open_balance = self._account_balance
+        if self._day_open_equity <= 0:
+            self._day_open_equity = self._account_equity
+
+    def _refresh_governor_state(self) -> None:
+        """
+        Recalcule l'etat du gouverneur de drawdown intraday.
+        """
+        realized_dd = self._get_daily_realized_drawdown_percent()
+        equity_dd = self._get_daily_equity_drawdown_percent()
+        previous_state = self._kill_switch_state
+
+        if equity_dd >= self.flatten_immediate_drawdown:
+            self._kill_switch_state = "flatten_immediate"
+            self._kill_switch_reason = "drawdown_equity_immediat"
+        elif equity_dd >= self.flatten_progressive_drawdown:
+            self._kill_switch_state = "flatten_progressive"
+            self._kill_switch_reason = "drawdown_equity_progressif"
+        elif (
+            realized_dd >= self.block_new_entries_drawdown
+            or equity_dd >= self.block_new_entries_drawdown
+        ):
+            self._kill_switch_state = "blocked_new_entries"
+            self._kill_switch_reason = (
+                "drawdown_realise_journalier"
+                if realized_dd >= self.block_new_entries_drawdown
+                else "drawdown_equity_journalier"
+            )
+        else:
+            self._kill_switch_state = "normal"
+            self._kill_switch_reason = None
+            self._flatten_started_at = None
+            self._flatten_last_action_at = None
+            self._flatten_action_count = 0
+
+        if self._kill_switch_state != "normal" and self._flatten_started_at is None:
+            self._flatten_started_at = datetime.now()
+
+        if previous_state != self._kill_switch_state:
+            logger.warning(
+                "Etat du gouverneur de risque mis a jour: %s -> %s (%s).",
+                previous_state,
+                self._kill_switch_state,
+                self._kill_switch_reason,
+            )
+
+    def _build_flatten_state(self) -> dict[str, Any]:
+        """
+        Construit la vue publique du flatten intraday.
+
+        Returns:
+            dict[str, Any]: Etat publie dans les endpoints banker.
+        """
+        return {
+            "active": self._kill_switch_state in {"flatten_progressive", "flatten_immediate"},
+            "mode": self._kill_switch_state if self._kill_switch_state.startswith("flatten_") else None,
+            "started_at": self._flatten_started_at.isoformat() if self._flatten_started_at else None,
+            "last_action_at": (
+                self._flatten_last_action_at.isoformat()
+                if self._flatten_last_action_at
+                else None
+            ),
+            "action_count": self._flatten_action_count,
+            "cooldown_seconds": 120,
+            "resume_below_percent": float(self.block_new_entries_drawdown),
+        }
+
+    def _build_thresholds_payload(self) -> dict[str, Any]:
+        """
+        Retourne les seuils actifs du gouverneur de risque.
+
+        Returns:
+            dict[str, Any]: Seuils actifs en pourcentage.
+        """
+        return {
+            "block_new_entries_drawdown_percent": float(self.block_new_entries_drawdown),
+            "flatten_progressive_drawdown_percent": float(self.flatten_progressive_drawdown),
+            "flatten_immediate_drawdown_percent": float(self.flatten_immediate_drawdown),
+            "max_total_drawdown_percent": float(self.max_total_drawdown),
+            "anti_tilt_losses": int(self.anti_tilt_losses),
+            "anti_tilt_hours": int(self.anti_tilt_hours),
+        }
 
 
 @lru_cache

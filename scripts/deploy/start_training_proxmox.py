@@ -65,6 +65,7 @@ SYNC_FILES = [
     Path("src/shared/shared/__init__.py"),
     Path("src/shared/shared/config.py"),
     Path("src/shared/shared/models.py"),
+    Path("scripts/deploy/gold_manual_remote_runner.py"),
     Path("scripts/deploy/v4_sequence_runner.py"),
     Path("scripts/prepare_gold_cpu_artifacts.py"),
 ]
@@ -142,6 +143,8 @@ PASSTHROUGH_VARS = [
     "DREAMER_NETWORK_HIDDEN_DIMS",
     "DREAMER_NUM_UNROLL_STEPS",
     "DREAMER_REPLAY_MAX_GAMES",
+    "MUZERO_RESUME_CHECKPOINT_PATH",
+    "MUZERO_RESUME_STEP",
     "XLA_PYTHON_CLIENT_PREALLOCATE",
     "XLA_PYTHON_CLIENT_MEM_FRACTION",
     "MUZERO_PROMOTION_MIN_TOTAL_TRADES",
@@ -276,6 +279,16 @@ GOLD_MONDAY_CONTEXT_SYMBOLS = [
     "DXY.cash",
     "US500.cash",
     "EURUSD",
+]
+FAST_MUZERO_PROXY_SYMBOLS = ["EURUSD", "XAUUSD", "GBPUSD"]
+FAST_MUZERO_FULL_SYMBOLS = [
+    "EURUSD",
+    "XAUUSD",
+    "GBPUSD",
+    "USDJPY",
+    "US30.cash",
+    "GER40.cash",
+    "US500.cash",
 ]
 
 V4_WINDOW_ORDER = [
@@ -624,6 +637,8 @@ export MUZERO_SYMBOLS=\"${MUZERO_SYMBOLS:-}\"
 export MUZERO_SYMBOLS_SCALP=\"${MUZERO_SYMBOLS_SCALP:-}\"
 export MUZERO_SYMBOLS_INTRADAY=\"${MUZERO_SYMBOLS_INTRADAY:-}\"
 export MUZERO_SYMBOLS_SWING=\"${MUZERO_SYMBOLS_SWING:-}\"
+export MUZERO_RESUME_CHECKPOINT_PATH=\"${MUZERO_RESUME_CHECKPOINT_PATH:-}\"
+export MUZERO_RESUME_STEP=\"${MUZERO_RESUME_STEP:-0}\"
 export TRAINING_SYMBOLS=\"${TRAINING_SYMBOLS:-}\"
 export ARENA_MAX_SYMBOLS=\"${ARENA_MAX_SYMBOLS:-12}\"
 export ARENA_SYMBOLS=\"${ARENA_SYMBOLS:-}\"
@@ -753,6 +768,8 @@ docker compose run --rm \
   -e MUZERO_SYMBOLS_SCALP=\"$MUZERO_SYMBOLS_SCALP\" \
   -e MUZERO_SYMBOLS_INTRADAY=\"$MUZERO_SYMBOLS_INTRADAY\" \
   -e MUZERO_SYMBOLS_SWING=\"$MUZERO_SYMBOLS_SWING\" \
+  -e MUZERO_RESUME_CHECKPOINT_PATH=\"$MUZERO_RESUME_CHECKPOINT_PATH\" \
+  -e MUZERO_RESUME_STEP=\"$MUZERO_RESUME_STEP\" \
   -e TRAINING_SYMBOLS=\"$TRAINING_SYMBOLS\" \
   -e ARENA_MAX_SYMBOLS=\"$ARENA_MAX_SYMBOLS\" \
   -e ARENA_SYMBOLS=\"$ARENA_SYMBOLS\" \
@@ -1615,6 +1632,38 @@ def _get_v3_trial_catalog(profile: str) -> list[dict[str, Any]]:
                 "MUZERO_REWARD_HOLD_DRAG_MULTIPLIER": "0.62",
             },
         },
+        {
+            "trial_id": "directional_guard",
+            "overrides": {
+                "MUZERO_DIRECTIONAL_MAX_IMBALANCE": "0.58",
+                "MUZERO_DIRECTIONAL_IMBALANCE_PENALTY": "18.0",
+                "MUZERO_ACTIVITY_INSUFFICIENT_ENTRIES_PENALTY": "12.0",
+            },
+        },
+        {
+            "trial_id": "hold_release",
+            "overrides": {
+                "MUZERO_HOLD_TREND_PENALTY": "0.68",
+                "MUZERO_REWARD_HOLD_DRAG_MULTIPLIER": "0.78",
+                "MUZERO_ACTIVITY_MIN_ENTRIES": "3",
+            },
+        },
+        {
+            "trial_id": "split_release",
+            "overrides": {
+                "MUZERO_SPLIT_MIN_TRADE_RETURN": "0.0022",
+                "MUZERO_SPLIT_MIN_REALIZED_PCT": "0.018",
+                "MUZERO_SPLIT_FAILURE_PENALTY": "0.52",
+            },
+        },
+        {
+            "trial_id": "close_recovery",
+            "overrides": {
+                "MUZERO_CLOSE_STRONG_WINNER_THRESHOLD": "0.0064",
+                "MUZERO_CLOSE_WINNER_THRESHOLD": "0.0032",
+                "MUZERO_CLOSE_TP_LIKE_THRESHOLD": "0.0028",
+            },
+        },
     ]
     family_trials: dict[str, list[dict[str, Any]]] = {
         "metals": common_trials
@@ -1689,11 +1738,19 @@ def _build_v3_profile_overrides(
             {
                 "TRAINING_RUN_TRIGGER": f"manual_{normalized_profile}_{trial_id}",
                 "MUZERO_TRAINING_STEPS": "6000",
-                "MUZERO_GAMES_PER_SYMBOL": "8",
-                "ARENA_GAMES_PER_SYMBOL": "3",
-                "ARENA_MIN_GAMES": "10",
-                "MUZERO_PROMOTION_MIN_EVAL_GAMES": "8",
+                "MUZERO_GAMES_PER_SYMBOL": "3",
+                "ARENA_GAMES_PER_SYMBOL": "2",
+                "ARENA_MIN_GAMES": "6",
+                "MUZERO_PROMOTION_MIN_EVAL_GAMES": "6",
                 "TRAINING_GA_STATUS": "proxy_ga",
+                "MUZERO_PROXY_PRECHECK_ENABLED": "1",
+                "MUZERO_PROXY_PRECHECK_STEPS": "1500,3000",
+                "MUZERO_PROXY_PRECHECK_GAMES": "2",
+                "TRAINING_FOCUS_SYMBOLS": ",".join(FAST_MUZERO_PROXY_SYMBOLS),
+                "MUZERO_SYMBOLS": ",".join(FAST_MUZERO_PROXY_SYMBOLS),
+                "MUZERO_SYMBOLS_SCALP": ",".join(FAST_MUZERO_PROXY_SYMBOLS),
+                "ARENA_SYMBOLS": ",".join(FAST_MUZERO_PROXY_SYMBOLS),
+                "ARENA_SYMBOLS_SCALP": ",".join(FAST_MUZERO_PROXY_SYMBOLS),
             }
         )
     else:
@@ -1701,11 +1758,16 @@ def _build_v3_profile_overrides(
         overrides.update(
             {
                 "TRAINING_RUN_TRIGGER": f"manual_{normalized_profile}_finalist_{rank_label}_{trial_id}",
-                "MUZERO_TRAINING_STEPS": "16000",
-                "MUZERO_GAMES_PER_SYMBOL": "14",
-                "ARENA_GAMES_PER_SYMBOL": "8",
-                "ARENA_MIN_GAMES": "24",
+                "MUZERO_TRAINING_STEPS": "12000",
+                "MUZERO_GAMES_PER_SYMBOL": "6",
+                "ARENA_GAMES_PER_SYMBOL": "6",
+                "ARENA_MIN_GAMES": "18",
                 "TRAINING_GA_STATUS": "full",
+                "TRAINING_FOCUS_SYMBOLS": ",".join(FAST_MUZERO_FULL_SYMBOLS),
+                "MUZERO_SYMBOLS": ",".join(FAST_MUZERO_FULL_SYMBOLS),
+                "MUZERO_SYMBOLS_SCALP": ",".join(FAST_MUZERO_FULL_SYMBOLS),
+                "ARENA_SYMBOLS": ",".join(FAST_MUZERO_FULL_SYMBOLS),
+                "ARENA_SYMBOLS_SCALP": ",".join(FAST_MUZERO_FULL_SYMBOLS),
             }
         )
     overrides["TRAINING_GA_GENERATION"] = "1"
@@ -2248,6 +2310,14 @@ def _build_gold_monday_sequence_config(
         dict[str, Any]: Configuration serialisable de la sequence Gold.
     """
 
+    resume_checkpoint_path = str(os.getenv("GOLD_MONDAY_RESUME_CHECKPOINT_PATH", "")).strip()
+    resume_step = int(str(os.getenv("GOLD_MONDAY_RESUME_STEP", "0")).strip() or 0)
+    resume_trial_id = str(os.getenv("GOLD_MONDAY_RESUME_TRIAL_ID", "momentum_close")).strip() or "momentum_close"
+    if resume_checkpoint_path.startswith(f"{REMOTE_DIR}/"):
+        resume_checkpoint_path = resume_checkpoint_path[len(f"{REMOTE_DIR}/") :]
+    full_finalists_limit = max(1, int(str(os.getenv("GOLD_MONDAY_FULL_FINALISTS_MAX", "1")).strip() or 1))
+    stall_timeout_seconds = max(60, int(str(os.getenv("TRAINING_STALL_TIMEOUT_SECONDS", "600")).strip() or 600))
+
     muzero_proxy_trials = []
     muzero_full_catalog: dict[str, dict[str, str]] = {}
     for trial in _get_v3_trial_catalog(GOLD_MONDAY_PROFILE):
@@ -2310,8 +2380,26 @@ def _build_gold_monday_sequence_config(
         "focus_symbol": GOLD_MONDAY_FOCUS_SYMBOL,
         "gate_profile": "gold_demo",
         "retry_limit": 1,
+        "stall_timeout_seconds": stall_timeout_seconds,
+        "full_finalist_limits": {
+            "muzero": full_finalists_limit,
+            "dreamer": 1,
+        },
         "stdout_log_path": stdout_log_path,
         "stderr_log_path": stderr_log_path,
+        "resume_trial": (
+            {
+                "engine": "muzero",
+                "profile": GOLD_MONDAY_PROFILE,
+                "mode": "proxy_ga",
+                "trial_id": resume_trial_id,
+                "checkpoint_path": resume_checkpoint_path,
+                "resume_step": resume_step,
+                "consume_once": True,
+            }
+            if resume_checkpoint_path
+            else None
+        ),
         "catalogs": {
             "muzero": {GOLD_MONDAY_PROFILE: muzero_proxy_trials},
             "dreamer": {GOLD_MONDAY_PROFILE: dreamer_proxy_trials},
@@ -2564,6 +2652,32 @@ def _fetch_remote_champion_status() -> dict:
         raise RuntimeError(f"Lecture impossible de {url}: {exc}") from exc
 
 
+def _publish_remote_ga_trial(payload: dict[str, Any]) -> bool:
+    """Persiste un resultat de trial GA via l'API interne du Lab.
+
+    Args:
+        payload (dict[str, Any]): Resultat de scoring a persister.
+
+    Returns:
+        bool: ``True`` si la persistance HTTP a abouti.
+    """
+
+    url = f"http://{HOST}:8600/internal/ga-trial"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        print(f"[ga-trial] Persistance distante impossible: {exc}")
+        return False
+    return bool(body.get("persisted"))
+
+
 def _fetch_remote_sequence_status() -> dict[str, Any]:
     """Lit le statut HTTP du superviseur distant de sequence.
 
@@ -2707,7 +2821,12 @@ def _extract_engine_horizon_metrics(
 
 
 def _score_v4_trial_result(profile: str, champion_status: dict[str, Any], *, engine: str) -> dict[str, Any]:
-    """Calcule le fitness V4 d'un essai moteur."""
+    """Calcule le fitness V4 d'un essai moteur.
+
+    Le scoring MuZero suit la formule courte definie pour la campagne
+    seedee rapide afin de penaliser tres tot les candidats passifs ou
+    directionnellement desequilibres.
+    """
 
     normalized_profile = _normalize_v4_profile(profile)
     normalized_engine = _normalize_v4_engine(engine)
@@ -2716,13 +2835,16 @@ def _score_v4_trial_result(profile: str, champion_status: dict[str, Any], *, eng
     horizon_status = dict(extracted.get("status") or {})
     metrics = dict(extracted.get("metrics") or {})
     mechanics = dict(extracted.get("mechanics") or {})
+    terminal_summary = dict(horizon_status.get("terminal_summary") or {})
+    latest_verdict = dict(horizon_status.get("latest_verdict") or {})
 
+    win_rate = float(metrics.get("win_rate", 0.0) or 0.0)
     profit_factor = float(metrics.get("profit_factor", 0.0) or 0.0)
     return_pct = float(metrics.get("return_pct", 0.0) or 0.0)
     net_realized_pct = float(metrics.get("net_realized_pct", 0.0) or 0.0)
+    expectancy_pct = float(metrics.get("expectancy_pct", 0.0) or 0.0)
+    max_drawdown_pct = float(metrics.get("max_drawdown_pct", 0.0) or 0.0)
     positive_episode_rate = float(metrics.get("positive_episode_rate", 0.0) or 0.0)
-    long_entry_share = float(metrics.get("long_entry_share", 0.0) or 0.0)
-    short_entry_share = float(metrics.get("short_entry_share", 0.0) or 0.0)
     directional_imbalance = float(metrics.get("directional_imbalance", 1.0) or 1.0)
     close_quality_score = float(mechanics.get("close_quality_score", 0.0) or 0.0)
     split_efficiency = float(mechanics.get("split_efficiency", 0.0) or 0.0)
@@ -2731,23 +2853,27 @@ def _score_v4_trial_result(profile: str, champion_status: dict[str, Any], *, eng
     hold_drag_score = float(mechanics.get("hold_drag_score", 0.0) or 0.0)
     total_trades = int(metrics.get("total_trades", 0) or 0)
     failure_mode = str(horizon_status.get("failure_mode") or "unknown")
-    score = (
-        return_pct * 180.0
-        + net_realized_pct * 140.0
-        + max(0.0, profit_factor - 1.0) * 55.0
-        + positive_episode_rate * 0.35
-        + min(long_entry_share, short_entry_share) * 45.0
-        + close_quality_score * 30.0
-        + split_efficiency * 18.0
-        + pyramid_efficiency * 16.0
-        + slbe_capture_rate * 14.0
-        - hold_drag_score * 12.0
-        - directional_imbalance * 24.0
+    early_kill_reason = (
+        str(terminal_summary.get("early_kill_reason") or "").strip()
+        or str(latest_verdict.get("reason") or "").strip()
+        or None
     )
-    if total_trades <= 0:
-        score -= 80.0
-    if failure_mode in {"inactive", "sell_heavy", "buy_heavy", "bad_exit"}:
-        score -= 25.0
+    score = (
+        return_pct * 8.0
+        + max(0.0, profit_factor - 1.0) * 18.0
+        + expectancy_pct * 120.0
+        + win_rate * 0.08
+        + positive_episode_rate * 0.06
+        - max_drawdown_pct * 1.5
+        + close_quality_score * 6.0
+        + split_efficiency * 4.0
+        + pyramid_efficiency * 4.0
+        + slbe_capture_rate * 4.0
+        - hold_drag_score * 8.0
+        - directional_imbalance * 10.0
+    )
+    if total_trades <= 0 or early_kill_reason:
+        score -= 40.0
 
     return {
         "engine": normalized_engine,
@@ -2755,6 +2881,9 @@ def _score_v4_trial_result(profile: str, champion_status: dict[str, Any], *, eng
         "family": family,
         "score": round(score, 4),
         "failure_mode": failure_mode,
+        "phase": str((horizon_status.get("current_step") or {}).get("phase") or horizon_status.get("selection") or ""),
+        "early_kill_reason": early_kill_reason,
+        "promotion_state": str(latest_verdict.get("status") or horizon_status.get("selection") or "").strip() or None,
         "metrics": metrics,
         "mechanics": mechanics,
     }
@@ -3264,7 +3393,20 @@ def launch_v4_profile_remote(
                 scored["trial_id"] = trial_id
                 scored["generation"] = generation
                 scored["run_id"] = run_id
+                scored["ga_generation"] = generation
+                scored["ga_trial"] = trial_id
+                scored["trial_mode"] = normalized_mode
+                scored["trial_cost_profile"] = "proxy"
+                scored["sequence_id"] = None
+                scored["profile"] = normalized_profile
+                scored["horizon"] = _split_v3_profile(normalized_profile)[0]
+                scored["feature_profile"] = None
+                scored["mechanics_profile_version"] = normalized_profile
+                scored["fitness_score"] = scored.get("score")
+                scored["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                scored["finalist_rank"] = None
                 proxy_results.append(scored)
+                _publish_remote_ga_trial(scored)
                 _write_v3_results_snapshot(
                     proxy_results_path,
                     profile=f"{normalized_engine}:{normalized_profile}",
@@ -3280,7 +3422,11 @@ def launch_v4_profile_remote(
                 )
 
             proxy_results.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
-            finalists = proxy_results[:2]
+            finalists = [
+                item
+                for item in proxy_results
+                if not str(item.get("early_kill_reason") or "").strip()
+            ][:2]
             _write_v3_results_snapshot(
                 proxy_results_path,
                 profile=f"{normalized_engine}:{normalized_profile}",
@@ -3375,7 +3521,20 @@ def launch_v4_profile_remote(
             scored["trial_id"] = trial_id
             scored["generation"] = finalist_rank
             scored["run_id"] = run_id
+            scored["ga_generation"] = finalist_rank
+            scored["ga_trial"] = trial_id
+            scored["trial_mode"] = normalized_mode
+            scored["trial_cost_profile"] = "full"
+            scored["sequence_id"] = None
+            scored["profile"] = normalized_profile
+            scored["horizon"] = _split_v3_profile(normalized_profile)[0]
+            scored["feature_profile"] = None
+            scored["mechanics_profile_version"] = normalized_profile
+            scored["fitness_score"] = scored.get("score")
+            scored["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            scored["finalist_rank"] = finalist_rank
             full_results.append(scored)
+            _publish_remote_ga_trial(scored)
             _write_v3_results_snapshot(
                 full_results_path,
                 profile=f"{normalized_engine}:{normalized_profile}",

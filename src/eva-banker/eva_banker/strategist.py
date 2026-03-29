@@ -31,9 +31,10 @@ class Strategist:
     En mode standard, le strategist interroge le Cortex LLM puis fusionne son
     biais avec le GNN multi-horizon.
 
-    En mode `cpu_live`, le strategist n'appelle plus le Cortex. Il garde un
-    contexte local lisible, expose le biais GNN, mais interdit toute surcouche
-    de veto directionnel fort afin que le live continue sans dependance `vLLM`.
+    En mode `cpu_live`, le strategist peut soit desactiver completement le
+    Cortex, soit utiliser un Cortex `ollama` sur CPU. Dans tous les cas, ce
+    Cortex reste strictement consultatif : le live continue a etre pilote par
+    MuZero et aucun veto directionnel fort n'est ajoute.
     """
 
     def __init__(self, mt5_service: MT5Service):
@@ -48,15 +49,29 @@ class Strategist:
             os.getenv("BANKER_TRAINING_COMPAT_MODE", "disabled")
         )
         self._cpu_live_mode = self._training_compat_mode == "cpu_live"
+        self._cpu_live_cortex_mode = self._resolve_cpu_live_cortex_mode(
+            os.getenv("BANKER_CPU_LIVE_CORTEX_MODE", "ollama")
+        )
+        self._cpu_live_cortex_timeout_seconds = self._resolve_cpu_live_cortex_timeout_seconds()
+        self._cpu_live_cortex_endpoint = self._resolve_cpu_live_cortex_endpoint(settings)
         self.cortex_model = self._resolve_cortex_model(settings)
-        self.cortex = None if self._cpu_live_mode else LLMClient(model=self.cortex_model)
+        self.cortex_backend = settings.llm_backend
+        self.cortex = self._build_cortex_client(settings)
         self.latest_strategy: dict[str, dict[str, Any]] = {}
         self.last_update: datetime = datetime.min
 
         if self._cpu_live_mode:
-            logger.info(
-                "Mode cpu_live actif: Cortex desactive, GNN consultatif, contexte local uniquement."
-            )
+            if self.cortex is None:
+                logger.info(
+                    "Mode cpu_live actif: Cortex desactive, GNN consultatif, contexte local uniquement."
+                )
+            else:
+                logger.info(
+                    "Mode cpu_live actif: Cortex consultatif via %s (%s), timeout %.1fs.",
+                    self.cortex_backend,
+                    self.cortex_model,
+                    self._cpu_live_cortex_timeout_seconds,
+                )
         else:
             logger.info("Cortex bancaire initialise avec le modele: %s", self.cortex_model)
 
@@ -80,6 +95,91 @@ class Strategist:
             raw_mode,
         )
         return "disabled"
+
+    @staticmethod
+    def _resolve_cpu_live_cortex_mode(raw_mode: str) -> str:
+        """Normalise le mode du Cortex consultatif en `cpu_live`.
+
+        Args:
+            raw_mode (str): Valeur brute issue de l'environnement.
+
+        Returns:
+            str: Mode retenu (`disabled` ou `ollama`).
+        """
+        normalized = str(raw_mode or "").strip().lower()
+        if normalized in {"", "0", "false", "off", "none", "disabled"}:
+            return "disabled"
+        if normalized == "ollama":
+            return normalized
+        logger.warning(
+            "Mode BANKER_CPU_LIVE_CORTEX_MODE inconnu (%s). Repli sur disabled.",
+            raw_mode,
+        )
+        return "disabled"
+
+    @staticmethod
+    def _resolve_cpu_live_cortex_timeout_seconds() -> float:
+        """Lit le timeout du Cortex CPU consultatif.
+
+        Returns:
+            float: Delai maximal d'un appel CPU consultatif.
+        """
+        raw_timeout = os.getenv("BANKER_CPU_LIVE_CORTEX_TIMEOUT_SECONDS", "4.0").strip()
+        try:
+            return max(1.0, float(raw_timeout))
+        except ValueError:
+            logger.warning(
+                "Timeout BANKER_CPU_LIVE_CORTEX_TIMEOUT_SECONDS invalide (%s). Repli sur 4.0s.",
+                raw_timeout,
+            )
+            return 4.0
+
+    @staticmethod
+    def _resolve_cpu_live_cortex_endpoint(settings) -> str:
+        """Construit l'endpoint du Cortex CPU consultatif.
+
+        Args:
+            settings: Configuration partagee.
+
+        Returns:
+            str: URL de base a utiliser pour `ollama`.
+        """
+        explicit_url = os.getenv("BANKER_CPU_LIVE_CORTEX_URL", "").strip()
+        if explicit_url:
+            return explicit_url
+
+        host = os.getenv("BANKER_CPU_LIVE_CORTEX_HOST", "").strip() or "127.0.0.1"
+        port = os.getenv("BANKER_CPU_LIVE_CORTEX_PORT", "").strip() or str(settings.ollama_port)
+        return f"http://{host}:{port}"
+
+    def _build_cortex_client(self, settings) -> LLMClient | None:
+        """Construit le client Cortex adapte au mode courant.
+
+        Args:
+            settings: Configuration partagee.
+
+        Returns:
+            LLMClient | None: Client LLM actif ou `None` si le Cortex reste coupe.
+        """
+        if self._cpu_live_mode:
+            if self._cpu_live_cortex_mode != "ollama":
+                self.cortex_backend = "disabled"
+                return None
+
+            self.cortex_backend = "ollama"
+            self.cortex_model = (
+                os.getenv("BANKER_CPU_LIVE_CORTEX_MODEL", "").strip()
+                or settings.ollama_model
+            )
+            return LLMClient(
+                model=self.cortex_model,
+                host=self._cpu_live_cortex_endpoint,
+                backend="ollama",
+                request_timeout_seconds=self._cpu_live_cortex_timeout_seconds,
+            )
+
+        self.cortex_backend = settings.llm_backend
+        return LLMClient(model=self.cortex_model)
 
     @staticmethod
     def _resolve_cortex_model(settings) -> str:
@@ -107,6 +207,43 @@ class Strategist:
             return candidate or settings.vllm_model
 
         return settings.ollama_model
+
+    def get_runtime_status(self) -> dict[str, Any]:
+        """Expose l'etat du Cortex pour les APIs du banker.
+
+        Returns:
+            dict[str, Any]: Mode, backend, exigence et endpoint du Cortex.
+        """
+        if self._cpu_live_mode:
+            if self.cortex is None:
+                return {
+                    "mode": "disabled",
+                    "backend": "none",
+                    "required": False,
+                    "consultative": True,
+                    "model": None,
+                    "endpoint": None,
+                    "timeout_seconds": self._cpu_live_cortex_timeout_seconds,
+                }
+            return {
+                "mode": "consultatif_cpu",
+                "backend": self.cortex_backend,
+                "required": False,
+                "consultative": True,
+                "model": self.cortex_model,
+                "endpoint": self._cpu_live_cortex_endpoint,
+                "timeout_seconds": self._cpu_live_cortex_timeout_seconds,
+            }
+
+        return {
+            "mode": "live",
+            "backend": self.cortex_backend,
+            "required": True,
+            "consultative": False,
+            "model": self.cortex_model,
+            "endpoint": getattr(self.cortex, "host", None) if self.cortex is not None else None,
+            "timeout_seconds": getattr(self.cortex, "request_timeout_seconds", None),
+        }
 
     @staticmethod
     def _strip_json_fence(content: str) -> str:
@@ -252,7 +389,7 @@ class Strategist:
         }
 
         response = ""
-        if self._cpu_live_mode or self.cortex is None:
+        if self.cortex is None:
             cortex_bias = "NEUTRAL"
             cortex_reason = (
                 "Mode CPU live: Cortex desactive pendant l'entrainement GPU. "
@@ -339,7 +476,17 @@ class Strategist:
                 bias_strength = "weak"
 
         if self._cpu_live_mode:
-            if gnn_bias != "NEUTRAL" and gnn_confidence >= 0.55:
+            if self.cortex is not None and cortex_bias in {"BULLISH", "BEARISH"}:
+                if gnn_bias == cortex_bias and gnn_confidence >= 0.55:
+                    final_bias = "RANGING"
+                    bias_alignment = "cpu_live_conseil_aligne"
+                elif gnn_bias != "NEUTRAL" and gnn_confidence >= 0.55 and gnn_bias != cortex_bias:
+                    final_bias = "RANGING"
+                    bias_alignment = "cpu_live_conseil_conflit"
+                else:
+                    final_bias = "NEUTRAL"
+                    bias_alignment = "cpu_live_cortex_consultatif"
+            elif gnn_bias != "NEUTRAL" and gnn_confidence >= 0.55:
                 final_bias = "RANGING"
                 bias_alignment = "cpu_live_gnn_consultatif"
             else:
@@ -362,6 +509,8 @@ class Strategist:
             "raw_response": response,
             "compat_mode": self._training_compat_mode,
             "cortex_required": not self._cpu_live_mode,
+            "cortex_backend": self.cortex_backend,
+            "cortex_mode": self.get_runtime_status().get("mode"),
             "timestamp": datetime.now().isoformat(),
         }
         self.latest_strategy[symbol] = strategy
@@ -425,11 +574,24 @@ class Strategist:
         adx = float(indicators.get("adx", 25) or 25)
         macd = float(indicators.get("MACD_Hist", 0) or 0)
 
-        if self._cpu_live_mode or self.cortex is None:
+        if self._cpu_live_mode:
+            last_strategy = self.latest_strategy.get(symbol, {})
+            cortex_bias = str(last_strategy.get("cortex_bias") or "NEUTRAL")
+            gnn_bias = str(last_strategy.get("gnn_bias") or "NEUTRAL")
+            if self.cortex is not None:
+                rationale = self._sanitize_reasoning_text(last_strategy.get("raw_thought", ""))[:140]
+                detail = rationale or f"RSI {rsi:.1f}, ADX {adx:.1f} et MACD {macd:.4f}."
+                return (
+                    f"Mode CPU live: {action} sur {symbol} avec Cortex CPU {cortex_bias}, "
+                    f"GNN {gnn_bias}. {detail}"
+                )
             return (
                 f"Mode CPU live: {action} sur {symbol} conserve en demo avec RSI {rsi:.1f}, "
                 f"ADX {adx:.1f} et MACD {macd:.4f}."
             )
+
+        if self.cortex is None:
+            return "Le signal technique reste coherent avec le contexte courant."
 
         prompt = (
             f"Explique en une seule phrase courte, en francais, pourquoi ouvrir un {action} sur {symbol}. "

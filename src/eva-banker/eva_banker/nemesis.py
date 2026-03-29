@@ -45,10 +45,49 @@ class NemesisSystem:
             50,
             int(os.getenv("BANKER_NEMESIS_MAX_LEDGER_ENTRIES", "200")),
         )
+        self.symbol_quarantine_hours = max(
+            1,
+            int(os.getenv("BANKER_NEMESIS_SYMBOL_QUARANTINE_HOURS", "4")),
+        )
+        self.symbol_loss_streak_threshold = max(
+            2,
+            int(os.getenv("BANKER_NEMESIS_SYMBOL_LOSS_STREAK_THRESHOLD", "2")),
+        )
+        self.symbol_event_threshold = max(
+            2,
+            int(os.getenv("BANKER_NEMESIS_SYMBOL_EVENT_THRESHOLD", "3")),
+        )
+        self.symbol_loss_lookback_hours = max(
+            1,
+            int(os.getenv("BANKER_NEMESIS_SYMBOL_LOSS_LOOKBACK_HOURS", "4")),
+        )
+        self.symbol_event_lookback_hours = max(
+            1,
+            int(os.getenv("BANKER_NEMESIS_SYMBOL_EVENT_LOOKBACK_HOURS", "12")),
+        )
+        self.global_loss_threshold = max(
+            2,
+            int(os.getenv("BANKER_NEMESIS_GLOBAL_LOSS_THRESHOLD", "4")),
+        )
+        self.global_loss_lookback_hours = max(
+            1,
+            int(os.getenv("BANKER_NEMESIS_GLOBAL_LOSS_LOOKBACK_HOURS", "6")),
+        )
+        self.global_quarantine_symbol_threshold = max(
+            2,
+            int(os.getenv("BANKER_NEMESIS_GLOBAL_QUARANTINE_SYMBOL_THRESHOLD", "2")),
+        )
+        self.symbol_loss_day_threshold_percent = max(
+            0.10,
+            float(os.getenv("BANKER_NEMESIS_SYMBOL_LOSS_DAY_THRESHOLD_PERCENT", "0.60")),
+        )
         self.defeat_ledger: List[Dict[str, Any]] = []
         self.known_nemeses: Dict[str, int] = {}
         self.lifetime_nemeses: Dict[str, int] = {}
         self.last_meditation_by_type: Dict[str, str] = {}
+        self.quarantine_expires_at_by_symbol: Dict[str, str] = {}
+        self.recent_losses_by_symbol: Dict[str, Dict[str, Any]] = {}
+        self.escalation_state = "normal"
         self.trading_blocked_until: Optional[datetime] = None
         self._meditation_in_progress = False
 
@@ -78,12 +117,14 @@ class NemesisSystem:
             "loss": loss_amount,
             "context": market_context,
             "nemesis_type": nemesis_type,
+            "symbol": str(market_context.get("symbol") or "").strip().upper() or None,
         }
         self.defeat_ledger.append(defeat_entry)
         self._trim_ledger()
 
         self.lifetime_nemeses[nemesis_type] = self.lifetime_nemeses.get(nemesis_type, 0) + 1
         self._refresh_recent_nemeses(now=now)
+        self._refresh_symbol_controls(now=now)
         recent_count = self.known_nemeses.get(nemesis_type, 0)
 
         logger.warning(
@@ -96,6 +137,18 @@ class NemesisSystem:
 
         if recent_count >= self.trigger_threshold:
             await self._trigger_meditation(nemesis_type, now=now)
+
+        symbol = str(defeat_entry.get("symbol") or "").strip().upper()
+        if symbol:
+            self._apply_symbol_quarantine_rules(symbol=symbol, now=now)
+
+        if self._should_escalate_globally(now=now, context=market_context):
+            self.escalation_state = "global_blocked"
+            await self._trigger_meditation("GLOBAL_ESCALATION", now=now)
+        elif self.quarantine_expires_at_by_symbol:
+            self.escalation_state = "symbol_quarantine"
+        else:
+            self.escalation_state = "normal"
 
         await self._save_state()
 
@@ -180,7 +233,24 @@ class NemesisSystem:
             self._meditation_in_progress = False
             self.trading_blocked_until = None
             self._refresh_recent_nemeses()
+            self._refresh_symbol_controls()
+            self.escalation_state = (
+                "symbol_quarantine" if self.quarantine_expires_at_by_symbol else "normal"
+            )
         return False
+
+    def is_symbol_quarantined(self, symbol: str) -> bool:
+        """
+        Indique si un symbole est temporairement exclu des nouvelles entrees.
+
+        Args:
+            symbol (str): Symbole a verifier.
+
+        Returns:
+            bool: ``True`` si le symbole est en quarantaine.
+        """
+        self._refresh_symbol_controls()
+        return str(symbol or "").strip().upper() in self.quarantine_expires_at_by_symbol
 
     async def _save_state(self) -> None:
         """
@@ -197,6 +267,9 @@ class NemesisSystem:
                     "known_nemeses": self.known_nemeses,
                     "lifetime_nemeses": self.lifetime_nemeses,
                     "last_meditation_by_type": self.last_meditation_by_type,
+                    "quarantine_expires_at_by_symbol": self.quarantine_expires_at_by_symbol,
+                    "recent_losses_by_symbol": self.recent_losses_by_symbol,
+                    "escalation_state": self.escalation_state,
                     "trading_blocked_until": (
                         self.trading_blocked_until.isoformat()
                         if self.trading_blocked_until
@@ -227,6 +300,11 @@ class NemesisSystem:
                 state.get("known_nemeses", {}),
             )
             self.last_meditation_by_type = state.get("last_meditation_by_type", {})
+            self.quarantine_expires_at_by_symbol = dict(
+                state.get("quarantine_expires_at_by_symbol") or {}
+            )
+            self.recent_losses_by_symbol = dict(state.get("recent_losses_by_symbol") or {})
+            self.escalation_state = str(state.get("escalation_state") or "normal")
             if state.get("trading_blocked_until"):
                 self.trading_blocked_until = datetime.fromisoformat(
                     state["trading_blocked_until"]
@@ -243,6 +321,7 @@ class NemesisSystem:
 
             self._trim_ledger()
             self._refresh_recent_nemeses()
+            self._refresh_symbol_controls()
             logger.info("Etat Nemesis charge depuis Redis.")
         except Exception:
             pass
@@ -255,6 +334,7 @@ class NemesisSystem:
             Dict[str, Any]: Blocage, compteurs recents et historique recent.
         """
         self._refresh_recent_nemeses()
+        self._refresh_symbol_controls()
         return {
             "total_defeats": len(self.defeat_ledger),
             "known_nemeses": self.known_nemeses,
@@ -268,6 +348,11 @@ class NemesisSystem:
             "meditation_active": self._meditation_in_progress,
             "trigger_threshold": self.trigger_threshold,
             "lookback_hours": self.lookback_hours,
+            "quarantined_symbols": sorted(self.quarantine_expires_at_by_symbol.keys()),
+            "quarantine_expires_at_by_symbol": self.quarantine_expires_at_by_symbol,
+            "recent_losses_by_symbol": self.recent_losses_by_symbol,
+            "escalation_state": self.escalation_state,
+            "last_meditation_by_type": self.last_meditation_by_type,
             "recent_defeats": self.defeat_ledger[-5:],
         }
 
@@ -303,6 +388,126 @@ class NemesisSystem:
             recent_counts[nemesis_type] = recent_counts.get(nemesis_type, 0) + 1
 
         self.known_nemeses = recent_counts
+
+    def _refresh_symbol_controls(self, now: Optional[datetime] = None) -> None:
+        """
+        Recalcule les compteurs recents par symbole et purge les quarantaines expirees.
+
+        Args:
+            now (Optional[datetime]): Horodatage de reference optionnel.
+        """
+        now = now or datetime.now()
+        cleaned_quarantine: Dict[str, str] = {}
+        for symbol, expires_at in dict(self.quarantine_expires_at_by_symbol).items():
+            expiry_dt = self._parse_timestamp(expires_at)
+            if expiry_dt is not None and expiry_dt > now:
+                cleaned_quarantine[symbol] = expires_at
+        self.quarantine_expires_at_by_symbol = cleaned_quarantine
+
+        recent_summary: Dict[str, Dict[str, Any]] = {}
+        global_window_start = now - timedelta(
+            hours=max(
+                self.symbol_loss_lookback_hours,
+                self.symbol_event_lookback_hours,
+                self.global_loss_lookback_hours,
+            )
+        )
+        today = now.date()
+        for entry in self.defeat_ledger:
+            entry_time = self._parse_timestamp(entry.get("timestamp"))
+            if entry_time is None or entry_time < global_window_start:
+                continue
+            symbol = str(entry.get("symbol") or ((entry.get("context") or {}).get("symbol")) or "").strip().upper()
+            if not symbol:
+                continue
+            item = recent_summary.setdefault(
+                symbol,
+                {
+                    "recent_losses_4h": 0,
+                    "recent_events_12h": 0,
+                    "recent_losses_6h": 0,
+                    "day_loss_amount": 0.0,
+                    "day_loss_percent": 0.0,
+                    "latest_nemesis_type": str(entry.get("nemesis_type") or "UNKNOWN"),
+                },
+            )
+            if entry_time >= now - timedelta(hours=self.symbol_loss_lookback_hours):
+                item["recent_losses_4h"] += 1
+            if entry_time >= now - timedelta(hours=self.symbol_event_lookback_hours):
+                item["recent_events_12h"] += 1
+            if entry_time >= now - timedelta(hours=self.global_loss_lookback_hours):
+                item["recent_losses_6h"] += 1
+            if entry_time.date() == today:
+                item["day_loss_amount"] += float(entry.get("loss") or 0.0)
+                day_open_balance = float(
+                    ((entry.get("context") or {}).get("day_open_balance") or 0.0)
+                )
+                if day_open_balance > 0:
+                    item["day_loss_percent"] = round(
+                        item["day_loss_amount"] / day_open_balance * 100.0,
+                        4,
+                    )
+        self.recent_losses_by_symbol = recent_summary
+
+    def _apply_symbol_quarantine_rules(self, symbol: str, now: Optional[datetime] = None) -> None:
+        """
+        Place un symbole en quarantaine si ses pertes recentes deviennent anormales.
+
+        Args:
+            symbol (str): Symbole a evaluer.
+            now (Optional[datetime]): Horodatage de reference.
+        """
+        now = now or datetime.now()
+        self._refresh_symbol_controls(now=now)
+        summary = dict(self.recent_losses_by_symbol.get(symbol) or {})
+        should_quarantine = (
+            int(summary.get("recent_losses_4h", 0)) >= self.symbol_loss_streak_threshold
+            or int(summary.get("recent_events_12h", 0)) >= self.symbol_event_threshold
+            or float(summary.get("day_loss_percent", 0.0)) >= self.symbol_loss_day_threshold_percent
+        )
+        if not should_quarantine:
+            return
+
+        expires_at = now + timedelta(hours=self.symbol_quarantine_hours)
+        previous_expiry = self._parse_timestamp(self.quarantine_expires_at_by_symbol.get(symbol))
+        if previous_expiry is None or expires_at > previous_expiry:
+            self.quarantine_expires_at_by_symbol[symbol] = expires_at.isoformat()
+            logger.warning(
+                "Nemesis place %s en quarantaine jusqu'a %s.",
+                symbol,
+                expires_at.isoformat(),
+            )
+
+    def _should_escalate_globally(
+        self,
+        *,
+        now: Optional[datetime] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Decide si les pertes recentes imposent un blocage global.
+
+        Args:
+            now (Optional[datetime]): Horodatage de reference.
+            context (Optional[Dict[str, Any]]): Contexte de perte courant.
+
+        Returns:
+            bool: ``True`` si un blocage global doit etre applique.
+        """
+        now = now or datetime.now()
+        self._refresh_symbol_controls(now=now)
+        if bool((context or {}).get("risk_governor_triggered")):
+            return True
+        if len(self.quarantine_expires_at_by_symbol) >= self.global_quarantine_symbol_threshold:
+            return True
+
+        recent_losses = 0
+        window_start = now - timedelta(hours=self.global_loss_lookback_hours)
+        for entry in self.defeat_ledger:
+            entry_time = self._parse_timestamp(entry.get("timestamp"))
+            if entry_time is not None and entry_time >= window_start:
+                recent_losses += 1
+        return recent_losses >= self.global_loss_threshold
 
     @staticmethod
     def _parse_timestamp(raw_value: Optional[str]) -> Optional[datetime]:

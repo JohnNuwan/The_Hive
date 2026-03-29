@@ -30,21 +30,39 @@ class LLMClient:
             globale determine le modele par defaut.
         host (str | None): Hote ou URL de base a utiliser. Si absent, la
             configuration globale determine l'endpoint par defaut.
+        backend (str | None): Backend explicite (`vllm` ou `ollama`). Si absent,
+            la configuration globale reste la source de verite.
+        request_timeout_seconds (float | None): Delai HTTP maximal. Si absent,
+            un delai par defaut raisonnable est applique.
     """
 
-    def __init__(self, model: str | None = None, host: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        host: str | None = None,
+        backend: str | None = None,
+        request_timeout_seconds: float | None = None,
+    ) -> None:
         """
         Initialise le client LLM partage.
 
         Args:
             model (str | None): Surcharge optionnelle du modele.
             host (str | None): Surcharge optionnelle de l'endpoint.
+            backend (str | None): Surcharge optionnelle du backend.
+            request_timeout_seconds (float | None): Delai maximal par appel.
         """
         self.settings = get_settings()
-        self.backend = self.settings.llm_backend
+        normalized_backend = str(backend or self.settings.llm_backend or "vllm").strip().lower()
+        self.backend = normalized_backend if normalized_backend in {"vllm", "ollama"} else "vllm"
         self.retry_attempts = max(1, self._env_int("LLM_RETRY_ATTEMPTS", 4))
         self.retry_delay_seconds = max(1.0, self._env_float("LLM_RETRY_DELAY_SECONDS", 5.0))
         self.failure_cooldown_seconds = max(0.0, self._env_float("LLM_FAILURE_COOLDOWN_SECONDS", 45.0))
+        default_timeout_seconds = max(1.0, self._env_float("LLM_REQUEST_TIMEOUT_SECONDS", 30.0))
+        self.request_timeout_seconds = max(
+            1.0,
+            float(request_timeout_seconds) if request_timeout_seconds is not None else default_timeout_seconds,
+        )
         self._cooldown_until = 0.0
         self._last_failure_reason = ""
 
@@ -132,7 +150,7 @@ class LLMClient:
         Returns:
             bool: True si un cooldown est actif.
         """
-        return self.backend == "vllm" and time.time() < self._cooldown_until
+        return time.time() < self._cooldown_until
 
     def _mark_failure(self, reason: str) -> None:
         """
@@ -184,28 +202,35 @@ class LLMClient:
         if self._cooldown_active():
             remaining = max(1, int(self._cooldown_until - time.time()))
             logger.warning(
-                "vLLM est en phase de reprise pendant encore %ss (%s). Repli heuristique conserve.",
+                "Backend LLM %s en phase de reprise pendant encore %ss (%s). Repli heuristique conserve.",
+                self.backend,
                 remaining,
                 self._last_failure_reason or "indisponibilite reseau",
             )
-            return "Mode heuristique temporaire: vLLM indisponible"
+            return f"Mode heuristique temporaire: {self.backend} indisponible"
 
         try:
             async with aiohttp.ClientSession() as session:
                 if self.backend == "vllm":
                     return await self._analyze_vllm_with_retries(session, payload)
 
-                async with session.post(self.api_url, json=payload, timeout=30.0) as resp:
+                async with session.post(
+                    self.api_url,
+                    json=payload,
+                    timeout=self.request_timeout_seconds,
+                ) as resp:
                     if resp.status == 200:
                         result = await resp.json()
                         self._clear_failure()
                         return result.get("response", "").strip()
 
                     logger.error("Erreur LLM: HTTP %s - %s", resp.status, await resp.text())
-                    return "Mode heuristique temporaire: backend LLM indisponible"
+                    self._mark_failure(f"http_{resp.status}")
+                    return f"Mode heuristique temporaire: {self.backend} indisponible"
         except Exception as exc:
             logger.error("Connexion LLM impossible: %s", exc)
-            return "Mode heuristique temporaire: backend LLM indisponible"
+            self._mark_failure(str(exc))
+            return f"Mode heuristique temporaire: {self.backend} indisponible"
 
     async def _analyze_vllm_with_retries(
         self,
@@ -249,7 +274,7 @@ class LLMClient:
                 self.retry_attempts,
                 last_exception,
             )
-        return "Mode heuristique temporaire: vLLM indisponible"
+        return f"Mode heuristique temporaire: {self.backend} indisponible"
 
     async def _analyze_vllm(self, session: aiohttp.ClientSession, payload: dict[str, Any]) -> str:
         """
@@ -266,7 +291,11 @@ class LLMClient:
             aiohttp.ClientError: Si la connexion ou la requete echoue.
             asyncio.TimeoutError: Si l'appel depasse le delai.
         """
-        async with session.post(self.api_url, json=payload, timeout=30.0) as resp:
+        async with session.post(
+            self.api_url,
+            json=payload,
+            timeout=self.request_timeout_seconds,
+        ) as resp:
             if resp.status == 200:
                 result = await resp.json()
                 return result["choices"][0]["message"]["content"].strip()
@@ -285,7 +314,11 @@ class LLMClient:
                     retry_payload = dict(payload)
                     retry_payload["model"] = fallback_model
 
-                    async with session.post(self.api_url, json=retry_payload, timeout=30.0) as retry_resp:
+                    async with session.post(
+                        self.api_url,
+                        json=retry_payload,
+                        timeout=self.request_timeout_seconds,
+                    ) as retry_resp:
                         if retry_resp.status == 200:
                             retry_result = await retry_resp.json()
                             return retry_result["choices"][0]["message"]["content"].strip()
@@ -295,10 +328,10 @@ class LLMClient:
                             retry_resp.status,
                             await retry_resp.text(),
                         )
-                        return "Mode heuristique temporaire: vLLM indisponible"
+                        return f"Mode heuristique temporaire: {self.backend} indisponible"
 
             logger.error("Erreur LLM: HTTP %s - %s", resp.status, error_text)
-            return "Mode heuristique temporaire: vLLM indisponible"
+            return f"Mode heuristique temporaire: {self.backend} indisponible"
 
     async def _discover_vllm_available_model(self, session: aiohttp.ClientSession) -> Optional[str]:
         """

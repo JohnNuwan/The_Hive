@@ -12,7 +12,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -37,7 +37,12 @@ from eva_lab.gnn_registry import (
 from eva_lab.live_inference_models import LivePredictRequest
 from eva_lab.shadow_learning import ShadowLearningService
 from eva_lab.dreamer_gate import DreamerGate
-from eva_lab.timescale_store import describe_timescale_source, record_ga_trial, record_run_window
+from eva_lab.timescale_store import (
+    describe_timescale_source,
+    load_recent_ga_trials,
+    record_ga_trial,
+    record_run_window,
+)
 from eva_lab.training_status import (
     CPU_SCHEDULER_STATE_PATH,
     RUN_LOG_PATH,
@@ -124,6 +129,118 @@ def _env_flag(name: str, default: bool) -> bool:
     if raw_value is None:
         return default
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_runtime_profile(run_status: dict[str, Any] | None = None) -> str:
+    """Determine le profil d'exploitation courant du Lab.
+
+    Args:
+        run_status (dict[str, Any] | None): Statut training courant si deja charge.
+
+    Returns:
+        str: Profil normalise ``day_live_full_stack`` ou ``night_research_training``.
+    """
+
+    forced = str(os.getenv("LAB_RUNTIME_PROFILE", "")).strip().lower()
+    if forced in {"day_live_full_stack", "night_research_training"}:
+        return forced
+    current_run = dict(run_status or load_training_status())
+    return "night_research_training" if bool(current_run.get("active")) else "day_live_full_stack"
+
+
+def _compute_gnn_champion_payload(registry: dict[str, Any]) -> dict[str, Any]:
+    """Construit une vue consultative stable du champion GNN.
+
+    Args:
+        registry (dict[str, Any]): Registre GNN brut.
+
+    Returns:
+        dict[str, Any]: Vue derivee du champion consultatif.
+    """
+
+    status = str(registry.get("status") or "").strip().lower()
+    trained_at = str(registry.get("trained_at") or "").strip() or None
+    freshness_hours: float | None = None
+    if trained_at:
+        try:
+            trained_dt = datetime.fromisoformat(trained_at.replace("Z", "+00:00"))
+            freshness_hours = round(
+                (datetime.now(tz=timezone.utc) - trained_dt.astimezone(timezone.utc)).total_seconds() / 3600.0,
+                2,
+            )
+        except ValueError:
+            freshness_hours = None
+    metrics = dict(registry.get("metrics") or {})
+    deployment_class = str(registry.get("deployment_class") or "").strip() or "consultative"
+    decision_support_metrics = {
+        "scalp_accuracy": float(metrics.get("scalp_accuracy", 0.0) or 0.0),
+        "intraday_accuracy": float(metrics.get("intraday_accuracy", 0.0) or 0.0),
+        "swing_accuracy": float(metrics.get("swing_accuracy", 0.0) or 0.0),
+        "loss": float(metrics.get("loss", 0.0) or 0.0),
+        "samples": int(metrics.get("samples", 0) or 0),
+    }
+    champion_ready = (
+        status in {"validated", "live"}
+        and deployment_class == "consultative"
+        and not str(registry.get("last_refresh_status") or "").strip().lower() == "error"
+        and not bool(registry.get("stale", status == "stale"))
+        and bool(str(registry.get("source_run_id") or "").strip())
+        and (
+            decision_support_metrics["scalp_accuracy"] > 0.0
+            or decision_support_metrics["intraday_accuracy"] > 0.0
+            or decision_support_metrics["swing_accuracy"] > 0.0
+        )
+        and (freshness_hours is None or freshness_hours < 72.0)
+    )
+    return {
+        "champion_id": str(registry.get("version") or "").strip() or None,
+        "champion_ready": champion_ready,
+        "champion_kind": "consultative",
+        "source_run_id": str(registry.get("source_run_id") or "").strip() or None,
+        "freshness_hours": freshness_hours,
+        "decision_support_metrics": decision_support_metrics,
+    }
+
+
+def _group_ga_trials_by_generation(
+    trials: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Regroupe les essais GA par generation pour l'API publique.
+
+    Args:
+        trials (list[dict[str, Any]]): Essais recents lus depuis TimeDB.
+
+    Returns:
+        list[dict[str, Any]]: Groupes ordonnes par generation.
+    """
+
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for trial in trials:
+        generation = int(trial.get("ga_generation") or 0)
+        grouped.setdefault(generation, []).append(
+            {
+                "generation": generation,
+                "trial_id": trial.get("trial_id"),
+                "phase": trial.get("phase"),
+                "early_kill_reason": trial.get("early_kill_reason"),
+                "fitness_score": trial.get("fitness_score"),
+                "promotion_state": trial.get("promotion_state"),
+                "finalist_rank": trial.get("finalist_rank"),
+                "failure_mode": trial.get("failure_mode"),
+                "run_id": trial.get("run_id"),
+                "finished_at": trial.get("finished_at"),
+            }
+        )
+    ordered: list[dict[str, Any]] = []
+    for generation in sorted(grouped.keys(), reverse=True):
+        ordered.append(
+            {
+                "generation": generation,
+                "trial_count": len(grouped[generation]),
+                "trials": grouped[generation],
+            }
+        )
+    return ordered
 
 
 async def _probe_tcp_dependency(name: str, host: str, port: int) -> dict[str, Any]:
@@ -1230,6 +1347,10 @@ async def sequence_status():
         "precheck_status": state.get("precheck_status"),
         "precheck_score": state.get("precheck_score"),
         "proxy_terminal_score": state.get("proxy_terminal_score"),
+        "restart_count": state.get("restart_count"),
+        "retry_reason": state.get("retry_reason"),
+        "resumed_from_checkpoint": state.get("resumed_from_checkpoint"),
+        "resume_step": state.get("resume_step"),
         "supervisor_heartbeat": state.get("supervisor_heartbeat"),
         "stdout_log_path": state.get("stdout_log_path"),
         "stderr_log_path": state.get("stderr_log_path"),
@@ -1274,10 +1395,14 @@ async def champion_status():
     genetic: GeneticUpdater = app.state.genetic
     gate: DreamerGate = app.state.dreamer_gate
     timescale_source = describe_timescale_source()
+    run_status = load_training_status()
+    runtime_profile = _resolve_runtime_profile(run_status)
 
     horizons = ["scalp", "intraday", "swing"]
     registry_champions = genetic.get_all_champions()
     performance_summary = genetic.get_performance_summary()
+    gnn_registry = load_market_gnn_registry()
+    gnn_champion = _compute_gnn_champion_payload(gnn_registry)
     nightly_summary_path = "data/checkpoints/nightly_training_summary.json"
     nightly_summary = None
 
@@ -1302,9 +1427,28 @@ async def champion_status():
         }
         for engine, statuses in engine_status.items()
     }
+    muzero_scalp_status = dict((engine_status.get("muzero") or {}).get("scalp") or {})
+    dreamer_scalp_status = dict((engine_status.get("dreamer") or {}).get("scalp") or {})
+    gate_status = gate.get_status()
+    daytime_activation = {
+        "muzero_live_ok": bool(muzero_scalp_status.get("live_champion_id")),
+        "dreamer_live_ok": bool(
+            dreamer_scalp_status.get("live_champion_id")
+            and dreamer_scalp_status.get("promotion_gate", {}).get("allowed")
+            and gate_status.get("dreamer_live_enabled", False)
+        ),
+        "gnn_consultative_ok": bool(gnn_champion.get("champion_ready")),
+        "vllm_ready": runtime_profile == "day_live_full_stack",
+    }
+    daytime_activation["full_stack_ready"] = bool(
+        daytime_activation["muzero_live_ok"]
+        and daytime_activation["gnn_consultative_ok"]
+        and daytime_activation["vllm_ready"]
+    )
 
     payload = {
         "status": "ok",
+        "runtime_profile": runtime_profile,
         "selection_policy": promoter.get_live_selection_policy(),
         "dreamer_gate": gate.get_status(),
         "data_source": timescale_source.get("source"),
@@ -1317,6 +1461,8 @@ async def champion_status():
         "performance_summary": performance_summary,
         "horizons": horizon_status,
         "engines": engine_status,
+        "daytime_activation": daytime_activation,
+        "gnn_consultative": gnn_champion,
         "nightly_summary": nightly_summary,
     }
     await _publish_champion_status_snapshot(payload)
@@ -1361,8 +1507,10 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         if challenger_metrics.get("metrics_by_position_mechanics"):
             run_view["metrics_by_position_mechanics"] = challenger_metrics.get("metrics_by_position_mechanics")
 
+    runtime_profile = _resolve_runtime_profile(run_status)
     payload = {
         "status": "ok",
+        "runtime_profile": runtime_profile,
         "run": run_view,
         "dependencies": dependencies,
         "universe": universe_summary,
@@ -1383,6 +1531,14 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         "precheck_step": run_view.get("precheck_step"),
         "precheck_metrics": run_view.get("precheck_metrics"),
         "precheck_summary_path": run_view.get("precheck_summary_path"),
+        "last_successful_step": run_view.get("last_successful_step"),
+        "last_successful_step_at": run_view.get("last_successful_step_at"),
+        "train_step_phase": run_view.get("train_step_phase"),
+        "phase_durations_ms": run_view.get("phase_durations_ms"),
+        "resume_checkpoint_path": run_view.get("resume_checkpoint_path"),
+        "resume_step": run_view.get("resume_step"),
+        "stall_detected": run_view.get("stall_detected"),
+        "stall_reason": run_view.get("stall_reason"),
         "timescaledb_status": ((run_view.get("dataset_coverage") or {}).get("timescaledb") or {}),
         "bars_table": (((run_view.get("dataset_coverage") or {}).get("timescaledb") or {}).get("bars_table")),
         "features_table": (((run_view.get("dataset_coverage") or {}).get("timescaledb") or {}).get("features_table")),
@@ -1417,6 +1573,59 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         nightly_summary=nightly_summary,
     )
     return payload
+
+
+@app.get("/ga/status")
+async def ga_status(limit: int = Query(default=40, ge=1, le=200)):
+    """Retourne l'etat exploitable de la campagne GA MuZero.
+
+    Args:
+        limit (int): Nombre maximal d'essais a retourner.
+
+    Returns:
+        dict: Vue agregée des essais, de la generation et du run courant.
+    """
+
+    run_status = load_training_status()
+    runtime_profile = _resolve_runtime_profile(run_status)
+    current_run = dict(run_status)
+    recent_trials = load_recent_ga_trials(limit=limit)
+    grouped_trials = _group_ga_trials_by_generation(recent_trials)
+    active_generation = current_run.get("ga_generation")
+    active_trial = current_run.get("ga_trial")
+    return {
+        "status": "ok",
+        "runtime_profile": runtime_profile,
+        "engine": str(current_run.get("engine") or "muzero"),
+        "ga_status": current_run.get("ga_status"),
+        "ga_generation": active_generation,
+        "ga_trial": active_trial,
+        "trial_mode": current_run.get("trial_mode"),
+        "trial_cost_profile": current_run.get("trial_cost_profile"),
+        "run_id": current_run.get("run_id"),
+        "active": bool(current_run.get("active")),
+        "current_phase": ((current_run.get("current_step") or {}).get("phase")),
+        "current_trial": {
+            "generation": active_generation,
+            "trial_id": active_trial,
+            "phase": ((current_run.get("current_step") or {}).get("phase")),
+            "early_kill_reason": (
+                str((current_run.get("gold_precheck") or {}).get("reason") or "").strip() or None
+            ),
+            "fitness_score": ((current_run.get("gold_precheck") or {}).get("fitness_score")),
+            "promotion_state": (
+                str((current_run.get("latest_verdict") or {}).get("status") or "").strip() or None
+            ),
+            "finalist_rank": None,
+        },
+        "trials_by_generation": grouped_trials,
+        "trial_count": len(recent_trials),
+        "finalists": [
+            trial
+            for trial in recent_trials
+            if trial.get("finalist_rank") is not None
+        ],
+    }
 
 
 @app.get("/training/logs/tail")
@@ -1775,12 +1984,19 @@ async def gnn_status():
     registry = load_market_gnn_registry()
     refresh_state = _current_gnn_refresh_state()
     graph_snapshot = build_market_gnn_graph_snapshot(registry=registry)
+    champion_payload = _compute_gnn_champion_payload(registry)
     return {
         "status": "ok",
         "gnn": registry,
         "focus_symbol": registry.get("focus_symbol"),
         "context_symbols": registry.get("context_symbols", []),
         "deployment_class": registry.get("deployment_class"),
+        "champion_id": champion_payload.get("champion_id"),
+        "champion_ready": champion_payload.get("champion_ready"),
+        "champion_kind": champion_payload.get("champion_kind"),
+        "source_run_id": champion_payload.get("source_run_id"),
+        "freshness_hours": champion_payload.get("freshness_hours"),
+        "decision_support_metrics": champion_payload.get("decision_support_metrics"),
         "graph_readiness": {
             "status": graph_snapshot.get("status"),
             "reason": graph_snapshot.get("reason"),
@@ -1893,6 +2109,7 @@ async def gnn_metrics():
         dict: Metriques consolidees et informations de couverture.
     """
     registry = load_market_gnn_registry()
+    champion_payload = _compute_gnn_champion_payload(registry)
     return {
         "status": "ok",
         "version": registry.get("version"),
@@ -1908,6 +2125,11 @@ async def gnn_metrics():
         "last_refresh_started_at": registry.get("last_refresh_started_at"),
         "last_refresh_finished_at": registry.get("last_refresh_finished_at"),
         "last_refresh_status": registry.get("last_refresh_status"),
+        "champion_id": champion_payload.get("champion_id"),
+        "champion_ready": champion_payload.get("champion_ready"),
+        "champion_kind": champion_payload.get("champion_kind"),
+        "freshness_hours": champion_payload.get("freshness_hours"),
+        "decision_support_metrics": champion_payload.get("decision_support_metrics"),
         "metrics": registry.get("metrics", {}),
         "universe": registry.get("universe", {}),
         "timeframes": registry.get("timeframes", []),

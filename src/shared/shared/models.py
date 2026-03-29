@@ -253,15 +253,24 @@ class RiskStatus(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     daily_drawdown_percent: Decimal = Decimal("0")
     total_drawdown_percent: Decimal = Decimal("0")
+    daily_realized_pnl: Decimal = Decimal("0")
+    day_open_balance: Decimal = Decimal("0")
+    day_open_equity: Decimal = Decimal("0")
+    daily_realized_drawdown_percent: Decimal = Decimal("0")
+    daily_equity_drawdown_percent: Decimal = Decimal("0")
     open_positions_count: int = 0
     anti_tilt_active: bool = False
     anti_tilt_expires_at: datetime | None = None
     news_filter_active: bool = False
     trading_allowed: bool = True
+    kill_switch_state: str = "normal"
+    kill_switch_reason: str | None = None
+    flatten_state: dict[str, Any] = Field(default_factory=dict)
+    thresholds: dict[str, Any] = Field(default_factory=dict)
 
     def check_trading_allowed(
         self,
-        max_daily_dd: Decimal = Decimal("4.0"),
+        max_daily_dd: Decimal = Decimal("2.0"),
         max_total_dd: Decimal = Decimal("8.0"),
         max_positions: int = 3,
     ) -> tuple[bool, str | None]:

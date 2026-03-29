@@ -4,6 +4,7 @@ Contient la logique dÃ©cisionnelle (Manager), l'exÃ©cution (Worker) et la bo
 """
 
 import asyncio
+import json
 import logging
 import math
 from collections import Counter, deque
@@ -11,6 +12,7 @@ from decimal import Decimal
 from uuid import UUID
 from datetime import datetime, timedelta
 import os
+from pathlib import Path
 import aiohttp
 import random
 import uuid
@@ -113,6 +115,7 @@ class AutoTradingEngine:
         self.is_active = False
         self._loop_task = None
         self._daily_report_task = None
+        self._review_task = None
         self._news_task = None
         self.symbols = list(dict.fromkeys(self.settings.banker_symbols))
         self.risk.register_symbol_universe({symbol: self.mt5.classify_symbol(symbol) or "unknown" for symbol in self.symbols})
@@ -145,6 +148,12 @@ class AutoTradingEngine:
             self._env_text("BANKER_TRAINING_COMPAT_MODE", "disabled")
         )
         self._cpu_live_mode = self._training_compat_mode == "cpu_live"
+        self._runtime_profile = self._resolve_runtime_profile(
+            self._env_text("BANKER_RUNTIME_PROFILE", "auto")
+        )
+        self._shadow_learning_mode = "shadow_only"
+        self._intraday_retrain_allowed = False
+        self._intraday_promotion_allowed = False
         self._cpu_live_symbols = self._parse_symbol_allowlist(
             self._env_text(
                 "BANKER_CPU_LIVE_SYMBOLS",
@@ -178,6 +187,13 @@ class AutoTradingEngine:
             "BANKER_STARTUP_ALERT_STATE_FILE",
             os.path.join(os.getcwd(), ".banker_startup_alert"),
         )
+        self._trading_review_dir = Path(
+            os.getenv(
+                "BANKER_TRADING_REVIEW_DIR",
+                os.path.join(os.getcwd(), "data", "checkpoints", "trading_reviews"),
+            )
+        )
+        self._latest_trading_review_path = self._trading_review_dir / "latest.json"
         self._pause_log_state = {}
 
         # Sprint 7: The Cortex
@@ -228,6 +244,7 @@ class AutoTradingEngine:
 
         self._loop_task = asyncio.create_task(self._drift_loop())
         self._daily_report_task = asyncio.create_task(self._half_day_report_loop())
+        self._review_task = asyncio.create_task(self._daily_review_loop())
         self._news_task = asyncio.create_task(self.news.start_monitoring())
         logger.info(
             "AUTO-TRADING ENGINE STARTED: universe=%s batch=%s",
@@ -253,7 +270,7 @@ class AutoTradingEngine:
         if not self.is_active:
             return
         self.is_active = False
-        for task in [self._loop_task, self._daily_report_task, self._news_task]:
+        for task in [self._loop_task, self._daily_report_task, self._review_task, self._news_task]:
             if task:
                 task.cancel()
                 try:
@@ -262,6 +279,7 @@ class AutoTradingEngine:
                     pass
         self._loop_task = None
         self._daily_report_task = None
+        self._review_task = None
         self._news_task = None
         logger.info("AUTO-TRADING ENGINE STOPPED")
 
@@ -342,6 +360,28 @@ class AutoTradingEngine:
             raw_mode,
         )
         return "disabled"
+
+    def _resolve_runtime_profile(self, raw_profile: str) -> str:
+        """Determine le profil d'exploitation expose par le banker.
+
+        Args:
+            raw_profile (str): Valeur brute lue dans l'environnement.
+
+        Returns:
+            str: Profil courant (`day_live_full_stack` ou
+            `night_research_training`).
+        """
+        normalized = str(raw_profile or "").strip().lower()
+        if normalized == "day_live_full_stack":
+            return "day_live_full_stack"
+        if normalized == "night_research_training":
+            return "night_research_training"
+        if normalized not in {"", "auto"}:
+            logger.warning(
+                "Profil runtime banker inconnu (%s). Repli sur le mode derive.",
+                raw_profile,
+            )
+        return "night_research_training" if self._cpu_live_mode else "day_live_full_stack"
 
     @staticmethod
     def _parse_symbol_allowlist(raw_value: str) -> list[str]:
@@ -703,6 +743,7 @@ class AutoTradingEngine:
         Returns:
             dict[str, object]: Etat du cache EVA Lab et univers courant.
         """
+        cortex_status = self.cortex.get_runtime_status()
         return {
             "enabled": self._lab_universe_enabled,
             "horizon": "scalp" if self._cpu_live_mode else self._lab_universe_horizon,
@@ -728,7 +769,8 @@ class AutoTradingEngine:
             "training_compat_mode": self._training_compat_mode,
             "cpu_live_mode": self._cpu_live_mode,
             "ensemble_enabled": self._ensemble_enabled,
-            "cortex_required": not self._cpu_live_mode,
+            "cortex_required": bool(cortex_status.get("required", not self._cpu_live_mode)),
+            "cortex": cortex_status,
             "last_refresh": (
                 self._lab_universe_last_refresh.isoformat()
                 if self._lab_universe_last_refresh is not None
@@ -742,12 +784,20 @@ class AutoTradingEngine:
         Returns:
             dict[str, object]: Etat du chemin live local.
         """
+        cortex_status = self.cortex.get_runtime_status()
         return {
             "runtime_mode": self._resolve_runtime_mode().value,
+            "runtime_profile": self._runtime_profile,
+            "shadow_learning_mode": self._shadow_learning_mode,
+            "intraday_retrain_allowed": self._intraday_retrain_allowed,
+            "intraday_promotion_allowed": self._intraday_promotion_allowed,
             "training_compat_mode": self._training_compat_mode,
             "cpu_live_mode": self._cpu_live_mode,
             "allowed_horizons": ["scalp"] if self._cpu_live_mode else ["auto"],
-            "cortex_required": not self._cpu_live_mode,
+            "cortex_required": bool(cortex_status.get("required", not self._cpu_live_mode)),
+            "cortex_mode": cortex_status.get("mode"),
+            "cortex_backend": cortex_status.get("backend"),
+            "cortex": cortex_status,
             "gnn_mode": "consultatif" if self._cpu_live_mode else "fusionne",
             "selection_policy_required": "champion_only" if self._cpu_live_mode else "default",
             "live_inference_url": self._resolve_live_inference_url(),
@@ -766,6 +816,7 @@ class AutoTradingEngine:
             dict[str, object]: Parametres de volume, stale close et cooldown.
         """
         max_open_positions = int(getattr(self.risk, "max_open_positions", 0) or 0)
+        cortex_status = self.cortex.get_runtime_status()
         return {
             "max_open_positions": max_open_positions,
             "symbol_entry_cooldown_minutes": int(self._symbol_entry_cooldown.total_seconds() / 60),
@@ -786,6 +837,7 @@ class AutoTradingEngine:
             "ensemble_enabled": self._ensemble_enabled,
             "ensemble_mode": "vote_50_50" if self._ensemble_enabled else "muzero_only",
             "ensemble_min_edge": self._ensemble_min_edge,
+            "cortex": cortex_status,
         }
 
     def _resolve_runtime_mode(self) -> RuntimeMode:
@@ -820,6 +872,7 @@ class AutoTradingEngine:
 
         gnn_mode = ConnectorMode.DISABLED if gnn_confidence <= 0.0 else ConnectorMode.LIVE
         mt5_mode = ConnectorMode.LIVE if getattr(self.mt5, "is_connected", False) and not getattr(self.mt5, "mock_mode", False) else ConnectorMode.PAPER
+        cortex_status = self.cortex.get_runtime_status()
 
         return {
             "mt5": {
@@ -836,6 +889,12 @@ class AutoTradingEngine:
             "gnn": {
                 "mode": gnn_mode.value,
                 "role": "consultatif" if self._cpu_live_mode else "fusionne",
+            },
+            "cortex": {
+                "mode": str(cortex_status.get("mode") or "disabled"),
+                "backend": str(cortex_status.get("backend") or "none"),
+                "required": bool(cortex_status.get("required", False)),
+                "consultative": bool(cortex_status.get("consultative", self._cpu_live_mode)),
             },
             "vllm": {
                 "mode": ConnectorMode.DISABLED.value if self._cpu_live_mode else ConnectorMode.LIVE.value,
@@ -1174,6 +1233,375 @@ class AutoTradingEngine:
             "symbols": formatted_symbols,
             "recent": recent_events,
         }
+
+    def get_latest_trading_review(self) -> dict[str, object] | None:
+        """Relit le dernier rapport journalier persiste.
+
+        Returns:
+            dict[str, object] | None: Rapport complet si present, sinon `None`.
+        """
+        if not self._latest_trading_review_path.exists():
+            return None
+        try:
+            return json.loads(self._latest_trading_review_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Lecture du dernier rapport journalier impossible: %s", exc)
+            return None
+
+    def get_latest_trading_review_summary(self) -> dict[str, object]:
+        """Expose un resume leger du dernier rapport journalier.
+
+        Returns:
+            dict[str, object]: Resume de disponibilite et principaux chiffres.
+        """
+        review = self.get_latest_trading_review()
+        if review is None:
+            return {
+                "available": False,
+                "path": str(self._latest_trading_review_path),
+            }
+
+        review_window = dict(review.get("window") or {})
+        performance = dict(review.get("performance") or {})
+        summary = dict(performance.get("summary") or {})
+        diagnostics = list(review.get("diagnostics") or [])
+        return {
+            "available": True,
+            "generated_at": review.get("generated_at"),
+            "path": str((review.get("storage") or {}).get("latest_path") or self._latest_trading_review_path),
+            "window": review_window,
+            "realized_pnl": summary.get("net_profit", 0.0),
+            "closed_trades": summary.get("closed_trades", 0),
+            "diagnostics_count": len(diagnostics),
+        }
+
+    def _build_symbol_review(self, closed_deals: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Agrege la journee par symbole a partir des deals de sortie.
+
+        Args:
+            closed_deals (list[dict[str, object]]): Deals de sortie normalises.
+
+        Returns:
+            list[dict[str, object]]: Resume trie des symboles les plus actifs.
+        """
+        buckets: dict[str, dict[str, object]] = {}
+        for deal in closed_deals:
+            symbol = str(deal.get("symbol") or "INCONNU")
+            net_profit = (
+                float(deal.get("profit") or 0.0)
+                + float(deal.get("swap") or 0.0)
+                + float(deal.get("commission") or 0.0)
+            )
+            bucket = buckets.setdefault(
+                symbol,
+                {
+                    "symbol": symbol,
+                    "closed_deals": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "net_profit": 0.0,
+                },
+            )
+            bucket["closed_deals"] = int(bucket["closed_deals"]) + 1
+            bucket["net_profit"] = float(bucket["net_profit"]) + net_profit
+            if net_profit > 0:
+                bucket["wins"] = int(bucket["wins"]) + 1
+            elif net_profit < 0:
+                bucket["losses"] = int(bucket["losses"]) + 1
+
+        ranked: list[dict[str, object]] = []
+        for bucket in buckets.values():
+            closed_deals_count = int(bucket["closed_deals"])
+            wins = int(bucket["wins"])
+            ranked.append(
+                {
+                    "symbol": bucket["symbol"],
+                    "closed_deals": closed_deals_count,
+                    "wins": wins,
+                    "losses": int(bucket["losses"]),
+                    "win_rate": round((wins / closed_deals_count) * 100.0, 2) if closed_deals_count else 0.0,
+                    "net_profit": round(float(bucket["net_profit"]), 2),
+                }
+            )
+        ranked.sort(key=lambda item: (float(item["net_profit"]), int(item["closed_deals"])), reverse=True)
+        return ranked
+
+    def _build_close_reason_summary(self, closed_deals: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Resume les motifs de cloture observes sur la journee.
+
+        Args:
+            closed_deals (list[dict[str, object]]): Deals de sortie normalises.
+
+        Returns:
+            list[dict[str, object]]: Motifs de cloture tries par frequence.
+        """
+        reasons: Counter[str] = Counter()
+        for deal in closed_deals:
+            comment = str(deal.get("comment") or "Inconnu").strip() or "Inconnu"
+            reasons[comment] += 1
+        return [
+            {"reason": reason, "count": count}
+            for reason, count in reasons.most_common(10)
+        ]
+
+    def _build_review_diagnostics(
+        self,
+        *,
+        performance: dict[str, object],
+        decision_audit: dict[str, object],
+        symbol_review: list[dict[str, object]],
+        nemesis_status: dict[str, object],
+    ) -> list[dict[str, object]]:
+        """Derive un diagnostic exploitable pour les runs de nuit.
+
+        Args:
+            performance (dict[str, object]): Performance agregee de la journee.
+            decision_audit (dict[str, object]): Audit glissant des decisions live.
+            symbol_review (list[dict[str, object]]): Resume par symbole.
+            nemesis_status (dict[str, object]): Etat courant de Nemesis.
+
+        Returns:
+            list[dict[str, object]]: Liste de constats priorises.
+        """
+        diagnostics: list[dict[str, object]] = []
+        summary = dict(performance.get("summary") or {})
+        raw_counts = Counter(dict(decision_audit.get("raw_counts") or {}))
+        post_counts = Counter(dict(decision_audit.get("post_counts") or {}))
+        degraded_fallbacks = dict(decision_audit.get("degraded_fallbacks") or {})
+        closed_trades = int(summary.get("closed_trades") or 0)
+        net_profit = float(summary.get("net_profit") or 0.0)
+
+        if closed_trades == 0:
+            diagnostics.append(
+                {
+                    "code": "aucun_trade_cloture",
+                    "severity": "warning",
+                    "message": "Aucun trade cloture sur la fenetre analysee; les comparaisons restent faibles.",
+                }
+            )
+        elif net_profit <= 0.0:
+            diagnostics.append(
+                {
+                    "code": "pnl_journalier_negatif",
+                    "severity": "warning",
+                    "message": "Le PnL realise de la journee est negatif ou nul.",
+                }
+            )
+
+        post_total = sum(post_counts.values())
+        if post_total > 0 and (post_counts.get("HOLD", 0) / post_total) >= 0.65:
+            diagnostics.append(
+                {
+                    "code": "passivite_elevee",
+                    "severity": "info",
+                    "message": "Le taux de HOLD/VETO depasse 65%, ce qui signale une passivite notable.",
+                }
+            )
+
+        directional_total = raw_counts.get("BUY", 0) + raw_counts.get("SELL", 0)
+        if directional_total > 0:
+            dominant_share = max(raw_counts.get("BUY", 0), raw_counts.get("SELL", 0)) / directional_total
+            if dominant_share >= 0.75:
+                diagnostics.append(
+                    {
+                        "code": "biais_directionnel",
+                        "severity": "warning",
+                        "message": "Les signaux directionnels sont trop concentres sur un seul sens.",
+                    }
+                )
+
+        gold_state = next((item for item in symbol_review if str(item.get("symbol")).upper() == "XAUUSD"), None)
+        if gold_state is None or int(gold_state.get("closed_deals") or 0) == 0:
+            diagnostics.append(
+                {
+                    "code": "passivite_gold",
+                    "severity": "info",
+                    "message": "Aucune cloture Gold detectee sur la periode; le flux XAUUSD reste trop passif.",
+                }
+            )
+
+        if degraded_fallbacks:
+            diagnostics.append(
+                {
+                    "code": "fallbacks_runtime",
+                    "severity": "warning",
+                    "message": "Des replis runtime ont ete observes dans la chaine live.",
+                    "details": degraded_fallbacks,
+                }
+            )
+
+        if bool(nemesis_status.get("trading_blocked", False)):
+            diagnostics.append(
+                {
+                    "code": "nemesis_actif",
+                    "severity": "critical",
+                    "message": "Nemesis bloque actuellement le trading; la revue de nuit doit integrer les defaites recentes.",
+                }
+            )
+
+        return diagnostics
+
+    def _build_review_recommendations(
+        self,
+        diagnostics: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        """Transforme les constats en recommandations de nuit.
+
+        Args:
+            diagnostics (list[dict[str, object]]): Constats produits par la revue.
+
+        Returns:
+            list[dict[str, object]]: Actions conseillees pour la fenetre de nuit.
+        """
+        recommendations: list[dict[str, object]] = []
+        seen_codes: set[str] = set()
+        for diagnostic in diagnostics:
+            code = str(diagnostic.get("code") or "")
+            if not code or code in seen_codes:
+                continue
+            seen_codes.add(code)
+            if code == "passivite_elevee":
+                recommendations.append(
+                    {
+                        "action": "ajuster_mechanics_hold_split",
+                        "message": "Verifier les seuils HOLD/SPLIT et reduire la passivite des veto intraday.",
+                    }
+                )
+            elif code == "biais_directionnel":
+                recommendations.append(
+                    {
+                        "action": "relancer_ga_mecanique",
+                        "message": "Durcir l'equilibre directionnel dans la campagne GA seedee MuZero.",
+                    }
+                )
+            elif code == "passivite_gold":
+                recommendations.append(
+                    {
+                        "action": "revoir_xauusd",
+                        "message": "Analyser les veto spread/contexte sur XAUUSD avant la prochaine campagne nocturne.",
+                    }
+                )
+            elif code == "fallbacks_runtime":
+                recommendations.append(
+                    {
+                        "action": "stabiliser_runtime",
+                        "message": "Inspecter les connecteurs en repli avant d'autoriser des runs GPU plus lourds.",
+                    }
+                )
+            elif code == "nemesis_actif":
+                recommendations.append(
+                    {
+                        "action": "analyser_nemesis",
+                        "message": "Passer en revue les patterns Nemesis pour eviter une repetition sur la prochaine session.",
+                    }
+                )
+            elif code == "pnl_journalier_negatif":
+                recommendations.append(
+                    {
+                        "action": "revoir_shortlist",
+                        "message": "Ne promouvoir aucun candidat et renforcer la shortlist GA/full avant la prochaine bascule.",
+                    }
+                )
+        if not recommendations:
+            recommendations.append(
+                {
+                    "action": "continuer_collecte_shadow",
+                    "message": "Aucun signal critique; poursuivre la collecte Shadow et la comparaison nocturne.",
+                }
+            )
+        return recommendations
+
+    async def generate_trading_review(
+        self,
+        *,
+        from_dt: datetime | None = None,
+        to_dt: datetime | None = None,
+        persist: bool = True,
+    ) -> dict[str, object]:
+        """Genere la revue journaliere structuree du banker.
+
+        Args:
+            from_dt (datetime | None): Debut explicite de la fenetre.
+            to_dt (datetime | None): Fin explicite de la fenetre.
+            persist (bool): Si True, persiste le rapport sur disque.
+
+        Returns:
+            dict[str, object]: Rapport complet de revue.
+        """
+        review_end = to_dt or datetime.now()
+        review_start = from_dt or review_end.replace(hour=0, minute=0, second=0, microsecond=0)
+        account_summary = await self.mt5.get_account_summary()
+        open_positions = await self.mt5.get_open_positions() or []
+        closed_deals = await self.mt5.get_deal_history(review_start, review_end, closed_only=True)
+        performance = await self.mt5.get_strategy_performance(review_start, review_end, limit=10)
+        decision_audit = self.get_decision_audit_snapshot()
+        nemesis_status = get_nemesis_system().get_status()
+        runtime_status = self.get_runtime_mode_status()
+        execution_mechanics = self.get_execution_mechanics_status()
+        live_universe = self.get_live_universe_status()
+        symbol_review = self._build_symbol_review(closed_deals)
+        close_reasons = self._build_close_reason_summary(closed_deals)
+        diagnostics = self._build_review_diagnostics(
+            performance=performance,
+            decision_audit=decision_audit,
+            symbol_review=symbol_review,
+            nemesis_status=nemesis_status,
+        )
+        recommendations = self._build_review_recommendations(diagnostics)
+
+        review: dict[str, object] = {
+            "generated_at": review_end.isoformat(),
+            "runtime_profile": self._runtime_profile,
+            "shadow_learning_mode": self._shadow_learning_mode,
+            "window": {
+                "from": review_start.isoformat(),
+                "to": review_end.isoformat(),
+            },
+            "account": self._json_safe_value(account_summary or {}),
+            "open_positions": self._json_safe_value(
+                [
+                    {
+                        "ticket": position.ticket,
+                        "symbol": position.symbol,
+                        "action": position.action.value if hasattr(position.action, "value") else str(position.action),
+                        "volume": float(position.volume),
+                        "profit": float(position.profit),
+                        "open_price": float(position.open_price),
+                        "current_price": float(position.current_price),
+                    }
+                    for position in open_positions
+                ]
+            ),
+            "performance": self._json_safe_value(performance),
+            "symbols": symbol_review,
+            "close_reasons": close_reasons,
+            "decision_audit": self._json_safe_value(decision_audit),
+            "latest_decisions": self._json_safe_value(self.latest_decisions),
+            "nemesis": self._json_safe_value(nemesis_status),
+            "runtime": self._json_safe_value(runtime_status),
+            "execution_mechanics": self._json_safe_value(execution_mechanics),
+            "live_universe": self._json_safe_value(live_universe),
+            "intraday_mutation_allowed": self._intraday_retrain_allowed,
+            "intraday_promotion_allowed": self._intraday_promotion_allowed,
+            "diagnostics": diagnostics,
+            "recommendations": recommendations,
+        }
+
+        if persist:
+            self._trading_review_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = review_end.strftime("%Y%m%d_%H%M%S")
+            archive_path = self._trading_review_dir / f"review_{timestamp}.json"
+            review["storage"] = {
+                "latest_path": str(self._latest_trading_review_path),
+                "archive_path": str(archive_path),
+            }
+            payload = self._json_safe_value(review)
+            serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+            archive_path.write_text(serialized, encoding="utf-8")
+            self._latest_trading_review_path.write_text(serialized, encoding="utf-8")
+            logger.info("Revue journaliere ecrite dans %s.", archive_path)
+
+        return review
 
     def get_symbol_batch(self, advance: bool = True) -> list[str]:
         """Retourne le prochain lot de symboles a scanner."""
@@ -1553,95 +1981,141 @@ class AutoTradingEngine:
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def _detect_closed_positions(self, current_positions: list):
-        """DÃ©tecte les positions fermÃ©es et envoie une notification."""
+        """Detecte les positions fermees et alimente le feedback live.
+
+        Cette routine doit rester stricte sur l'identification du deal de
+        cloture afin d'eviter de rattacher un mauvais PnL a un ticket encore
+        vivant. Elle alimente ensuite le gouverneur de risque, Nemesis et le
+        Shadow Learning a partir du contexte reel de la position.
+
+        Args:
+            current_positions (list): Positions encore ouvertes sur MT5.
+        """
         if current_positions is None:
-            # Glitch in MT5 retrieval, abort detection safely
             return
-            
+
         current_tickets = {pos.ticket for pos in current_positions}
-        
-        # Find tickets that disappeared (= closed)
         closed_tickets = self._known_tickets - current_tickets
-        
+
         for ticket in closed_tickets:
             info = self._trade_open_info.get(ticket, {})
             if not info:
                 continue
-            
-            # Try to get the actual close info from MT5 deal history
+
             try:
+                symbol = str(info.get("symbol") or "").strip().upper()
                 from_dt = info.get("open_time", datetime.now() - timedelta(days=1))
-                to_dt = datetime.now() + timedelta(days=1) # Deal with server timezone ahead of local
-                deals = await self.mt5.get_deal_history(from_dt, to_dt)
-                
-                # Find the closing deal for this position
+                to_dt = datetime.now() + timedelta(days=1)
+                deals = await self.mt5.get_deal_history(from_dt, to_dt) or []
+
                 close_deal = None
                 for deal in deals:
-                    if deal.get("position_id") == ticket or deal.get("magic") == 12345:
-                        if deal.get("symbol") == info.get("symbol"):
-                            close_deal = deal
-                            break
-                
+                    if deal.get("position_id") != ticket:
+                        continue
+                    if str(deal.get("symbol") or "").strip().upper() != symbol:
+                        continue
+                    close_deal = deal
+                    break
+
+                close_time = datetime.now()
                 if close_deal:
-                    profit = close_deal["profit"] + close_deal.get("swap", 0) + close_deal.get("commission", 0)
-                    exit_price = close_deal["price"]
-                    duration = (close_deal["time"] - info["open_time"]).total_seconds() / 60
-                    reason = close_deal.get("comment", "SL/TP Hit") or "SL/TP Hit"
+                    profit = (
+                        float(close_deal.get("profit", 0.0) or 0.0)
+                        + float(close_deal.get("swap", 0.0) or 0.0)
+                        + float(close_deal.get("commission", 0.0) or 0.0)
+                    )
+                    exit_price = float(close_deal.get("price", info.get("entry_price", 0.0)) or 0.0)
+                    close_time = close_deal.get("time") if isinstance(close_deal.get("time"), datetime) else datetime.now()
+                    reason = str(close_deal.get("comment") or "SL/TP Hit")
                 else:
-                    # Fallback: no deal found, use stored info
                     profit = 0.0
-                    exit_price = info.get("entry_price", 0.0)
-                    duration = (datetime.now() - info["open_time"]).total_seconds() / 60
-                    reason = "FermÃ© (dÃ©tails indisponibles)"
-                
+                    exit_price = float(info.get("entry_price", 0.0) or 0.0)
+                    reason = "Ferme (details indisponibles)"
+
+                duration = max(
+                    0.0,
+                    (close_time - info.get("open_time", datetime.now())).total_seconds() / 60.0,
+                )
+
                 msg = self._fmt_close_msg(
-                    symbol=info["symbol"],
+                    symbol=symbol,
                     action=info["action"],
                     entry_price=info["entry_price"],
                     exit_price=exit_price,
                     profit=profit,
                     duration_min=int(duration),
-                    reason=reason
+                    reason=reason,
                 )
                 self.telegram.send_sync(msg)
-                logger.info(f"ðŸ“¤ Close notification sent for {info['symbol']} #{ticket} (P&L: ${profit:.2f})")
-                
-                # ðŸ§  FEEDBACK LOOP: Send real P&L to Lab for micro-training
-                asyncio.create_task(self._send_pnl_feedback(
-                    symbol=info["symbol"],
-                    action=info["action"],
-                    price=exit_price,
-                    pnl=profit,
-                    ticket=ticket,
-                ))
-                
-                # ðŸ›¡ï¸ ANTI-TILT LOOP: Report losses to Nemesis for Self-Healing
-                if profit < 0:
-                    asyncio.create_task(get_nemesis_system().report_loss(
-                        trade_id=str(ticket),
-                        loss_amount=abs(profit),
-                        market_context={"symbol": info["symbol"], "action": info["action"], "volatility": 0, "news_event": False, "trend_reversal": False}
-                    ))
-                
-                # ðŸ’° ACCOUNTANT LOOP: Send financial event for Drawdown validation
-                asyncio.create_task(self._send_pnl_to_accountant(
-                    symbol=info["symbol"],
-                    profit=profit
-                ))
+                logger.info(
+                    "Notification de cloture envoyee pour %s #%s (P&L: %.2f).",
+                    symbol,
+                    ticket,
+                    profit,
+                )
 
-                # ðŸ“¸ VIRALIZATION LOOP: Send winning trade to Muse Media Factory (Port 8601)
-                if profit >= 0.5:
-                    asyncio.create_task(self._viralize_trade(
-                        symbol=info["symbol"],
+                self.risk.record_trade_result(Decimal(str(profit)))
+                asyncio.create_task(self.risk.save_state())
+                risk_status = await self.risk.get_current_status()
+
+                asyncio.create_task(
+                    self._send_pnl_feedback(
+                        symbol=symbol,
                         action=info["action"],
-                        pnl=profit
-                    ))
-            except Exception as e:
-                logger.error(f"Error processing closed ticket #{ticket}: {e}")
-                # Cleanup if it failed mid-way
+                        price=exit_price,
+                        pnl=profit,
+                        ticket=ticket,
+                    )
+                )
+
+                if profit < 0:
+                    market_context = {
+                        "symbol": symbol,
+                        "action": info.get("action"),
+                        "volatility": float(info.get("atr", 0.0) or 0.0),
+                        "gnn_bias": info.get("gnn_bias"),
+                        "final_bias": info.get("final_bias"),
+                        "spread": float(info.get("spread", 0.0) or 0.0),
+                        "veto_reason": info.get("veto_reason"),
+                        "raw_model_action": info.get("raw_model_action"),
+                        "close_reason": reason,
+                        "model_version": info.get("model_version"),
+                        "engine_name": info.get("engine_name"),
+                        "selection": info.get("selection"),
+                        "checkpoint": info.get("checkpoint"),
+                        "day_open_balance": float(risk_status.day_open_balance),
+                        "risk_governor_triggered": risk_status.kill_switch_state != "normal",
+                        "trend_reversal": "reversal" in str(reason).lower(),
+                        "news_event": "news" in str(reason).lower(),
+                    }
+                    asyncio.create_task(
+                        get_nemesis_system().report_loss(
+                            trade_id=str(ticket),
+                            loss_amount=abs(profit),
+                            market_context=market_context,
+                        )
+                    )
+
+                asyncio.create_task(
+                    self._send_pnl_to_accountant(
+                        symbol=symbol,
+                        profit=profit,
+                    )
+                )
+
+                if profit >= 0.5:
+                    asyncio.create_task(
+                        self._viralize_trade(
+                            symbol=symbol,
+                            action=info["action"],
+                            pnl=profit,
+                        )
+                    )
+            except Exception as exc:
+                logger.error("Erreur lors du traitement de la cloture %s: %s", ticket, exc)
+            finally:
                 self._trade_open_info.pop(ticket, None)
-        
-        # Update known tickets to current state
+
         self._known_tickets = current_tickets
 
     async def _sync_open_positions(self):
@@ -1661,6 +2135,74 @@ class AutoTradingEngine:
                 logger.info(f"âœ… Synced {len(positions)} existing positions.")
         except Exception as e:
             logger.error(f"Failed to startup-sync positions: {e}")
+
+    async def _flatten_all_positions(self, positions: list) -> None:
+        """Ferme toutes les positions ouvertes lorsque le kill switch est critique.
+
+        Args:
+            positions (list): Positions ouvertes a fermer.
+        """
+        if not positions:
+            return
+
+        ordered_positions = sorted(
+            positions,
+            key=lambda position: float(getattr(position, "profit", 0.0) or 0.0),
+        )
+        logger.warning(
+            "Flatten immediat active: tentative de fermeture de %s positions.",
+            len(ordered_positions),
+        )
+        for position in ordered_positions:
+            result = await self.mt5.close_position(position.ticket)
+            if result.get("success"):
+                self.risk.note_flatten_action("immediate")
+                logger.warning(
+                    "Flatten immediat: position %s #%s fermee.",
+                    position.symbol,
+                    position.ticket,
+                )
+            else:
+                logger.error(
+                    "Flatten immediat: echec de fermeture pour %s #%s: %s",
+                    position.symbol,
+                    position.ticket,
+                    result.get("message", "erreur inconnue"),
+                )
+
+    async def _flatten_worst_position(self, positions: list) -> bool:
+        """Ferme la pire position ouverte pour alleger le drawdown.
+
+        Args:
+            positions (list): Positions candidates au flatten progressif.
+
+        Returns:
+            bool: ``True`` si une fermeture a ete declenchee.
+        """
+        if not positions:
+            return False
+
+        worst_position = min(
+            positions,
+            key=lambda position: float(getattr(position, "profit", 0.0) or 0.0),
+        )
+        result = await self.mt5.close_position(worst_position.ticket)
+        if not result.get("success"):
+            logger.error(
+                "Flatten progressif: echec de fermeture pour %s #%s: %s",
+                worst_position.symbol,
+                worst_position.ticket,
+                result.get("message", "erreur inconnue"),
+            )
+            return False
+
+        self.risk.note_flatten_action("progressive")
+        logger.warning(
+            "Flatten progressif: fermeture de la pire position %s #%s.",
+            worst_position.symbol,
+            worst_position.ticket,
+        )
+        return True
 
     async def _viralize_trade(self, symbol: str, action: str, pnl: float):
         """Notifie l'agent The Muse pour gÃ©nÃ©rer une image virale d'un gain."""
@@ -1715,6 +2257,26 @@ class AutoTradingEngine:
             except Exception as e:
                 logger.error(f"Half-day report error: {e}")
                 await asyncio.sleep(3600)
+
+    async def _daily_review_loop(self):
+        """Genere une revue journaliere persistante a la fin de chaque journee."""
+        while self.is_active:
+            try:
+                now = datetime.now()
+                next_review = now.replace(hour=23, minute=58, second=0, microsecond=0)
+                if now >= next_review:
+                    next_review = next_review + timedelta(days=1)
+
+                await asyncio.sleep((next_review - now).total_seconds())
+                if not self.is_active:
+                    break
+
+                await self.generate_trading_review()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error("Erreur boucle revue journaliere: %s", exc)
+                await asyncio.sleep(900)
 
     async def _send_half_day_report(self):
         """GÃ©nÃ¨re et envoie le rapport de la demi-journÃ©e."""
@@ -1862,7 +2424,8 @@ class AutoTradingEngine:
                     continue
                 self._clear_pause_state("mt5_offline")
                 balance = Decimal(str(summary.get("balance", 100000)))
-                self.risk.update_account_balance(balance)
+                equity = Decimal(str(summary.get("equity", summary.get("balance", 100000))))
+                self.risk.update_account_balance(balance, equity=equity)
 
                 await self.refresh_symbol_universe()
 
@@ -2026,6 +2589,24 @@ class AutoTradingEngine:
                             if getattr(position, "symbol", None)
                         }
 
+                if self.risk.should_flatten_immediate():
+                    await self._flatten_all_positions(positions)
+                    await asyncio.sleep(5)
+                    continue
+
+                if self.risk.should_flatten_progressive() and self.risk.can_run_progressive_flatten():
+                    flattened = await self._flatten_worst_position(positions)
+                    if flattened:
+                        refreshed_positions = await self.mt5.get_open_positions()
+                        if refreshed_positions is not None:
+                            positions = refreshed_positions
+                            self.risk.update_positions_count(len(positions))
+                            open_symbols = {
+                                position.symbol
+                                for position in positions
+                                if getattr(position, "symbol", None)
+                            }
+
                 status = await self.risk.get_current_status()
                 if not status.trading_allowed:
                     self._log_pause_state(
@@ -2081,6 +2662,15 @@ class AutoTradingEngine:
                                 symbol,
                             )
                             continue
+
+                        if nemesis.is_symbol_quarantined(symbol):
+                            self._log_pause_state(
+                                f"nemesis_quarantine_{symbol}",
+                                f"Auto-Trading pause sur {symbol}: quarantaine Nemesis active.",
+                                cooldown_seconds=300,
+                            )
+                            continue
+                        self._clear_pause_state(f"nemesis_quarantine_{symbol}")
 
                         # NEW (Sprint 10) : Night Session Filter (Rollover Trap)
                         if not self.risk.is_within_trading_session(symbol):
@@ -2786,6 +3376,16 @@ class AutoTradingEngine:
                                         "entry_price": float(entry_price),
                                         "open_time": now_open,
                                         "skill": skill.value if hasattr(skill, "value") else str(skill),
+                                        "raw_model_action": raw_model_action,
+                                        "veto_reason": veto_reason,
+                                        "gnn_bias": decision_state.get("gnn_bias"),
+                                        "final_bias": decision_state.get("final_bias"),
+                                        "spread": float((tick["ask"] - tick["bid"]) if isinstance(tick, dict) else 0.0),
+                                        "model_version": decision_state.get("model_version"),
+                                        "engine_name": decision_state.get("engine_name"),
+                                        "selection": lab_selection,
+                                        "checkpoint": checkpoint_path,
+                                        "atr": float(features.get("ATR", 0.0) or 0.0),
                                     }
                                     self._known_tickets.add(ticket)
                                     self._last_symbol_entry_at[symbol] = now_open

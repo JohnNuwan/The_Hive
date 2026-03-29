@@ -1187,6 +1187,114 @@ class ChampionPromoter:
             for engine in ("muzero", "dreamer")
         }
 
+    def _extract_live_reference_metrics(
+        self,
+        *,
+        manifest: dict[str, Any] | None,
+        arena_report: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Extrait les metriques de reference du champion live.
+
+        Args:
+            manifest (dict[str, Any] | None): Manifeste live courant.
+            arena_report (dict[str, Any] | None): Rapport Arena le plus recent.
+
+        Returns:
+            dict[str, Any]: Metriques de reference du champion live.
+        """
+
+        payloads = [
+            dict((manifest or {}).get("promotion_gate") or {}),
+            dict((manifest or {}).get("battle_report", {}) or {}).get("champion", {}) or {},
+            dict((arena_report or {}).get("battle_report", {}) or {}).get("champion", {}) or {},
+        ]
+        for payload in payloads:
+            metrics = dict(payload.get("metrics") or payload)
+            if metrics:
+                return metrics
+        return {}
+
+    def _build_live_comparison(
+        self,
+        *,
+        horizon: str,
+        battle_report: dict[str, Any],
+        engine: str,
+    ) -> dict[str, Any]:
+        """Compare un challenger MuZero au champion live courant.
+
+        Args:
+            horizon (str): Horizon strategique cible.
+            battle_report (dict[str, Any]): Rapport Arena du challenger.
+            engine (str): Moteur en cours de promotion.
+
+        Returns:
+            dict[str, Any]: Verdict de comparaison contre le live.
+        """
+
+        normalized_engine = self.normalize_engine_name(engine)
+        if normalized_engine != "muzero":
+            return {
+                "allowed": True,
+                "reason": "not_applicable",
+                "checks": {},
+                "symbol_wins_vs_live": 0,
+                "required_symbol_wins": 0,
+                "compared_symbol_count": 0,
+                "candidate_metrics": dict((battle_report.get("challenger") or {}).get("metrics") or {}),
+                "live_metrics": {},
+            }
+
+        manifest = self.load_manifest(horizon, engine=normalized_engine)
+        arena_report = self.load_arena_report(horizon, engine=normalized_engine)
+        live_metrics = self._extract_live_reference_metrics(manifest=manifest, arena_report=arena_report)
+        candidate_metrics = dict((battle_report.get("challenger") or {}).get("metrics") or {})
+        candidate_mechanics = dict(candidate_metrics.get("metrics_by_position_mechanics") or {})
+        live_mechanics = dict(live_metrics.get("metrics_by_position_mechanics") or {})
+        live_metrics_by_symbol = self._read_live_symbol_metrics(manifest, arena_report)
+        candidate_metrics_by_symbol = dict(candidate_metrics.get("metrics_by_symbol") or {})
+
+        symbol_wins = 0
+        compared_symbol_count = 0
+        for symbol, candidate_symbol_metrics in candidate_metrics_by_symbol.items():
+            live_symbol_metrics = dict(live_metrics_by_symbol.get(symbol) or {})
+            if not live_symbol_metrics:
+                continue
+            compared_symbol_count += 1
+            if self._to_float(candidate_symbol_metrics.get("net_realized_pct")) >= self._to_float(
+                live_symbol_metrics.get("net_realized_pct")
+            ):
+                symbol_wins += 1
+
+        checks = {
+            "profit_factor": self._to_float(candidate_metrics.get("profit_factor"))
+            > self._to_float(live_metrics.get("profit_factor")),
+            "return_pct": self._to_float(candidate_metrics.get("return_pct"))
+            > self._to_float(live_metrics.get("return_pct")),
+            "net_realized_pct": self._to_float(candidate_metrics.get("net_realized_pct"))
+            > self._to_float(live_metrics.get("net_realized_pct")),
+            "close_quality_score": self._to_float(candidate_mechanics.get("close_quality_score"))
+            > self._to_float(live_mechanics.get("close_quality_score")),
+            "directional_imbalance": self._to_float(
+                candidate_metrics.get("directional_imbalance"),
+                default=1.0,
+            )
+            <= self._to_float(live_metrics.get("directional_imbalance"), default=1.0),
+            "symbol_coverage": compared_symbol_count >= 7,
+            "symbol_wins": symbol_wins >= 4,
+        }
+        reason = next((name for name, passed in checks.items() if not passed), "eligible")
+        return {
+            "allowed": all(checks.values()),
+            "reason": reason,
+            "checks": checks,
+            "symbol_wins_vs_live": symbol_wins,
+            "required_symbol_wins": 4,
+            "compared_symbol_count": compared_symbol_count,
+            "candidate_metrics": candidate_metrics,
+            "live_metrics": live_metrics,
+        }
+
     def promote_challenger(
         self,
         challenger_path: str | Path,
@@ -1256,6 +1364,29 @@ class ChampionPromoter:
                 "promotion_gate": promotion_gate,
             }
 
+        live_comparison = self._build_live_comparison(
+            horizon=horizon,
+            battle_report=battle_report,
+            engine=normalized_engine,
+        )
+        if not live_comparison.get("allowed", False):
+            logger.warning(
+                "Promotion live refusee pour %s: comparaison live=%s.",
+                horizon,
+                live_comparison.get("reason"),
+            )
+            return {
+                "status": "skipped",
+                "reason": "live_comparison_failed",
+                "engine": normalized_engine,
+                "horizon": horizon,
+                "source_path": str(source_path),
+                "champion_paths": [],
+                "promotion_gate": promotion_gate,
+                "live_comparison": live_comparison,
+                "symbol_wins_vs_live": live_comparison.get("symbol_wins_vs_live", 0),
+            }
+
         champion_paths: list[str] = []
         horizon_champion = self.get_champion_path(horizon, engine=normalized_engine)
         shutil.copy2(source_path, horizon_champion)
@@ -1292,6 +1423,8 @@ class ChampionPromoter:
             "battle_report": battle_report,
             "training_metrics": training_metrics or {},
             "promotion_gate": promotion_gate,
+            "live_comparison": live_comparison,
+            "symbol_wins_vs_live": live_comparison.get("symbol_wins_vs_live", 0),
         }
         manifest_path = self.get_manifest_path(horizon, engine=normalized_engine)
         manifest_path.write_text(json.dumps(manifest, indent=2, default=float), encoding="utf-8")

@@ -31,6 +31,7 @@ from eva_lab.training_status import (
     load_training_status,
     mark_step_running,
     set_gold_precheck,
+    set_training_runtime_state,
     write_precheck_summary,
     write_terminal_summary,
 )
@@ -68,13 +69,37 @@ def build_environment(symbol: str, config: MuZeroConfigV3) -> TradingEnvironment
 
 
 
+def _parse_proxy_precheck_steps(raw_steps: str) -> list[int]:
+    """Normalise la liste des etapes de precheck proxy.
+
+    Args:
+        raw_steps (str): Valeur CSV issue de l'environnement.
+
+    Returns:
+        list[int]: Etapes strictement positives, triees et dedoublonnees.
+    """
+
+    steps: list[int] = []
+    for raw_part in str(raw_steps or "").split(","):
+        candidate = str(raw_part).strip()
+        if not candidate:
+            continue
+        try:
+            step = int(candidate)
+        except ValueError:
+            continue
+        if step > 0 and step not in steps:
+            steps.append(step)
+    return sorted(steps)
+
+
 def _is_gold_proxy_precheck_enabled(
     *,
     gate_profile: str,
     trial_mode: str | None,
     focus_symbols: list[str],
 ) -> bool:
-    """Retourne vrai si le run courant doit executer un precheck Gold.
+    """Retourne vrai si le run courant doit executer un precheck proxy.
 
     Args:
         gate_profile (str): Profil de gate du run.
@@ -82,13 +107,21 @@ def _is_gold_proxy_precheck_enabled(
         focus_symbols (list[str]): Univers explicite du run.
 
     Returns:
-        bool: ``True`` si le precheck Gold est pertinent, ``False`` sinon.
+        bool: ``True`` si le precheck proxy est pertinent, ``False`` sinon.
     """
 
+    if str(trial_mode or "").strip().lower() != "proxy_ga":
+        return False
+    if str(os.getenv("MUZERO_PROXY_PRECHECK_ENABLED", "")).strip():
+        return str(os.getenv("MUZERO_PROXY_PRECHECK_ENABLED", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
     normalized_focus = [str(symbol).strip().upper() for symbol in focus_symbols if str(symbol).strip()]
     return (
         str(gate_profile or "").strip().lower() == "gold_demo"
-        and str(trial_mode or "").strip().lower() == "proxy_ga"
         and normalized_focus == ["XAUUSD"]
     )
 
@@ -98,18 +131,14 @@ def _evaluate_gold_precheck_verdict(
     metrics: dict[str, object],
     mechanics: dict[str, object],
 ) -> dict[str, object]:
-    """Etablit un verdict de precheck Gold a partir des metriques intermediaires.
-
-    La politique reste prudente: on coupe uniquement les echantillons
-    manifestement faibles. Les cas ambigus continuent jusqu'au proxy complet.
+    """Etablit un verdict de precheck proxy a partir des metriques intermediaires.
 
     Args:
         metrics (dict[str, object]): Metriques consolidees du challenger.
         mechanics (dict[str, object]): Metriques de mecanique de position.
 
     Returns:
-        dict[str, object]: Verdict structure ``pass``, ``fail`` ou
-            ``inconclusive`` avec raison et mode d'echec stable.
+        dict[str, object]: Verdict structure ``pass`` ou ``fail`` avec raison stable.
     """
 
     evaluation_games = int(metrics.get("evaluation_games", 0) or 0)
@@ -117,6 +146,7 @@ def _evaluate_gold_precheck_verdict(
     profit_factor = float(metrics.get("profit_factor", 0.0) or 0.0)
     return_pct = float(metrics.get("return_pct", 0.0) or 0.0)
     net_realized_pct = float(metrics.get("net_realized_pct", 0.0) or 0.0)
+    directional_imbalance = float(metrics.get("directional_imbalance", 1.0) or 1.0)
     close_quality_score = float(mechanics.get("close_quality_score", 0.0) or 0.0)
     hold_drag_score = float(mechanics.get("hold_drag_score", 0.0) or 0.0)
     directional_bias = str(metrics.get("directional_bias") or "inactive").strip().lower()
@@ -124,57 +154,60 @@ def _evaluate_gold_precheck_verdict(
     if evaluation_games <= 0 or total_trades <= 0:
         return {
             "status": "fail",
-            "reason": "aucun_trade_exploitable",
+            "reason": "insufficient_sample",
             "failure_mode": "inactive",
         }
 
-    if directional_bias in {"buy_heavy", "sell_heavy"} and return_pct <= 0.0 and profit_factor < 0.95:
+    if profit_factor <= 1.0:
         return {
             "status": "fail",
-            "reason": "biais_directionnel_extreme",
-            "failure_mode": directional_bias,
-        }
-
-    if (
-        return_pct <= 0.0
-        and net_realized_pct < 0.0
-        and profit_factor < 0.90
-        and close_quality_score <= 0.05
-        and hold_drag_score >= 0.90
-    ):
-        return {
-            "status": "fail",
-            "reason": "profil_non_rentable_et_sorties_degradees",
+            "reason": "profit_factor_too_low",
             "failure_mode": "unprofitable",
         }
 
-    if close_quality_score <= 0.02 and hold_drag_score >= 1.00 and total_trades >= 4:
+    if return_pct <= 0.0:
         return {
             "status": "fail",
-            "reason": "sorties_trop_degradees",
+            "reason": "return_pct_non_positive",
+            "failure_mode": "unprofitable",
+        }
+
+    if net_realized_pct <= 0.0:
+        return {
+            "status": "fail",
+            "reason": "net_realized_pct_non_positive",
+            "failure_mode": "unprofitable",
+        }
+
+    if close_quality_score < 0.40:
+        return {
+            "status": "fail",
+            "reason": "close_quality_too_low",
             "failure_mode": "bad_exit",
         }
 
-    if (
-        total_trades >= 6
-        and return_pct > 0.0
-        and net_realized_pct >= 0.0
-        and profit_factor >= 1.0
-        and directional_bias == "balanced"
-        and close_quality_score >= 0.20
-        and hold_drag_score <= 0.80
-    ):
+    if hold_drag_score > 0.80:
         return {
-            "status": "pass",
-            "reason": "signal_prometteur",
-            "failure_mode": None,
+            "status": "fail",
+            "reason": "hold_drag_too_high",
+            "failure_mode": "bad_exit",
         }
 
-    return {
-        "status": "inconclusive",
-        "reason": "signal_ambigu_a_confirmer",
-        "failure_mode": None,
-    }
+    if directional_imbalance > 0.70:
+        return {
+            "status": "fail",
+            "reason": "directional_imbalance_too_high",
+            "failure_mode": directional_bias or "directional_imbalance",
+        }
+
+    if directional_bias in {"buy_heavy", "sell_heavy"} and return_pct <= 0.0:
+        return {
+            "status": "fail",
+            "reason": "directional_bias_negative",
+            "failure_mode": directional_bias,
+        }
+
+    return {"status": "pass", "reason": "proxy_precheck_pass", "failure_mode": None}
 
 
 def main() -> dict[str, object]:
@@ -208,8 +241,31 @@ def main() -> dict[str, object]:
         trial_mode=trial_mode,
         focus_symbols=focus_symbols,
     )
-    gold_precheck_step = max(1, int(os.getenv("MUZERO_GOLD_PRECHECK_STEP", "3000")))
-    gold_precheck_games = max(1, int(os.getenv("MUZERO_GOLD_PRECHECK_GAMES", "6")))
+    proxy_precheck_steps = _parse_proxy_precheck_steps(
+        str(
+            os.getenv(
+                "MUZERO_PROXY_PRECHECK_STEPS",
+                os.getenv("MUZERO_GOLD_PRECHECK_STEP", "3000"),
+            )
+        )
+    )
+    if not proxy_precheck_steps:
+        proxy_precheck_steps = [3000]
+    gold_precheck_games = max(
+        1,
+        int(
+            os.getenv(
+                "MUZERO_PROXY_PRECHECK_GAMES",
+                os.getenv("MUZERO_GOLD_PRECHECK_GAMES", "6"),
+            )
+        ),
+    )
+    resume_checkpoint_path = str(os.getenv("MUZERO_RESUME_CHECKPOINT_PATH", "")).strip() or None
+    resume_step_override = int(str(os.getenv("MUZERO_RESUME_STEP", "0")).strip() or 0)
+    collection_timeout_seconds = max(
+        0.0,
+        float(str(os.getenv("MUZERO_COLLECTION_GAME_TIMEOUT_SECONDS", "240")).strip() or 0.0),
+    )
     logger.info("Demarrage MuZero horizon=%s | timeframe=%s", horizon, config.primary_timeframe)
     logger.info("Peripheriques JAX: %s", jax.devices())
     logger.info("Inventaire historique: %s", build_inventory_report())
@@ -220,6 +276,8 @@ def main() -> dict[str, object]:
     )
     send_training_horizon_started(horizon, len(config.symbols))
     set_gold_precheck(None)
+    active_run_id = str(load_training_status().get("run_id") or "").strip() or None
+    resume_step = 0
     mark_step_running(
         step_name,
         engine=engine,
@@ -244,6 +302,16 @@ def main() -> dict[str, object]:
         replay_cache_source="memoire",
         dataset_coverage=dataset_coverage,
     )
+    set_training_runtime_state(
+        last_successful_step=None,
+        last_successful_step_at=None,
+        train_step_phase="initialisation",
+        phase_durations_ms={},
+        resume_checkpoint_path=resume_checkpoint_path,
+        resume_step=None,
+        stall_detected=False,
+        stall_reason=None,
+    )
     record_training_dataset(
         dict(getattr(config, "dataset_descriptor", {}) or {}),
         metadata={
@@ -265,7 +333,22 @@ def main() -> dict[str, object]:
     results_dir.mkdir(parents=True, exist_ok=True)
 
     latest_path = weights_dir / f"muzero_{horizon}_latest.pkl"
-    if latest_path.exists():
+    if resume_checkpoint_path:
+        resume_path = Path(resume_checkpoint_path)
+        if not resume_path.exists():
+            raise ValueError(f"Checkpoint de reprise introuvable: {resume_checkpoint_path}")
+        resume_metadata = agent.load(str(resume_path))
+        resume_step = max(int(resume_metadata.get("step") or 0), resume_step_override)
+        logger.info("Reprise MuZero explicite depuis %s a l'etape %s", resume_path, resume_step)
+        append_training_log(
+            f"MuZero {horizon}: reprise depuis {resume_path.name} a l'etape {resume_step}.",
+            source="muzero",
+        )
+        set_training_runtime_state(
+            resume_checkpoint_path=resume_checkpoint_path,
+            resume_step=resume_step if resume_step > 0 else None,
+        )
+    elif latest_path.exists():
         try:
             agent.load(str(latest_path))
             logger.info("Reprise MuZero depuis %s", latest_path)
@@ -273,10 +356,45 @@ def main() -> dict[str, object]:
             logger.warning("Checkpoint MuZero ignore: %s", exc)
 
     games_per_symbol = int(os.getenv("MUZERO_GAMES_PER_SYMBOL", "12"))
+    if resume_step > 0:
+        games_per_symbol = max(
+            1,
+            int(
+                str(
+                    os.getenv(
+                        "MUZERO_RESUME_GAMES_PER_SYMBOL",
+                        str(games_per_symbol),
+                    )
+                ).strip()
+                or games_per_symbol
+            ),
+        )
+    collection_mode = str(
+        os.getenv(
+            "MUZERO_RESUME_COLLECTION_MODE" if resume_step > 0 else "MUZERO_COLLECTION_MODE",
+            "policy_only" if resume_step > 0 else "mcts",
+        )
+        or ("policy_only" if resume_step > 0 else "mcts")
+    ).strip().lower()
+    if collection_mode not in {"mcts", "policy_only"}:
+        raise ValueError(f"Mode de collecte MuZero invalide: {collection_mode}")
     valid_symbols: list[str] = []
     total_games = 0
 
     logger.info("Phase 1 - collecte historique par self-play guide")
+    if resume_step > 0:
+        logger.info(
+            "Collecte MuZero de reprise en mode %s avec %s parties par symbole.",
+            collection_mode,
+            games_per_symbol,
+        )
+        append_training_log(
+            (
+                f"MuZero {horizon}: collecte de reprise en mode {collection_mode} "
+                f"avec {games_per_symbol} parties par symbole."
+            ),
+            source="muzero",
+        )
     for symbol_index, symbol in enumerate(config.symbols, start=1):
         env = build_environment(symbol, config)
         if env is None:
@@ -315,7 +433,12 @@ def main() -> dict[str, object]:
                 replay_cache_source="memoire",
                 dataset_coverage=dataset_coverage,
             )
-            agent.play_game(env, exploration=True)
+            agent.play_game(
+                env,
+                exploration=True,
+                collection_mode=collection_mode,
+                max_wall_time_seconds=collection_timeout_seconds or None,
+            )
             summary = env.get_summary()
             total_games += 1
             logger.info(
@@ -342,14 +465,90 @@ def main() -> dict[str, object]:
     start_time = datetime.now()
     last_metrics = None
     gold_precheck_payload: dict[str, object] | None = None
-    gold_precheck_executed = False
+    start_optimisation_step = min(resume_step, config.training_steps)
+    last_successful_step = start_optimisation_step
+    executed_precheck_steps = {
+        step for step in proxy_precheck_steps if start_optimisation_step >= step
+    } if gold_precheck_enabled else set()
     killed_after_precheck = False
+    if executed_precheck_steps:
+        append_training_log(
+            (
+                f"MuZero {horizon}: precheck proxy saute pour les etapes "
+                f"{sorted(executed_precheck_steps)} car la reprise commence apres ces seuils."
+            ),
+            source="muzero",
+        )
     append_training_log(
         f"MuZero {horizon}: optimisation profonde sur {config.training_steps} steps.",
         source="muzero",
     )
+    mark_step_running(
+        step_name,
+        engine=engine,
+        phase="optimisation",
+        horizon=horizon,
+        family=family,
+        symbol_total=len(valid_symbols),
+        training_step_current=start_optimisation_step,
+        training_step_total=config.training_steps,
+        dataset_id=dataset_id,
+        dataset_source=dataset_source,
+        feature_profile=(str(feature_profile.get("profile_name") or "").strip() or None),
+        mechanics_profile_version=mechanics_profile_version,
+        ga_status=ga_status,
+        ga_generation=ga_generation,
+        ga_trial=ga_trial,
+        trial_mode=trial_mode,
+        trial_cost_profile=trial_cost_profile,
+        focus_symbols=focus_symbols,
+        gate_profile=gate_profile,
+        replay_cache_status="memoire",
+        replay_cache_key=f"{engine}:{horizon}:{family}:{mechanics_profile_version or 'default'}",
+        replay_cache_entries=agent.replay_buffer.size,
+        replay_cache_source="memoire",
+        dataset_coverage=dataset_coverage,
+    )
+    set_training_runtime_state(
+        last_successful_step=start_optimisation_step if start_optimisation_step > 0 else None,
+        last_successful_step_at=datetime.now().isoformat(),
+        train_step_phase="ready",
+        phase_durations_ms={},
+        resume_checkpoint_path=resume_checkpoint_path,
+        resume_step=start_optimisation_step if start_optimisation_step > 0 else None,
+        stall_detected=False,
+        stall_reason=None,
+    )
 
-    for step in range(1, config.training_steps + 1):
+    def _trace_train_step(phase_name: str) -> None:
+        """Publie la sous-phase exacte du `train_step` MuZero."""
+
+        set_training_runtime_state(
+            train_step_phase=phase_name,
+            stall_detected=False,
+            stall_reason=None,
+        )
+
+    for step in range(start_optimisation_step + 1, config.training_steps + 1):
+        step_result = agent.train_step(trace_hook=_trace_train_step)
+        if step_result is None:
+            logger.warning("MuZero sans batch suffisant, arret a l'etape %s.", step)
+            append_training_log(
+                f"MuZero {horizon}: arret anticipe a l'etape {step} faute de batch suffisant.",
+                level="WARNING",
+                source="muzero",
+            )
+            set_training_runtime_state(
+                train_step_phase="waiting_for_batch",
+                stall_detected=False,
+                stall_reason=None,
+            )
+            break
+        metrics = dict(step_result.get("metrics") or {})
+        phase_durations_ms = dict(step_result.get("phase_durations_ms") or {})
+        last_metrics = metrics
+        last_successful_step = step
+        step_completed_at = datetime.now().isoformat()
         mark_step_running(
             step_name,
             engine=engine,
@@ -376,28 +575,39 @@ def main() -> dict[str, object]:
             replay_cache_source="memoire",
             dataset_coverage=dataset_coverage,
         )
-        metrics = agent.train_step()
-        if metrics is None:
-            logger.warning("MuZero sans batch suffisant, arret a l'etape %s.", step)
-            append_training_log(
-                f"MuZero {horizon}: arret anticipe a l'etape {step} faute de batch suffisant.",
-                level="WARNING",
-                source="muzero",
-            )
-            break
-        last_metrics = metrics
+        set_training_runtime_state(
+            last_successful_step=last_successful_step,
+            last_successful_step_at=step_completed_at,
+            train_step_phase="completed",
+            phase_durations_ms=phase_durations_ms,
+            resume_checkpoint_path=resume_checkpoint_path,
+            resume_step=start_optimisation_step if start_optimisation_step > 0 else None,
+            stall_detected=False,
+            stall_reason=None,
+        )
 
-        if (
-            gold_precheck_enabled
-            and not gold_precheck_executed
-            and step >= gold_precheck_step
-        ):
-            checkpoint_path = weights_dir / f"muzero_{horizon}_gold_precheck_{step}.pkl"
-            agent.save(str(checkpoint_path))
+        next_precheck_step = next(
+            (
+                candidate_step
+                for candidate_step in proxy_precheck_steps
+                if candidate_step not in executed_precheck_steps and step >= candidate_step
+            ),
+            None,
+        )
+        if gold_precheck_enabled and next_precheck_step is not None:
+            checkpoint_path = weights_dir / f"muzero_{horizon}_proxy_precheck_{next_precheck_step}.pkl"
+            agent.save(
+                str(checkpoint_path),
+                step=step,
+                run_id=active_run_id,
+                trial_id=ga_trial,
+                gate_profile=gate_profile,
+                focus_symbols=focus_symbols,
+            )
             append_training_log(
                 (
-                    f"MuZero {horizon}: lancement du precheck Gold a l'etape "
-                    f"{step} sur {gold_precheck_games} segments."
+                    f"MuZero {horizon}: lancement du precheck proxy a l'etape "
+                    f"{next_precheck_step} sur {gold_precheck_games} segments."
                 ),
                 source="muzero",
             )
@@ -409,7 +619,7 @@ def main() -> dict[str, object]:
                 "horizon": horizon,
                 "family": family,
                 "feature_profile": str(feature_profile.get("profile_name") or "").strip() or None,
-                "step": step,
+                "step": next_precheck_step,
                 "eval_symbols": list(focus_symbols),
                 "games": gold_precheck_games,
                 "reason": "precheck_en_cours",
@@ -436,21 +646,22 @@ def main() -> dict[str, object]:
                 "horizon": horizon,
                 "family": family,
                 "feature_profile": str(feature_profile.get("profile_name") or "").strip() or None,
-                "step": step,
+                "step": next_precheck_step,
                 "eval_symbols": list(precheck_report.get("eval_symbols") or focus_symbols),
                 "games": int(precheck_report.get("games_per_symbol") or gold_precheck_games),
                 "metrics": precheck_metrics,
                 "metrics_by_position_mechanics": precheck_mechanics,
                 "reason": verdict.get("reason"),
                 "failure_mode": verdict.get("failure_mode"),
+                "early_kill_reason": verdict.get("reason") if verdict.get("status") == "fail" else None,
             }
             precheck_path = write_precheck_summary(gold_precheck_payload)
             gold_precheck_payload["path"] = str(precheck_path)
             set_gold_precheck(gold_precheck_payload)
-            gold_precheck_executed = True
+            executed_precheck_steps.add(next_precheck_step)
             append_training_log(
                 (
-                    f"MuZero {horizon}: precheck Gold {gold_precheck_payload.get('status')} "
+                    f"MuZero {horizon}: precheck proxy {gold_precheck_payload.get('status')} "
                     f"({gold_precheck_payload.get('reason')})."
                 ),
                 level="WARNING" if gold_precheck_payload.get("status") == "fail" else "INFO",
@@ -458,9 +669,9 @@ def main() -> dict[str, object]:
             )
             if gold_precheck_payload.get("status") == "fail":
                 logger.warning(
-                    "MuZero %s coupe apres precheck Gold a l'etape %s: %s",
+                    "MuZero %s coupe apres precheck proxy a l'etape %s: %s",
                     horizon,
-                    step,
+                    next_precheck_step,
                     gold_precheck_payload.get("reason"),
                 )
                 killed_after_precheck = True
@@ -488,30 +699,53 @@ def main() -> dict[str, object]:
 
         if step % config.checkpoint_interval == 0:
             checkpoint_path = weights_dir / f"muzero_{horizon}_ckpt_{step}.pkl"
-            agent.save(str(checkpoint_path))
+            agent.save(
+                str(checkpoint_path),
+                step=step,
+                run_id=active_run_id,
+                trial_id=ga_trial,
+                gate_profile=gate_profile,
+                focus_symbols=focus_symbols,
+            )
             logger.info("Checkpoint MuZero sauvegarde: %s", checkpoint_path)
 
-    agent.save(str(latest_path))
+    final_checkpoint_step = last_successful_step if last_successful_step > 0 else start_optimisation_step
+    agent.save(
+        str(latest_path),
+        step=final_checkpoint_step,
+        run_id=active_run_id,
+        trial_id=ga_trial,
+        gate_profile=gate_profile,
+        focus_symbols=focus_symbols,
+    )
     logger.info("Checkpoint latest mis a jour: %s", latest_path)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     challenger_id = f"gen_{horizon}_{timestamp}"
     challenger_path = weights_dir / f"{challenger_id}.pkl"
-    agent.save(str(challenger_path))
-    active_run_id = str(load_training_status().get("run_id") or "").strip() or None
+    agent.save(
+        str(challenger_path),
+        step=final_checkpoint_step,
+        run_id=active_run_id,
+        trial_id=ga_trial,
+        gate_profile=gate_profile,
+        focus_symbols=focus_symbols,
+    )
+    active_run_id = str(load_training_status().get("run_id") or "").strip() or active_run_id
 
     if killed_after_precheck:
         precheck_metrics = dict((gold_precheck_payload or {}).get("metrics") or {})
         precheck_mechanics = dict((gold_precheck_payload or {}).get("metrics_by_position_mechanics") or {})
         promotion_result = {
             "status": "skipped",
-            "reason": "gold_precheck_fail",
+            "reason": "proxy_precheck_fail",
             "promotion_gate": {
                 "allowed": False,
                 "status": "blocked",
-                "reason": "gold_precheck_fail",
+                "reason": "proxy_precheck_fail",
                 "gate_profile": gate_profile,
                 "failure_mode": (gold_precheck_payload or {}).get("failure_mode"),
+                "early_kill_reason": (gold_precheck_payload or {}).get("early_kill_reason"),
             },
         }
         terminal_summary = {
@@ -547,6 +781,8 @@ def main() -> dict[str, object]:
                 "promotion_present": True,
                 "candidate_checkpoint_present": challenger_path.exists(),
             },
+            "resume_checkpoint_path": resume_checkpoint_path,
+            "resume_step": start_optimisation_step if start_optimisation_step > 0 else None,
             "latest_candidate": challenger_id,
             "latest_verdict": {
                 "status": "killed_after_precheck",
@@ -555,12 +791,13 @@ def main() -> dict[str, object]:
             },
             "gold_precheck": dict(gold_precheck_payload or {}),
             "precheck_status": (gold_precheck_payload or {}).get("status"),
+            "early_kill_reason": (gold_precheck_payload or {}).get("early_kill_reason"),
         }
         terminal_summary_path = write_terminal_summary(terminal_summary)
         logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
         append_training_log(
             (
-                f"MuZero {horizon}: trial coupe apres precheck Gold "
+                f"MuZero {horizon}: trial coupe apres precheck proxy "
                 f"({(gold_precheck_payload or {}).get('reason')})."
             ),
             level="WARNING",
@@ -590,7 +827,10 @@ def main() -> dict[str, object]:
             "ga_trial": ga_trial,
             "trial_mode": trial_mode,
             "trial_cost_profile": trial_cost_profile,
+            "resume_checkpoint_path": resume_checkpoint_path,
+            "resume_step": start_optimisation_step if start_optimisation_step > 0 else None,
             "precheck": dict(gold_precheck_payload or {}),
+            "early_kill_reason": (gold_precheck_payload or {}).get("early_kill_reason"),
             "promotion": promotion_result,
             "terminal_summary_path": str(terminal_summary_path),
         }
@@ -608,7 +848,7 @@ def main() -> dict[str, object]:
         family=family,
         symbol_total=len(valid_symbols),
         part_total=games_per_symbol,
-        training_step_current=config.training_steps if last_metrics is not None else None,
+        training_step_current=last_successful_step if last_metrics is not None else None,
         training_step_total=config.training_steps,
         dataset_id=dataset_id,
         dataset_source=dataset_source,
@@ -701,6 +941,8 @@ def main() -> dict[str, object]:
         "live_champion_id": live_champion_id or None,
         "champion_paths": champion_paths,
         "training_metrics": last_metrics,
+        "resume_checkpoint_path": resume_checkpoint_path,
+        "resume_step": start_optimisation_step if start_optimisation_step > 0 else None,
         "ga_status": str(os.getenv("TRAINING_GA_STATUS", "")).strip() or None,
         "ga_generation": (
             int(os.getenv("TRAINING_GA_GENERATION", "0"))
@@ -754,6 +996,8 @@ def main() -> dict[str, object]:
             "promotion_present": bool(promotion_result),
             "candidate_checkpoint_present": challenger_path.exists(),
         },
+        "resume_checkpoint_path": resume_checkpoint_path,
+        "resume_step": start_optimisation_step if start_optimisation_step > 0 else None,
         "latest_candidate": challenger_id,
         "latest_verdict": {
             "status": promotion_result.get("status"),

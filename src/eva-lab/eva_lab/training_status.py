@@ -139,6 +139,14 @@ def _default_status() -> dict[str, Any]:
         "precheck_step": None,
         "precheck_metrics": {},
         "precheck_summary_path": None,
+        "last_successful_step": None,
+        "last_successful_step_at": None,
+        "train_step_phase": None,
+        "phase_durations_ms": {},
+        "resume_checkpoint_path": None,
+        "resume_step": None,
+        "stall_detected": False,
+        "stall_reason": None,
     }
 
 
@@ -171,6 +179,10 @@ def _default_sequence_state() -> dict[str, Any]:
         "precheck_status": None,
         "precheck_score": None,
         "proxy_terminal_score": None,
+        "retry_reason": None,
+        "restart_count": 0,
+        "resumed_from_checkpoint": None,
+        "resume_step": None,
     }
 
 
@@ -363,11 +375,12 @@ def write_terminal_summary(summary: dict[str, Any]) -> Path:
     payload.setdefault("terminal_at", _now_iso())
     _atomic_write_json(path, payload)
 
+    persisted = None
     status = load_training_status()
     if str(status.get("run_id") or "").strip() == run_id:
         status["terminal_summary_path"] = str(path)
         persisted = persist_training_status(status)
-    if str(persisted.get("run_id") or "").strip() == run_id:
+    if persisted is not None and str(persisted.get("run_id") or "").strip() == run_id:
         return path
     return path
 
@@ -598,6 +611,36 @@ def set_gold_precheck(progress: dict[str, Any] | None) -> dict[str, Any]:
         status["precheck_metrics"] = {}
         status["precheck_summary_path"] = None
     return persist_training_status(status)
+
+
+def set_training_runtime_state(**payload: Any) -> dict[str, Any]:
+    """Met a jour la telemetrie runtime fine d'un run d'entrainement.
+
+    Args:
+        **payload (Any): Champs de telemetrie a fusionner dans le statut.
+
+    Returns:
+        dict[str, Any]: Statut training persiste.
+    """
+
+    allowed_keys = {
+        "last_successful_step",
+        "last_successful_step_at",
+        "train_step_phase",
+        "phase_durations_ms",
+        "resume_checkpoint_path",
+        "resume_step",
+        "stall_detected",
+        "stall_reason",
+    }
+    patch = {
+        key: value
+        for key, value in payload.items()
+        if key in allowed_keys
+    }
+    if not patch:
+        return load_training_status()
+    return merge_training_status(patch)
 
 
 def set_training_dependency(name: str, payload: dict[str, Any]) -> dict[str, Any]:
