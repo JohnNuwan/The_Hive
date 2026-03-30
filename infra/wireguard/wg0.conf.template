@@ -1,0 +1,10 @@
+[Interface]
+# Adresse privee du hub WireGuard.
+Address = {{SERVER_ADDRESS}}
+ListenPort = {{SERVER_PORT}}
+PrivateKey = {{SERVER_PRIVATE_KEY}}
+SaveConfig = false
+
+# PostUp/PostDown restent optionnels et peuvent etre completes selon le pare-feu cible.
+
+{{PEER_BLOCKS}}

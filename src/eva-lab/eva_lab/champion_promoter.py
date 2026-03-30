@@ -1022,15 +1022,19 @@ class ChampionPromoter:
         registry_champion_id = champion_id
         live_champion_id = None
         candidate_id = None
+        live_selection = str(live_meta.get("selection") or "").strip().lower()
+        live_selection_allowed = live_selection in {"champion", "legacy_champion"}
+        manifest_candidate_id = None
 
         if manifest:
+            manifest_candidate_id = (
+                manifest.get("challenger_id")
+                or manifest.get("battle_report", {}).get("challenger", {}).get("id")
+            )
             manifest_gate = self.resolve_promotion_gate(manifest, arena_report)
             if manifest.get("status") == "promoted" and manifest_gate.get("allowed", False):
-                live_champion_id = (
-                    manifest.get("challenger_id")
-                    or manifest.get("battle_report", {}).get("challenger", {}).get("id")
-                )
-        if live_champion_id is None:
+                live_champion_id = manifest_candidate_id
+        if live_champion_id is None and live_selection_allowed:
             live_champion_id = str(live_meta.get("live_champion_id") or "") or None
 
         if arena_report:
@@ -1042,7 +1046,11 @@ class ChampionPromoter:
             ):
                 live_champion_id = candidate_id
         if candidate_id is None:
-            candidate_id = str(terminal_summary.get("latest_candidate") or "").strip() or None
+            candidate_id = (
+                str(manifest_candidate_id or "").strip()
+                or str(terminal_summary.get("latest_candidate") or "").strip()
+                or None
+            )
 
         promotion_gate = live_meta.get("promotion_gate") or self.resolve_promotion_gate(
             manifest,
@@ -1091,6 +1099,15 @@ class ChampionPromoter:
             "directional_imbalance": promotion_gate.get("metrics", {}).get("directional_imbalance"),
             "directional_bias": promotion_gate.get("metrics", {}).get("directional_bias"),
         }
+        can_activate_live = bool(live_champion_id and promotion_gate.get("allowed") and live_selection_allowed)
+        if can_activate_live:
+            promotion_state = "promoted"
+        elif candidate_id and not promotion_gate.get("allowed", False):
+            promotion_state = "blocked"
+        elif candidate_id:
+            promotion_state = "candidate_only"
+        else:
+            promotion_state = "none"
 
         return {
             "engine": normalized_engine,
@@ -1113,6 +1130,8 @@ class ChampionPromoter:
             "registry_champion_id": registry_champion_id,
             "live_champion_id": live_champion_id,
             "candidate_id": candidate_id,
+            "can_activate_live": can_activate_live,
+            "promotion_state": promotion_state,
             "selection_policy": live_meta.get("policy"),
             "engine_label": live_meta.get("engine_label"),
             "selection": live_meta.get("selection"),

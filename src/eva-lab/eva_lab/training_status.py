@@ -117,6 +117,7 @@ def _default_status() -> dict[str, Any]:
         "window_id": None,
         "trial_id": None,
         "terminal_summary_path": None,
+        "terminal_status": None,
         "supervisor_state": None,
         "ga_status": None,
         "ga_generation": None,
@@ -145,6 +146,15 @@ def _default_status() -> dict[str, Any]:
         "phase_durations_ms": {},
         "resume_checkpoint_path": None,
         "resume_step": None,
+        "last_checkpoint_path": None,
+        "checkpoint_written_at": None,
+        "resume_available": False,
+        "resume_epoch": None,
+        "resume_world_model_steps": None,
+        "slice_budget_seconds": None,
+        "slice_elapsed_seconds": None,
+        "battle_report_path": None,
+        "promotion_state": None,
         "stall_detected": False,
         "stall_reason": None,
     }
@@ -379,6 +389,29 @@ def write_terminal_summary(summary: dict[str, Any]) -> Path:
     status = load_training_status()
     if str(status.get("run_id") or "").strip() == run_id:
         status["terminal_summary_path"] = str(path)
+        status["terminal_status"] = payload.get("terminal_status")
+        if payload.get("resume_checkpoint_path") is not None:
+            status["resume_checkpoint_path"] = payload.get("resume_checkpoint_path")
+        if payload.get("resume_step") is not None:
+            status["resume_step"] = payload.get("resume_step")
+        if payload.get("last_checkpoint_path") is not None:
+            status["last_checkpoint_path"] = payload.get("last_checkpoint_path")
+        if payload.get("checkpoint_written_at") is not None:
+            status["checkpoint_written_at"] = payload.get("checkpoint_written_at")
+        if payload.get("resume_available") is not None:
+            status["resume_available"] = bool(payload.get("resume_available"))
+        if payload.get("resume_epoch") is not None:
+            status["resume_epoch"] = payload.get("resume_epoch")
+        if payload.get("resume_world_model_steps") is not None:
+            status["resume_world_model_steps"] = payload.get("resume_world_model_steps")
+        if payload.get("slice_budget_seconds") is not None:
+            status["slice_budget_seconds"] = payload.get("slice_budget_seconds")
+        if payload.get("slice_elapsed_seconds") is not None:
+            status["slice_elapsed_seconds"] = payload.get("slice_elapsed_seconds")
+        if payload.get("battle_report_path") is not None:
+            status["battle_report_path"] = payload.get("battle_report_path")
+        if payload.get("promotion_state") is not None:
+            status["promotion_state"] = payload.get("promotion_state")
         persisted = persist_training_status(status)
     if persisted is not None and str(persisted.get("run_id") or "").strip() == run_id:
         return path
@@ -630,6 +663,16 @@ def set_training_runtime_state(**payload: Any) -> dict[str, Any]:
         "phase_durations_ms",
         "resume_checkpoint_path",
         "resume_step",
+        "last_checkpoint_path",
+        "checkpoint_written_at",
+        "resume_available",
+        "resume_epoch",
+        "resume_world_model_steps",
+        "slice_budget_seconds",
+        "slice_elapsed_seconds",
+        "terminal_status",
+        "battle_report_path",
+        "promotion_state",
         "stall_detected",
         "stall_reason",
     }
@@ -1133,6 +1176,8 @@ def finalize_training_status(
     status["active"] = False
     status["status"] = final_status
     status["finished_at"] = _now_iso()
+    if final_status in {"paused", "completed", "blocked", "error"} or not status.get("terminal_status"):
+        status["terminal_status"] = final_status
     if reason is not None:
         status["reason"] = reason
     if skip_reason is not None:

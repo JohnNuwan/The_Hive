@@ -1,0 +1,12 @@
+[Interface]
+# Client WireGuard operateur (telephone ou poste desktop).
+Address = {{CLIENT_ADDRESS}}
+PrivateKey = {{CLIENT_PRIVATE_KEY}}
+DNS = {{CLIENT_DNS}}
+
+[Peer]
+PublicKey = {{SERVER_PUBLIC_KEY}}
+PresharedKey = {{PRESHARED_KEY}}
+AllowedIPs = {{CLIENT_ALLOWED_IPS}}
+Endpoint = {{SERVER_PUBLIC_ENDPOINT}}:{{SERVER_PORT}}
+PersistentKeepalive = 25

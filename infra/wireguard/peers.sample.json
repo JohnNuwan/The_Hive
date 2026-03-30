@@ -1,0 +1,32 @@
+{
+  "server": {
+    "private_key": "REMPLACER_PAR_LA_CLE_PRIVEE_SERVEUR",
+    "public_key": "REMPLACER_PAR_LA_CLE_PUBLIQUE_SERVEUR",
+    "address": "10.77.0.1/24",
+    "listen_port": 51820,
+    "public_endpoint": "vpn.thehive.local",
+    "dns": "1.1.1.1"
+  },
+  "peers": [
+    {
+      "name": "operator-phone",
+      "private_key": "REMPLACER_PAR_LA_CLE_PRIVEE_CLIENT",
+      "public_key": "REMPLACER_PAR_LA_CLE_PUBLIQUE_CLIENT",
+      "preshared_key": "REMPLACER_PAR_LA_CLE_PRESHARED",
+      "address": "10.77.0.2/32",
+      "server_allowed_ips": "10.77.0.2/32",
+      "client_allowed_ips": "10.77.0.0/24",
+      "dns": "1.1.1.1"
+    },
+    {
+      "name": "operator-desktop",
+      "private_key": "REMPLACER_PAR_LA_CLE_PRIVEE_CLIENT",
+      "public_key": "REMPLACER_PAR_LA_CLE_PUBLIQUE_CLIENT",
+      "preshared_key": "REMPLACER_PAR_LA_CLE_PRESHARED",
+      "address": "10.77.0.3/32",
+      "server_allowed_ips": "10.77.0.3/32",
+      "client_allowed_ips": "10.77.0.0/24",
+      "dns": "1.1.1.1"
+    }
+  ]
+}

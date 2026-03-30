@@ -7,12 +7,18 @@ import logging
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 try:
     import pandas as pd
 except ImportError:  # pragma: no cover - repli utile pour le superviseur hors conteneur.
     pd = None
+
+try:
+    from psycopg2.extras import execute_values
+except Exception:  # pragma: no cover - repli utile hors environnements PostgreSQL.
+    execute_values = None
 
 logger = logging.getLogger(__name__)
 
@@ -570,6 +576,412 @@ def discover_timescale_inventory() -> dict[str, set[str]]:
             logger.warning("Inventaire TimeDB indisponible: %s", exc)
             return {}
     return inventory
+
+
+def _normalize_symbol_list(symbols: Sequence[str] | None) -> list[str]:
+    """Normalise une liste de symboles en conservant l'ordre.
+
+    Args:
+        symbols (Sequence[str] | None): Liste brute de symboles.
+
+    Returns:
+        list[str]: Liste nettoyee et dedoublonnee.
+    """
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw_symbol in symbols or ():
+        symbol = str(raw_symbol or "").strip()
+        if not symbol or symbol in seen:
+            continue
+        cleaned.append(symbol)
+        seen.add(symbol)
+    return cleaned
+
+
+def _normalize_timeframe_list(timeframes: Sequence[str] | None) -> list[str]:
+    """Normalise une liste de timeframes en majuscules.
+
+    Args:
+        timeframes (Sequence[str] | None): Liste brute de timeframes.
+
+    Returns:
+        list[str]: Liste nettoyee et dedoublonnee.
+    """
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw_timeframe in timeframes or ():
+        timeframe = str(raw_timeframe or "").strip().upper()
+        if not timeframe or timeframe in seen:
+            continue
+        cleaned.append(timeframe)
+        seen.add(timeframe)
+    return cleaned
+
+
+def _describe_history_csv_coverage(
+    symbols: Sequence[str] | None,
+    timeframes: Sequence[str] | None,
+    history_dir: str | os.PathLike[str] = "data/history",
+) -> dict[str, Any]:
+    """Construit la couverture CSV par symbole et timeframe.
+
+    Args:
+        symbols (Sequence[str] | None): Symboles cibles.
+        timeframes (Sequence[str] | None): Timeframes requis.
+        history_dir (str | os.PathLike[str]): Dossier racine des CSV.
+
+    Returns:
+        dict[str, Any]: Couverture detaillee du stockage CSV.
+    """
+
+    normalized_symbols = _normalize_symbol_list(symbols)
+    normalized_timeframes = _normalize_timeframe_list(timeframes)
+    history_root = Path(history_dir)
+    by_symbol: dict[str, Any] = {}
+    fully_available: list[str] = []
+    partially_available: list[str] = []
+    missing_symbols: list[str] = []
+    existing_pairs = 0
+    total_pairs = len(normalized_symbols) * len(normalized_timeframes)
+
+    for symbol in normalized_symbols:
+        available_timeframes: list[str] = []
+        missing_timeframes: list[str] = []
+        files: dict[str, Any] = {}
+        for timeframe in normalized_timeframes:
+            csv_path = history_root / f"{symbol}_{timeframe}.csv"
+            exists = csv_path.exists()
+            if exists:
+                available_timeframes.append(timeframe)
+                existing_pairs += 1
+            else:
+                missing_timeframes.append(timeframe)
+            files[timeframe] = {
+                "path": str(csv_path),
+                "exists": exists,
+                "size_bytes": csv_path.stat().st_size if exists else None,
+            }
+        if missing_timeframes and available_timeframes:
+            partially_available.append(symbol)
+        elif available_timeframes:
+            fully_available.append(symbol)
+        else:
+            missing_symbols.append(symbol)
+        by_symbol[symbol] = {
+            "available_timeframes": available_timeframes,
+            "missing_timeframes": missing_timeframes,
+            "files": files,
+        }
+
+    coverage_ratio = (existing_pairs / total_pairs) if total_pairs > 0 else 0.0
+    return {
+        "history_dir": str(history_root),
+        "requested_symbols": normalized_symbols,
+        "requested_timeframes": normalized_timeframes,
+        "available_symbols": fully_available,
+        "partially_available_symbols": partially_available,
+        "missing_symbols": missing_symbols,
+        "existing_pairs": existing_pairs,
+        "total_pairs": total_pairs,
+        "coverage_ratio": round(coverage_ratio, 4),
+        "by_symbol": by_symbol,
+    }
+
+
+def build_timescaledb_coverage_report(
+    symbols: Sequence[str] | None,
+    timeframes: Sequence[str] | None,
+    history_dir: str | os.PathLike[str] = "data/history",
+) -> dict[str, Any]:
+    """Construit un rapport compare CSV vs TimescaleDB.
+
+    Args:
+        symbols (Sequence[str] | None): Symboles cibles.
+        timeframes (Sequence[str] | None): Timeframes requis.
+        history_dir (str | os.PathLike[str]): Dossier des historiques CSV.
+
+    Returns:
+        dict[str, Any]: Rapport de couverture et priorites de backfill.
+    """
+
+    normalized_symbols = _normalize_symbol_list(symbols)
+    normalized_timeframes = _normalize_timeframe_list(timeframes)
+    inventory = discover_timescale_inventory()
+    csv_coverage = _describe_history_csv_coverage(
+        normalized_symbols,
+        normalized_timeframes,
+        history_dir=history_dir,
+    )
+    by_symbol: dict[str, Any] = {}
+    fully_available: list[str] = []
+    partially_available: list[str] = []
+    missing_symbols: list[str] = []
+    existing_pairs = 0
+    total_pairs = len(normalized_symbols) * len(normalized_timeframes)
+    backfill_ready: list[dict[str, Any]] = []
+
+    for symbol in normalized_symbols:
+        available = sorted(
+            timeframe
+            for timeframe in normalized_timeframes
+            if timeframe in inventory.get(symbol, set())
+        )
+        missing = [timeframe for timeframe in normalized_timeframes if timeframe not in set(available)]
+        existing_pairs += len(available)
+        if missing and available:
+            partially_available.append(symbol)
+        elif available:
+            fully_available.append(symbol)
+        else:
+            missing_symbols.append(symbol)
+        csv_symbol = dict((csv_coverage.get("by_symbol") or {}).get(symbol) or {})
+        csv_available = list(csv_symbol.get("available_timeframes") or [])
+        if missing and set(missing).issubset(set(csv_available)):
+            backfill_ready.append(
+                {
+                    "symbol": symbol,
+                    "missing_timeframes": missing,
+                    "csv_available_timeframes": csv_available,
+                    "backfill_ready": True,
+                }
+            )
+        by_symbol[symbol] = {
+            "available_timeframes": available,
+            "missing_timeframes": missing,
+            "csv_available_timeframes": csv_available,
+        }
+
+    coverage_ratio = (existing_pairs / total_pairs) if total_pairs > 0 else 0.0
+    return {
+        "timescaledb": {
+            **describe_timescale_source(),
+            "requested_symbols": normalized_symbols,
+            "requested_timeframes": normalized_timeframes,
+            "available_symbols": fully_available,
+            "partially_available_symbols": partially_available,
+            "missing_symbols": missing_symbols,
+            "existing_pairs": existing_pairs,
+            "total_pairs": total_pairs,
+            "coverage_ratio": round(coverage_ratio, 4),
+            "by_symbol": by_symbol,
+        },
+        "csv": csv_coverage,
+        "backfill_priorities": backfill_ready,
+    }
+
+
+def _normalize_history_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalise un DataFrame d'historique CSV avant insertion.
+
+    Args:
+        frame (pd.DataFrame): DataFrame brut charge depuis un CSV.
+
+    Returns:
+        pd.DataFrame: DataFrame normalise et trie.
+    """
+
+    normalized = frame.copy()
+    if "time" not in normalized.columns:
+        raise ValueError("Colonne 'time' absente du CSV historique.")
+    normalized["time"] = pd.to_datetime(normalized["time"], utc=True, errors="coerce")
+    normalized = normalized.dropna(subset=["time"])
+    for column in ["open", "high", "low", "close"]:
+        if column not in normalized.columns:
+            raise ValueError(f"Colonne obligatoire absente du CSV historique: {column}")
+        normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+    for optional_column in ["tick_volume", "real_volume", "spread"]:
+        if optional_column not in normalized.columns:
+            normalized[optional_column] = 0
+        normalized[optional_column] = pd.to_numeric(normalized[optional_column], errors="coerce").fillna(0)
+    normalized = normalized.dropna(subset=["open", "high", "low", "close"])
+    normalized = (
+        normalized.sort_values("time")
+        .drop_duplicates(subset=["time"])
+        .reset_index(drop=True)
+    )
+    return normalized
+
+
+def _build_history_rows(
+    symbol: str,
+    timeframe: str,
+    frame: pd.DataFrame,
+) -> list[tuple[Any, ...]]:
+    """Construit les lignes SQL a inserer dans `market.market_bars`.
+
+    Args:
+        symbol (str): Symbole source.
+        timeframe (str): Timeframe source.
+        frame (pd.DataFrame): DataFrame d'historique normalise.
+
+    Returns:
+        list[tuple[Any, ...]]: Lignes SQL pretes pour `execute_values`.
+    """
+
+    rows: list[tuple[Any, ...]] = []
+    for row in frame.itertuples(index=False):
+        rows.append(
+            (
+                row.time.to_pydatetime(),
+                symbol,
+                timeframe,
+                float(row.open),
+                float(row.high),
+                float(row.low),
+                float(row.close),
+                int(getattr(row, "tick_volume", 0) or 0),
+                int(getattr(row, "real_volume", 0) or 0),
+                int(getattr(row, "spread", 0) or 0),
+                "csv_backfill",
+                pd.Timestamp.utcnow().to_pydatetime(),
+            )
+        )
+    return rows
+
+
+def backfill_timescaledb_from_history(
+    symbols: Sequence[str] | None,
+    timeframes: Sequence[str] | None,
+    history_dir: str | os.PathLike[str] = "data/history",
+) -> dict[str, Any]:
+    """Backfill TimescaleDB depuis les CSV historiques deja presents.
+
+    Args:
+        symbols (Sequence[str] | None): Symboles a inserer.
+        timeframes (Sequence[str] | None): Timeframes cibles.
+        history_dir (str | os.PathLike[str]): Dossier source des CSV.
+
+    Returns:
+        dict[str, Any]: Resume detaille du backfill execute.
+    """
+
+    normalized_symbols = _normalize_symbol_list(symbols)
+    normalized_timeframes = _normalize_timeframe_list(timeframes)
+    history_root = Path(history_dir)
+    if pd is None:
+        return {
+            "status": "error",
+            "reason": "pandas_unavailable",
+            "inserted_rows": 0,
+            "processed_files": [],
+        }
+    if execute_values is None:
+        return {
+            "status": "error",
+            "reason": "psycopg2_extras_unavailable",
+            "inserted_rows": 0,
+            "processed_files": [],
+        }
+
+    settings = get_timescale_settings()
+    processed_files: list[dict[str, Any]] = []
+    inserted_rows = 0
+    with _connect() as connection:
+        if connection is None:
+            return {
+                "status": "error",
+                "reason": "timescaledb_unreachable",
+                "inserted_rows": 0,
+                "processed_files": processed_files,
+            }
+        try:
+            _ensure_schema_objects(connection, settings)
+            with connection.cursor() as cursor:
+                for symbol in normalized_symbols:
+                    for timeframe in normalized_timeframes:
+                        csv_path = history_root / f"{symbol}_{timeframe}.csv"
+                        if not csv_path.exists():
+                            processed_files.append(
+                                {
+                                    "symbol": symbol,
+                                    "timeframe": timeframe,
+                                    "status": "missing_csv",
+                                    "path": str(csv_path),
+                                    "rows": 0,
+                                }
+                            )
+                            continue
+                        frame = pd.read_csv(csv_path)
+                        normalized_frame = _normalize_history_frame(frame)
+                        rows = _build_history_rows(symbol, timeframe, normalized_frame)
+                        if not rows:
+                            processed_files.append(
+                                {
+                                    "symbol": symbol,
+                                    "timeframe": timeframe,
+                                    "status": "empty_csv",
+                                    "path": str(csv_path),
+                                    "rows": 0,
+                                }
+                            )
+                            continue
+                        execute_values(
+                            cursor,
+                            f"""
+                            INSERT INTO {_sql_identifier(settings['bars_table'])} (
+                                "timestamp",
+                                symbol,
+                                timeframe,
+                                open,
+                                high,
+                                low,
+                                close,
+                                tick_volume,
+                                real_volume,
+                                spread,
+                                source,
+                                ingested_at
+                            )
+                            VALUES %s
+                            ON CONFLICT (symbol, timeframe, "timestamp") DO UPDATE SET
+                                open = EXCLUDED.open,
+                                high = EXCLUDED.high,
+                                low = EXCLUDED.low,
+                                close = EXCLUDED.close,
+                                tick_volume = EXCLUDED.tick_volume,
+                                real_volume = EXCLUDED.real_volume,
+                                spread = EXCLUDED.spread,
+                                source = EXCLUDED.source,
+                                ingested_at = EXCLUDED.ingested_at
+                            """,
+                            rows,
+                            page_size=5000,
+                        )
+                        inserted_rows += len(rows)
+                        processed_files.append(
+                            {
+                                "symbol": symbol,
+                                "timeframe": timeframe,
+                                "status": "loaded",
+                                "path": str(csv_path),
+                                "rows": len(rows),
+                            }
+                        )
+            connection.commit()
+        except Exception as exc:
+            logger.warning("Backfill TimeDB impossible: %s", exc)
+            return {
+                "status": "error",
+                "reason": str(exc),
+                "inserted_rows": inserted_rows,
+                "processed_files": processed_files,
+            }
+
+    return {
+        "status": "ok",
+        "history_dir": str(history_root),
+        "symbols": normalized_symbols,
+        "timeframes": normalized_timeframes,
+        "inserted_rows": inserted_rows,
+        "processed_files": processed_files,
+        "coverage": build_timescaledb_coverage_report(
+            normalized_symbols,
+            normalized_timeframes,
+            history_dir=history_dir,
+        ),
+    }
 
 
 def load_history_frame_from_timescale(

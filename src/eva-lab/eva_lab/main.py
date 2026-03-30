@@ -38,6 +38,8 @@ from eva_lab.live_inference_models import LivePredictRequest
 from eva_lab.shadow_learning import ShadowLearningService
 from eva_lab.dreamer_gate import DreamerGate
 from eva_lab.timescale_store import (
+    backfill_timescaledb_from_history,
+    build_timescaledb_coverage_report,
     describe_timescale_source,
     load_recent_ga_trials,
     record_ga_trial,
@@ -61,7 +63,7 @@ from eva_lab.training_status import (
     tail_training_log,
     write_terminal_summary,
 )
-from eva_lab.training_utils import get_gnn_model_kwargs
+from eva_lab.training_utils import get_gnn_model_kwargs, parse_symbol_csv
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -69,6 +71,30 @@ HOST_DATA_PREFIX = Path("/home/aza/The_Hive/data")
 CONTAINER_DATA_ROOT = Path("/app/eva-lab/data")
 LAB_APP_ROOT = Path("/app/eva-lab")
 GNN_REFRESH_LOG_PATH = STATUS_DIR / "gnn_refresh.log"
+CANONICAL_SCALP_FULL_SYMBOLS = [
+    "EURUSD",
+    "XAUUSD",
+    "GBPUSD",
+    "USDJPY",
+    "US30.cash",
+    "GER40.cash",
+    "US500.cash",
+]
+CANONICAL_COVERAGE_TIMEFRAMES = ["M5", "H1", "D1"]
+
+
+class TimescaleBackfillRequest(BaseModel):
+    """Decrit une demande de backfill CSV vers TimescaleDB.
+
+    Attributes:
+        symbols (list[str]): Symboles cibles a recharger.
+        timeframes (list[str]): Timeframes a injecter dans TimeDB.
+        history_dir (str): Dossier source des historiques CSV.
+    """
+
+    symbols: list[str] = Field(default_factory=lambda: list(CANONICAL_SCALP_FULL_SYMBOLS))
+    timeframes: list[str] = Field(default_factory=lambda: list(CANONICAL_COVERAGE_TIMEFRAMES))
+    history_dir: str = "data/history"
 
 
 def _resolve_latest_checkpoint_log(*patterns: str) -> Path | None:
@@ -148,6 +174,241 @@ def _resolve_runtime_profile(run_status: dict[str, Any] | None = None) -> str:
     return "night_research_training" if bool(current_run.get("active")) else "day_live_full_stack"
 
 
+def _normalize_rate_percent(value: Any) -> float:
+    """Normalise un taux heterogene vers un pourcentage borné.
+
+    Args:
+        value (Any): Valeur brute provenant du registre ou d'un resume.
+
+    Returns:
+        float: Taux exprime en pourcentage, borne entre 0 et 100.
+    """
+
+    try:
+        numeric = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if numeric <= 1.0:
+        numeric *= 100.0
+    return round(max(0.0, min(100.0, numeric)), 2)
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    """Convertit une valeur heterogene en flottant robuste.
+
+    Args:
+        value (Any): Valeur brute a convertir.
+        default (float): Valeur de repli si la conversion echoue.
+
+    Returns:
+        float: Valeur convertie ou repli.
+    """
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_metrics_overview(metrics: dict[str, Any] | None) -> dict[str, float | int]:
+    """Construit un bloc compact de metriques de performance.
+
+    Args:
+        metrics (dict[str, Any] | None): Metriques brutes du moteur.
+
+    Returns:
+        dict[str, float | int]: Vue condensee des metriques de pilotage.
+    """
+
+    payload = dict(metrics or {})
+    return {
+        "profit_factor": round(_to_float(payload.get("profit_factor")), 4),
+        "return_pct": round(_to_float(payload.get("return_pct")), 4),
+        "net_realized_pct": round(_to_float(payload.get("net_realized_pct")), 4),
+        "win_rate": round(_to_float(payload.get("win_rate")), 2),
+        "total_trades": int(_to_float(payload.get("total_trades"))),
+        "evaluation_games": int(_to_float(payload.get("evaluation_games"))),
+        "evaluation_symbols": int(_to_float(payload.get("evaluation_symbols"))),
+        "max_drawdown_pct": round(_to_float(payload.get("max_drawdown_pct")), 4),
+        "close_quality_score": round(_to_float(payload.get("close_quality_score")), 4),
+        "directional_imbalance": round(_to_float(payload.get("directional_imbalance"), 1.0), 4),
+        "hold_drag_score": round(_to_float(payload.get("hold_drag_score")), 4),
+    }
+
+
+def _build_symbol_overview(metrics_by_symbol: dict[str, Any] | None, limit: int = 3) -> dict[str, Any]:
+    """Trie les meilleurs et pires symboles d'un bloc de metriques.
+
+    Args:
+        metrics_by_symbol (dict[str, Any] | None): Metriques consolidees par symbole.
+        limit (int): Nombre maximum de symboles a exposer par liste.
+
+    Returns:
+        dict[str, Any]: Symboles forts, faibles et couverture globale.
+    """
+
+    rows: list[dict[str, Any]] = []
+    for symbol, raw_metrics in dict(metrics_by_symbol or {}).items():
+        metrics = dict(raw_metrics or {})
+        rows.append(
+            {
+                "symbol": str(symbol),
+                "net_realized_pct": round(_to_float(metrics.get("net_realized_pct")), 4),
+                "return_pct": round(_to_float(metrics.get("return_pct")), 4),
+                "profit_factor": round(_to_float(metrics.get("profit_factor")), 4),
+                "score": round(_to_float(metrics.get("score")), 4),
+                "evaluation_games": int(_to_float(metrics.get("evaluation_games"))),
+            }
+        )
+    best = sorted(
+        rows,
+        key=lambda item: (
+            item.get("net_realized_pct", 0.0),
+            item.get("profit_factor", 0.0),
+            item.get("score", 0.0),
+        ),
+        reverse=True,
+    )[:limit]
+    worst = sorted(
+        rows,
+        key=lambda item: (
+            item.get("net_realized_pct", 0.0),
+            item.get("profit_factor", 0.0),
+            item.get("score", 0.0),
+        ),
+    )[:limit]
+    return {
+        "count": len(rows),
+        "best": best,
+        "worst": worst,
+    }
+
+
+def _estimate_training_eta(run_view: dict[str, Any]) -> dict[str, Any]:
+    """Estime l'ETA d'un run a partir de la telemetrie de phase.
+
+    Args:
+        run_view (dict[str, Any]): Statut courant du run.
+
+    Returns:
+        dict[str, Any]: Progression relative et ETA si calculable.
+    """
+
+    current_step = dict(run_view.get("current_step") or {})
+    current = int(_to_float(current_step.get("training_step_current")))
+    total = int(_to_float(current_step.get("training_step_total")))
+    if total <= 0:
+        return {
+            "progress_percent": None,
+            "remaining_steps": None,
+            "eta_seconds": None,
+            "eta_at": None,
+        }
+    progress_percent = round((current / total) * 100.0, 2)
+    remaining_steps = max(total - current, 0)
+    durations = dict(run_view.get("phase_durations_ms") or {})
+    per_step_ms = sum(
+        max(_to_float(value), 0.0)
+        for value in durations.values()
+    )
+    if per_step_ms <= 0.0 or remaining_steps <= 0:
+        return {
+            "progress_percent": progress_percent,
+            "remaining_steps": remaining_steps,
+            "eta_seconds": 0 if remaining_steps <= 0 else None,
+            "eta_at": datetime.now(timezone.utc).isoformat() if remaining_steps <= 0 else None,
+        }
+    eta_seconds = int((per_step_ms / 1000.0) * remaining_steps)
+    eta_at = datetime.now(timezone.utc) + timedelta(seconds=eta_seconds)
+    return {
+        "progress_percent": progress_percent,
+        "remaining_steps": remaining_steps,
+        "eta_seconds": eta_seconds,
+        "eta_at": eta_at.isoformat(),
+    }
+
+
+def _build_engine_overview_card(engine: str, horizon: str, status: dict[str, Any]) -> dict[str, Any]:
+    """Construit une carte compacte d'un moteur et d'un horizon.
+
+    Args:
+        engine (str): Moteur cible.
+        horizon (str): Horizon de pilotage.
+        status (dict[str, Any]): Statut detaille moteur/horizon.
+
+    Returns:
+        dict[str, Any]: Carte de synthese pour le pilotage.
+    """
+
+    gate = dict(status.get("promotion_gate") or {})
+    live_metrics = _build_metrics_overview((gate.get("metrics") or {}))
+    candidate_metrics = _build_metrics_overview(status.get("candidate_metrics") or {})
+    return {
+        "engine": engine,
+        "horizon": horizon,
+        "live_champion_id": status.get("live_champion_id"),
+        "candidate_id": status.get("candidate_id"),
+        "can_activate_live": bool(status.get("can_activate_live")),
+        "selection": status.get("selection"),
+        "promotion_state": status.get("promotion_state") or (
+            "promoted"
+            if status.get("live_champion_id")
+            else ("candidate_only" if status.get("candidate_id") else "none")
+        ),
+        "gate_allowed": bool(gate.get("allowed")),
+        "gate_reason": gate.get("reason") or status.get("gate_reason"),
+        "failure_mode": status.get("failure_mode"),
+        "feature_profile": status.get("feature_profile"),
+        "family": status.get("family"),
+        "live_metrics": live_metrics,
+        "candidate_metrics": candidate_metrics,
+        "top_live_symbols": _build_symbol_overview(status.get("metrics_by_symbol") or {}),
+        "top_candidate_symbols": _build_symbol_overview(
+            (status.get("candidate_metrics") or {}).get("metrics_by_symbol") or {}
+        ),
+        "latest_run_id": status.get("latest_run_id"),
+        "latest_verdict": status.get("latest_verdict"),
+    }
+
+
+def _build_ga_overview(recent_trials: list[dict[str, Any]], current_run: dict[str, Any]) -> dict[str, Any]:
+    """Construit une vue compacte de la campagne GA courante.
+
+    Args:
+        recent_trials (list[dict[str, Any]]): Derniers essais persistés.
+        current_run (dict[str, Any]): Statut courant du run actif.
+
+    Returns:
+        dict[str, Any]: Synthese concise de la campagne GA.
+    """
+
+    ranked_trials = sorted(
+        [dict(item or {}) for item in recent_trials],
+        key=lambda item: float(item.get("fitness_score") or item.get("score") or 0.0),
+        reverse=True,
+    )
+    eta = _estimate_training_eta(current_run)
+    return {
+        "active_generation": current_run.get("ga_generation"),
+        "active_trial": current_run.get("ga_trial"),
+        "phase": ((current_run.get("current_step") or {}).get("phase")),
+        "progress_percent": eta.get("progress_percent"),
+        "eta_seconds": eta.get("eta_seconds"),
+        "eta_at": eta.get("eta_at"),
+        "recent_best": [
+            {
+                "trial_id": item.get("trial_id"),
+                "generation": item.get("generation"),
+                "fitness_score": item.get("fitness_score") or item.get("score"),
+                "promotion_state": item.get("promotion_state"),
+                "failure_mode": item.get("failure_mode"),
+                "finalist_rank": item.get("finalist_rank"),
+            }
+            for item in ranked_trials[:5]
+        ],
+    }
+
+
 def _compute_gnn_champion_payload(registry: dict[str, Any]) -> dict[str, Any]:
     """Construit une vue consultative stable du champion GNN.
 
@@ -172,10 +433,19 @@ def _compute_gnn_champion_payload(registry: dict[str, Any]) -> dict[str, Any]:
             freshness_hours = None
     metrics = dict(registry.get("metrics") or {})
     deployment_class = str(registry.get("deployment_class") or "").strip() or "consultative"
+    directional_precision = max(
+        _normalize_rate_percent(metrics.get("directional_precision")),
+        _normalize_rate_percent(metrics.get("scalp_accuracy")),
+        _normalize_rate_percent(metrics.get("intraday_accuracy")),
+        _normalize_rate_percent(metrics.get("swing_accuracy")),
+    )
+    agreement_rate = _normalize_rate_percent(metrics.get("agreement_rate"))
     decision_support_metrics = {
         "scalp_accuracy": float(metrics.get("scalp_accuracy", 0.0) or 0.0),
         "intraday_accuracy": float(metrics.get("intraday_accuracy", 0.0) or 0.0),
         "swing_accuracy": float(metrics.get("swing_accuracy", 0.0) or 0.0),
+        "directional_precision": directional_precision,
+        "agreement_rate": agreement_rate,
         "loss": float(metrics.get("loss", 0.0) or 0.0),
         "samples": int(metrics.get("samples", 0) or 0),
     }
@@ -185,11 +455,7 @@ def _compute_gnn_champion_payload(registry: dict[str, Any]) -> dict[str, Any]:
         and not str(registry.get("last_refresh_status") or "").strip().lower() == "error"
         and not bool(registry.get("stale", status == "stale"))
         and bool(str(registry.get("source_run_id") or "").strip())
-        and (
-            decision_support_metrics["scalp_accuracy"] > 0.0
-            or decision_support_metrics["intraday_accuracy"] > 0.0
-            or decision_support_metrics["swing_accuracy"] > 0.0
-        )
+        and directional_precision >= 55.0
         and (freshness_hours is None or freshness_hours < 72.0)
     )
     return {
@@ -1228,6 +1494,7 @@ async def dreamer_status():
         "active": bool(active_run.get("active")),
         "run_id": active_run.get("run_id"),
         "status": active_run.get("status"),
+        "terminal_status": active_run.get("terminal_status") or (latest_summary or {}).get("terminal_status"),
         "family": active_run.get("family"),
         "feature_profile": active_run.get("feature_profile"),
         "mechanics_profile_version": active_run.get("mechanics_profile_version"),
@@ -1243,6 +1510,15 @@ async def dreamer_status():
         "sequence_length": active_run.get("sequence_length"),
         "sequence_stride": active_run.get("sequence_stride"),
         "world_model_steps": active_run.get("world_model_steps"),
+        "resume_checkpoint_path": active_run.get("resume_checkpoint_path") or (latest_summary or {}).get("resume_checkpoint_path"),
+        "resume_step": active_run.get("resume_step") or (latest_summary or {}).get("resume_step"),
+        "last_checkpoint_path": active_run.get("last_checkpoint_path") or (latest_summary or {}).get("last_checkpoint_path"),
+        "checkpoint_written_at": active_run.get("checkpoint_written_at") or (latest_summary or {}).get("checkpoint_written_at"),
+        "resume_available": bool(active_run.get("resume_available")) or bool((latest_summary or {}).get("resume_available")),
+        "resume_epoch": active_run.get("resume_epoch") or (latest_summary or {}).get("resume_epoch"),
+        "resume_world_model_steps": active_run.get("resume_world_model_steps") or (latest_summary or {}).get("resume_world_model_steps"),
+        "slice_budget_seconds": active_run.get("slice_budget_seconds") or (latest_summary or {}).get("slice_budget_seconds"),
+        "slice_elapsed_seconds": active_run.get("slice_elapsed_seconds") or (latest_summary or {}).get("slice_elapsed_seconds"),
         "dataset_id": active_run.get("dataset_id") or (latest_summary or {}).get("dataset_id"),
         "dataset_source": active_run.get("dataset_source") or (latest_summary or {}).get("dataset_source"),
         "dataset_coverage": active_run.get("dataset_coverage", {}) or (latest_summary or {}).get("dataset_coverage", {}),
@@ -1251,7 +1527,9 @@ async def dreamer_status():
         "sequence_id": active_run.get("sequence_id"),
         "window_id": active_run.get("window_id"),
         "trial_id": active_run.get("trial_id"),
-        "terminal_summary_path": active_run.get("terminal_summary_path"),
+        "terminal_summary_path": active_run.get("terminal_summary_path") or (latest_summary or {}).get("path"),
+        "battle_report_path": active_run.get("battle_report_path") or (latest_summary or {}).get("battle_report_path"),
+        "promotion_state": active_run.get("promotion_state") or (latest_summary or {}).get("promotion_state"),
         "supervisor_state": sequence_state.get("state"),
     }
     engine_horizons = {
@@ -1312,6 +1590,19 @@ async def dreamer_status():
         "artifact_state": artifact_state,
         "focus_symbols": list(pipeline.get("focus_symbols") or []),
         "gate_profile": pipeline.get("gate_profile"),
+        "resume_available": pipeline.get("resume_available"),
+        "resume_checkpoint_path": pipeline.get("resume_checkpoint_path"),
+        "resume_step": pipeline.get("resume_step"),
+        "last_checkpoint_path": pipeline.get("last_checkpoint_path"),
+        "checkpoint_written_at": pipeline.get("checkpoint_written_at"),
+        "resume_epoch": pipeline.get("resume_epoch"),
+        "resume_world_model_steps": pipeline.get("resume_world_model_steps"),
+        "slice_budget_seconds": pipeline.get("slice_budget_seconds"),
+        "slice_elapsed_seconds": pipeline.get("slice_elapsed_seconds"),
+        "terminal_status": pipeline.get("terminal_status"),
+        "terminal_summary_path": pipeline.get("terminal_summary_path"),
+        "battle_report_path": pipeline.get("battle_report_path"),
+        "promotion_state": pipeline.get("promotion_state"),
         "terminal_summary": latest_summary,
     }
 
@@ -1430,10 +1721,15 @@ async def champion_status():
     muzero_scalp_status = dict((engine_status.get("muzero") or {}).get("scalp") or {})
     dreamer_scalp_status = dict((engine_status.get("dreamer") or {}).get("scalp") or {})
     gate_status = gate.get_status()
+    scalp_coverage = build_timescaledb_coverage_report(
+        CANONICAL_SCALP_FULL_SYMBOLS,
+        CANONICAL_COVERAGE_TIMEFRAMES,
+    )
     daytime_activation = {
         "muzero_live_ok": bool(muzero_scalp_status.get("live_champion_id")),
         "dreamer_live_ok": bool(
             dreamer_scalp_status.get("live_champion_id")
+            and dreamer_scalp_status.get("can_activate_live")
             and dreamer_scalp_status.get("promotion_gate", {}).get("allowed")
             and gate_status.get("dreamer_live_enabled", False)
         ),
@@ -1463,6 +1759,7 @@ async def champion_status():
         "engines": engine_status,
         "daytime_activation": daytime_activation,
         "gnn_consultative": gnn_champion,
+        "timescaledb_coverage": scalp_coverage,
         "nightly_summary": nightly_summary,
     }
     await _publish_champion_status_snapshot(payload)
@@ -1508,6 +1805,7 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
             run_view["metrics_by_position_mechanics"] = challenger_metrics.get("metrics_by_position_mechanics")
 
     runtime_profile = _resolve_runtime_profile(run_status)
+    eta_payload = _estimate_training_eta(run_view)
     payload = {
         "status": "ok",
         "runtime_profile": runtime_profile,
@@ -1537,8 +1835,22 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         "phase_durations_ms": run_view.get("phase_durations_ms"),
         "resume_checkpoint_path": run_view.get("resume_checkpoint_path"),
         "resume_step": run_view.get("resume_step"),
+        "last_checkpoint_path": run_view.get("last_checkpoint_path"),
+        "checkpoint_written_at": run_view.get("checkpoint_written_at"),
+        "resume_available": run_view.get("resume_available"),
+        "resume_epoch": run_view.get("resume_epoch"),
+        "resume_world_model_steps": run_view.get("resume_world_model_steps"),
+        "slice_budget_seconds": run_view.get("slice_budget_seconds"),
+        "slice_elapsed_seconds": run_view.get("slice_elapsed_seconds"),
+        "terminal_status": run_view.get("terminal_status"),
+        "battle_report_path": run_view.get("battle_report_path"),
+        "promotion_state": run_view.get("promotion_state"),
         "stall_detected": run_view.get("stall_detected"),
         "stall_reason": run_view.get("stall_reason"),
+        "progress_percent": eta_payload.get("progress_percent"),
+        "remaining_steps": eta_payload.get("remaining_steps"),
+        "eta_seconds": eta_payload.get("eta_seconds"),
+        "eta_at": eta_payload.get("eta_at"),
         "timescaledb_status": ((run_view.get("dataset_coverage") or {}).get("timescaledb") or {}),
         "bars_table": (((run_view.get("dataset_coverage") or {}).get("timescaledb") or {}).get("bars_table")),
         "features_table": (((run_view.get("dataset_coverage") or {}).get("timescaledb") or {}).get("features_table")),
@@ -1593,6 +1905,7 @@ async def ga_status(limit: int = Query(default=40, ge=1, le=200)):
     grouped_trials = _group_ga_trials_by_generation(recent_trials)
     active_generation = current_run.get("ga_generation")
     active_trial = current_run.get("ga_trial")
+    eta_payload = _estimate_training_eta(current_run)
     return {
         "status": "ok",
         "runtime_profile": runtime_profile,
@@ -1617,6 +1930,10 @@ async def ga_status(limit: int = Query(default=40, ge=1, le=200)):
                 str((current_run.get("latest_verdict") or {}).get("status") or "").strip() or None
             ),
             "finalist_rank": None,
+            "progress_percent": eta_payload.get("progress_percent"),
+            "remaining_steps": eta_payload.get("remaining_steps"),
+            "eta_seconds": eta_payload.get("eta_seconds"),
+            "eta_at": eta_payload.get("eta_at"),
         },
         "trials_by_generation": grouped_trials,
         "trial_count": len(recent_trials),
@@ -1625,7 +1942,171 @@ async def ga_status(limit: int = Query(default=40, ge=1, le=200)):
             for trial in recent_trials
             if trial.get("finalist_rank") is not None
         ],
+        "overview": _build_ga_overview(recent_trials, current_run),
     }
+
+
+@app.get("/factory/overview")
+async def factory_overview():
+    """Retourne une vue compacte de pilotage des champions et du run actif.
+
+    Returns:
+        dict: Tableau de bord concis du live, des challengers et de l'entrainement.
+    """
+
+    promoter: ChampionPromoter = app.state.promoter
+    gate: DreamerGate = app.state.dreamer_gate
+    genetic = GeneticUpdater()
+    registry_champions = genetic.get_all_champions()
+    horizons = ["scalp", "intraday", "swing"]
+    engine_status = promoter.build_engine_matrix_status(horizons, registry_champions)
+    training_state = load_training_status()
+    observed_step = derive_observed_training_step(tail_training_log(60))
+    run_view = dict(training_state)
+    run_view["current_step"] = select_effective_training_step(
+        run_view.get("current_step") or {},
+        observed_step,
+    )
+    eta_payload = _estimate_training_eta(run_view)
+    gnn_registry = load_market_gnn_registry()
+    gnn_champion = _compute_gnn_champion_payload(gnn_registry)
+    recent_trials = load_recent_ga_trials(limit=20)
+    muzero_scalp = dict((engine_status.get("muzero") or {}).get("scalp") or {})
+    dreamer_scalp = dict((engine_status.get("dreamer") or {}).get("scalp") or {})
+    gate_status = gate.get_status()
+    timescaledb_coverage = build_timescaledb_coverage_report(
+        CANONICAL_SCALP_FULL_SYMBOLS,
+        CANONICAL_COVERAGE_TIMEFRAMES,
+    )
+    blockers: list[str] = []
+    if not muzero_scalp.get("live_champion_id"):
+        blockers.append("Aucun champion MuZero live exploitable.")
+    if run_view.get("active") and run_view.get("focus_symbols") != CANONICAL_SCALP_FULL_SYMBOLS:
+        blockers.append("Le run actif n'utilise pas encore l'univers canonique 7 symboles.")
+    if not dreamer_scalp.get("candidate_id"):
+        blockers.append("DreamerV3 n'a pas encore de champion live valide.")
+    elif not dreamer_scalp.get("can_activate_live"):
+        blockers.append(
+            f"DreamerV3 est bloque pour le live: {dreamer_scalp.get('gate_reason') or 'gate_non_validee'}."
+        )
+    if not gnn_champion.get("champion_ready"):
+        blockers.append("Le champion GNN consultatif n'est pas encore pret.")
+    missing_timescaledb_symbols = list(
+        ((timescaledb_coverage.get("timescaledb") or {}).get("missing_symbols") or [])
+    )
+    if missing_timescaledb_symbols:
+        blockers.append(
+            "TimeDB incomplet sur le full 7: "
+            + ", ".join(missing_timescaledb_symbols)
+            + "."
+        )
+    return {
+        "status": "ok",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "runtime_profile": _resolve_runtime_profile(training_state),
+        "live": {
+            "selection_policy": promoter.get_live_selection_policy(),
+            "active_engine": "muzero" if muzero_scalp.get("live_champion_id") else None,
+            "muzero_live_champion_id": muzero_scalp.get("live_champion_id"),
+            "dreamer_live_champion_id": (
+                dreamer_scalp.get("live_champion_id")
+                if dreamer_scalp.get("can_activate_live")
+                else None
+            ),
+            "dreamer_candidate_id": dreamer_scalp.get("candidate_id"),
+            "ensemble_ready": bool(gate_status.get("ensemble_ready")),
+            "ensemble_active": bool(gate_status.get("ensemble_active")),
+            "dreamer_live_enabled": bool(gate_status.get("dreamer_live_enabled")),
+            "gnn_consultative_ready": bool(gnn_champion.get("champion_ready")),
+        },
+        "active_training": {
+            "run_id": run_view.get("run_id"),
+            "engine": run_view.get("engine"),
+            "trigger": run_view.get("trigger"),
+            "phase": ((run_view.get("current_step") or {}).get("phase")),
+            "status": run_view.get("status"),
+            "progress_percent": eta_payload.get("progress_percent"),
+            "remaining_steps": eta_payload.get("remaining_steps"),
+            "eta_seconds": eta_payload.get("eta_seconds"),
+            "eta_at": eta_payload.get("eta_at"),
+            "focus_symbols": run_view.get("focus_symbols", []),
+            "dataset_source": run_view.get("dataset_source"),
+            "gate_profile": run_view.get("gate_profile"),
+            "feature_profile": run_view.get("feature_profile"),
+            "trial_mode": run_view.get("trial_mode"),
+            "ga_status": run_view.get("ga_status"),
+            "ga_trial": run_view.get("ga_trial"),
+        },
+        "champions": {
+            "muzero_scalp": _build_engine_overview_card("muzero", "scalp", muzero_scalp),
+            "dreamer_scalp": _build_engine_overview_card("dreamer", "scalp", dreamer_scalp),
+            "gnn_consultative": {
+                "champion_id": gnn_champion.get("champion_id"),
+                "champion_ready": gnn_champion.get("champion_ready"),
+                "champion_kind": gnn_champion.get("champion_kind"),
+                "freshness_hours": gnn_champion.get("freshness_hours"),
+                "decision_support_metrics": gnn_champion.get("decision_support_metrics"),
+            },
+        },
+        "ga": _build_ga_overview(recent_trials, run_view),
+        "timescaledb_coverage": timescaledb_coverage,
+        "blockers": blockers,
+    }
+
+
+@app.get("/timescaledb/coverage")
+async def timescaledb_coverage(
+    symbols: str | None = Query(default=None),
+    timeframes: str | None = Query(default=None),
+):
+    """Expose la couverture CSV et TimescaleDB pour un univers cible.
+
+    Args:
+        symbols (str | None): CSV de symboles a verifier.
+        timeframes (str | None): CSV de timeframes a verifier.
+
+    Returns:
+        dict: Couverture comparee, trous et priorites de backfill.
+    """
+
+    requested_symbols = parse_symbol_csv(symbols) or list(CANONICAL_SCALP_FULL_SYMBOLS)
+    requested_timeframes = parse_symbol_csv(timeframes) or list(CANONICAL_COVERAGE_TIMEFRAMES)
+    return {
+        "status": "ok",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        **build_timescaledb_coverage_report(
+            requested_symbols,
+            requested_timeframes,
+        ),
+    }
+
+
+@app.post("/timescaledb/backfill")
+async def timescaledb_backfill(request: TimescaleBackfillRequest):
+    """Backfill TimescaleDB depuis les CSV historiques deja disponibles.
+
+    Args:
+        request (TimescaleBackfillRequest): Perimetre du backfill a executer.
+
+    Returns:
+        dict: Resume du backfill et couverture apres injection.
+    """
+
+    result = backfill_timescaledb_from_history(
+        request.symbols,
+        request.timeframes,
+        history_dir=request.history_dir,
+    )
+    if result.get("status") == "ok":
+        logger.info(
+            "Backfill TimeDB termine: %s lignes pour %s symboles / %s timeframes.",
+            result.get("inserted_rows"),
+            len(request.symbols),
+            len(request.timeframes),
+        )
+    else:
+        logger.warning("Backfill TimeDB en echec: %s", result.get("reason"))
+    return result
 
 
 @app.get("/training/logs/tail")

@@ -140,6 +140,26 @@ class Settings(BaseSettings):
     banker_heartbeat_interval_seconds: float = 3.0
     banker_ghost_fragmentation_enabled: bool = False
     banker_ghost_fragmentation_min_volume: float = 0.20
+    hydra_enabled: bool = True
+    hydra_master_source_id: str = "local-master"
+    hydra_http_timeout_seconds: float = 5.0
+    hydra_terminal_base_port: int = 19100
+    hydra_copy_order_path: str = "/hydra/terminal/order"
+    hydra_copy_close_path: str = "/hydra/terminal/close"
+    hydra_terminal_health_path: str = "/hydra/terminal/health"
+    hydra_wine_root: str = "/opt/the_hive/hydra"
+    hydra_remote_root: str = "/home/aza/hydra"
+    hydra_wine_python_exe: str = "C:\\Python311\\python.exe"
+    hydra_mt5_executable: str = "C:\\Program Files\\MetaTrader 5\\terminal64.exe"
+    hydra_cpu_set: str = "0-3"
+    hydra_soak_test_hours: int = 24
+    wireguard_enabled: bool = True
+    wireguard_mode: str = "native"
+    wireguard_interface: str = "wg0"
+    wireguard_private_subnet: str = "10.77.0.0/24"
+    wireguard_server_address: str = "10.77.0.1/24"
+    wireguard_server_port: int = 51820
+    wireguard_public_endpoint: str = ""
 
     # Constitution Loi 2 - Limites de risque
     risk_max_daily_drawdown_percent: float = 2.0

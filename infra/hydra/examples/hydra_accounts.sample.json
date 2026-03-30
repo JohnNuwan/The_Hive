@@ -1,0 +1,50 @@
+{
+  "server": {
+    "remote_repo_dir": "/home/aza/The_Hive",
+    "hydra_root": "/home/aza/hydra",
+    "wine_python_exe": "C:\\Python311\\python.exe",
+    "mt5_executable": "C:\\Program Files\\MetaTrader 5\\terminal64.exe",
+    "terminal_host": "127.0.0.1",
+    "base_port": 19100,
+    "cpu_set": "0-3",
+    "banker_url": "http://127.0.0.1:8100"
+  },
+  "accounts": [
+    {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "name": "FTMO-Slave-01",
+      "login": 12345678,
+      "password": "REMPLACER",
+      "server": "FTMO-Server",
+      "broker": "FTMO",
+      "phase": "funded",
+      "initial_balance": 10000,
+      "current_balance": 10000,
+      "profit_target_percent": 10,
+      "max_daily_loss_percent": 4,
+      "max_total_loss_percent": 8,
+      "scaling_mode": "fixed",
+      "scaling_factor": 1.0,
+      "lot_min": 0.01,
+      "lot_max": 2.0,
+      "lot_step": 0.01,
+      "symbol_map": {
+        "US30.cash": "US30",
+        "GER40.cash": "DE40"
+      },
+      "allowed_symbols": [
+        "EURUSD",
+        "XAUUSD",
+        "GBPUSD",
+        "USDJPY",
+        "US30",
+        "DE40",
+        "US500.cash"
+      ],
+      "risk_enabled": true,
+      "max_daily_drawdown_pct": 2.0,
+      "copy_enabled": true,
+      "master_source_id": "local-master"
+    }
+  ]
+}

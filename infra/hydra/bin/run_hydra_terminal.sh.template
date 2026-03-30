@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Chaque terminal Hydra reste isole dans son propre WINEPREFIX.
+export WINEPREFIX="{{WINEPREFIX}}"
+export DISPLAY="${DISPLAY:-:0}"
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="{{WINDOWS_PYTHONPATH}}"
+
+source "{{ENV_FILE}}"
+
+mkdir -p "{{ACCOUNT_DIR}}/logs"
+
+if ! pgrep -f "{{MT5_EXECUTABLE}}" >/dev/null 2>&1; then
+  nohup wine "{{MT5_EXECUTABLE}}" /portable > "{{ACCOUNT_DIR}}/logs/mt5.log" 2>&1 &
+  sleep 20
+fi
+
+exec wine "{{WINE_PYTHON_EXE}}" -m eva_banker.hydra_terminal_main >> "{{ACCOUNT_DIR}}/logs/executor.log" 2>&1

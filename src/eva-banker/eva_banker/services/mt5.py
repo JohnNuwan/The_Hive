@@ -6,12 +6,22 @@ GÃ¨re la connexion et l'exÃ©cution des ordres sur MT5
 import asyncio
 import logging
 import sys
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_FLOOR
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
-from shared import AccountBalance, Position, TradeAction, TradeOrder, get_settings
+from shared import (
+    AccountBalance,
+    HydraEventType,
+    OrderSource,
+    Position,
+    TradeAction,
+    TradeOrder,
+    TradeReplicationEvent,
+    get_settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +126,7 @@ class MT5Service:
         self._last_reconnect_attempt: datetime | None = None
         self._last_offline_warning: datetime | None = None
         self._last_disconnect_reason: str | None = None
+        self._execution_event_callback: Callable[[dict[str, Any]], Awaitable[Any]] | None = None
         # Credentials pour login automatique
         self._login = login
         self._password = password
@@ -127,6 +138,48 @@ class MT5Service:
             login,
             server,
         )
+
+    def set_execution_event_callback(
+        self,
+        callback: Callable[[dict[str, Any]], Awaitable[Any]] | None,
+    ) -> None:
+        """
+        Enregistre un callback appele apres un fill confirme.
+
+        Args:
+            callback (Callable[[dict[str, Any]], Awaitable[Any]] | None): Callback
+                async charge de consommer l'evenement Hydra.
+        """
+        self._execution_event_callback = callback
+
+    async def _emit_execution_event(self, event: TradeReplicationEvent) -> None:
+        """
+        Publie un evenement Hydra derive d'un fill ou d'une cloture.
+
+        Args:
+            event (TradeReplicationEvent): Evenement a publier.
+        """
+        if event.source == OrderSource.COPY:
+            return
+
+        payload = event.model_dump(mode="json")
+        try:
+            from shared.redis_client import get_redis_client
+
+            redis = get_redis_client()
+            channel = "eva.hydra.trade_fill_event"
+            if event.event_type == HydraEventType.CLOSE:
+                channel = "eva.hydra.trade_close_event"
+            await redis.publish(channel, payload)
+        except Exception as exc:
+            logger.debug("Hydra: publication Redis ignoree (%s).", exc)
+
+        if self._execution_event_callback is None:
+            return
+        try:
+            await self._execution_event_callback(payload)
+        except Exception as exc:
+            logger.warning("Hydra: callback d'execution ignore (%s).", exc)
 
     def _live_mode_requested(self) -> bool:
         """
@@ -1082,6 +1135,25 @@ class MT5Service:
 
                 if result.retcode == mt5.TRADE_RETCODE_DONE:
                     order_executed = True
+                    account_info = await asyncio.to_thread(mt5.account_info)
+                    await self._emit_execution_event(
+                        TradeReplicationEvent(
+                            event_type=HydraEventType.FILL,
+                            source_account_id=str(get_settings().hydra_master_source_id),
+                            source_login=getattr(account_info, "login", None),
+                            ticket=result.order,
+                            symbol=order.symbol,
+                            action=order.action,
+                            volume=Decimal(str(normalized_volume)),
+                            entry_price=Decimal(str(exec_price)),
+                            stop_loss_price=order.stop_loss_price,
+                            take_profit_price=order.take_profit_price,
+                            comment=safe_comment,
+                            source=order.source,
+                            master_balance=Decimal(str(getattr(account_info, "balance", 0) or 0)),
+                            master_equity=Decimal(str(getattr(account_info, "equity", 0) or 0)),
+                        )
+                    )
                     return {
                         "success": True,
                         "ticket": result.order,
@@ -1127,6 +1199,22 @@ class MT5Service:
             # Simulation de profit pour le mock (entre -50 et +150)
             import random
             profit = Decimal(str(random.uniform(-50, 150)))
+            await self._emit_execution_event(
+                TradeReplicationEvent(
+                    event_type=HydraEventType.CLOSE,
+                    source_account_id=str(get_settings().hydra_master_source_id),
+                    ticket=ticket,
+                    symbol=pos.symbol,
+                    action=pos.action,
+                    volume=Decimal(str(pos.volume)),
+                    entry_price=Decimal(str(pos.current_price)),
+                    profit=profit,
+                    comment="EVA Close Mock",
+                    source=OrderSource.STRATEGY,
+                    master_balance=self._mock_balance,
+                    master_equity=self._mock_balance,
+                )
+            )
             return {
                 "success": True, 
                 "message": f"Position {ticket} fermÃ©e (mock)",
@@ -1171,6 +1259,24 @@ class MT5Service:
 
             result = await asyncio.to_thread(mt5.order_send, request)
             if result.retcode == mt5.TRADE_RETCODE_DONE:
+                account_info = await asyncio.to_thread(mt5.account_info)
+                await self._emit_execution_event(
+                    TradeReplicationEvent(
+                        event_type=HydraEventType.CLOSE,
+                        source_account_id=str(get_settings().hydra_master_source_id),
+                        source_login=getattr(account_info, "login", None),
+                        ticket=ticket,
+                        symbol=pos.symbol,
+                        action=TradeAction.BUY if pos.type == 0 else TradeAction.SELL,
+                        volume=Decimal(str(pos.volume)),
+                        entry_price=Decimal(str(close_price)),
+                        profit=Decimal(str(pos.profit)),
+                        comment="EVA Close",
+                        source=OrderSource.STRATEGY,
+                        master_balance=Decimal(str(getattr(account_info, "balance", 0) or 0)),
+                        master_equity=Decimal(str(getattr(account_info, "equity", 0) or 0)),
+                    )
+                )
                 return {
                     "success": True, 
                     "ticket": ticket, 
@@ -1287,6 +1393,23 @@ class MT5Service:
         self._mock_positions.append(position)
 
         logger.info(f"ðŸ“Š Mock Order: {order.action.value} {order.volume} {order.symbol} @ {price}")
+        await self._emit_execution_event(
+            TradeReplicationEvent(
+                event_type=HydraEventType.FILL,
+                source_account_id=str(get_settings().hydra_master_source_id),
+                ticket=ticket,
+                symbol=order.symbol,
+                action=order.action,
+                volume=Decimal(str(order.volume)),
+                entry_price=price,
+                stop_loss_price=order.stop_loss_price,
+                take_profit_price=order.take_profit_price,
+                comment=order.comment,
+                source=order.source,
+                master_balance=self._mock_balance,
+                master_equity=self._mock_balance,
+            )
+        )
 
         return {
             "success": True,

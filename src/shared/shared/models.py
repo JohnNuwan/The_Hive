@@ -74,6 +74,64 @@ class OrderSource(str, Enum):
     COPY = "COPY"
 
 
+class HydraAccountRole(str, Enum):
+    """
+    Role d'un compte dans le protocole Hydra.
+
+    Values:
+        MASTER: Compte source dont les fills servent de verite.
+        SLAVE: Compte recevant les replications de trading.
+    """
+
+    MASTER = "master"
+    SLAVE = "slave"
+
+
+class HydraScalingMode(str, Enum):
+    """
+    Mode de redimensionnement applique lors de la copie d'un ordre.
+
+    Values:
+        FIXED: Replique le volume avec un facteur multiplicatif fixe.
+        PROPORTIONAL: Replique selon un ratio de capital et un facteur.
+    """
+
+    FIXED = "fixed"
+    PROPORTIONAL = "proportional"
+
+
+class HydraEventType(str, Enum):
+    """
+    Type d'evenement remonte par le compte maitre.
+
+    Values:
+        FILL: Un ordre maitre a ete execute.
+        CLOSE: Une position maitre a ete cloturee.
+    """
+
+    FILL = "fill"
+    CLOSE = "close"
+
+
+class HydraJobStatus(str, Enum):
+    """
+    Statut d'un job de replication Hydra.
+
+    Values:
+        PENDING: Job cree mais pas encore envoye au terminal esclave.
+        DISPATCHED: Job envoye a l'executeur distant.
+        EXECUTED: Job execute avec succes sur le slave.
+        REJECTED: Job refuse avant execution.
+        FAILED: Job envoye mais termine en erreur.
+    """
+
+    PENDING = "pending"
+    DISPATCHED = "dispatched"
+    EXECUTED = "executed"
+    REJECTED = "rejected"
+    FAILED = "failed"
+
+
 class IntentType(str, Enum):
     """
     Classification des intentions utilisateur (NLU).
@@ -338,6 +396,7 @@ class PropFirmAccount(BaseModel):
     login: int
     server: str
     broker: str
+    role: HydraAccountRole = HydraAccountRole.SLAVE
     phase: str = Field(..., description="challenge|verification|funded")
     initial_balance: Decimal
     current_balance: Decimal
@@ -345,8 +404,156 @@ class PropFirmAccount(BaseModel):
     max_total_loss_percent: Decimal = Decimal("8.0")
     profit_target_percent: Decimal | None = None
     copy_enabled: bool = True
+    scaling_mode: HydraScalingMode = HydraScalingMode.FIXED
+    scaling_factor: Decimal = Decimal("1.0")
+    lot_min: Decimal = Decimal("0.01")
+    lot_max: Decimal = Decimal("10.0")
+    lot_step: Decimal = Decimal("0.01")
+    symbol_map: dict[str, str] = Field(default_factory=dict)
+    allowed_symbols: list[str] = Field(default_factory=list)
+    risk_enabled: bool = True
+    max_daily_drawdown_pct: Decimal = Decimal("2.0")
+    master_source_id: str | None = None
+    executor_url: str | None = None
+    terminal_host: str | None = None
+    terminal_port: int | None = None
+    wineprefix: str | None = None
+    terminal_path: str | None = None
+    auto_trading_enabled: bool = True
+    quarantined_until: datetime | None = None
+    quarantine_reason: str | None = None
     active: bool = True
     created_at: datetime = Field(default_factory=datetime.now)
+
+
+class TradeReplicationEvent(BaseModel):
+    """
+    Evenement de replication derive d'un ordre maitre confirme par MT5.
+
+    Attributes:
+        event_id (UUID): Identifiant unique de l'evenement.
+        event_type (HydraEventType): Nature de l'evenement.
+        source_account_id (str): Identifiant logique du maitre.
+        source_login (int | None): Login MT5 du maitre si disponible.
+        ticket (int): Ticket principal sur le maitre.
+        symbol (str): Symbole negocie.
+        action (TradeAction): Sens du trade.
+        volume (Decimal): Volume execute sur le maitre.
+        entry_price (Decimal | None): Prix d'execution maitre.
+        stop_loss_price (Decimal | None): Stop loss associe.
+        take_profit_price (Decimal | None): Take profit associe.
+        profit (Decimal | None): Profit realise si evenement de cloture.
+        source (OrderSource): Origine de l'ordre maitre.
+    """
+
+    event_id: UUID = Field(default_factory=uuid4)
+    event_type: HydraEventType
+    source_account_id: str
+    source_login: int | None = None
+    ticket: int
+    symbol: str
+    action: TradeAction
+    volume: Decimal = Decimal("0")
+    entry_price: Decimal | None = None
+    stop_loss_price: Decimal | None = None
+    take_profit_price: Decimal | None = None
+    profit: Decimal | None = None
+    comment: str | None = None
+    source: OrderSource = OrderSource.STRATEGY
+    timestamp: datetime = Field(default_factory=datetime.now)
+    master_balance: Decimal | None = None
+    master_equity: Decimal | None = None
+
+
+class HydraReplicationJob(BaseModel):
+    """
+    Travail de replication cree pour un compte esclave cible.
+
+    Attributes:
+        id (UUID): Identifiant du job.
+        event_id (UUID): Evenement maitre ayant genere le job.
+        source_account_id (str): Identifiant du maitre.
+        target_account_id (UUID): Identifiant du compte esclave.
+        target_login (int | None): Login MT5 cible si connu.
+        status (HydraJobStatus): Etat courant du job.
+        symbol (str): Symbole finalement mappe pour le compte cible.
+        volume (Decimal): Volume final apres scaling et normalisation.
+        latency_ms (int | None): Latence fill-to-copy mesuree.
+        error_message (str | None): Motif de rejet ou d'echec.
+    """
+
+    id: UUID = Field(default_factory=uuid4)
+    event_id: UUID
+    source_account_id: str
+    target_account_id: UUID
+    target_login: int | None = None
+    event_type: HydraEventType
+    status: HydraJobStatus = HydraJobStatus.PENDING
+    symbol: str
+    action: TradeAction
+    volume: Decimal
+    source_ticket: int
+    target_ticket: int | None = None
+    latency_ms: int | None = None
+    scaling_mode: HydraScalingMode = HydraScalingMode.FIXED
+    scaling_factor: Decimal = Decimal("1.0")
+    error_message: str | None = None
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class CopyTradeRequest(BaseModel):
+    """
+    Demande explicite de replication d'un evenement maitre.
+
+    Attributes:
+        event (TradeReplicationEvent): Evenement maitre a recopier.
+        target_accounts (list[UUID] | None): Cibles explicites ou tous les slaves eligibles.
+        dry_run (bool): Si vrai, calcule sans executer.
+    """
+
+    event: TradeReplicationEvent
+    target_accounts: list[UUID] | None = None
+    dry_run: bool = False
+
+
+class CopyTradeResult(BaseModel):
+    """
+    Resultat consolide d'une demande de replication.
+
+    Attributes:
+        event_id (UUID): Evenement source traite.
+        jobs (list[HydraReplicationJob]): Jobs generes pour les slaves.
+        skipped_accounts (list[str]): Comptes ignores avec motif compact.
+    """
+
+    event_id: UUID
+    jobs: list[HydraReplicationJob] = Field(default_factory=list)
+    skipped_accounts: list[str] = Field(default_factory=list)
+
+
+class HydraTerminalHealth(BaseModel):
+    """
+    Etat de sante d'un terminal MT5 Hydra.
+
+    Attributes:
+        account_id (UUID): Compte auquel le terminal est attache.
+        process_alive (bool): Processus Python/terminal actif.
+        mt5_connected (bool): Session MT5 connectee.
+        autotrading_enabled (bool): Autorisation AutoTrading dans le terminal.
+        symbols_available (list[str]): Symboles verifies comme disponibles.
+        latency_ms (int | None): Latence moyenne de reponse du terminal.
+    """
+
+    account_id: UUID
+    process_alive: bool = False
+    mt5_connected: bool = False
+    autotrading_enabled: bool = False
+    symbols_available: list[str] = Field(default_factory=list)
+    latency_ms: int | None = None
+    terminal_path: str | None = None
+    wineprefix: str | None = None
+    updated_at: datetime = Field(default_factory=datetime.now)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

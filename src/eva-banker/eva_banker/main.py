@@ -27,17 +27,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from eva_banker.nemesis import NemesisSystem, get_nemesis_system
+from eva_banker.services.hydra import HydraCopyEngine
 from eva_banker.services.binance_service import BinanceService
 from eva_banker.services.traderepublic_client import TradeRepublicService
 from eva_banker.services.mt5 import MT5Service, get_mt5_service
+from eva_banker.services.multi_account import MultiAccountManager
 from eva_banker.services.news_filter import NewsFilterService
 from eva_banker.services.risk import RiskValidator, get_risk_validator
 from eva_banker.skill_library import SkillLibrary
 from eva_banker.swarm import BankerSwarm
 from shared import (
     AccountBalance,
+    CopyTradeRequest,
     ConnectorMode,
+    HydraAccountRole,
+    HydraScalingMode,
+    HydraTerminalHealth,
     Position,
+    PropFirmAccount,
     RiskStatus,
     RuntimeMode,
     TradeAction,
@@ -180,6 +187,45 @@ class RiskCheckResponse(BaseModel):
     risk_percent: Decimal
     reason: str | None = None
     details: dict[str, Any] = {}
+
+
+class HydraAccountPatchRequest(BaseModel):
+    """
+    Mise a jour partielle d'un compte Hydra.
+
+    Attributes:
+        name (str | None): Nom operateur du compte.
+        active (bool | None): Active/desactive le compte.
+        copy_enabled (bool | None): Autorise ou bloque la copie.
+        scaling_mode (HydraScalingMode | None): Mode fixed/proportional.
+        scaling_factor (Decimal | None): Facteur multiplicatif.
+        executor_url (str | None): URL de l'executeur distant.
+        master_source_id (str | None): Maitre logique associe.
+        allowed_symbols (list[str] | None): Liste blanche de symboles.
+        symbol_map (dict[str, str] | None): Mapping symbole master -> slave.
+    """
+
+    name: str | None = None
+    active: bool | None = None
+    copy_enabled: bool | None = None
+    scaling_mode: HydraScalingMode | None = None
+    scaling_factor: Decimal | None = None
+    executor_url: str | None = None
+    master_source_id: str | None = None
+    allowed_symbols: list[str] | None = None
+    symbol_map: dict[str, str] | None = None
+    risk_enabled: bool | None = None
+    max_daily_drawdown_pct: Decimal | None = None
+    role: HydraAccountRole | None = None
+
+
+class HydraQuarantineRequest(BaseModel):
+    """
+    Parametres de quarantaine operateur pour un compte Hydra.
+    """
+
+    hours: int = Field(default=4, ge=1, le=72)
+    reason: str = Field(default="manual")
 
 
 class HealthResponse(BaseHealthResponse):
@@ -467,6 +513,17 @@ async def lifespan(app: FastAPI):
     app.state.mt5_service = get_mt5_service()
     app.state.risk_validator = get_risk_validator()
     await app.state.risk_validator.load_state()
+    app.state.multi_account_manager = MultiAccountManager()
+    await app.state.multi_account_manager.initialize()
+    app.state.hydra = HydraCopyEngine(
+        app.state.multi_account_manager,
+        master_source_id=settings.hydra_master_source_id,
+        request_timeout_seconds=settings.hydra_http_timeout_seconds,
+        order_path=settings.hydra_copy_order_path,
+        close_path=settings.hydra_copy_close_path,
+        health_path=settings.hydra_terminal_health_path,
+    )
+    await app.state.hydra.initialize()
     app.state.binance_service = BinanceService()
     app.state.tr_service = TradeRepublicService()
     app.state.background_tasks = []
@@ -511,6 +568,7 @@ async def lifespan(app: FastAPI):
 
     # Connexion MT5
     mt5_service: MT5Service = app.state.mt5_service
+    mt5_service.set_execution_event_callback(app.state.hydra.handle_execution_event)
     if await mt5_service.connect():
         logger.info("âœ… MT5 connectÃ©")
         # Detecter l'univers reel puis preparer le premier lot de scan.
@@ -997,6 +1055,31 @@ async def reset_risk_day() -> dict[str, Any]:
     }
 
 
+async def _build_hydra_master_snapshot(app: FastAPI) -> dict[str, Any]:
+    """
+    Construit la vue runtime du maitre transitoire.
+
+    Args:
+        app (FastAPI): Application Banker courante.
+
+    Returns:
+        dict[str, Any]: Resume compact du maitre local.
+    """
+    mt5_service: MT5Service = app.state.mt5_service
+    account = await mt5_service.get_account_info()
+    return {
+        "mode": "master_local_transitoire",
+        "source_account_id": str(app.state.settings.hydra_master_source_id),
+        "mt5_connected": mt5_service.is_connected,
+        "paper_trading": bool(app.state.settings.paper_trading),
+        "login": getattr(account, "login", None),
+        "server": getattr(account, "server", None),
+        "balance": float(getattr(account, "balance", 0) or 0),
+        "equity": float(getattr(account, "equity", 0) or 0),
+        "currency": getattr(account, "currency", "USD"),
+    }
+
+
 @app.post("/risk/kill-switch", tags=["Risque"])
 async def trigger_kill_switch() -> dict[str, str]:
     """
@@ -1117,6 +1200,8 @@ async def get_trading_status():
     live_universe_status = app.state.auto_engine.get_live_universe_status()
     latest_review = app.state.auto_engine.get_latest_trading_review_summary()
     nemesis_status = app.state.nemesis.get_status()
+    hydra_master = await _build_hydra_master_snapshot(app)
+    hydra_status = await app.state.hydra.get_aggregate(master_runtime=hydra_master)
     live_family = str(
         execution_mechanics.get("live_family")
         or live_universe_status.get("live_family")
@@ -1229,6 +1314,12 @@ async def get_trading_status():
         "vllm": connector_status.get("vllm", {}),
         "gnn": connector_status.get("gnn", {}),
         "nemesis": nemesis_status,
+        "hydra": hydra_status,
+        "network": {
+            "vpn_mode": app.state.settings.wireguard_mode,
+            "wireguard_enabled": bool(app.state.settings.wireguard_enabled),
+            "private_subnet": app.state.settings.wireguard_private_subnet,
+        },
         "latest_review": latest_review,
         "live_data_source": live_universe_status.get("source") or execution_mechanics.get("selection_policy_required"),
         "market_context": market_context,
@@ -1399,3 +1490,196 @@ async def get_propfirm_accounts():
             "daily_drawdown": 0.0,
         }
     ]
+
+
+@app.get("/hydra/accounts", tags=["Hydra"])
+async def get_hydra_accounts() -> dict[str, Any]:
+    """
+    Retourne le registre Hydra master/slaves.
+
+    Returns:
+        dict[str, Any]: Comptes connus et etat operateur.
+    """
+    manager: MultiAccountManager = app.state.multi_account_manager
+    return manager.get_status()
+
+
+@app.post("/hydra/accounts", tags=["Hydra"])
+async def register_hydra_account(account: PropFirmAccount) -> dict[str, Any]:
+    """
+    Enregistre un compte Hydra pour la copie master/slave.
+
+    Args:
+        account (PropFirmAccount): Compte a ajouter.
+
+    Returns:
+        dict[str, Any]: Compte ajoute.
+    """
+    manager: MultiAccountManager = app.state.multi_account_manager
+    created = await manager.add_account(account)
+    return {"status": "ok", "account": created.model_dump(mode="json")}
+
+
+@app.patch("/hydra/accounts/{account_id}", tags=["Hydra"])
+async def patch_hydra_account(account_id: UUID, request: HydraAccountPatchRequest) -> dict[str, Any]:
+    """
+    Met a jour un compte Hydra existant.
+
+    Args:
+        account_id (UUID): Compte cible.
+        request (HydraAccountPatchRequest): Delta de configuration.
+
+    Returns:
+        dict[str, Any]: Compte mis a jour.
+
+    Raises:
+        HTTPException: Si le compte est inconnu.
+    """
+    manager: MultiAccountManager = app.state.multi_account_manager
+    patch = request.model_dump(exclude_none=True, mode="json")
+    updated = await manager.update_account(account_id, patch)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Compte Hydra introuvable.")
+    return {"status": "ok", "account": updated.model_dump(mode="json")}
+
+
+@app.post("/hydra/accounts/{account_id}/pause", tags=["Hydra"])
+async def pause_hydra_account(account_id: UUID) -> dict[str, Any]:
+    """
+    Suspend la copie sur un compte Hydra.
+    """
+    manager: MultiAccountManager = app.state.multi_account_manager
+    updated = await manager.pause_account(account_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Compte Hydra introuvable.")
+    return {"status": "paused", "account": updated.model_dump(mode="json")}
+
+
+@app.post("/hydra/accounts/{account_id}/resume", tags=["Hydra"])
+async def resume_hydra_account(account_id: UUID) -> dict[str, Any]:
+    """
+    Reprend la copie sur un compte Hydra.
+    """
+    manager: MultiAccountManager = app.state.multi_account_manager
+    updated = await manager.resume_account(account_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Compte Hydra introuvable.")
+    return {"status": "active", "account": updated.model_dump(mode="json")}
+
+
+@app.post("/hydra/accounts/{account_id}/quarantine", tags=["Hydra"])
+async def quarantine_hydra_account(account_id: UUID, request: HydraQuarantineRequest) -> dict[str, Any]:
+    """
+    Place un compte Hydra en quarantaine temporaire.
+    """
+    manager: MultiAccountManager = app.state.multi_account_manager
+    updated = await manager.quarantine_account(
+        account_id,
+        hours=request.hours,
+        reason=request.reason,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Compte Hydra introuvable.")
+    return {"status": "quarantined", "account": updated.model_dump(mode="json")}
+
+
+@app.get("/hydra/accounts/{account_id}/metrics", tags=["Hydra"])
+async def get_hydra_account_metrics(account_id: UUID) -> dict[str, Any]:
+    """
+    Retourne la vue compacte d'un compte Hydra.
+
+    Args:
+        account_id (UUID): Compte cible.
+
+    Returns:
+        dict[str, Any]: Compte, metriques, sante et derniers jobs.
+
+    Raises:
+        HTTPException: Si le compte est inconnu.
+    """
+    hydra: HydraCopyEngine = app.state.hydra
+    payload = await hydra.get_account_metrics(account_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Compte Hydra introuvable.")
+    return {"status": "ok", **payload}
+
+
+@app.post("/hydra/copy", tags=["Hydra"])
+async def manual_hydra_copy(request: CopyTradeRequest) -> dict[str, Any]:
+    """
+    Declenche une replication Hydra explicite.
+
+    Args:
+        request (CopyTradeRequest): Evenement et cibles a repliquer.
+
+    Returns:
+        dict[str, Any]: Resultat consolide de la replication.
+    """
+    hydra: HydraCopyEngine = app.state.hydra
+    result = await hydra.replicate(request)
+    return {"status": "ok", **result.model_dump(mode="json")}
+
+
+@app.get("/hydra/jobs", tags=["Hydra"])
+async def get_hydra_jobs(
+    limit: int = Query(default=20, ge=1, le=200),
+    account_id: UUID | None = Query(default=None),
+) -> dict[str, Any]:
+    """
+    Retourne les derniers jobs Hydra.
+    """
+    hydra: HydraCopyEngine = app.state.hydra
+    jobs = await hydra.list_jobs(limit=limit, account_id=account_id)
+    return {
+        "status": "ok",
+        "jobs": [job.model_dump(mode="json") for job in jobs],
+    }
+
+
+@app.get("/hydra/jobs/{job_id}", tags=["Hydra"])
+async def get_hydra_job(job_id: UUID) -> dict[str, Any]:
+    """
+    Retourne un job Hydra par identifiant.
+    """
+    hydra: HydraCopyEngine = app.state.hydra
+    job = await hydra.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job Hydra introuvable.")
+    return {"status": "ok", "job": job.model_dump(mode="json")}
+
+
+@app.get("/hydra/health", tags=["Hydra"])
+async def get_hydra_health() -> dict[str, Any]:
+    """
+    Retourne la sante des executeurs Hydra.
+    """
+    hydra: HydraCopyEngine = app.state.hydra
+    manager: MultiAccountManager = app.state.multi_account_manager
+    accounts = await manager.get_all_accounts()
+    for account in accounts:
+        if account.role != HydraAccountRole.SLAVE:
+            continue
+        await hydra.probe_account_health(account)
+    aggregate = await hydra.get_aggregate(master_runtime=await _build_hydra_master_snapshot(app))
+    return {"status": "ok", "health": aggregate.get("health", [])}
+
+
+@app.get("/hydra/aggregate", tags=["Hydra"])
+async def get_hydra_aggregate() -> dict[str, Any]:
+    """
+    Retourne la vue consolidee Hydra pour Nexus.
+    """
+    hydra: HydraCopyEngine = app.state.hydra
+    aggregate = await hydra.get_aggregate(master_runtime=await _build_hydra_master_snapshot(app))
+    return {"status": "ok", **aggregate}
+
+
+@app.post("/hydra/accounts/{account_id}/health", tags=["Hydra"])
+async def ingest_hydra_terminal_health(account_id: UUID, health: HydraTerminalHealth) -> dict[str, Any]:
+    """
+    Recoit un heartbeat de sante d'un executeur Hydra.
+    """
+    hydra: HydraCopyEngine = app.state.hydra
+    snapshot = health.model_copy(update={"account_id": account_id, "updated_at": datetime.now()})
+    await hydra.set_terminal_health(snapshot)
+    return {"status": "ok", "health": snapshot.model_dump(mode="json")}

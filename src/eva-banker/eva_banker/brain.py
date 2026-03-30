@@ -164,6 +164,9 @@ class AutoTradingEngine:
             0.01,
             self._env_float("BANKER_CPU_LIVE_MAX_VOLUME", 0.10),
         )
+        self._cpu_live_symbol_max_volumes = self._parse_symbol_float_mapping(
+            self._env_text("BANKER_CPU_LIVE_SYMBOL_MAX_VOLUMES", "")
+        )
         self._ensemble_enabled = self._env_flag("BANKER_ENSEMBLE_ENABLED", False)
         self._ensemble_min_edge = max(0.0, self._env_float("BANKER_ENSEMBLE_MIN_EDGE", 0.15))
         if self._cpu_live_mode:
@@ -402,6 +405,45 @@ class AutoTradingEngine:
             symbols.append(symbol)
             seen.add(symbol)
         return symbols
+
+    @staticmethod
+    def _parse_symbol_float_mapping(raw_value: str) -> dict[str, float]:
+        """Normalise un mapping `SYMBOLE=volume` issu de l'environnement.
+
+        Args:
+            raw_value (str): Valeur brute issue de l'environnement.
+
+        Returns:
+            dict[str, float]: Volumes max par symbole.
+        """
+
+        mapping: dict[str, float] = {}
+        for chunk in str(raw_value or "").split(","):
+            entry = chunk.strip()
+            if not entry or "=" not in entry:
+                continue
+            symbol, raw_limit = entry.split("=", 1)
+            normalized_symbol = symbol.strip().upper()
+            if not normalized_symbol:
+                continue
+            try:
+                limit = float(raw_limit.strip())
+            except ValueError:
+                logger.warning(
+                    "Volume cpu_live ignore pour %s: valeur illisible (%s).",
+                    normalized_symbol,
+                    raw_limit,
+                )
+                continue
+            if limit <= 0:
+                logger.warning(
+                    "Volume cpu_live ignore pour %s: valeur non positive (%s).",
+                    normalized_symbol,
+                    raw_limit,
+                )
+                continue
+            mapping[normalized_symbol] = limit
+        return mapping
 
     def _log_pause_state(
         self,
@@ -804,6 +846,7 @@ class AutoTradingEngine:
             "live_inference_timeout_seconds": self._live_inference_timeout_seconds,
             "cpu_live_symbols": list(self._cpu_live_symbols),
             "cpu_live_max_volume": self._cpu_live_max_volume,
+            "cpu_live_symbol_max_volumes": dict(self._cpu_live_symbol_max_volumes),
             "ensemble_enabled": self._ensemble_enabled,
             "ensemble_mode": "vote_50_50" if self._ensemble_enabled else "muzero_only",
             "ensemble_min_edge": self._ensemble_min_edge,
@@ -823,6 +866,7 @@ class AutoTradingEngine:
             "scalp_stale_minutes": self._scalp_stale_minutes,
             "cpu_live_max_volume": self._cpu_live_max_volume,
             "cpu_live_symbols": list(self._cpu_live_symbols),
+            "cpu_live_symbol_max_volumes": dict(self._cpu_live_symbol_max_volumes),
             "live_family": self._lab_universe_family,
             "live_champion_id": self._lab_universe_live_champion_id,
             "live_champion_id_muzero": self._lab_universe_live_champion_id_muzero,
@@ -1344,6 +1388,331 @@ class AutoTradingEngine:
             for reason, count in reasons.most_common(10)
         ]
 
+    def _build_symbol_risk_map(
+        self,
+        *,
+        symbol_review: list[dict[str, object]],
+        nemesis_status: dict[str, object],
+    ) -> list[dict[str, object]]:
+        """Construit une carte de risque exploitable symbole par symbole.
+
+        Args:
+            symbol_review (list[dict[str, object]]): Performance journaliere par symbole.
+            nemesis_status (dict[str, object]): Etat courant de Nemesis.
+
+        Returns:
+            list[dict[str, object]]: Carte de risque triee par criticite.
+        """
+        recent_losses_by_symbol = {
+            str(symbol).strip().upper(): dict(payload or {})
+            for symbol, payload in dict(nemesis_status.get("recent_losses_by_symbol") or {}).items()
+            if str(symbol).strip()
+        }
+        quarantined_symbols = {
+            str(symbol).strip().upper()
+            for symbol in list(nemesis_status.get("quarantined_symbols") or [])
+            if str(symbol).strip()
+        }
+        quarantine_expires = {
+            str(symbol).strip().upper(): value
+            for symbol, value in dict(nemesis_status.get("quarantine_expires_at_by_symbol") or {}).items()
+            if str(symbol).strip()
+        }
+        buckets: dict[str, dict[str, object]] = {
+            str(item.get("symbol") or "").strip().upper(): dict(item)
+            for item in symbol_review
+            if str(item.get("symbol") or "").strip()
+        }
+        for symbol in set(buckets.keys()) | set(recent_losses_by_symbol.keys()) | quarantined_symbols:
+            bucket = dict(buckets.get(symbol) or {})
+            losses = dict(recent_losses_by_symbol.get(symbol) or {})
+            closed_deals = int(bucket.get("closed_deals") or 0)
+            net_profit = round(float(bucket.get("net_profit") or 0.0), 2)
+            recent_losses_4h = int(losses.get("recent_losses_4h") or 0)
+            recent_events_12h = int(losses.get("recent_events_12h") or 0)
+            day_loss_percent = round(float(losses.get("day_loss_percent") or 0.0), 4)
+            is_quarantined = symbol in quarantined_symbols
+            risk_level = "normal"
+            if is_quarantined:
+                risk_level = "quarantaine"
+            elif recent_losses_4h >= 2 or recent_events_12h >= 3 or day_loss_percent >= 0.60:
+                risk_level = "alerte"
+            elif net_profit < 0.0 or int(bucket.get("losses") or 0) > int(bucket.get("wins") or 0):
+                risk_level = "surveillance"
+            buckets[symbol] = {
+                "symbol": symbol,
+                "closed_deals": closed_deals,
+                "wins": int(bucket.get("wins") or 0),
+                "losses": int(bucket.get("losses") or 0),
+                "win_rate": round(float(bucket.get("win_rate") or 0.0), 2),
+                "net_profit": net_profit,
+                "recent_losses_4h": recent_losses_4h,
+                "recent_events_12h": recent_events_12h,
+                "recent_losses_6h": int(losses.get("recent_losses_6h") or 0),
+                "day_loss_amount": round(float(losses.get("day_loss_amount") or 0.0), 2),
+                "day_loss_percent": day_loss_percent,
+                "latest_nemesis_type": losses.get("latest_nemesis_type"),
+                "quarantined": is_quarantined,
+                "quarantine_expires_at": quarantine_expires.get(symbol),
+                "risk_level": risk_level,
+            }
+        ordered = sorted(
+            buckets.values(),
+            key=lambda item: (
+                {"quarantaine": 0, "alerte": 1, "surveillance": 2, "normal": 3}.get(
+                    str(item.get("risk_level") or "normal"),
+                    9,
+                ),
+                float(item.get("net_profit") or 0.0),
+            ),
+        )
+        return ordered
+
+    def _build_nemesis_learning(
+        self,
+        *,
+        nemesis_status: dict[str, object],
+    ) -> dict[str, object]:
+        """Agrege les pertes labelisees pour l'apprentissage nocturne.
+
+        Args:
+            nemesis_status (dict[str, object]): Etat courant de Nemesis.
+
+        Returns:
+            dict[str, object]: Exemples recents et regroupements utiles.
+        """
+        recent_defeats = list(nemesis_status.get("recent_defeats") or [])
+        by_type: Counter[str] = Counter()
+        by_symbol: Counter[str] = Counter()
+        labeled_examples: list[dict[str, object]] = []
+
+        for defeat in recent_defeats:
+            context = dict(defeat.get("context") or {})
+            nemesis_type = str(defeat.get("nemesis_type") or "UNKNOWN").strip() or "UNKNOWN"
+            symbol = str(defeat.get("symbol") or context.get("symbol") or "UNKNOWN").strip().upper() or "UNKNOWN"
+            by_type[nemesis_type] += 1
+            by_symbol[symbol] += 1
+            labeled_examples.append(
+                {
+                    "trade_id": defeat.get("trade_id"),
+                    "timestamp": defeat.get("timestamp"),
+                    "symbol": symbol,
+                    "nemesis_type": nemesis_type,
+                    "loss": round(float(defeat.get("loss") or 0.0), 2),
+                    "action": context.get("action"),
+                    "gnn_bias": context.get("gnn_bias"),
+                    "final_bias": context.get("final_bias"),
+                    "spread": context.get("spread"),
+                    "veto_reason": context.get("veto_reason"),
+                    "raw_model_action": context.get("raw_model_action"),
+                    "close_reason": context.get("close_reason"),
+                    "model_version": context.get("model_version"),
+                }
+            )
+
+        return {
+            "total_examples": len(labeled_examples),
+            "by_nemesis_type": dict(by_type),
+            "by_symbol": dict(by_symbol),
+            "labeled_examples": labeled_examples,
+        }
+
+    def _build_runtime_fallbacks(
+        self,
+        *,
+        runtime_status: dict[str, object],
+        decision_audit: dict[str, object],
+    ) -> dict[str, object]:
+        """Resume les replis runtime observes pendant la session.
+
+        Args:
+            runtime_status (dict[str, object]): Etat runtime courant du banker.
+            decision_audit (dict[str, object]): Audit glissant des decisions.
+
+        Returns:
+            dict[str, object]: Compteurs et contexte des fallbacks observes.
+        """
+        by_reason = {
+            str(reason): int(count or 0)
+            for reason, count in dict(decision_audit.get("degraded_fallbacks") or {}).items()
+            if str(reason).strip()
+        }
+        fallback_events = sum(by_reason.values())
+        window_size = max(0, int(decision_audit.get("window_size") or 0))
+        fallback_rate = round((fallback_events / window_size) * 100.0, 2) if window_size else 0.0
+        return {
+            "fallback_events": fallback_events,
+            "fallback_rate_percent": fallback_rate,
+            "by_reason": by_reason,
+            "cpu_live_mode": bool(runtime_status.get("cpu_live_mode")),
+            "cortex_mode": runtime_status.get("cortex_mode"),
+            "cortex_backend": runtime_status.get("cortex_backend"),
+            "gnn_mode": runtime_status.get("gnn_mode"),
+            "selection_policy_required": runtime_status.get("selection_policy_required"),
+        }
+
+    def _build_support_model_quality(
+        self,
+        *,
+        runtime_status: dict[str, object],
+        decision_audit: dict[str, object],
+        runtime_fallbacks: dict[str, object],
+    ) -> dict[str, object]:
+        """Evalue la qualite operationnelle des modeles de support.
+
+        Args:
+            runtime_status (dict[str, object]): Etat runtime courant du banker.
+            decision_audit (dict[str, object]): Audit glissant des decisions.
+            runtime_fallbacks (dict[str, object]): Synthese des replis runtime.
+
+        Returns:
+            dict[str, object]: Vue compacte de la sante des modeles de support.
+        """
+        cortex_status = dict(runtime_status.get("cortex") or {})
+        ensemble_modes = dict(decision_audit.get("ensemble_modes") or {})
+        return {
+            "cortex": {
+                "mode": cortex_status.get("mode"),
+                "backend": cortex_status.get("backend"),
+                "required": bool(cortex_status.get("required", False)),
+                "consultative": bool(cortex_status.get("consultative", runtime_status.get("cpu_live_mode", False))),
+            },
+            "gnn": {
+                "mode": runtime_status.get("gnn_mode"),
+                "window_events": int(decision_audit.get("window_size") or 0),
+            },
+            "vllm": {
+                "mode": "disabled" if bool(runtime_status.get("cpu_live_mode")) else "live",
+                "selection_policy_required": runtime_status.get("selection_policy_required"),
+            },
+            "ensemble_modes": ensemble_modes,
+            "fallback_rate_percent": runtime_fallbacks.get("fallback_rate_percent", 0.0),
+            "fallback_events": runtime_fallbacks.get("fallback_events", 0),
+        }
+
+    def _build_mutation_priors(
+        self,
+        *,
+        diagnostics: list[dict[str, object]],
+        symbol_risk_map: list[dict[str, object]],
+        nemesis_learning: dict[str, object],
+        runtime_fallbacks: dict[str, object],
+    ) -> list[dict[str, object]]:
+        """Convertit la revue du jour en priors de mutation pour la nuit.
+
+        Args:
+            diagnostics (list[dict[str, object]]): Diagnostics de la review.
+            symbol_risk_map (list[dict[str, object]]): Carte de risque par symbole.
+            nemesis_learning (dict[str, object]): Exemples Nemesis recents.
+            runtime_fallbacks (dict[str, object]): Etat des replis runtime.
+
+        Returns:
+            list[dict[str, object]]: Priors structures pour les runs de nuit.
+        """
+        priors: list[dict[str, object]] = []
+        diagnostic_codes = {
+            str(item.get("code") or "").strip()
+            for item in diagnostics
+            if str(item.get("code") or "").strip()
+        }
+        symbol_index = {
+            str(item.get("symbol") or "").strip().upper(): item
+            for item in symbol_risk_map
+            if str(item.get("symbol") or "").strip()
+        }
+
+        if "passivite_elevee" in diagnostic_codes:
+            priors.append(
+                {
+                    "target": "muzero_mechanics",
+                    "priority": "high",
+                    "reason": "passivite_elevee",
+                    "adjustments": [
+                        "relacher_hold_thresholds",
+                        "augmenter_split_reactivity",
+                        "ameliorer_close_quality",
+                    ],
+                }
+            )
+
+        if "biais_directionnel" in diagnostic_codes:
+            priors.append(
+                {
+                    "target": "muzero_directional_balance",
+                    "priority": "high",
+                    "reason": "biais_directionnel",
+                    "adjustments": [
+                        "durcir_directional_imbalance",
+                        "augmenter_directional_penalty",
+                        "rehausser_activity_penalty_si_entrees_insuffisantes",
+                    ],
+                }
+            )
+
+        gold_risk = dict(symbol_index.get("XAUUSD") or {})
+        gold_nemesis = int((nemesis_learning.get("by_symbol") or {}).get("XAUUSD", 0) or 0)
+        if "passivite_gold" in diagnostic_codes or gold_nemesis > 0 or gold_risk.get("risk_level") in {"alerte", "quarantaine"}:
+            priors.append(
+                {
+                    "target": "gold_live_filters",
+                    "priority": "medium",
+                    "reason": "liquidity_trap_xauusd",
+                    "adjustments": [
+                        "verifier_quarantaine_nemesis_xauusd",
+                        "revoir_entree_gold_et_veto_spread",
+                        "mesurer_impact_hold_sur_xauusd",
+                    ],
+                }
+            )
+
+        if int(runtime_fallbacks.get("fallback_events") or 0) > 0:
+            priors.append(
+                {
+                    "target": "support_runtime",
+                    "priority": "medium",
+                    "reason": "fallbacks_runtime",
+                    "adjustments": [
+                        "stabiliser_cortex_ollama_ou_vllm",
+                        "reduire_les_replis_avant_promotion",
+                        "controler_la_chaine_consultative_avant_runs_gpu_lourds",
+                    ],
+                }
+            )
+
+        alert_symbols = [
+            item["symbol"]
+            for item in symbol_risk_map
+            if str(item.get("risk_level") or "") in {"alerte", "quarantaine"}
+        ]
+        if alert_symbols:
+            priors.append(
+                {
+                    "target": "gnn_consultatif",
+                    "priority": "medium",
+                    "reason": "filtrage_contextuel_a_renforcer",
+                    "symbols": alert_symbols,
+                    "adjustments": [
+                        "rafraichir_gnn_consultatif",
+                        "mesurer_directional_precision_minimale",
+                        "verifier_l_apport_reel_sur_les_vetos",
+                    ],
+                }
+            )
+
+        if not priors:
+            priors.append(
+                {
+                    "target": "collecte_shadow",
+                    "priority": "low",
+                    "reason": "aucun_signal_critique",
+                    "adjustments": [
+                        "poursuivre_la_collecte_shadow",
+                        "maintenir_mu_zero_prioritaire",
+                    ],
+                }
+            )
+        return priors
+
     def _build_review_diagnostics(
         self,
         *,
@@ -1540,12 +1909,32 @@ class AutoTradingEngine:
         execution_mechanics = self.get_execution_mechanics_status()
         live_universe = self.get_live_universe_status()
         symbol_review = self._build_symbol_review(closed_deals)
+        symbol_risk_map = self._build_symbol_risk_map(
+            symbol_review=symbol_review,
+            nemesis_status=nemesis_status,
+        )
         close_reasons = self._build_close_reason_summary(closed_deals)
         diagnostics = self._build_review_diagnostics(
             performance=performance,
             decision_audit=decision_audit,
             symbol_review=symbol_review,
             nemesis_status=nemesis_status,
+        )
+        nemesis_learning = self._build_nemesis_learning(nemesis_status=nemesis_status)
+        runtime_fallbacks = self._build_runtime_fallbacks(
+            runtime_status=runtime_status,
+            decision_audit=decision_audit,
+        )
+        support_model_quality = self._build_support_model_quality(
+            runtime_status=runtime_status,
+            decision_audit=decision_audit,
+            runtime_fallbacks=runtime_fallbacks,
+        )
+        mutation_priors = self._build_mutation_priors(
+            diagnostics=diagnostics,
+            symbol_risk_map=symbol_risk_map,
+            nemesis_learning=nemesis_learning,
+            runtime_fallbacks=runtime_fallbacks,
         )
         recommendations = self._build_review_recommendations(diagnostics)
 
@@ -1574,16 +1963,21 @@ class AutoTradingEngine:
             ),
             "performance": self._json_safe_value(performance),
             "symbols": symbol_review,
+            "symbol_risk_map": self._json_safe_value(symbol_risk_map),
             "close_reasons": close_reasons,
             "decision_audit": self._json_safe_value(decision_audit),
             "latest_decisions": self._json_safe_value(self.latest_decisions),
             "nemesis": self._json_safe_value(nemesis_status),
+            "nemesis_learning": self._json_safe_value(nemesis_learning),
             "runtime": self._json_safe_value(runtime_status),
+            "runtime_fallbacks": self._json_safe_value(runtime_fallbacks),
+            "support_model_quality": self._json_safe_value(support_model_quality),
             "execution_mechanics": self._json_safe_value(execution_mechanics),
             "live_universe": self._json_safe_value(live_universe),
             "intraday_mutation_allowed": self._intraday_retrain_allowed,
             "intraday_promotion_allowed": self._intraday_promotion_allowed,
             "diagnostics": diagnostics,
+            "mutation_priors": self._json_safe_value(mutation_priors),
             "recommendations": recommendations,
         }
 
@@ -3235,6 +3629,10 @@ class AutoTradingEngine:
                             if self._cpu_live_mode
                             else 0.10
                         )
+                        if self._cpu_live_mode:
+                            symbol_cap = self._cpu_live_symbol_max_volumes.get(symbol.upper())
+                            if symbol_cap is not None:
+                                max_volume_cap = max(0.01, float(symbol_cap))
                         if str(decision_state.get("ensemble_mode") or "").lower() == "degraded_muzero_only":
                             # En mode degrade, on reduit la taille pour proteger la demo
                             # tant que DreamerV3 n'est pas capable de participer au vote.

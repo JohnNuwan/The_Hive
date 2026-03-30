@@ -72,6 +72,115 @@ export interface NemesisStatus {
     blocked_until: string | null
 }
 
+export interface HydraAccountSnapshot {
+    id: string
+    name: string
+    role: 'master' | 'slave' | string
+    login: number
+    broker: string
+    server: string
+    active: boolean
+    copy_enabled: boolean
+    scaling_mode: 'fixed' | 'proportional' | string
+    scaling_factor: number
+    executor_url?: string | null
+    master_source_id?: string | null
+    quarantined_until?: string | null
+    quarantine_reason?: string | null
+}
+
+export interface HydraRegistryStatus {
+    total_accounts: number
+    masters: number
+    slaves: number
+    quarantined_accounts: number
+    accounts: HydraAccountSnapshot[]
+}
+
+export interface HydraJobSnapshot {
+    id: string
+    event_id: string
+    source_account_id: string
+    target_account_id: string
+    target_login?: number | null
+    event_type: 'fill' | 'close' | string
+    status: 'pending' | 'dispatched' | 'executed' | 'failed' | 'rejected' | string
+    symbol: string
+    action: string
+    volume: number
+    source_ticket: number
+    target_ticket?: number | null
+    latency_ms?: number | null
+    scaling_mode: 'fixed' | 'proportional' | string
+    scaling_factor: number
+    error_message?: string | null
+    created_at: string
+    updated_at: string
+}
+
+export interface HydraHealthSnapshot {
+    account_id: string
+    process_alive: boolean
+    mt5_connected: boolean
+    autotrading_enabled: boolean
+    symbols_available: string[]
+    latency_ms?: number | null
+    terminal_path?: string | null
+    wineprefix?: string | null
+    updated_at: string
+}
+
+export interface HydraAggregateSummary {
+    total_jobs: number
+    executed_jobs: number
+    failed_jobs: number
+    pending_jobs: number
+    average_latency_ms?: number | null
+}
+
+export interface HydraMasterSnapshot {
+    mode?: string
+    source_account_id?: string
+    mt5_connected?: boolean
+    paper_trading?: boolean
+    login?: number | null
+    server?: string | null
+    balance?: number | null
+    equity?: number | null
+}
+
+export interface HydraMetricSnapshot {
+    account_id?: string
+    account_name?: string
+    account_login?: number
+    last_job_id?: string
+    last_status?: string
+    last_error?: string | null
+    last_latency_ms?: number | null
+    last_symbol?: string | null
+    updated_at?: string
+}
+
+export interface HydraAggregateResponse {
+    status: string
+    enabled: boolean
+    mode: string
+    master_source_id: string
+    master: HydraMasterSnapshot
+    registry: HydraRegistryStatus
+    jobs: HydraJobSnapshot[]
+    health: HydraHealthSnapshot[]
+    metrics: HydraMetricSnapshot[]
+    summary: HydraAggregateSummary
+}
+
+export interface TradingNetworkStatus {
+    vpn_mode?: string
+    wireguard_enabled?: boolean
+    private_subnet?: string | null
+    public_endpoint?: string | null
+}
+
 export interface NewsFilterStatus {
     is_active: boolean
     blocked_until: string | null
@@ -420,6 +529,8 @@ export interface TradingStatusResponse {
     live_champion_id_muzero?: string | null
     live_champion_id_dreamer?: string | null
     degraded_fallback_reason?: string | null
+    hydra?: HydraAggregateResponse | null
+    network?: TradingNetworkStatus | null
 }
 
 export async function createOrder(order: OrderRequest): Promise<OrderResponse> {
@@ -502,7 +613,13 @@ export async function getTradingStatus(): Promise<TradingStatusResponse> {
         live_champion_id_muzero: null,
         live_champion_id_dreamer: null,
         degraded_fallback_reason: null,
+        hydra: null,
+        network: null,
     })
+}
+
+export async function getHydraAggregate(): Promise<HydraAggregateResponse | null> {
+    return safeBankerFetch('/hydra/aggregate', null, 8000)
 }
 
 export interface ModelPerformanceRow {

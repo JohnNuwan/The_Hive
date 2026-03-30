@@ -4,12 +4,14 @@ import {
     checkNodeHealth,
     closePosition,
     createOrder,
+    getHydraAggregate,
     getLabChampionStatus,
     getLabTrainingStatus,
     getModelPerformance,
     getNemesisStatus,
     getTradingStatus,
     toggleAutoTrading,
+    type HydraAggregateResponse,
     type LabChampionStatus,
     type ModelPerformanceReport,
     type NemesisStatus,
@@ -19,6 +21,7 @@ import {
     type TrainingRunStatus,
 } from '../services/api'
 import ChampionStatusPanel from './trading/ChampionStatusPanel'
+import HydraStatusPanel from './trading/HydraStatusPanel'
 import LivePerformancePanel from './trading/LivePerformancePanel'
 import TradingOverviewPanel from './trading/TradingOverviewPanel'
 import TrainingRunPanel from './trading/TrainingRunPanel'
@@ -88,6 +91,7 @@ export default function TradingPanel() {
     const [bankerStatus, setBankerStatus] = useState<BankerNodeStatus>('unknown')
     const [tradingData, setTradingData] = useState<TradingStatusResponse>(DEFAULT_TRADING_STATUS)
     const [championStatus, setChampionStatus] = useState<LabChampionStatus | null>(null)
+    const [hydraStatus, setHydraStatus] = useState<HydraAggregateResponse | null>(null)
     const [modelPerformance, setModelPerformance] = useState<ModelPerformanceReport | null>(null)
     const [trainingStatus, setTrainingStatus] = useState<TrainingRunStatus | null>(null)
     const [nemesisStatus, setNemesisStatus] = useState<NemesisStatus | null>(null)
@@ -105,9 +109,10 @@ export default function TradingPanel() {
             try {
                 const bankerHealth = await checkNodeHealth('Banker', '/api/banker/health')
                 const currentStatus: BankerNodeStatus = bankerHealth.status === 'online' ? 'online' : 'offline'
-                const [tradingResp, championResp, performanceResp, trainingResp, nemesisResp] = await Promise.all([
+                const [tradingResp, championResp, hydraResp, performanceResp, trainingResp, nemesisResp] = await Promise.all([
                     currentStatus === 'online' ? getTradingStatus() : Promise.resolve(DEFAULT_TRADING_STATUS),
                     getLabChampionStatus(),
+                    currentStatus === 'online' ? getHydraAggregate() : Promise.resolve(null),
                     currentStatus === 'online' ? getModelPerformance(7, 6) : Promise.resolve(null),
                     getLabTrainingStatus(),
                     currentStatus === 'online' ? getNemesisStatus() : Promise.resolve(null),
@@ -115,6 +120,7 @@ export default function TradingPanel() {
                 setBankerStatus(currentStatus)
                 setTradingData(tradingResp)
                 setChampionStatus(championResp)
+                setHydraStatus(hydraResp)
                 setModelPerformance(performanceResp)
                 setTrainingStatus(trainingResp)
                 setNemesisStatus(nemesisResp)
@@ -164,6 +170,7 @@ export default function TradingPanel() {
     const refreshTrading = async () => {
         if (bankerStatus !== 'online') return
         setTradingData(await getTradingStatus())
+        setHydraStatus(await getHydraAggregate())
         setNemesisStatus(await getNemesisStatus())
     }
 
@@ -232,6 +239,7 @@ export default function TradingPanel() {
 
             <div className="flex flex-col gap-6 min-w-0">
                 <TrainingRunPanel trainingStatus={trainingStatus} />
+                <HydraStatusPanel hydra={hydraStatus} network={tradingData.network} />
                 <ChampionStatusPanel championStatus={championStatus} />
                 <LivePerformancePanel modelPerformance={modelPerformance} openPnl={openPnl} />
                 <UniverseSummaryPanel

@@ -459,10 +459,11 @@ def _resolve_resume_overrides(
     resolved = dict(overrides)
     resume_checkpoint_path: str | None = None
     resume_step: int | None = None
+    engine = str(state.get("engine") or "").strip().lower()
 
     resume_trial = dict(config.get("resume_trial") or {})
     if (
-        str(state.get("engine") or "").strip().lower() == "muzero"
+        engine == "muzero"
         and not bool(resume_trial.get("consumed"))
         and str(resume_trial.get("trial_id") or "").strip() == str(state.get("trial_id") or "").strip()
         and str(resume_trial.get("profile") or "").strip() == str(state.get("profile") or "").strip()
@@ -476,7 +477,7 @@ def _resolve_resume_overrides(
                 resume_trial["consumed"] = True
                 config["resume_trial"] = resume_trial
     elif (
-        str(state.get("engine") or "").strip().lower() == "muzero"
+        engine == "muzero"
         and int(state.get("retry_count") or 0) > 0
     ):
         horizon, _family = _split_profile(str(state.get("profile") or ""))
@@ -493,16 +494,70 @@ def _resolve_resume_overrides(
                 horizon,
                 max_step=search_ceiling,
             )
+    elif (
+        engine == "dreamer"
+        and not bool(resume_trial.get("consumed"))
+        and str(resume_trial.get("trial_id") or "").strip() == str(state.get("trial_id") or "").strip()
+        and str(resume_trial.get("profile") or "").strip() == str(state.get("profile") or "").strip()
+        and str(resume_trial.get("mode") or "").strip() == str(state.get("mode") or "").strip()
+    ):
+        checkpoint_candidate = Path(str(resume_trial.get("checkpoint_path") or "").strip())
+        if checkpoint_candidate.exists():
+            resume_checkpoint_path = _to_trainer_checkpoint_path(checkpoint_candidate)
+            resume_step = int(resume_trial.get("resume_step") or 0)
+            if bool(resume_trial.get("consume_once", True)):
+                resume_trial["consumed"] = True
+                config["resume_trial"] = resume_trial
+    elif engine == "dreamer":
+        resume_trial_id = str(state.get("resume_trial_id") or "").strip()
+        resume_profile = str(state.get("resume_profile") or "").strip()
+        resume_mode = str(state.get("resume_mode") or "").strip()
+        if (
+            resume_trial_id
+            and resume_trial_id != str(state.get("trial_id") or "").strip()
+        ) or (
+            resume_profile
+            and resume_profile != str(state.get("profile") or "").strip()
+        ) or (
+            resume_mode
+            and resume_mode != str(state.get("mode") or "").strip()
+        ):
+            state["resume_checkpoint_path"] = None
+            state["resume_step"] = None
+            state["resumed_from_checkpoint"] = None
+            return resolved
+        current_resume_path = str(
+            state.get("resume_checkpoint_path")
+            or state.get("resumed_from_checkpoint")
+            or ""
+        ).strip() or None
+        current_resume_step = int(state.get("resume_step") or 0)
+        if current_resume_path:
+            checkpoint_candidate = Path(current_resume_path)
+            if checkpoint_candidate.exists():
+                resume_checkpoint_path = _to_trainer_checkpoint_path(checkpoint_candidate)
+                resume_step = current_resume_step
 
-    if resume_checkpoint_path and resume_step:
+    resolved.pop("MUZERO_RESUME_CHECKPOINT_PATH", None)
+    resolved.pop("MUZERO_RESUME_STEP", None)
+    resolved.pop("DREAMER_RESUME_CHECKPOINT_PATH", None)
+    resolved.pop("DREAMER_RESUME_STEP", None)
+
+    if engine == "muzero" and resume_checkpoint_path and resume_step:
         resolved["MUZERO_RESUME_CHECKPOINT_PATH"] = resume_checkpoint_path
         resolved["MUZERO_RESUME_STEP"] = str(resume_step)
         state["resumed_from_checkpoint"] = resume_checkpoint_path
+        state["resume_checkpoint_path"] = resume_checkpoint_path
         state["resume_step"] = resume_step
+    elif engine == "dreamer" and resume_checkpoint_path:
+        resolved["DREAMER_RESUME_CHECKPOINT_PATH"] = resume_checkpoint_path
+        resolved["DREAMER_RESUME_STEP"] = str(max(0, int(resume_step or 0)))
+        state["resumed_from_checkpoint"] = resume_checkpoint_path
+        state["resume_checkpoint_path"] = resume_checkpoint_path
+        state["resume_step"] = max(0, int(resume_step or 0))
     else:
-        resolved.pop("MUZERO_RESUME_CHECKPOINT_PATH", None)
-        resolved.pop("MUZERO_RESUME_STEP", None)
         state["resumed_from_checkpoint"] = None
+        state["resume_checkpoint_path"] = None
         state["resume_step"] = None
     return resolved
 
@@ -533,8 +588,18 @@ def _read_run_snapshot() -> dict[str, Any]:
         "last_successful_step_at": payload.get("last_successful_step_at"),
         "train_step_phase": str(payload.get("train_step_phase") or "").strip() or None,
         "phase_durations_ms": dict(payload.get("phase_durations_ms") or {}),
+        "terminal_status": str(payload.get("terminal_status") or "").strip() or None,
         "resume_checkpoint_path": str(payload.get("resume_checkpoint_path") or "").strip() or None,
         "resume_step": payload.get("resume_step"),
+        "last_checkpoint_path": str(payload.get("last_checkpoint_path") or "").strip() or None,
+        "checkpoint_written_at": payload.get("checkpoint_written_at"),
+        "resume_available": bool(payload.get("resume_available")),
+        "resume_epoch": payload.get("resume_epoch"),
+        "resume_world_model_steps": payload.get("resume_world_model_steps"),
+        "slice_budget_seconds": payload.get("slice_budget_seconds"),
+        "slice_elapsed_seconds": payload.get("slice_elapsed_seconds"),
+        "battle_report_path": str(payload.get("battle_report_path") or "").strip() or None,
+        "promotion_state": str(payload.get("promotion_state") or "").strip() or None,
         "stall_detected": bool(payload.get("stall_detected")),
         "stall_reason": str(payload.get("stall_reason") or "").strip() or None,
     }
@@ -981,6 +1046,16 @@ def _record_scored_trial(
         if part
     )
     terminal_status = str(terminal_summary.get("terminal_status") or "unknown")
+    early_kill_reason = str(
+        (terminal_summary.get("gold_precheck") or {}).get("reason")
+        or (terminal_summary.get("latest_verdict") or {}).get("reason")
+        or ""
+    ).strip() or None
+    promotion_state = str(
+        terminal_summary.get("promotion_state")
+        or (terminal_summary.get("latest_verdict") or {}).get("status")
+        or ""
+    ).strip() or None
     result_entry = {
         "sequence_id": sequence_id,
         "engine": engine,
@@ -997,6 +1072,10 @@ def _record_scored_trial(
         "killed_after_precheck": killed_after_precheck,
         "failure_mode": failure_mode,
         "terminal_status": terminal_status,
+        "phase": mode,
+        "early_kill_reason": early_kill_reason,
+        "promotion_state": promotion_state,
+        "finalist_rank": generation if mode == "full" else None,
         "summary_path": terminal_summary.get("path"),
         "precheck_summary_path": ((terminal_summary.get("gold_precheck") or {}).get("path")),
         "resume_checkpoint_path": terminal_summary.get("resume_checkpoint_path"),
@@ -1035,6 +1114,10 @@ def _record_scored_trial(
         "trial_cost_profile": str(terminal_summary.get("trial_cost_profile") or ""),
         "gate_profile": str(terminal_summary.get("gate_profile") or ""),
         "params": dict(trial.get("trial_definition") or trial),
+        "phase": mode,
+        "early_kill_reason": early_kill_reason,
+        "promotion_state": promotion_state,
+        "finalist_rank": generation if mode == "full" else None,
         "fitness_score": score,
         "failure_mode": failure_mode,
         "run_id": run_id,
@@ -1067,7 +1150,7 @@ def _write_finalists(
         for item in proxy_results
         if not bool(item.get("killed_after_precheck"))
         and str(item.get("failure_mode") or "").strip() not in {"soft_hang", "infra_error"}
-        and str(item.get("terminal_status") or "").strip().lower() not in {"error", "aborted"}
+        and str(item.get("terminal_status") or "").strip().lower() == "completed"
     ]
     finalists = eligible_results[:finalist_limit]
     _write_json(
@@ -1259,6 +1342,58 @@ def _execute_window(
                 if _handle_terminal_without_summary(outcome, sequence_state, retry_limit=retry_limit):
                     continue
                 raise RuntimeError(str(sequence_state.get("last_error") or "resume_terminal_absent"))
+            terminal_status = str(terminal_summary.get("terminal_status") or "").strip().lower()
+            if terminal_status == "paused":
+                resume_checkpoint_path = str(
+                    terminal_summary.get("resume_checkpoint_path")
+                    or terminal_summary.get("last_checkpoint_path")
+                    or ""
+                ).strip() or None
+                resume_step = int(terminal_summary.get("resume_step") or 0)
+                sequence_state.update(
+                    {
+                        "state": "paused",
+                        "status": "paused",
+                        "last_run_id": outcome.get("run_id"),
+                        "last_completed_trial": raw_trial_id,
+                        "resumed_from_checkpoint": resume_checkpoint_path,
+                        "resume_checkpoint_path": resume_checkpoint_path,
+                        "resume_step": resume_step,
+                        "resume_trial_id": raw_trial_id,
+                        "resume_profile": profile,
+                        "resume_mode": mode,
+                        "last_error": None,
+                        "next_step": {
+                            "profile": profile,
+                            "engine": engine,
+                            "mode": mode,
+                            "trial_id": raw_trial_id,
+                            "resume_checkpoint_path": resume_checkpoint_path,
+                            "resume_step": resume_step,
+                        },
+                        "supervisor_heartbeat": _now_iso(),
+                    }
+                )
+                _persist_window_state(sequence_state)
+                append_training_log(
+                    (
+                        f"Sequence V4: pause propre du trial {raw_trial_id} "
+                        f"({engine}/{mode}), reprise via checkpoint."
+                    ),
+                    level="WARNING",
+                    source="sequence",
+                )
+                return {
+                    "profile": profile,
+                    "engine": engine,
+                    "mode": mode,
+                    "status": "paused",
+                    "proxy_ready": False,
+                    "failure_mode": None,
+                    "terminal_status": "paused",
+                    "resume_checkpoint_path": resume_checkpoint_path,
+                    "resume_step": resume_step,
+                }
 
             result_entry = _record_scored_trial(
                 sequence_id=sequence_id,
@@ -1284,6 +1419,12 @@ def _execute_window(
                     "retry_reason": None,
                     "supervisor_heartbeat": _now_iso(),
                     "last_error": None,
+                    "resume_trial_id": None,
+                    "resume_profile": None,
+                    "resume_mode": None,
+                    "resume_checkpoint_path": None,
+                    "resumed_from_checkpoint": None,
+                    "resume_step": None,
                 }
             )
             _persist_window_state(sequence_state)
@@ -1506,6 +1647,16 @@ def _run_sequence(config: dict[str, Any]) -> None:
                     mode=mode,
                     window_index=window_index,
                 )
+                if str(window_result.get("status") or "").strip().lower() == "paused":
+                    append_training_log(
+                        (
+                            f"Sequence V4: mise en pause apres {engine}/{mode} "
+                            f"pour reprise ulterieure."
+                        ),
+                        level="WARNING",
+                        source="sequence",
+                    )
+                    return
                 if mode == "smoke":
                     smoke_results[smoke_key] = bool(window_result.get("proxy_ready"))
                 continue
@@ -1553,6 +1704,16 @@ def _run_sequence(config: dict[str, Any]) -> None:
                 mode=mode,
                 window_index=window_index,
             )
+            if str(state.get("status") or "").strip().lower() == "paused":
+                append_training_log(
+                    (
+                        f"Sequence V4: mise en pause apres {engine}/{mode} "
+                        f"pour reprise ulterieure."
+                    ),
+                    level="WARNING",
+                    source="sequence",
+                )
+                return
 
     state["state"] = "completed"
     state["status"] = "completed"
