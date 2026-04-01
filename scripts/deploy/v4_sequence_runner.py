@@ -49,6 +49,10 @@ LOCK_PATH = ROOT / "data" / "checkpoints" / "nightly_training.lock"
 LOCK_DIR = ROOT / "data" / "checkpoints" / "nightly_training.lock.d"
 MUZERO_WEIGHTS_DIR = ROOT / "data" / "muzero" / "weights"
 DEFAULT_STALL_TIMEOUT_SECONDS = max(60, int(os.getenv("TRAINING_STALL_TIMEOUT_SECONDS", "600")))
+TERMINAL_SUMMARY_GRACE_SECONDS = max(
+    15,
+    int(os.getenv("TRAINING_TERMINAL_SUMMARY_GRACE_SECONDS", "90")),
+)
 SOFT_HANG_FAILURE_MODE = "soft_hang"
 
 
@@ -602,7 +606,156 @@ def _read_run_snapshot() -> dict[str, Any]:
         "promotion_state": str(payload.get("promotion_state") or "").strip() or None,
         "stall_detected": bool(payload.get("stall_detected")),
         "stall_reason": str(payload.get("stall_reason") or "").strip() or None,
+        "updated_at": payload.get("updated_at"),
     }
+
+
+def _snapshot_matches_window(
+    snapshot: dict[str, Any],
+    *,
+    window_id: str,
+    sequence_id: str | None,
+    trial_id: str | None,
+) -> bool:
+    """Verifie qu'un snapshot training appartient a la fenetre attendue.
+
+    Args:
+        snapshot (dict[str, Any]): Snapshot courant ou terminal a controler.
+        window_id (str): Identifiant de fenetre attendu.
+        sequence_id (str | None): Identifiant de sequence attendu.
+        trial_id (str | None): Identifiant de trial attendu.
+
+    Returns:
+        bool: ``True`` si le snapshot est coherent avec la fenetre attendue.
+    """
+
+    if str(snapshot.get("window_id") or "").strip() != window_id:
+        return False
+    expected_sequence_id = str(sequence_id or "").strip()
+    if expected_sequence_id:
+        observed_sequence_id = str(snapshot.get("sequence_id") or "").strip()
+        if observed_sequence_id and observed_sequence_id != expected_sequence_id:
+            return False
+    expected_trial_id = str(trial_id or "").strip()
+    if expected_trial_id:
+        observed_trial_id = str(snapshot.get("trial_id") or "").strip()
+        if observed_trial_id and observed_trial_id != expected_trial_id:
+            return False
+    return True
+
+
+def _summary_matches_expected(
+    summary: dict[str, Any] | None,
+    *,
+    run_id: str | None,
+    window_id: str,
+    sequence_id: str | None,
+    trial_id: str | None,
+) -> bool:
+    """Verifie qu'un resume terminal correspond a la fenetre attendue.
+
+    Args:
+        summary (dict[str, Any] | None): Resume terminal candidat.
+        run_id (str | None): Run attendu si connu.
+        window_id (str): Fenetre attendue.
+        sequence_id (str | None): Sequence attendue.
+        trial_id (str | None): Trial attendu.
+
+    Returns:
+        bool: ``True`` si le resume peut etre score sans risque de stale.
+    """
+
+    if not isinstance(summary, dict) or not summary:
+        return False
+    expected_run_id = str(run_id or "").strip()
+    if expected_run_id:
+        observed_run_id = str(summary.get("run_id") or "").strip()
+        if observed_run_id and observed_run_id != expected_run_id:
+            return False
+    if str(summary.get("window_id") or "").strip() != window_id:
+        return False
+    expected_sequence_id = str(sequence_id or "").strip()
+    if expected_sequence_id:
+        observed_sequence_id = str(summary.get("sequence_id") or "").strip()
+        if observed_sequence_id and observed_sequence_id != expected_sequence_id:
+            return False
+    expected_trial_id = str(trial_id or "").strip()
+    if expected_trial_id:
+        observed_trial_id = (
+            str(summary.get("trial_id") or "").strip()
+            or str(summary.get("ga_trial") or "").strip()
+        )
+        if observed_trial_id and observed_trial_id != expected_trial_id:
+            return False
+    return True
+
+
+def _wait_for_matching_terminal_summary(
+    *,
+    run_id: str | None,
+    initial_summary_path: str | None,
+    state: dict[str, Any],
+    grace_seconds: int = TERMINAL_SUMMARY_GRACE_SECONDS,
+    poll_seconds: int = 5,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Attend un resume terminal coherent avec la fenetre courante.
+
+    Args:
+        run_id (str | None): Run attendu si deja observe.
+        initial_summary_path (str | None): Chemin de resume deja connu.
+        state (dict[str, Any]): Etat sequence de la fenetre.
+        grace_seconds (int): Delai d'attente maximal.
+        poll_seconds (int): Frequence de polling.
+
+    Returns:
+        tuple[dict[str, Any] | None, str | None]: Resume valide et chemin retenu.
+    """
+
+    window_id = str(state.get("window_id") or "").strip()
+    sequence_id = str(state.get("sequence_id") or "").strip() or None
+    trial_id = str(state.get("trial_id") or "").strip() or None
+    deadline = time.time() + max(5, grace_seconds)
+    summary_path = str(initial_summary_path or "").strip() or None
+
+    while True:
+        if summary_path:
+            summary = load_terminal_summary(path=summary_path)
+            if _summary_matches_expected(
+                summary,
+                run_id=run_id,
+                window_id=window_id,
+                sequence_id=sequence_id,
+                trial_id=trial_id,
+            ):
+                return dict(summary), summary_path
+        if run_id:
+            summary = load_terminal_summary(run_id=str(run_id))
+            if _summary_matches_expected(
+                summary,
+                run_id=run_id,
+                window_id=window_id,
+                sequence_id=sequence_id,
+                trial_id=trial_id,
+            ):
+                resolved_path = str((summary or {}).get("path") or summary_path or "").strip() or None
+                return dict(summary), resolved_path
+        if time.time() >= deadline:
+            return None, summary_path
+        run_snapshot = _read_run_snapshot()
+        if _snapshot_matches_window(
+            run_snapshot,
+            window_id=window_id,
+            sequence_id=sequence_id,
+            trial_id=trial_id,
+        ):
+            candidate_path = str(run_snapshot.get("terminal_summary_path") or "").strip() or None
+            if candidate_path:
+                summary_path = candidate_path
+            if not run_id:
+                candidate_run_id = str(run_snapshot.get("run_id") or "").strip() or None
+                if candidate_run_id:
+                    run_id = candidate_run_id
+        time.sleep(max(1, poll_seconds))
 
 
 def _interrupt_active_run(
@@ -923,6 +1076,9 @@ def _run_trial(
     """Execute ou rattache un trial V4 puis retourne son etat terminal."""
 
     window_id = str(state.get("window_id") or "")
+    expected_sequence_id = str(state.get("sequence_id") or "").strip() or None
+    expected_trial_id = str(state.get("trial_id") or "").strip() or None
+    previous_run_id = str(state.get("last_run_id") or "").strip() or None
     run_snapshot = _read_run_snapshot()
     synthetic_summary: dict[str, Any] | None = None
     if run_snapshot.get("active") and run_snapshot.get("window_id") == window_id:
@@ -964,15 +1120,41 @@ def _run_trial(
             stall_timeout_seconds=stall_timeout_seconds,
         )
 
-    run_id = final_snapshot.get("run_id") or state.get("last_run_id")
+    snapshot_matches_window = _snapshot_matches_window(
+        final_snapshot,
+        window_id=window_id,
+        sequence_id=expected_sequence_id,
+        trial_id=expected_trial_id,
+    )
+    observed_run_id = str(state.get("last_run_id") or "").strip() or None
+    run_id = (
+        str(final_snapshot.get("run_id") or "").strip() or None
+        if snapshot_matches_window
+        else None
+    )
+    if run_id is None and observed_run_id and observed_run_id != previous_run_id:
+        run_id = observed_run_id
     summary = None
-    summary_path = str(final_snapshot.get("terminal_summary_path") or "").strip() or None
+    summary_path = (
+        str(final_snapshot.get("terminal_summary_path") or "").strip() or None
+        if snapshot_matches_window
+        else None
+    )
     if synthetic_summary is not None:
         summary = synthetic_summary
-    if summary_path:
-        summary = load_terminal_summary(path=summary_path)
-    if summary is None and run_id:
-        summary = load_terminal_summary(run_id=str(run_id))
+    if summary is None:
+        summary, summary_path = _wait_for_matching_terminal_summary(
+            run_id=run_id,
+            initial_summary_path=summary_path,
+            state=state,
+        )
+    if summary is None and run_id is None:
+        final_snapshot = dict(final_snapshot)
+        final_snapshot["status"] = "aborted"
+        final_snapshot["reason"] = (
+            str(final_snapshot.get("reason") or "").strip()
+            or "aucun_run_associe_a_la_fenetre_supervisee"
+        )
 
     return {
         "run_id": run_id,
@@ -995,16 +1177,18 @@ def _handle_terminal_without_summary(
 
     terminal_status = str(outcome.get("status") or "unknown")
     retry_count = int(state.get("retry_count") or 0)
-    if terminal_status == "aborted" and retry_count < retry_limit:
+    if terminal_status != "paused" and retry_count < retry_limit:
         state["retry_count"] = retry_count + 1
         state["restart_count"] = int(state.get("restart_count") or 0) + 1
         state["status"] = "retrying"
-        state["retry_reason"] = str(outcome.get("reason") or "resume_terminal_absent_apres_aborted")
+        state["retry_reason"] = str(
+            outcome.get("reason") or f"resume_terminal_absent_apres_{terminal_status}"
+        )
         state["last_error"] = state["retry_reason"]
         _persist_window_state(state)
         append_training_log(
             (
-                f"Sequence V4: retry du trial {state.get('trial_id')} apres aborted "
+                f"Sequence V4: retry du trial {state.get('trial_id')} apres {terminal_status} "
                 f"sans resume terminal ({state['retry_reason']})."
             ),
             level="WARNING",
@@ -1228,7 +1412,7 @@ def _execute_window(
     completed_trial_ids = {
         str(item.get("trial_id") or "").strip()
         for item in completed_entries
-        if item.get("trial_id")
+        if item.get("trial_id") and str(item.get("sequence_id") or "").strip() == sequence_id
     }
 
     if mode in {"proxy_ga", "smoke"}:
@@ -1296,6 +1480,7 @@ def _execute_window(
                 "window_id": window_id,
                 "window_index": window_index,
                 "status": "running",
+                "last_run_id": None,
                 "retry_count": 0,
                 "started_at": sequence_state.get("started_at") or _now_iso(),
                 "next_step": None,

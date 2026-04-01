@@ -605,6 +605,76 @@ class ChampionPromoter:
 
         return self.evaluate_promotion_gate(None, gate_profile=gate_profile)
 
+    @staticmethod
+    def _has_battle_report(
+        manifest: dict[str, Any] | None,
+        arena_report: dict[str, Any] | None,
+    ) -> bool:
+        """Indique si un rapport d'arena exploitable est disponible.
+
+        Args:
+            manifest (dict[str, Any] | None): Manifeste courant.
+            arena_report (dict[str, Any] | None): Rapport d'arena courant.
+
+        Returns:
+            bool: `True` si un `battle_report` est present.
+        """
+
+        manifest_battle = dict((manifest or {}).get("battle_report") or {})
+        arena_battle = dict((arena_report or {}).get("battle_report") or {})
+        return bool(manifest_battle or arena_battle)
+
+    def _enforce_dreamer_live_guard(
+        self,
+        engine: str,
+        manifest: dict[str, Any] | None,
+        arena_report: dict[str, Any] | None,
+        promotion_gate: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Bloque Dreamer live tant qu'un vrai battle report manque.
+
+        Args:
+            engine (str): Moteur evalue.
+            manifest (dict[str, Any] | None): Manifeste courant.
+            arena_report (dict[str, Any] | None): Rapport d'arena courant.
+            promotion_gate (dict[str, Any] | None): Gate calculee.
+
+        Returns:
+            dict[str, Any]: Gate potentiellement forcee en mode bloque.
+        """
+
+        normalized_engine = self.normalize_engine_name(engine)
+        gated = dict(promotion_gate or {})
+        live_lock = {
+            "active": False,
+            "scope": "live_activation",
+            "reason": None,
+            "required_artifacts": ["battle_report"],
+            "satisfied": True,
+        }
+        if normalized_engine != "dreamer":
+            return gated
+        if self._has_battle_report(manifest, arena_report):
+            gated["live_lock"] = live_lock
+            return gated
+        live_lock.update(
+            {
+                "active": True,
+                "reason": "missing_battle_report",
+                "satisfied": False,
+            }
+        )
+        gated.update(
+            {
+                "allowed": False,
+                "status": "blocked",
+                "reason": "missing_battle_report",
+                "failure_mode": gated.get("failure_mode") or "missing_battle_report",
+                "live_lock": live_lock,
+            }
+        )
+        return gated
+
     def load_manifest(self, horizon: str, engine: str = "muzero") -> dict[str, Any] | None:
         """Charge le manifeste d'un champion si disponible.
 
@@ -1052,9 +1122,15 @@ class ChampionPromoter:
                 or None
             )
 
-        promotion_gate = live_meta.get("promotion_gate") or self.resolve_promotion_gate(
+        promotion_gate = self._enforce_dreamer_live_guard(
+            normalized_engine,
             manifest,
             arena_report,
+            live_meta.get("promotion_gate")
+            or self.resolve_promotion_gate(
+                manifest,
+                arena_report,
+            ),
         )
         live_universe = self.build_live_universe(horizon, engine=normalized_engine)
         candidate_metrics = (
@@ -1108,6 +1184,15 @@ class ChampionPromoter:
             promotion_state = "candidate_only"
         else:
             promotion_state = "none"
+        live_lock = dict(promotion_gate.get("live_lock") or {})
+        if normalized_engine != "dreamer":
+            live_lock = {
+                "active": False,
+                "scope": "live_activation",
+                "reason": None,
+                "required_artifacts": [],
+                "satisfied": True,
+            }
 
         return {
             "engine": normalized_engine,
@@ -1140,6 +1225,7 @@ class ChampionPromoter:
             "gate_reason": promotion_gate.get("reason"),
             "failure_mode": promotion_gate.get("failure_mode") or terminal_summary.get("failure_mode"),
             "promotion_gate": promotion_gate,
+            "live_lock": live_lock,
             "promotion_checks": promotion_gate.get("checks", {}),
             "promotion_thresholds": promotion_gate.get("thresholds", {}),
             "candidate_metrics": candidate_metrics,
@@ -1549,7 +1635,12 @@ class ChampionPromoter:
         )
         manifest = self.load_manifest(horizon, engine=normalized_engine) or {}
         arena_report = self.load_arena_report(horizon, engine=normalized_engine)
-        promotion_gate = self.resolve_promotion_gate(manifest, arena_report)
+        promotion_gate = self._enforce_dreamer_live_guard(
+            normalized_engine,
+            manifest,
+            arena_report,
+            self.resolve_promotion_gate(manifest, arena_report),
+        )
         champion_path = self.get_champion_path(horizon, engine=normalized_engine)
         legacy_champion = self.weights_dir / "muzero_champion.pkl"
         latest_path = self.get_latest_model_path(horizon, engine=normalized_engine)

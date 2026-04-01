@@ -275,6 +275,133 @@ def persist_sequence_state(state: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
+_FINAL_TRAINING_STATES = {"completed", "paused", "blocked", "error", "ok", "skipped"}
+_FINAL_SEQUENCE_STATES = {"completed", "paused", "idle", "blocked", "error"}
+
+
+def _normalize_runtime_state_label(value: Any) -> str | None:
+    """Normalise un libelle de statut pour les heuristiques runtime.
+
+    Args:
+        value (Any): Valeur brute a normaliser.
+
+    Returns:
+        str | None: Libelle minuscule normalise ou ``None`` si absent.
+    """
+
+    label = str(value or "").strip().lower()
+    return label or None
+
+
+def normalize_runtime_training_status(
+    status: dict[str, Any] | None,
+    *,
+    sequence_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Normalise un statut training potentiellement stale pour l'API runtime.
+
+    Cette normalisation ne touche pas automatiquement le fichier sur disque.
+    Elle sert a presenter une vue fiable quand un ancien run a laisse
+    ``active=true`` alors que le terminal et le superviseur sont deja termines.
+
+    Args:
+        status (dict[str, Any] | None): Statut training brut.
+        sequence_state (dict[str, Any] | None): Etat du superviseur V4 deja charge.
+
+    Returns:
+        dict[str, Any]: Statut normalise, enrichi de marqueurs runtime.
+    """
+
+    snapshot = _default_status()
+    snapshot.update(status or {})
+
+    merged_sequence = _default_sequence_state()
+    merged_sequence.update(sequence_state or load_sequence_state())
+    sequence_label = _normalize_runtime_state_label(
+        snapshot.get("supervisor_state") or merged_sequence.get("state")
+    )
+    if sequence_label:
+        snapshot["supervisor_state"] = sequence_label
+
+    status_label = _normalize_runtime_state_label(snapshot.get("status"))
+    terminal_label = _normalize_runtime_state_label(snapshot.get("terminal_status"))
+    current_step = dict(snapshot.get("current_step") or {})
+    current_step_label = _normalize_runtime_state_label(current_step.get("status"))
+    stale_reasons: list[str] = []
+    resolved_final = None
+
+    if bool(snapshot.get("active")):
+        if terminal_label in _FINAL_TRAINING_STATES:
+            stale_reasons.append("terminal_status_final")
+            resolved_final = terminal_label
+        elif status_label in _FINAL_TRAINING_STATES and snapshot.get("finished_at"):
+            stale_reasons.append("status_final")
+            resolved_final = status_label
+        elif sequence_label in _FINAL_SEQUENCE_STATES and snapshot.get("finished_at"):
+            stale_reasons.append("supervisor_final")
+            resolved_final = terminal_label or status_label or current_step_label or "completed"
+
+    if stale_reasons:
+        resolved_status = "completed" if resolved_final == "ok" else (resolved_final or "completed")
+        snapshot["active"] = False
+        snapshot["status"] = resolved_status
+        if current_step and current_step_label == "running":
+            current_step["status"] = resolved_status
+            current_step["updated_at"] = _now_iso()
+            snapshot["current_step"] = current_step
+        if not snapshot.get("terminal_status"):
+            snapshot["terminal_status"] = resolved_status
+
+    snapshot["stale_detected"] = bool(stale_reasons)
+    snapshot["stale_reasons"] = stale_reasons
+    return snapshot
+
+
+def _strip_runtime_training_markers(status: dict[str, Any]) -> dict[str, Any]:
+    """Retire les marqueurs temporaires avant persistence.
+
+    Args:
+        status (dict[str, Any]): Statut runtime enrichi.
+
+    Returns:
+        dict[str, Any]: Charge utile persistable.
+    """
+
+    payload = dict(status)
+    payload.pop("stale_detected", None)
+    payload.pop("stale_reasons", None)
+    return payload
+
+
+def load_effective_training_status(
+    *,
+    clean_stale: bool = False,
+    sequence_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Charge le statut training avec normalisation runtime optionnelle.
+
+    Args:
+        clean_stale (bool): Persiste la correction si un stale est detecte.
+        sequence_state (dict[str, Any] | None): Etat du superviseur deja charge.
+
+    Returns:
+        dict[str, Any]: Statut normalise exploitable par l'API.
+    """
+
+    merged_sequence = _default_sequence_state()
+    merged_sequence.update(sequence_state or load_sequence_state())
+    normalized = normalize_runtime_training_status(
+        load_training_status(),
+        sequence_state=merged_sequence,
+    )
+    if clean_stale and normalized.get("stale_detected"):
+        persisted = persist_training_status(_strip_runtime_training_markers(normalized))
+        persisted["stale_detected"] = True
+        persisted["stale_reasons"] = list(normalized.get("stale_reasons") or [])
+        return persisted
+    return normalized
+
+
 def merge_sequence_state(patch: dict[str, Any]) -> dict[str, Any]:
     """Fusionne un patch simple dans l'etat du superviseur V4."""
 

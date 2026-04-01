@@ -53,6 +53,7 @@ from eva_lab.training_status import (
     classify_training_symbol,
     derive_observed_training_step,
     format_training_step_label,
+    load_effective_training_status,
     load_latest_terminal_summary,
     load_nightly_summary,
     load_cpu_scheduler_state,
@@ -170,7 +171,7 @@ def _resolve_runtime_profile(run_status: dict[str, Any] | None = None) -> str:
     forced = str(os.getenv("LAB_RUNTIME_PROFILE", "")).strip().lower()
     if forced in {"day_live_full_stack", "night_research_training"}:
         return forced
-    current_run = dict(run_status or load_training_status())
+    current_run = dict(run_status or load_effective_training_status())
     return "night_research_training" if bool(current_run.get("active")) else "day_live_full_stack"
 
 
@@ -294,6 +295,13 @@ def _estimate_training_eta(run_view: dict[str, Any]) -> dict[str, Any]:
         dict[str, Any]: Progression relative et ETA si calculable.
     """
 
+    if not bool(run_view.get("active")):
+        return {
+            "progress_percent": None,
+            "remaining_steps": None,
+            "eta_seconds": None,
+            "eta_at": None,
+        }
     current_step = dict(run_view.get("current_step") or {})
     current = int(_to_float(current_step.get("training_step_current")))
     total = int(_to_float(current_step.get("training_step_total")))
@@ -1486,8 +1494,8 @@ async def dreamer_status():
     gate: DreamerGate = app.state.dreamer_gate
     promoter: ChampionPromoter = app.state.promoter
     horizons = ["scalp", "intraday", "swing"]
-    training_run = load_training_status()
     sequence_state = load_sequence_state()
+    training_run = load_effective_training_status(clean_stale=True, sequence_state=sequence_state)
     active_run = training_run if str(training_run.get("engine") or "").lower() == "dreamer" else {}
     latest_summary = load_latest_terminal_summary(engine="dreamer")
     pipeline = {
@@ -1579,10 +1587,13 @@ async def dreamer_status():
                 "reason": horizon_status.get("gate_reason"),
                 "failure_mode": horizon_status.get("failure_mode"),
             }
+    primary_live_lock = dict((engine_horizons.get("scalp") or {}).get("live_lock") or {})
     return {
         **gate.get_status(),
         "pipeline": pipeline,
         "horizons": engine_horizons,
+        "live_lock": primary_live_lock,
+        "live_lock_reason": primary_live_lock.get("reason"),
         "latest_run_id": latest_run_id,
         "latest_candidate": latest_candidate,
         "latest_verdict": latest_verdict,
@@ -1777,17 +1788,21 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
     Returns:
         dict: Progression courante, dependances et resume d'univers.
     """
-    run_status = load_training_status()
-    nightly_summary = load_nightly_summary()
     sequence_state = load_sequence_state()
+    run_status = load_effective_training_status(clean_stale=True, sequence_state=sequence_state)
+    nightly_summary = load_nightly_summary()
     universe_summary = run_status.get("universe") or build_training_universe_summary()
     dependencies = await _collect_training_dependencies(run_status)
     logs = tail_training_log(limit)
 
     current_step = run_status.get("current_step") or {}
     arena_progress = run_status.get("arena_progress") or None
-    observed_step = derive_observed_training_step(logs)
-    effective_step = select_effective_training_step(current_step, observed_step)
+    observed_step = derive_observed_training_step(logs) if run_status.get("active") else None
+    effective_step = (
+        select_effective_training_step(current_step, observed_step)
+        if run_status.get("active")
+        else current_step
+    )
     run_view = dict(run_status)
     run_view["current_step"] = effective_step
     run_view["arena_progress"] = arena_progress
@@ -1797,7 +1812,7 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
     run_view["step_label"] = format_training_step_label(effective_step)
     run_view["reported_step_label"] = format_training_step_label(current_step)
     run_view["observed_step_label"] = format_training_step_label(observed_step)
-    run_view["has_active_run"] = bool(run_status.get("active"))
+    run_view["has_active_run"] = bool(run_view.get("active"))
     run_view["supervisor_state"] = sequence_state.get("state")
     if arena_progress and isinstance(arena_progress, dict):
         challenger_metrics = dict((arena_progress.get("challenger") or {}).get("metrics") or {})
@@ -1847,6 +1862,8 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         "promotion_state": run_view.get("promotion_state"),
         "stall_detected": run_view.get("stall_detected"),
         "stall_reason": run_view.get("stall_reason"),
+        "stale_detected": run_view.get("stale_detected"),
+        "stale_reasons": run_view.get("stale_reasons"),
         "progress_percent": eta_payload.get("progress_percent"),
         "remaining_steps": eta_payload.get("remaining_steps"),
         "eta_seconds": eta_payload.get("eta_seconds"),
@@ -1898,7 +1915,8 @@ async def ga_status(limit: int = Query(default=40, ge=1, le=200)):
         dict: Vue agregée des essais, de la generation et du run courant.
     """
 
-    run_status = load_training_status()
+    sequence_state = load_sequence_state()
+    run_status = load_effective_training_status(clean_stale=True, sequence_state=sequence_state)
     runtime_profile = _resolve_runtime_profile(run_status)
     current_run = dict(run_status)
     recent_trials = load_recent_ga_trials(limit=limit)
@@ -1906,6 +1924,7 @@ async def ga_status(limit: int = Query(default=40, ge=1, le=200)):
     active_generation = current_run.get("ga_generation")
     active_trial = current_run.get("ga_trial")
     eta_payload = _estimate_training_eta(current_run)
+    current_phase = ((current_run.get("current_step") or {}).get("phase")) if current_run.get("active") else None
     return {
         "status": "ok",
         "runtime_profile": runtime_profile,
@@ -1917,11 +1936,13 @@ async def ga_status(limit: int = Query(default=40, ge=1, le=200)):
         "trial_cost_profile": current_run.get("trial_cost_profile"),
         "run_id": current_run.get("run_id"),
         "active": bool(current_run.get("active")),
-        "current_phase": ((current_run.get("current_step") or {}).get("phase")),
+        "stale_detected": bool(current_run.get("stale_detected")),
+        "stale_reasons": list(current_run.get("stale_reasons") or []),
+        "current_phase": current_phase,
         "current_trial": {
             "generation": active_generation,
             "trial_id": active_trial,
-            "phase": ((current_run.get("current_step") or {}).get("phase")),
+            "phase": current_phase,
             "early_kill_reason": (
                 str((current_run.get("gold_precheck") or {}).get("reason") or "").strip() or None
             ),
@@ -1960,12 +1981,17 @@ async def factory_overview():
     registry_champions = genetic.get_all_champions()
     horizons = ["scalp", "intraday", "swing"]
     engine_status = promoter.build_engine_matrix_status(horizons, registry_champions)
-    training_state = load_training_status()
-    observed_step = derive_observed_training_step(tail_training_log(60))
+    sequence_state = load_sequence_state()
+    training_state = load_effective_training_status(clean_stale=True, sequence_state=sequence_state)
+    observed_step = derive_observed_training_step(tail_training_log(60)) if training_state.get("active") else None
     run_view = dict(training_state)
-    run_view["current_step"] = select_effective_training_step(
-        run_view.get("current_step") or {},
-        observed_step,
+    run_view["current_step"] = (
+        select_effective_training_step(
+            run_view.get("current_step") or {},
+            observed_step,
+        )
+        if training_state.get("active")
+        else (run_view.get("current_step") or {})
     )
     eta_payload = _estimate_training_eta(run_view)
     gnn_registry = load_market_gnn_registry()
@@ -2023,7 +2049,7 @@ async def factory_overview():
             "run_id": run_view.get("run_id"),
             "engine": run_view.get("engine"),
             "trigger": run_view.get("trigger"),
-            "phase": ((run_view.get("current_step") or {}).get("phase")),
+            "phase": ((run_view.get("current_step") or {}).get("phase")) if run_view.get("active") else None,
             "status": run_view.get("status"),
             "progress_percent": eta_payload.get("progress_percent"),
             "remaining_steps": eta_payload.get("remaining_steps"),
@@ -2258,6 +2284,8 @@ async def live_universe(
     promoter: ChampionPromoter = app.state.promoter
     normalized_horizon = str(horizon or "intraday").lower()
     normalized_engine = promoter.normalize_engine_name(engine)
+    run_status = load_training_status()
+    runtime_profile = _resolve_runtime_profile(run_status)
     status = promoter.build_engine_horizon_status(normalized_engine, normalized_horizon)
     engine_matrix = promoter.build_engine_matrix_status([normalized_horizon], {})
     live_champions_by_engine = {
@@ -2275,6 +2303,7 @@ async def live_universe(
     }
     return {
         "status": "ok",
+        "runtime_profile": runtime_profile,
         "engine": normalized_engine,
         "horizon": normalized_horizon,
         "family": status.get("family"),

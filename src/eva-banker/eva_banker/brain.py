@@ -727,6 +727,10 @@ class AutoTradingEngine:
 
                     payload = await response.json()
                     live_universe = payload.get("live_universe", {}) or {}
+                    remote_runtime_profile = str(payload.get("runtime_profile") or "").strip().lower()
+                    if remote_runtime_profile in {"day_live_full_stack", "night_research_training"}:
+                        # Le Lab est la source de verite pour l'alternance jour/nuit.
+                        self._runtime_profile = remote_runtime_profile
                     symbols = [
                         str(symbol).strip()
                         for symbol in (live_universe.get("symbols", []) or [])

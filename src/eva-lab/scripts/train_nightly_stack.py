@@ -29,6 +29,16 @@ WORKDIR = Path(__file__).resolve().parents[1]
 SUMMARY_PATH = WORKDIR / "data" / "checkpoints" / "nightly_training_summary.json"
 LOCK_PATH = WORKDIR / "data" / "checkpoints" / "nightly_training.lock"
 SHADOW_DIR = WORKDIR / "data" / "shadow_learning"
+CANONICAL_TIMESCALE_SYMBOLS = [
+    "EURUSD",
+    "XAUUSD",
+    "GBPUSD",
+    "USDJPY",
+    "US30.cash",
+    "GER40.cash",
+    "US500.cash",
+]
+CANONICAL_GNN_TIMEFRAMES = ["M5", "H1", "D1"]
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -296,6 +306,16 @@ def _resolve_horizons() -> list[str]:
     ]
 
 
+def _canonical_symbols_csv() -> str:
+    """Retourne l'univers nightly canonique au format CSV.
+
+    Returns:
+        str: Liste CSV stable des symboles nightly.
+    """
+
+    return ",".join(CANONICAL_TIMESCALE_SYMBOLS)
+
+
 def _build_champion_snapshot(promoter: ChampionPromoter, horizons: list[str]) -> dict[str, object]:
     """Assemble l'etat des champions par horizon.
 
@@ -441,9 +461,10 @@ def apply_training_strategy(decision: dict[str, object]) -> None:
         decision (dict[str, object]): Strategie issue de `decide_training_strategy`.
     """
     strategy = str(decision.get("strategy", "research")).lower()
+    canonical_symbols_csv = _canonical_symbols_csv()
     if strategy == "research":
         _set_env_default("TRAINING_PROFILE", "research")
-        _set_env_default("RUN_TRAIN_GNN", "0")
+        _set_env_default("RUN_TRAIN_GNN", "1")
         _set_env_default("RUN_TRAIN_MUZERO", "1")
         _set_env_default("RUN_TRAIN_DREAMER", "0")
         _set_env_default("MUZERO_TRAINING_STEPS", "32000")
@@ -451,13 +472,27 @@ def apply_training_strategy(decision: dict[str, object]) -> None:
         _set_env_default("ARENA_GAMES_PER_SYMBOL", "8")
         _set_env_default("ARENA_MIN_GAMES", "24")
         _set_env_default("ARENA_MIN_SYMBOLS", "6")
-        _set_env_default("MUZERO_MAX_SYMBOLS", "0")
-        _set_env_default("ARENA_MAX_SYMBOLS", "0")
+        _set_env_default("MUZERO_MAX_SYMBOLS", str(len(CANONICAL_TIMESCALE_SYMBOLS)))
+        _set_env_default("ARENA_MAX_SYMBOLS", str(len(CANONICAL_TIMESCALE_SYMBOLS)))
+        _set_env_default("MUZERO_DATASET_SOURCE", "timescaledb")
+        _set_env_default("TRAINING_TIMESCALE_ENABLED", "1")
+        _set_env_default("TRAINING_FOCUS_SYMBOLS", canonical_symbols_csv)
+        _set_env_default("MUZERO_SYMBOLS", canonical_symbols_csv)
+        _set_env_default("ARENA_SYMBOLS", canonical_symbols_csv)
+        _set_env_default("MUZERO_SYMBOLS_SCALP", canonical_symbols_csv)
+        _set_env_default("MUZERO_SYMBOLS_INTRADAY", canonical_symbols_csv)
+        _set_env_default("MUZERO_SYMBOLS_SWING", canonical_symbols_csv)
+        _set_env_default("ARENA_SYMBOLS_SCALP", canonical_symbols_csv)
+        _set_env_default("ARENA_SYMBOLS_INTRADAY", canonical_symbols_csv)
+        _set_env_default("ARENA_SYMBOLS_SWING", canonical_symbols_csv)
+        _set_env_default("TRAIN_GNN_SYMBOLS", canonical_symbols_csv)
+        _set_env_default("TRAIN_GNN_CONTEXT_SYMBOLS", canonical_symbols_csv)
+        _set_env_default("TRAIN_GNN_MAX_SYMBOLS", str(len(CANONICAL_TIMESCALE_SYMBOLS)))
         return
 
     if strategy == "refresh":
         _set_env_default("TRAINING_PROFILE", "refresh")
-        _set_env_default("RUN_TRAIN_GNN", "0")
+        _set_env_default("RUN_TRAIN_GNN", "1")
         _set_env_default("RUN_TRAIN_MUZERO", "1")
         _set_env_default("RUN_TRAIN_DREAMER", "0")
         _set_env_default("MUZERO_TRAINING_STEPS", "8000")
@@ -465,8 +500,150 @@ def apply_training_strategy(decision: dict[str, object]) -> None:
         _set_env_default("ARENA_GAMES_PER_SYMBOL", "4")
         _set_env_default("ARENA_MIN_GAMES", "12")
         _set_env_default("ARENA_MIN_SYMBOLS", "3")
-        _set_env_default("MUZERO_MAX_SYMBOLS", "6")
-        _set_env_default("ARENA_MAX_SYMBOLS", "6")
+        _set_env_default("MUZERO_MAX_SYMBOLS", str(len(CANONICAL_TIMESCALE_SYMBOLS)))
+        _set_env_default("ARENA_MAX_SYMBOLS", str(len(CANONICAL_TIMESCALE_SYMBOLS)))
+        _set_env_default("MUZERO_DATASET_SOURCE", "timescaledb")
+        _set_env_default("TRAINING_TIMESCALE_ENABLED", "1")
+        _set_env_default("TRAINING_FOCUS_SYMBOLS", canonical_symbols_csv)
+        _set_env_default("MUZERO_SYMBOLS", canonical_symbols_csv)
+        _set_env_default("ARENA_SYMBOLS", canonical_symbols_csv)
+        _set_env_default("MUZERO_SYMBOLS_SCALP", canonical_symbols_csv)
+        _set_env_default("MUZERO_SYMBOLS_INTRADAY", canonical_symbols_csv)
+        _set_env_default("MUZERO_SYMBOLS_SWING", canonical_symbols_csv)
+        _set_env_default("ARENA_SYMBOLS_SCALP", canonical_symbols_csv)
+        _set_env_default("ARENA_SYMBOLS_INTRADAY", canonical_symbols_csv)
+        _set_env_default("ARENA_SYMBOLS_SWING", canonical_symbols_csv)
+        _set_env_default("TRAIN_GNN_SYMBOLS", canonical_symbols_csv)
+        _set_env_default("TRAIN_GNN_CONTEXT_SYMBOLS", canonical_symbols_csv)
+        _set_env_default("TRAIN_GNN_MAX_SYMBOLS", str(len(CANONICAL_TIMESCALE_SYMBOLS)))
+
+
+def _build_gnn_job() -> dict[str, object]:
+    """Construit l'etape explicite de refresh GNN.
+
+    Returns:
+        dict[str, object]: Definition complete du job GNN.
+    """
+
+    canonical_symbols_csv = _canonical_symbols_csv()
+    return {
+        "name": "gnn",
+        "engine": "gnn",
+        "horizon": None,
+        "dataset_source": "timescaledb",
+        "focus_symbols": list(CANONICAL_TIMESCALE_SYMBOLS),
+        "command": [sys.executable, "scripts/train_gnn.py"],
+        "extra_env": {
+            "TRAIN_GNN_SYMBOLS": canonical_symbols_csv,
+            "TRAIN_GNN_CONTEXT_SYMBOLS": canonical_symbols_csv,
+            "TRAIN_GNN_MAX_SYMBOLS": str(len(CANONICAL_TIMESCALE_SYMBOLS)),
+            "TRAIN_GNN_DEPLOYMENT_CLASS": "consultative",
+        },
+    }
+
+
+def _build_muzero_job(horizon: str) -> dict[str, object]:
+    """Construit un job nightly MuZero borne a TimeScaleDB.
+
+    Args:
+        horizon (str): Horizon cible.
+
+    Returns:
+        dict[str, object]: Definition complete du job MuZero.
+    """
+
+    normalized_horizon = str(horizon).strip().lower()
+    canonical_symbols_csv = _canonical_symbols_csv()
+    return {
+        "name": f"muzero_{normalized_horizon}",
+        "engine": "muzero",
+        "horizon": normalized_horizon,
+        "dataset_source": "timescaledb",
+        "focus_symbols": list(CANONICAL_TIMESCALE_SYMBOLS),
+        "command": [sys.executable, "scripts/train_global_models.py"],
+        "extra_env": {
+            "MUZERO_HORIZON": normalized_horizon,
+            "MUZERO_DATASET_SOURCE": "timescaledb",
+            "TRAINING_TIMESCALE_ENABLED": "1",
+            "TRAINING_FOCUS_SYMBOLS": canonical_symbols_csv,
+            "MUZERO_SYMBOLS": canonical_symbols_csv,
+            "ARENA_SYMBOLS": canonical_symbols_csv,
+            f"MUZERO_SYMBOLS_{normalized_horizon.upper()}": canonical_symbols_csv,
+            f"ARENA_SYMBOLS_{normalized_horizon.upper()}": canonical_symbols_csv,
+            "MUZERO_MAX_SYMBOLS": str(len(CANONICAL_TIMESCALE_SYMBOLS)),
+            "ARENA_MAX_SYMBOLS": str(len(CANONICAL_TIMESCALE_SYMBOLS)),
+        },
+    }
+
+
+def _build_dreamer_job() -> dict[str, object]:
+    """Construit un job Dreamer offline explicitement optionnel.
+
+    Returns:
+        dict[str, object]: Definition complete du job Dreamer.
+    """
+
+    return {
+        "name": "dreamer_offline",
+        "engine": "dreamer",
+        "horizon": None,
+        "dataset_source": "timescaledb",
+        "focus_symbols": list(CANONICAL_TIMESCALE_SYMBOLS),
+        "command": [sys.executable, "-m", "eva_lab.muzero.offline_trainer"],
+        "extra_env": {
+            "DREAMER_EPOCHS": os.getenv("DREAMER_EPOCHS", "1500"),
+            "MUZERO_DATASET_SOURCE": "timescaledb",
+            "TRAINING_TIMESCALE_ENABLED": "1",
+            "TRAINING_FOCUS_SYMBOLS": _canonical_symbols_csv(),
+        },
+    }
+
+
+def build_nightly_job_queue(
+    *,
+    run_gnn: bool,
+    run_muzero: bool,
+    run_dreamer: bool,
+) -> list[dict[str, object]]:
+    """Construit la file explicite des jobs nocturnes.
+
+    Args:
+        run_gnn (bool): Active le refresh GNN.
+        run_muzero (bool): Active les jobs MuZero multi-horizon.
+        run_dreamer (bool): Active le job Dreamer offline.
+
+    Returns:
+        list[dict[str, object]]: File ordonnee des jobs a executer.
+    """
+
+    jobs: list[dict[str, object]] = []
+    if run_gnn:
+        jobs.append(_build_gnn_job())
+    if run_muzero:
+        for horizon in _resolve_horizons():
+            jobs.append(_build_muzero_job(horizon))
+    if run_dreamer:
+        jobs.append(_build_dreamer_job())
+    return jobs
+
+
+def _summarize_job(job: dict[str, object]) -> dict[str, object]:
+    """Reduit un job nightly a une vue legere pour le resume JSON.
+
+    Args:
+        job (dict[str, object]): Definition complete du job.
+
+    Returns:
+        dict[str, object]: Vue compacte du job.
+    """
+
+    return {
+        "name": job.get("name"),
+        "engine": job.get("engine"),
+        "horizon": job.get("horizon"),
+        "dataset_source": job.get("dataset_source"),
+        "focus_symbols": list(job.get("focus_symbols") or []),
+    }
 
 
 def persist_summary(summary: dict[str, object]) -> None:
@@ -531,7 +708,7 @@ def run_step(name: str, command: list[str], extra_env: dict[str, str] | None = N
 
 
 def main() -> dict[str, object]:
-    """Lance GNN, MuZero multi-horizon puis Dreamer offline.
+    """Lance la file explicite des jobs nocturnes.
 
     Returns:
         dict[str, object]: Resume complet de la sequence nightly.
@@ -603,31 +780,28 @@ def main() -> dict[str, object]:
 
     run_gnn = _env_flag("RUN_TRAIN_GNN", True)
     run_muzero = _env_flag("RUN_TRAIN_MUZERO", True)
-    run_dreamer = _env_flag("RUN_TRAIN_DREAMER", True)
+    run_dreamer = _env_flag("RUN_TRAIN_DREAMER", False)
+    job_queue = build_nightly_job_queue(
+        run_gnn=run_gnn,
+        run_muzero=run_muzero,
+        run_dreamer=run_dreamer,
+    )
+    summary["job_queue"] = [_summarize_job(job) for job in job_queue]
+    persist_summary(summary)
+    logger.info("File nightly preparee: %s", [job.get("name") for job in job_queue])
+    append_training_log(
+        "File nightly preparee: " + ", ".join(str(job.get("name")) for job in job_queue),
+        source="nightly",
+    )
 
     try:
-        if run_gnn:
-            run_step("gnn", [sys.executable, "scripts/train_gnn.py"])
-            append_step(summary, "gnn", "ok")
-
-        if run_muzero:
-            horizons = _resolve_horizons()
-            for horizon in horizons:
-                step_name = f"muzero_{horizon}"
-                run_step(
-                    step_name,
-                    [sys.executable, "scripts/train_global_models.py"],
-                    extra_env={"MUZERO_HORIZON": horizon},
-                )
-                append_step(summary, step_name, "ok")
-
-        if run_dreamer:
+        for job in job_queue:
             run_step(
-                "dreamer_offline",
-                [sys.executable, "-m", "eva_lab.muzero.offline_trainer"],
-                extra_env={"DREAMER_EPOCHS": os.getenv("DREAMER_EPOCHS", "1500")},
+                str(job.get("name") or "unknown"),
+                list(job.get("command") or []),
+                extra_env=dict(job.get("extra_env") or {}),
             )
-            append_step(summary, "dreamer_offline", "ok")
+            append_step(summary, str(job.get("name") or "unknown"), "ok")
 
         summary["status"] = "ok"
         summary["finished_at"] = datetime.now().isoformat()

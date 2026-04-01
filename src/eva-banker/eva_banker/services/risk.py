@@ -598,17 +598,25 @@ class RiskValidator:
     def reset_day_session(self) -> None:
         """
         Reinitialise explicitement la session de risque courante.
+
+        Un reset manuel est utilise par l'operateur pour reouvrir une session
+        de trading propre apres revue. Il doit donc lever aussi l'anti-tilt et
+        oublier la serie de pertes consecutive ayant conduit a la pause.
         """
         self._daily_pnl = Decimal("0")
         self._daily_pnl_date = self._get_market_now().date()
         self._day_open_balance = self._account_balance
         self._day_open_equity = self._account_equity
+        self._consecutive_losses = 0
+        self._anti_tilt_until = None
         self._kill_switch_state = "normal"
         self._kill_switch_reason = None
         self._flatten_started_at = None
         self._flatten_last_action_at = None
         self._flatten_action_count = 0
-        logger.warning("Session de risque reinitialisee manuellement.")
+        logger.warning(
+            "Session de risque reinitialisee manuellement; anti-tilt et pertes consecutives effaces."
+        )
 
     async def save_state(self) -> None:
         """

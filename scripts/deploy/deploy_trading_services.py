@@ -52,6 +52,7 @@ SYNC_FILES = [
     Path("src/eva-lab/eva_lab/muzero/config.py"),
     Path("src/eva-lab/eva_lab/muzero/environment.py"),
     Path("src/eva-lab/scripts/train_global_models.py"),
+    Path("src/eva-lab/scripts/train_nightly_stack.py"),
     Path("src/eva-lab/pyproject.toml"),
     Path("src/eva-lab/Dockerfile"),
     Path("src/eva-core/eva_core/main.py"),

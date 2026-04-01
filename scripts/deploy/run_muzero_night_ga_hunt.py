@@ -15,6 +15,7 @@ import os
 import random
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -53,6 +54,9 @@ PROXMOX = _load_proxmox_module()
 PROFILE = "scalp_fx_v2"
 ENGINE = "muzero"
 HUNT_PREFIX = "muzero_night_hunt"
+TIMESCALE_PROXY_SYMBOLS = ["EURUSD", "XAUUSD", "GBPUSD"]
+TIMESCALE_FULL_SYMBOLS = list(PROXMOX.FAST_MUZERO_FULL_SYMBOLS)
+TIMESCALE_REQUIRED_TIMEFRAMES = ["M5", "H1", "D1"]
 PROXY_STEPS = "1800"
 PROXY_PRECHECK_STEPS = "600,1200"
 PROXY_PRECHECK_GAMES = "2"
@@ -110,6 +114,9 @@ class HuntContext:
     log_path: Path
     seed_checkpoint_path: str
     seed_champion_id: str
+    proxy_symbols: list[str]
+    full_symbols: list[str]
+    coverage_generated_at: str | None
     deadline: datetime
     random_seed: int
 
@@ -140,6 +147,94 @@ def _append_log(context: HuntContext, message: str) -> None:
     with context.log_path.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
     print(line, flush=True)
+
+
+def _fetch_timescaledb_coverage() -> dict[str, Any]:
+    """Charge la couverture TimeDB publiee par EVA Lab.
+
+    Returns:
+        dict[str, Any]: Bloc `timescaledb` expose par l'API du Lab.
+
+    Raises:
+        RuntimeError: Si le rapport de couverture est indisponible.
+    """
+
+    coverage_url = f"http://{PROXMOX.HOST}:8600/timescaledb/coverage"
+    with urllib.request.urlopen(coverage_url, timeout=20) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    coverage = dict(payload.get("timescaledb") or {})
+    if not coverage:
+        raise RuntimeError("Rapport de couverture TimeDB indisponible.")
+    return {
+        **coverage,
+        "generated_at": payload.get("generated_at"),
+    }
+
+
+def _is_symbol_fully_covered(symbol_payload: dict[str, Any]) -> bool:
+    """Determine si un symbole couvre tous les timeframes requis.
+
+    Args:
+        symbol_payload (dict[str, Any]): Bloc de couverture d'un symbole.
+
+    Returns:
+        bool: `True` si tous les timeframes requis sont disponibles.
+    """
+
+    available = {
+        str(timeframe).strip().upper()
+        for timeframe in list(symbol_payload.get("available_timeframes") or [])
+        if str(timeframe).strip()
+    }
+    missing = {
+        str(timeframe).strip().upper()
+        for timeframe in list(symbol_payload.get("missing_timeframes") or [])
+        if str(timeframe).strip()
+    }
+    return not missing and set(TIMESCALE_REQUIRED_TIMEFRAMES).issubset(available)
+
+
+def _resolve_timescaledb_universes() -> tuple[list[str], list[str], str | None]:
+    """Valide les univers proxy/full utilisables uniquement via TimeDB.
+
+    Returns:
+        tuple[list[str], list[str], str | None]: Univers proxy, univers full
+            et horodatage du rapport de couverture.
+
+    Raises:
+        RuntimeError: Si la couverture TimeDB n'est pas complete.
+    """
+
+    coverage = _fetch_timescaledb_coverage()
+    by_symbol = dict(coverage.get("by_symbol") or {})
+
+    missing_full = [
+        symbol
+        for symbol in TIMESCALE_FULL_SYMBOLS
+        if not _is_symbol_fully_covered(dict(by_symbol.get(symbol) or {}))
+    ]
+    if missing_full:
+        raise RuntimeError(
+            "Couverture TimeDB incomplete pour la vague du soir: "
+            + ", ".join(missing_full)
+        )
+
+    missing_proxy = [
+        symbol
+        for symbol in TIMESCALE_PROXY_SYMBOLS
+        if not _is_symbol_fully_covered(dict(by_symbol.get(symbol) or {}))
+    ]
+    if missing_proxy:
+        raise RuntimeError(
+            "Couverture TimeDB incomplete pour les symboles proxy: "
+            + ", ".join(missing_proxy)
+        )
+
+    return (
+        list(TIMESCALE_PROXY_SYMBOLS),
+        list(TIMESCALE_FULL_SYMBOLS),
+        str(coverage.get("generated_at") or "").strip() or None,
+    )
 
 
 def _load_base_trials() -> dict[str, dict[str, Any]]:
@@ -250,10 +345,13 @@ def _build_proxy_runtime_overrides(
     genome_overrides: dict[str, str],
     generation: int,
     seed_checkpoint_path: str,
+    proxy_symbols: list[str],
 ) -> dict[str, str]:
     """Construit l'environnement proxy a envoyer au serveur."""
 
     trial_definition = {"trial_id": trial_id, "overrides": genome_overrides}
+    symbol_csv = ",".join(proxy_symbols)
+    symbol_count = str(len(proxy_symbols))
     runtime_overrides = PROXMOX._build_v4_profile_overrides(
         PROFILE,
         engine=ENGINE,
@@ -268,13 +366,25 @@ def _build_proxy_runtime_overrides(
             "TRAINING_TRIAL_ID": trial_id,
             "MUZERO_RESUME_CHECKPOINT_PATH": seed_checkpoint_path,
             "MUZERO_RESUME_STEP": "0",
-            "MUZERO_DATASET_SOURCE": "auto",
+            "MUZERO_DATASET_SOURCE": "timescaledb",
             "MUZERO_TRAINING_STEPS": PROXY_STEPS,
             "MUZERO_PROXY_PRECHECK_STEPS": PROXY_PRECHECK_STEPS,
             "MUZERO_PROXY_PRECHECK_GAMES": PROXY_PRECHECK_GAMES,
             "MUZERO_GAMES_PER_SYMBOL": PROXY_GAMES_PER_SYMBOL,
             "ARENA_GAMES_PER_SYMBOL": PROXY_ARENA_GAMES_PER_SYMBOL,
             "ARENA_MIN_GAMES": PROXY_ARENA_MIN_GAMES,
+            "TRAINING_FOCUS_SYMBOLS": symbol_csv,
+            "MUZERO_SYMBOLS": symbol_csv,
+            "MUZERO_SYMBOLS_SCALP": symbol_csv,
+            "ARENA_SYMBOLS": symbol_csv,
+            "ARENA_SYMBOLS_SCALP": symbol_csv,
+            "MUZERO_MAX_SYMBOLS": symbol_count,
+            "ARENA_MAX_SYMBOLS": symbol_count,
+            "ARENA_MIN_SYMBOLS": symbol_count,
+            "MUZERO_PROMOTION_MIN_EVAL_SYMBOLS": symbol_count,
+            "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": symbol_count,
+            "MUZERO_LIVE_TOP_SYMBOLS": symbol_count,
+            "TRAINING_TIMESCALE_ENABLED": "1",
             "TRAINING_GATE_PROFILE": "standard",
             "NIGHTLY_KEEP_VLLM": "0",
         }
@@ -287,9 +397,12 @@ def _build_full_runtime_overrides(
     trial_id: str,
     genome_overrides: dict[str, str],
     seed_checkpoint_path: str,
+    full_symbols: list[str],
 ) -> dict[str, str]:
     """Construit l'environnement full final 7 symboles."""
 
+    symbol_csv = ",".join(full_symbols)
+    symbol_count = str(len(full_symbols))
     runtime_overrides = PROXMOX._build_muzero_full_7_overrides()
     runtime_overrides.update(
         {
@@ -303,11 +416,23 @@ def _build_full_runtime_overrides(
             "TRAINING_TRIAL_ID": trial_id,
             "MUZERO_RESUME_CHECKPOINT_PATH": seed_checkpoint_path,
             "MUZERO_RESUME_STEP": "0",
-            "MUZERO_DATASET_SOURCE": "auto",
+            "MUZERO_DATASET_SOURCE": "timescaledb",
             "MUZERO_TRAINING_STEPS": FULL_STEPS,
             "MUZERO_GAMES_PER_SYMBOL": FULL_GAMES_PER_SYMBOL,
             "ARENA_GAMES_PER_SYMBOL": FULL_ARENA_GAMES_PER_SYMBOL,
             "ARENA_MIN_GAMES": FULL_ARENA_MIN_GAMES,
+            "TRAINING_FOCUS_SYMBOLS": symbol_csv,
+            "MUZERO_SYMBOLS": symbol_csv,
+            "MUZERO_SYMBOLS_SCALP": symbol_csv,
+            "ARENA_SYMBOLS": symbol_csv,
+            "ARENA_SYMBOLS_SCALP": symbol_csv,
+            "MUZERO_MAX_SYMBOLS": symbol_count,
+            "ARENA_MAX_SYMBOLS": symbol_count,
+            "ARENA_MIN_SYMBOLS": str(max(3, len(full_symbols) - 1)),
+            "MUZERO_PROMOTION_MIN_EVAL_SYMBOLS": str(max(3, len(full_symbols) - 1)),
+            "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": symbol_count,
+            "MUZERO_LIVE_TOP_SYMBOLS": symbol_count,
+            "TRAINING_TIMESCALE_ENABLED": "1",
             "TRAINING_GATE_PROFILE": "standard",
             "NIGHTLY_KEEP_VLLM": "0",
         }
@@ -338,6 +463,7 @@ def _build_generation_one_trials(
                     genome_overrides=genome_overrides,
                     generation=1,
                     seed_checkpoint_path=context.seed_checkpoint_path,
+                    proxy_symbols=context.proxy_symbols,
                 ),
                 "notes": f"seed:{trial_id}",
             }
@@ -388,6 +514,7 @@ def _build_next_generation_trials(
                     genome_overrides=elite_genome,
                     generation=generation,
                     seed_checkpoint_path=context.seed_checkpoint_path,
+                    proxy_symbols=context.proxy_symbols,
                 ),
                 "notes": "elite_survivante",
             }
@@ -407,6 +534,7 @@ def _build_next_generation_trials(
                     genome_overrides=second_genome,
                     generation=generation,
                     seed_checkpoint_path=context.seed_checkpoint_path,
+                    proxy_symbols=context.proxy_symbols,
                 ),
                 "notes": "second_survivant",
             }
@@ -425,6 +553,7 @@ def _build_next_generation_trials(
                     genome_overrides=child_genome,
                     generation=generation,
                     seed_checkpoint_path=context.seed_checkpoint_path,
+                    proxy_symbols=context.proxy_symbols,
                 ),
                 "notes": "crossover_mutation",
             }
@@ -667,13 +796,32 @@ def _wait_for_sequence_completion(
         time.sleep(max(5, poll_seconds))
 
 
-def _download_remote_json(client: paramiko.SSHClient, remote_path: str) -> dict[str, Any]:
-    """Charge un JSON distant via SFTP."""
+def _download_remote_json(
+    client: paramiko.SSHClient,
+    remote_path: str,
+    *,
+    missing_ok: bool = False,
+) -> dict[str, Any]:
+    """Charge un JSON distant via SFTP.
+
+    Args:
+        client (paramiko.SSHClient): Session SSH ouverte.
+        remote_path (str): Chemin JSON distant.
+        missing_ok (bool): Autorise l'absence du fichier.
+
+    Returns:
+        dict[str, Any]: Charge utile JSON ou dictionnaire vide si absent.
+    """
 
     sftp = client.open_sftp()
     try:
-        with sftp.file(remote_path, "r") as remote_file:
-            payload = json.loads(remote_file.read().decode("utf-8"))
+        try:
+            with sftp.file(remote_path, "r") as remote_file:
+                payload = json.loads(remote_file.read().decode("utf-8"))
+        except OSError:
+            if missing_ok:
+                return {}
+            raise
     finally:
         sftp.close()
     return payload if isinstance(payload, dict) else {}
@@ -684,6 +832,30 @@ def _persist_local_json(path: Path, payload: dict[str, Any]) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _filter_sequence_results(
+    payload: dict[str, Any],
+    *,
+    sequence_id: str,
+) -> list[dict[str, Any]]:
+    """Extrait et trie uniquement les resultats d'une sequence donnee.
+
+    Args:
+        payload (dict[str, Any]): Charge utile brute des resultats proxy.
+        sequence_id (str): Identifiant de sequence a retenir.
+
+    Returns:
+        list[dict[str, Any]]: Resultats de la sequence tries par score decroissant.
+    """
+
+    results = [
+        item
+        for item in list(payload.get("results") or [])
+        if str(item.get("sequence_id") or "").strip() == sequence_id
+    ]
+    results.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    return results
 
 
 def _write_remote_finalists(
@@ -738,12 +910,11 @@ def _run_proxy_generation(
     remote_results_path = f"{PROXMOX.REMOTE_V4_SEQUENCE_DIR}/v4_{ENGINE}_{PROFILE}_proxy_results.json"
     remote_finalists_path = f"{PROXMOX.REMOTE_V4_SEQUENCE_DIR}/v4_{ENGINE}_{PROFILE}_finalists.json"
     proxy_results_payload = _download_remote_json(client, remote_results_path)
-    finalists_payload = _download_remote_json(client, remote_finalists_path)
+    finalists_payload = _download_remote_json(client, remote_finalists_path, missing_ok=True)
     _persist_local_json(context.hunt_dir / f"{sequence_id}_proxy_results.json", proxy_results_payload)
     _persist_local_json(context.hunt_dir / f"{sequence_id}_finalists.json", finalists_payload)
     _persist_local_json(context.hunt_dir / f"{sequence_id}_launch.json", launch_info)
-    results = list(proxy_results_payload.get("results") or [])
-    results.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    results = _filter_sequence_results(proxy_results_payload, sequence_id=sequence_id)
     _append_log(
         context,
         (
@@ -773,6 +944,7 @@ def _launch_full_from_best(
         trial_id=trial_id,
         genome_overrides=genome_overrides,
         seed_checkpoint_path=context.seed_checkpoint_path,
+        full_symbols=context.full_symbols,
     )
     finalists_payload = _write_remote_finalists(client, best_result=best_result)
     sequence_id = f"{HUNT_PREFIX}_full_{_now_tag()}"
@@ -843,6 +1015,7 @@ def _build_context(*, hours: float, random_seed: int | None) -> HuntContext:
     live_checkpoint = dict(scalp.get("live_checkpoint") or {})
     seed_checkpoint_path = str(live_checkpoint.get("path") or "").strip()
     seed_champion_id = str(scalp.get("live_champion_id") or "").strip()
+    proxy_symbols, full_symbols, coverage_generated_at = _resolve_timescaledb_universes()
     if not seed_checkpoint_path or not seed_champion_id:
         raise RuntimeError("Champion live scalp introuvable pour initialiser la chasse MuZero.")
     return HuntContext(
@@ -851,6 +1024,9 @@ def _build_context(*, hours: float, random_seed: int | None) -> HuntContext:
         log_path=log_path,
         seed_checkpoint_path=seed_checkpoint_path,
         seed_champion_id=seed_champion_id,
+        proxy_symbols=proxy_symbols,
+        full_symbols=full_symbols,
+        coverage_generated_at=coverage_generated_at,
         deadline=_now_paris() + timedelta(hours=hours),
         random_seed=random_seed if random_seed is not None else int(time.time()),
     )
@@ -906,7 +1082,9 @@ def main() -> int:
         context,
         (
             f"Initialisation de la chasse | champion_seed={context.seed_champion_id} | "
-            f"checkpoint={context.seed_checkpoint_path} | deadline={context.deadline.isoformat(timespec='seconds')}"
+            f"checkpoint={context.seed_checkpoint_path} | proxy={context.proxy_symbols} | "
+            f"full={context.full_symbols} | couverture={context.coverage_generated_at} | "
+            f"deadline={context.deadline.isoformat(timespec='seconds')}"
         ),
     )
     _ensure_remote_idle()
