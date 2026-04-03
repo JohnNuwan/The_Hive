@@ -294,6 +294,7 @@ FAST_MUZERO_FULL_SYMBOLS = [
     "US500.cash",
 ]
 FAST_MUZERO_FULL_TRIGGER = "manual_muzero_full_7_symbols"
+NIGHTLY_STACK_TRIGGER = "manual_nightly_stack_canonical"
 
 V4_WINDOW_ORDER = [
     ("muzero", "proxy_ga"),
@@ -309,6 +310,7 @@ REMOTE_ENV_LOADER = """if [ -f .env ]; then
     python3 - <<'PY'
 from __future__ import annotations
 
+import os
 import pathlib
 import shlex
 
@@ -322,6 +324,8 @@ for raw_line in env_path.read_text(encoding="utf-8").splitlines():
     value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         value = value[1:-1]
+    if os.environ.get(key):
+        continue
     print(f"export {key}={shlex.quote(value)}")
 PY
   )"
@@ -1123,6 +1127,60 @@ def _build_manual_massive_overrides() -> dict[str, str]:
         "MUZERO_HORIZONS": "scalp,intraday,swing",
         "MUZERO_MAX_SYMBOLS": "0",
         "ARENA_MAX_SYMBOLS": "0",
+    }
+
+
+def _build_nightly_timescaledb_stack_overrides() -> dict[str, str]:
+    """Construit une file nightly canonique bornee a TimeScaleDB.
+
+    Cette variante privilegie l'usine trading utile pour le lendemain:
+    refresh GNN puis MuZero `scalp`, `intraday` et `swing` sur le panier
+    canonique 7 symboles. Dreamer reste explicitement desactive.
+
+    Returns:
+        dict[str, str]: Bloc d'environnement pret pour le lanceur nightly.
+    """
+
+    symbol_csv = ",".join(FAST_MUZERO_FULL_SYMBOLS)
+    symbol_count = str(len(FAST_MUZERO_FULL_SYMBOLS))
+    return {
+        "TRAINING_PROFILE": "research",
+        "TRAINING_AUTOMATION_MODE": "force_research",
+        "TRAINING_RUN_TRIGGER": NIGHTLY_STACK_TRIGGER,
+        "NIGHTLY_KEEP_VLLM": "0",
+        "NIGHTLY_DEFER_VLLM_RESTART": "1",
+        "NIGHTLY_STOP_COMFYUI": "1",
+        "RUN_TRAIN_GNN": "1",
+        "RUN_TRAIN_MUZERO": "1",
+        "RUN_TRAIN_DREAMER": "0",
+        "MUZERO_HORIZONS": "scalp,intraday,swing",
+        "MUZERO_TRAINING_STEPS": "12000",
+        "MUZERO_GAMES_PER_SYMBOL": "10",
+        "ARENA_GAMES_PER_SYMBOL": "4",
+        "ARENA_MIN_GAMES": "14",
+        "ARENA_MIN_SYMBOLS": "4",
+        "MUZERO_PROMOTION_MIN_EVAL_GAMES": "14",
+        "MUZERO_PROMOTION_MIN_EVAL_SYMBOLS": "4",
+        "MUZERO_DATASET_SOURCE": "timescaledb",
+        "TRAINING_TIMESCALE_ENABLED": "1",
+        "TRAINING_FOCUS_SYMBOLS": symbol_csv,
+        "MUZERO_SYMBOLS": symbol_csv,
+        "ARENA_SYMBOLS": symbol_csv,
+        "MUZERO_SYMBOLS_SCALP": symbol_csv,
+        "MUZERO_SYMBOLS_INTRADAY": symbol_csv,
+        "MUZERO_SYMBOLS_SWING": symbol_csv,
+        "ARENA_SYMBOLS_SCALP": symbol_csv,
+        "ARENA_SYMBOLS_INTRADAY": symbol_csv,
+        "ARENA_SYMBOLS_SWING": symbol_csv,
+        "MUZERO_MAX_SYMBOLS": symbol_count,
+        "ARENA_MAX_SYMBOLS": symbol_count,
+        "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": symbol_count,
+        "MUZERO_LIVE_TOP_SYMBOLS": symbol_count,
+        "TRAIN_GNN_SYMBOLS": symbol_csv,
+        "TRAIN_GNN_CONTEXT_SYMBOLS": symbol_csv,
+        "TRAIN_GNN_MAX_SYMBOLS": symbol_count,
+        "TRAIN_GNN_EPOCHS": "200",
+        "TRAIN_GNN_DEPLOYMENT_CLASS": "consultative",
     }
 
 
@@ -3980,6 +4038,7 @@ from __future__ import annotations
 from eva_lab.training_status import (
     append_training_log,
     finalize_training_status,
+    persist_sequence_state,
     set_training_launcher_state,
 )
 
@@ -3991,6 +4050,33 @@ append_training_log(
 set_training_launcher_state(
     phase="idle",
     last_stop_reason="{reason}",
+)
+persist_sequence_state(
+    {{
+        "sequence_id": None,
+        "sequence_name": None,
+        "state": "idle",
+        "status": "idle",
+        "last_run_id": None,
+        "trial_id": None,
+        "window_id": None,
+        "window_index": None,
+        "next_step": None,
+        "last_error": None,
+        "supervisor_heartbeat": None,
+        "stdout_log_path": None,
+        "stderr_log_path": None,
+        "precheck_status": None,
+        "precheck_score": None,
+        "proxy_terminal_score": None,
+        "retry_reason": None,
+        "retry_count": 0,
+        "restart_count": 0,
+        "continued_after_precheck": None,
+        "killed_after_precheck": None,
+        "resumed_from_checkpoint": None,
+        "resume_step": None,
+    }}
 )
 finalize_training_status("aborted", reason="{reason}")
 PY
@@ -4005,6 +4091,7 @@ PY
 def start_training(
     manual_massive: bool = False,
     *,
+    nightly_stack: bool = False,
     muzero_full_7: bool = False,
     scalp_reduced: bool = False,
     intraday_reduced: bool = False,
@@ -4022,6 +4109,7 @@ def start_training(
 
     Args:
         manual_massive (bool): Force un run massif immediat de recherche.
+        nightly_stack (bool): Force la pile nightly canonique `GNN + MuZero`.
         muzero_full_7 (bool): Force un run MuZero `full` sur l'univers 7 symboles.
         scalp_reduced (bool): Force une relance `scalp` reduite.
         intraday_reduced (bool): Force une relance `intraday` reduite.
@@ -4058,6 +4146,8 @@ def start_training(
         runtime_overrides: dict[str, str] = {}
         if manual_massive:
             runtime_overrides = _build_manual_massive_overrides()
+        elif nightly_stack:
+            runtime_overrides = _build_nightly_timescaledb_stack_overrides()
         elif muzero_full_7:
             runtime_overrides = _build_muzero_full_7_overrides()
         elif scalp_reduced:
@@ -4116,6 +4206,14 @@ def parse_args() -> argparse.Namespace:
         "--manual-massive",
         action="store_true",
         help="Force un run massif immediat de recherche (GNN -> MuZero -> Dreamer).",
+    )
+    parser.add_argument(
+        "--nightly-stack",
+        action="store_true",
+        help=(
+            "Lance la pile nightly canonique `GNN + MuZero scalp/intraday/swing` "
+            "sur l'univers 7 symboles TimeScaleDB, sans Dreamer."
+        ),
     )
     parser.add_argument(
         "--muzero-full-7",
@@ -4238,6 +4336,7 @@ if __name__ == "__main__":
         1
         for flag in (
             args.manual_massive,
+            args.nightly_stack,
             args.muzero_full_7,
             args.scalp_reduced,
             args.intraday_reduced,
@@ -4254,7 +4353,7 @@ if __name__ == "__main__":
     )
     if selected_profiles > 1:
         raise SystemExit(
-            "Choisissez un seul profil parmi --manual-massive, --muzero-full-7, --scalp-reduced, --intraday-reduced, --swing-reduced, --all-reduced, --wave1-profile, --wave1-sequence, --v3-sequence, --v3-profile, --v4-sequence, --v4-profile."
+            "Choisissez un seul profil parmi --manual-massive, --nightly-stack, --muzero-full-7, --scalp-reduced, --intraday-reduced, --swing-reduced, --all-reduced, --wave1-profile, --wave1-sequence, --v3-sequence, --v3-profile, --v4-sequence, --v4-profile."
         )
     requested_symbols = [
         item.strip()
@@ -4302,6 +4401,7 @@ if __name__ == "__main__":
     else:
         start_training(
             manual_massive=args.manual_massive,
+            nightly_stack=args.nightly_stack,
             muzero_full_7=args.muzero_full_7,
             scalp_reduced=args.scalp_reduced,
             intraday_reduced=args.intraday_reduced,

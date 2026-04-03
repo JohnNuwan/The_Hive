@@ -167,6 +167,25 @@ class AutoTradingEngine:
         self._cpu_live_symbol_max_volumes = self._parse_symbol_float_mapping(
             self._env_text("BANKER_CPU_LIVE_SYMBOL_MAX_VOLUMES", "")
         )
+        default_gnn_symbols = ",".join(self._cpu_live_symbols or ["EURUSD", "GBPUSD", "XAUUSD"])
+        self._gnn_consultative_enabled = self._env_flag(
+            "BANKER_GNN_CONSULTATIVE_ENABLED",
+            self._cpu_live_mode,
+        )
+        self._gnn_consultative_symbols = self._parse_symbol_allowlist(
+            self._env_text("BANKER_GNN_CONSULTATIVE_SYMBOLS", default_gnn_symbols)
+        )
+        self._gnn_consultative_veto_min_confidence = min(
+            1.0,
+            max(
+                0.0,
+                self._env_float("BANKER_GNN_CONSULTATIVE_VETO_MIN_CONFIDENCE", 0.90),
+            ),
+        )
+        self._gnn_consultative_require_intraday_alignment = self._env_flag(
+            "BANKER_GNN_CONSULTATIVE_REQUIRE_INTRADAY_ALIGNMENT",
+            True,
+        )
         self._ensemble_enabled = self._env_flag("BANKER_ENSEMBLE_ENABLED", False)
         self._ensemble_min_edge = max(0.0, self._env_float("BANKER_ENSEMBLE_MIN_EDGE", 0.15))
         if self._cpu_live_mode:
@@ -851,6 +870,13 @@ class AutoTradingEngine:
             "cpu_live_symbols": list(self._cpu_live_symbols),
             "cpu_live_max_volume": self._cpu_live_max_volume,
             "cpu_live_symbol_max_volumes": dict(self._cpu_live_symbol_max_volumes),
+            "gnn_consultative": {
+                "enabled": self._gnn_consultative_enabled,
+                "mode": "weak_veto" if self._gnn_consultative_enabled else "disabled",
+                "symbols": list(self._gnn_consultative_symbols),
+                "veto_min_confidence": self._gnn_consultative_veto_min_confidence,
+                "require_intraday_alignment": self._gnn_consultative_require_intraday_alignment,
+            },
             "ensemble_enabled": self._ensemble_enabled,
             "ensemble_mode": "vote_50_50" if self._ensemble_enabled else "muzero_only",
             "ensemble_min_edge": self._ensemble_min_edge,
@@ -871,6 +897,13 @@ class AutoTradingEngine:
             "cpu_live_max_volume": self._cpu_live_max_volume,
             "cpu_live_symbols": list(self._cpu_live_symbols),
             "cpu_live_symbol_max_volumes": dict(self._cpu_live_symbol_max_volumes),
+            "gnn_consultative": {
+                "enabled": self._gnn_consultative_enabled,
+                "mode": "weak_veto" if self._gnn_consultative_enabled else "disabled",
+                "symbols": list(self._gnn_consultative_symbols),
+                "veto_min_confidence": self._gnn_consultative_veto_min_confidence,
+                "require_intraday_alignment": self._gnn_consultative_require_intraday_alignment,
+            },
             "live_family": self._lab_universe_family,
             "live_champion_id": self._lab_universe_live_champion_id,
             "live_champion_id_muzero": self._lab_universe_live_champion_id_muzero,
@@ -937,6 +970,11 @@ class AutoTradingEngine:
             "gnn": {
                 "mode": gnn_mode.value,
                 "role": "consultatif" if self._cpu_live_mode else "fusionne",
+                "consultative_filter": state.get("gnn_consultative_mode")
+                or ("weak_veto" if self._gnn_consultative_enabled else "disabled"),
+                "consultative_symbols": list(self._gnn_consultative_symbols),
+                "veto_min_confidence": self._gnn_consultative_veto_min_confidence,
+                "last_filter_reason": state.get("gnn_consultative_reason"),
             },
             "cortex": {
                 "mode": str(cortex_status.get("mode") or "disabled"),
@@ -1169,6 +1207,126 @@ class AutoTradingEngine:
 
         candidate = str(fallback or "").strip().upper()
         return candidate or "UNKNOWN"
+
+    @staticmethod
+    def _normalize_gnn_bias(value: object) -> str:
+        """Normalise un biais GNN vers un libelle stable.
+
+        Args:
+            value (object): Valeur brute retournee par le service GNN.
+
+        Returns:
+            str: Libelle directionnel stable.
+        """
+        candidate = str(value or "").strip().upper()
+        if candidate in {"BULLISH", "BEARISH", "RANGING", "NEUTRAL"}:
+            return candidate
+        return "NEUTRAL"
+
+    def _resolve_gnn_consultative_signal(
+        self,
+        decision_context: dict[str, object] | None,
+        horizon: str,
+    ) -> dict[str, object]:
+        """Construit le signal consultatif GNN a partir du contexte courant.
+
+        Args:
+            decision_context (dict[str, object] | None): Contexte fusionne actuel.
+            horizon (str): Horizon live traite.
+
+        Returns:
+            dict[str, object]: Signal consultatif normalise.
+        """
+        context = decision_context or {}
+        primary_bias_key = "gnn_scalp_bias" if horizon == "scalp" else "gnn_bias"
+        primary_conf_key = "gnn_scalp_confidence" if horizon == "scalp" else "gnn_intraday_confidence"
+        primary_bias = self._normalize_gnn_bias(context.get(primary_bias_key))
+        primary_confidence = float(
+            context.get(primary_conf_key)
+            or context.get("gnn_confidence")
+            or 0.0
+        )
+        intraday_bias = self._normalize_gnn_bias(context.get("gnn_intraday_bias"))
+        intraday_confidence = float(
+            context.get("gnn_intraday_confidence")
+            or context.get("gnn_confidence")
+            or 0.0
+        )
+        swing_bias = self._normalize_gnn_bias(context.get("gnn_swing_bias"))
+        swing_confidence = float(context.get("gnn_swing_confidence") or 0.0)
+        return {
+            "primary_bias": primary_bias,
+            "primary_confidence": primary_confidence,
+            "intraday_bias": intraday_bias,
+            "intraday_confidence": intraday_confidence,
+            "swing_bias": swing_bias,
+            "swing_confidence": swing_confidence,
+        }
+
+    def _apply_gnn_consultative_filter(
+        self,
+        *,
+        symbol: str,
+        action: TradeAction | None,
+        horizon: str,
+        decision_context: dict[str, object] | None,
+    ) -> tuple[TradeAction | None, str | None, dict[str, object]]:
+        """Applique un veto consultatif faible du GNN sur une entree live.
+
+        Le filtre reste volontairement faible : il ne bloque qu'un BUY/SELL
+        si le GNN scalp est fortement oppose et que le GNN intraday confirme
+        le meme sens oppose.
+
+        Args:
+            symbol (str): Symbole traite.
+            action (TradeAction | None): Action brute issue de MuZero.
+            horizon (str): Horizon live courant.
+            decision_context (dict[str, object] | None): Contexte strategique.
+
+        Returns:
+            tuple[TradeAction | None, str | None, dict[str, object]]: Action
+            retenue, motif eventuel de veto et metadonnees du filtre.
+        """
+        normalized_symbol = str(symbol or "").strip().upper()
+        metadata = {
+            "enabled": self._gnn_consultative_enabled,
+            "mode": "weak_veto" if self._gnn_consultative_enabled else "disabled",
+            "symbol_in_scope": normalized_symbol in self._gnn_consultative_symbols,
+            "applied": False,
+            "reason": None,
+        }
+        if action is None or not self._gnn_consultative_enabled:
+            return action, None, metadata
+        if normalized_symbol not in self._gnn_consultative_symbols:
+            return action, None, metadata
+
+        signal = self._resolve_gnn_consultative_signal(decision_context, horizon)
+        metadata.update(signal)
+        primary_bias = str(signal.get("primary_bias") or "NEUTRAL")
+        primary_confidence = float(signal.get("primary_confidence") or 0.0)
+        intraday_bias = str(signal.get("intraday_bias") or "NEUTRAL")
+        intraday_confidence = float(signal.get("intraday_confidence") or 0.0)
+
+        if primary_bias not in {"BULLISH", "BEARISH"}:
+            return action, None, metadata
+        if primary_confidence < self._gnn_consultative_veto_min_confidence:
+            return action, None, metadata
+        if self._gnn_consultative_require_intraday_alignment:
+            if intraday_bias != primary_bias or intraday_confidence < 0.55:
+                return action, None, metadata
+
+        veto_reason = None
+        if action == TradeAction.BUY and primary_bias == "BEARISH":
+            veto_reason = "gnn_consultatif_baissier_confirme"
+        elif action == TradeAction.SELL and primary_bias == "BULLISH":
+            veto_reason = "gnn_consultatif_haussier_confirme"
+
+        if veto_reason is None:
+            return action, None, metadata
+
+        metadata["applied"] = True
+        metadata["reason"] = veto_reason
+        return None, veto_reason, metadata
 
     def _apply_context_veto(
         self,
@@ -2455,17 +2613,20 @@ class AutoTradingEngine:
                 self.risk.record_trade_result(Decimal(str(profit)))
                 asyncio.create_task(self.risk.save_state())
                 risk_status = await self.risk.get_current_status()
+                feedback_metadata = {
+                    "model_version": info.get("model_version"),
+                    "engine_name": info.get("engine_name"),
+                    "final_bias": info.get("final_bias"),
+                    "gnn_bias": info.get("gnn_bias"),
+                    "veto_reason": info.get("veto_reason"),
+                    "raw_model_action": info.get("raw_model_action"),
+                    "close_reason": reason,
+                    "selection": info.get("selection"),
+                    "checkpoint": info.get("checkpoint"),
+                    "day_open_balance": float(risk_status.day_open_balance),
+                }
 
-                asyncio.create_task(
-                    self._send_pnl_feedback(
-                        symbol=symbol,
-                        action=info["action"],
-                        price=exit_price,
-                        pnl=profit,
-                        ticket=ticket,
-                    )
-                )
-
+                market_context = None
                 if profit < 0:
                     market_context = {
                         "symbol": symbol,
@@ -2486,6 +2647,22 @@ class AutoTradingEngine:
                         "trend_reversal": "reversal" in str(reason).lower(),
                         "news_event": "news" in str(reason).lower(),
                     }
+                    feedback_metadata["nemesis_type_hint"] = get_nemesis_system().preview_nemesis_type(
+                        market_context
+                    )
+
+                asyncio.create_task(
+                    self._send_pnl_feedback(
+                        symbol=symbol,
+                        action=info["action"],
+                        price=exit_price,
+                        pnl=profit,
+                        ticket=ticket,
+                        metadata=feedback_metadata,
+                    )
+                )
+
+                if profit < 0 and market_context is not None:
                     asyncio.create_task(
                         get_nemesis_system().report_loss(
                             trade_id=str(ticket),
@@ -3419,17 +3596,44 @@ class AutoTradingEngine:
                             action = None
                             comment = "Erreur service inference live"
 
-                        action, veto_reason = self._apply_context_veto(action, last_strat)
-                        if veto_reason is not None:
+                        action, gnn_consultative_reason, gnn_consultative_state = self._apply_gnn_consultative_filter(
+                            symbol=symbol,
+                            action=action,
+                            horizon=live_horizon,
+                            decision_context=last_strat,
+                        )
+                        if gnn_consultative_reason is not None:
+                            veto_reason = gnn_consultative_reason
+                            logger.info(
+                                "Veto consultatif GNN sur %s: action=%s biais=%s confiance=%.2f raison=%s",
+                                symbol,
+                                raw_model_action,
+                                gnn_consultative_state.get("primary_bias", "NEUTRAL"),
+                                float(gnn_consultative_state.get("primary_confidence", 0.0) or 0.0),
+                                gnn_consultative_reason,
+                            )
+                            comment = f"Bloque par GNN consultatif ({gnn_consultative_reason})"
+                        else:
+                            gnn_consultative_state = {
+                                "enabled": self._gnn_consultative_enabled,
+                                "mode": "weak_veto" if self._gnn_consultative_enabled else "disabled",
+                                "symbol_in_scope": symbol.upper() in self._gnn_consultative_symbols,
+                                "applied": False,
+                                "reason": None,
+                            }
+
+                        action, context_veto_reason = self._apply_context_veto(action, last_strat)
+                        if context_veto_reason is not None:
+                            veto_reason = context_veto_reason
                             logger.info(
                                 "Veto contextuel sur %s: action=%s biais_final=%s force=%s raison=%s",
                                 symbol,
                                 raw_model_action,
                                 last_strat.get("bias", "NEUTRAL"),
                                 last_strat.get("bias_strength", "weak"),
-                                veto_reason,
+                                context_veto_reason,
                             )
-                            comment = f"Bloque par contexte ({veto_reason})"
+                            comment = f"Bloque par contexte ({context_veto_reason})"
 
                         # FORCE LOGGING for user visibility (via rich)
                         try:
@@ -3486,6 +3690,17 @@ class AutoTradingEngine:
                             "gnn_intraday_bias": last_strat.get("gnn_intraday_bias", "NEUTRAL"),
                             "gnn_swing_bias": last_strat.get("gnn_swing_bias", "NEUTRAL"),
                             "gnn_confidence": float(last_strat.get("gnn_confidence", 0.0) or 0.0),
+                            "gnn_scalp_confidence": float(last_strat.get("gnn_scalp_confidence", 0.0) or 0.0),
+                            "gnn_intraday_confidence": float(last_strat.get("gnn_intraday_confidence", 0.0) or 0.0),
+                            "gnn_swing_confidence": float(last_strat.get("gnn_swing_confidence", 0.0) or 0.0),
+                            "gnn_consultative_enabled": self._gnn_consultative_enabled,
+                            "gnn_consultative_mode": gnn_consultative_state.get("mode"),
+                            "gnn_consultative_applied": bool(gnn_consultative_state.get("applied", False)),
+                            "gnn_consultative_reason": gnn_consultative_state.get("reason"),
+                            "gnn_consultative_bias": gnn_consultative_state.get("primary_bias"),
+                            "gnn_consultative_confidence": float(
+                                gnn_consultative_state.get("primary_confidence", 0.0) or 0.0
+                            ),
                             "final_bias": last_strat.get("bias", bias),
                             "bias_alignment": last_strat.get("bias_alignment", "unknown"),
                             "bias_strength": last_strat.get("bias_strength", "weak"),
@@ -3907,7 +4122,15 @@ class AutoTradingEngine:
         except Exception as e:
             logger.error("Envoi Shadow Learning impossible: %s", e)
 
-    async def _send_pnl_feedback(self, symbol: str, action: str, price: float, pnl: float, ticket: int | None = None):
+    async def _send_pnl_feedback(
+        self,
+        symbol: str,
+        action: str,
+        price: float,
+        pnl: float,
+        ticket: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
         """Envoie le P&L reel d'une cloture au Lab pour alimenter le dataset."""
         try:
             from shared.internal_auth import InternalAuth
@@ -3915,6 +4138,18 @@ class AutoTradingEngine:
             lab_host = os.getenv("LAB_HOST", "localhost")
             lab_url = f"http://{lab_host}:8600/shadow/feedback"
             safe_price = float(price or 0.0)
+            metadata_payload = {
+                "source": "banker_live_close",
+                "episode_id": f"live:{ticket}" if ticket else f"close:{symbol}:{int(datetime.now().timestamp())}",
+                "ticket": ticket,
+            }
+            metadata_payload.update(
+                {
+                    key: value
+                    for key, value in dict(metadata or {}).items()
+                    if value is not None
+                }
+            )
             observation = {
                 "price": safe_price,
                 "indicators": {"price_norm": safe_price / 3000.0 if safe_price else 0.0},
@@ -3929,11 +4164,7 @@ class AutoTradingEngine:
                 "indicators": observation["indicators"],
                 "observation": observation,
                 "next_observation": observation,
-                "metadata": {
-                    "source": "banker_live_close",
-                    "episode_id": f"live:{ticket}" if ticket else f"close:{symbol}:{int(datetime.now().timestamp())}",
-                    "ticket": ticket,
-                },
+                "metadata": metadata_payload,
                 "timestamp": datetime.now().isoformat(),
                 "done": True,
             }

@@ -414,6 +414,9 @@ class Strategist:
         gnn_scalp = "NEUTRAL"
         gnn_swing = "NEUTRAL"
         gnn_confidence = 0.0
+        gnn_scalp_confidence = 0.0
+        gnn_intraday_confidence = 0.0
+        gnn_swing_confidence = 0.0
         try:
             import aiohttp
 
@@ -433,9 +436,16 @@ class Strategist:
                         gnn_scalp = str(data.get("scalp", {}).get("bias", "NEUTRAL"))
                         gnn_intraday = str(data.get("intraday", {}).get("bias", "NEUTRAL"))
                         gnn_swing = str(data.get("swing", {}).get("bias", "NEUTRAL"))
-                        gnn_confidence = float(
+                        gnn_scalp_confidence = float(
+                            data.get("scalp", {}).get("confidence", 0.0) or 0.0
+                        )
+                        gnn_intraday_confidence = float(
                             data.get("intraday", {}).get("confidence", 0.0) or 0.0
                         )
+                        gnn_swing_confidence = float(
+                            data.get("swing", {}).get("confidence", 0.0) or 0.0
+                        )
+                        gnn_confidence = gnn_intraday_confidence
                     else:
                         logger.warning("GNN indisponible pour %s: HTTP %s.", symbol, resp.status)
         except Exception as exc:
@@ -502,6 +512,9 @@ class Strategist:
             "gnn_intraday_bias": gnn_intraday,
             "gnn_swing_bias": gnn_swing,
             "gnn_confidence": float(gnn_confidence or 0.0),
+            "gnn_scalp_confidence": float(gnn_scalp_confidence or 0.0),
+            "gnn_intraday_confidence": float(gnn_intraday_confidence or 0.0),
+            "gnn_swing_confidence": float(gnn_swing_confidence or 0.0),
             "bias": final_bias,
             "bias_alignment": bias_alignment,
             "bias_strength": bias_strength,

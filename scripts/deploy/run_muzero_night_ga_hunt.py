@@ -906,15 +906,30 @@ def _run_proxy_generation(
     )
     _persist_local_json(context.hunt_dir / f"{sequence_id}_config.json", config_payload)
     launch_info = _launch_remote_sequence(client, config_payload=config_payload, context=context)
-    _wait_for_sequence_completion(sequence_id=sequence_id, context=context, poll_seconds=poll_seconds)
+    sequence_status = _wait_for_sequence_completion(
+        sequence_id=sequence_id,
+        context=context,
+        poll_seconds=poll_seconds,
+    )
     remote_results_path = f"{PROXMOX.REMOTE_V4_SEQUENCE_DIR}/v4_{ENGINE}_{PROFILE}_proxy_results.json"
     remote_finalists_path = f"{PROXMOX.REMOTE_V4_SEQUENCE_DIR}/v4_{ENGINE}_{PROFILE}_finalists.json"
-    proxy_results_payload = _download_remote_json(client, remote_results_path)
+    proxy_results_payload = _download_remote_json(client, remote_results_path, missing_ok=True)
     finalists_payload = _download_remote_json(client, remote_finalists_path, missing_ok=True)
     _persist_local_json(context.hunt_dir / f"{sequence_id}_proxy_results.json", proxy_results_payload)
     _persist_local_json(context.hunt_dir / f"{sequence_id}_finalists.json", finalists_payload)
     _persist_local_json(context.hunt_dir / f"{sequence_id}_launch.json", launch_info)
+    _persist_local_json(context.hunt_dir / f"{sequence_id}_status.json", sequence_status)
     results = _filter_sequence_results(proxy_results_payload, sequence_id=sequence_id)
+    sequence_state = str(sequence_status.get("state") or "").strip().lower()
+    if sequence_state == "paused" and not results:
+        _append_log(
+            context,
+            (
+                f"Generation {generation} en pause sans resultats scorables | "
+                f"trial={sequence_status.get('current_trial')} | erreur={sequence_status.get('last_error')}"
+            ),
+        )
+        return []
     _append_log(
         context,
         (

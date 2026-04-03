@@ -11,6 +11,7 @@ from eva_lab.training_utils import (
     get_horizon_history_bars,
     get_horizon_timeframe,
     infer_family_from_symbols,
+    resolve_symbol_overrides,
     resolve_family_training_symbols,
     resolve_feature_profile,
     resolve_position_mechanics_profile,
@@ -47,8 +48,29 @@ class MuZeroConfigV3:
         horizon_env = self.horizon.upper()
         max_symbols = int(overrides.get("max_symbols") or os.getenv("MUZERO_MAX_SYMBOLS", "12"))
         explicit_symbols = overrides.get("symbols")
+        explicit_env_symbols, explicit_env_source = resolve_symbol_overrides(
+            [
+                "TRAINING_FOCUS_SYMBOLS",
+                f"MUZERO_SYMBOLS_{horizon_env}",
+                "MUZERO_SYMBOLS",
+                "TRAINING_SYMBOLS",
+            ]
+        )
+        family_hint = self.model_family
         if explicit_symbols:
             self.symbols = [str(symbol).strip() for symbol in list(explicit_symbols) if str(symbol).strip()]
+            family_hint = None
+        elif explicit_env_symbols:
+            # Un univers impose par l'orchestrateur nightly doit rester
+            # prioritaire sur un profil famille historique (`fx`, `metals`, etc.).
+            self.symbols = explicit_env_symbols[:max_symbols] if max_symbols > 0 else explicit_env_symbols
+            family_hint = None
+            if explicit_env_source:
+                logger.info(
+                    "Univers MuZero force via %s (%s symboles).",
+                    explicit_env_source,
+                    len(self.symbols),
+                )
         elif self.model_family:
             self.symbols = resolve_family_training_symbols(
                 horizon=self.horizon,
@@ -67,7 +89,7 @@ class MuZeroConfigV3:
         if not self.symbols:
             self.symbols = ["XAUUSD", "EURUSD", "BTCUSD"]
             logger.warning("Aucun historique compatible detecte. Fallback sur un univers minimal.")
-        self.model_family = infer_family_from_symbols(self.symbols, family=self.model_family)
+        self.model_family = infer_family_from_symbols(self.symbols, family=family_hint)
         self.feature_profile = resolve_feature_profile(self.horizon, self.model_family)
         self.position_mechanics_profile = resolve_position_mechanics_profile(
             self.horizon,

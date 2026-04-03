@@ -24,6 +24,7 @@ from eva_lab.genetic_updater import GeneticUpdater
 from eva_lab.muzero.config import MuZeroConfigV3
 from eva_lab.muzero.environment import TradingEnvironment
 from eva_lab.muzero.jax_agent import JAXMuZeroAgent
+from eva_lab.shadow_dataset import load_shadow_games
 from eva_lab.timescale_store import record_arena_result, record_training_dataset
 from eva_lab.training_notifier import send_horizon_summary, send_training_horizon_started
 from eva_lab.training_status import (
@@ -31,6 +32,7 @@ from eva_lab.training_status import (
     load_training_status,
     mark_step_running,
     set_gold_precheck,
+    set_training_weighting,
     set_training_runtime_state,
     write_precheck_summary,
     write_terminal_summary,
@@ -66,6 +68,111 @@ def build_environment(symbol: str, config: MuZeroConfigV3) -> TradingEnvironment
     env = TradingEnvironment(data=market_data, symbol=symbol, config=config, max_steps=max_steps)
     setattr(env, "dataset_source", str(frame.attrs.get("dataset_source") or getattr(config, "dataset_source", "csv")))
     return env
+
+
+def _load_shadow_replay_bundle(
+    *,
+    agent: JAXMuZeroAgent,
+    config: MuZeroConfigV3,
+    focus_symbols: list[str],
+) -> dict[str, object]:
+    """Charge un replay shadow pondere dans le buffer MuZero.
+
+    Args:
+        agent (JAXMuZeroAgent): Agent MuZero actif.
+        config (MuZeroConfigV3): Configuration du run courant.
+        focus_symbols (list[str]): Univers explicitement retenu pour le run.
+
+    Returns:
+        dict[str, object]: Resume compact du chargement shadow.
+    """
+    shadow_enabled = str(os.getenv("MUZERO_SHADOW_REPLAY_ENABLED", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    raw_data_dirs = str(os.getenv("TRAINING_SHADOW_DIRS", "data/shadow_learning") or "").strip()
+    shadow_dirs = [
+        candidate.strip()
+        for chunk in raw_data_dirs.split(os.pathsep)
+        for candidate in chunk.split(",")
+        if candidate.strip()
+    ]
+    replay_capacity = max(int(getattr(agent.replay_buffer, "max_games", 0) or 0), 1)
+    max_games_default = max(replay_capacity // 2, 1)
+    max_games_raw = int(str(os.getenv("MUZERO_SHADOW_MAX_GAMES", str(max_games_default))).strip() or max_games_default)
+    max_games = max_games_raw if max_games_raw > 0 else None
+    winner_symbols = [
+        item.strip()
+        for item in str(os.getenv("TRAINING_WINNER_SYMBOLS", "") or "").split(",")
+        if item.strip()
+    ]
+    risk_symbols = [
+        item.strip()
+        for item in str(os.getenv("TRAINING_RISK_SYMBOLS", "") or "").split(",")
+        if item.strip()
+    ]
+    weighting_profile = {
+        "base_weight": float(str(os.getenv("TRAINING_EPISODE_WEIGHT_BASE", "1.0")).strip() or 1.0),
+        "winner_bonus": float(
+            str(os.getenv("TRAINING_EPISODE_WEIGHT_WINNER_BONUS", "0.15")).strip() or 0.15
+        ),
+        "loser_bonus": float(
+            str(os.getenv("TRAINING_EPISODE_WEIGHT_LOSER_BONUS", "0.35")).strip() or 0.35
+        ),
+        "nemesis_bonus": float(
+            str(os.getenv("TRAINING_EPISODE_WEIGHT_NEMESIS_BONUS", "0.55")).strip() or 0.55
+        ),
+        "risk_symbol_bonus": float(
+            str(os.getenv("TRAINING_EPISODE_WEIGHT_RISK_BONUS", "0.25")).strip() or 0.25
+        ),
+    }
+    observation_size = 1
+    for dimension in tuple(getattr(config, "observation_shape", ()) or ()):
+        observation_size *= max(int(dimension or 1), 1)
+
+    summary: dict[str, object] = {
+        "enabled": shadow_enabled,
+        "data_dirs": shadow_dirs,
+        "max_games": max_games,
+        "focus_symbols": list(focus_symbols),
+        "winner_symbols": list(winner_symbols),
+        "risk_symbols": list(risk_symbols),
+        "weighting_profile": dict(weighting_profile),
+        "episodes_loaded": 0,
+        "loaded_into_replay": 0,
+        "weighted_episode_counts": {},
+        "weighted_priority_total": 0.0,
+        "replay_buffer_size_after_load": agent.replay_buffer.size,
+    }
+    if not shadow_enabled:
+        summary["reason"] = "shadow_replay_disabled"
+        return summary
+    if not shadow_dirs:
+        summary["reason"] = "shadow_dirs_missing"
+        return summary
+
+    games, weighting_summary = load_shadow_games(
+        shadow_dirs,
+        observation_size=observation_size,
+        action_space_size=int(getattr(config, "action_space_size", 5) or 5),
+        winner_symbols=winner_symbols,
+        risk_symbols=risk_symbols,
+        allowed_symbols=focus_symbols,
+        max_games=max_games,
+        weighting_profile=weighting_profile,
+        include_weighting_summary=True,
+    )
+    for game in games:
+        agent.replay_buffer.save_game(game)
+
+    summary.update(dict(weighting_summary or {}))
+    summary["loaded_into_replay"] = len(games)
+    summary["episodes_loaded"] = int(weighting_summary.get("episodes_loaded", len(games)) or len(games))
+    summary["replay_buffer_size_after_load"] = agent.replay_buffer.size
+    summary["reason"] = "shadow_replay_loaded" if games else "shadow_replay_empty"
+    return summary
 
 
 
@@ -354,6 +461,51 @@ def main() -> dict[str, object]:
             logger.info("Reprise MuZero depuis %s", latest_path)
         except Exception as exc:
             logger.warning("Checkpoint MuZero ignore: %s", exc)
+
+    existing_training_weighting = dict(load_training_status().get("training_weighting") or {})
+    shadow_weighting = _load_shadow_replay_bundle(
+        agent=agent,
+        config=config,
+        focus_symbols=focus_symbols,
+    )
+    merged_training_weighting = dict(existing_training_weighting)
+    merged_training_weighting.update(shadow_weighting)
+    if existing_training_weighting.get("gnn_focus_symbol") and not merged_training_weighting.get("gnn_focus_symbol"):
+        merged_training_weighting["gnn_focus_symbol"] = existing_training_weighting.get("gnn_focus_symbol")
+    set_training_weighting(merged_training_weighting)
+    append_training_log(
+        (
+            f"MuZero {horizon}: replay shadow "
+            f"{shadow_weighting.get('loaded_into_replay', 0)} episode(s) charge(s) "
+            f"depuis {len(list(shadow_weighting.get('data_dirs') or []))} dossier(s)."
+        ),
+        source="muzero",
+    )
+    mark_step_running(
+        step_name,
+        engine=engine,
+        phase="initialisation",
+        horizon=horizon,
+        family=initial_family,
+        symbol_total=len(config.symbols),
+        dataset_id=dataset_id,
+        dataset_source=dataset_source,
+        feature_profile=feature_profile_name,
+        mechanics_profile_version=mechanics_profile_version,
+        ga_status=ga_status,
+        ga_generation=ga_generation,
+        ga_trial=ga_trial,
+        trial_mode=trial_mode,
+        trial_cost_profile=trial_cost_profile,
+        focus_symbols=focus_symbols,
+        gate_profile=gate_profile,
+        replay_cache_status="memoire",
+        replay_cache_key=replay_cache_key,
+        replay_cache_entries=agent.replay_buffer.size,
+        replay_cache_source="memoire",
+        shadow_buffer_size=int(shadow_weighting.get("episodes_loaded", 0) or 0),
+        dataset_coverage=dataset_coverage,
+    )
 
     games_per_symbol = int(os.getenv("MUZERO_GAMES_PER_SYMBOL", "12"))
     if resume_step > 0:

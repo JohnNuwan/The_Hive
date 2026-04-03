@@ -9,8 +9,12 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from eva_lab.champion_promoter import ChampionPromoter
+from eva_lab.gnn_registry import load_market_gnn_registry
+from eva_lab.shadow_dataset import summarize_shadow_weighting
 from eva_lab.training_notifier import send_nightly_summary, send_training_run_started
 from eva_lab.training_status import (
     append_training_log,
@@ -20,6 +24,7 @@ from eva_lab.training_status import (
     mark_step_finished,
     mark_step_running,
     reset_training_status,
+    set_training_weighting,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -29,6 +34,7 @@ WORKDIR = Path(__file__).resolve().parents[1]
 SUMMARY_PATH = WORKDIR / "data" / "checkpoints" / "nightly_training_summary.json"
 LOCK_PATH = WORKDIR / "data" / "checkpoints" / "nightly_training.lock"
 SHADOW_DIR = WORKDIR / "data" / "shadow_learning"
+TRADING_REVIEW_PATH = WORKDIR / "data" / "checkpoints" / "trading_reviews" / "latest.json"
 CANONICAL_TIMESCALE_SYMBOLS = [
     "EURUSD",
     "XAUUSD",
@@ -105,7 +111,112 @@ def _hours_since(timestamp: datetime | None) -> float | None:
     """
     if timestamp is None:
         return None
-    return max((datetime.now() - timestamp).total_seconds() / 3600.0, 0.0)
+    current_time = datetime.now(timestamp.tzinfo) if timestamp.tzinfo is not None else datetime.now()
+    return max((current_time - timestamp).total_seconds() / 3600.0, 0.0)
+
+
+def _build_shadow_weighting_profile() -> dict[str, float]:
+    """Construit le profil de ponderation utilise par la nightly.
+
+    Returns:
+        dict[str, float]: Profil de pondération shadow exploitable.
+    """
+    return {
+        "base_weight": max(float(os.getenv("TRAINING_EPISODE_WEIGHT_BASE", "1.0") or 1.0), 0.0),
+        "winner_bonus": max(
+            float(os.getenv("TRAINING_EPISODE_WEIGHT_WINNER_BONUS", "0.15") or 0.15),
+            0.0,
+        ),
+        "loser_bonus": max(
+            float(os.getenv("TRAINING_EPISODE_WEIGHT_LOSER_BONUS", "0.35") or 0.35),
+            0.0,
+        ),
+        "nemesis_bonus": max(
+            float(os.getenv("TRAINING_EPISODE_WEIGHT_NEMESIS_BONUS", "0.55") or 0.55),
+            0.0,
+        ),
+        "risk_symbol_bonus": max(
+            float(os.getenv("TRAINING_EPISODE_WEIGHT_RISK_BONUS", "0.25") or 0.25),
+            0.0,
+        ),
+    }
+
+
+def _build_training_weighting_summary(
+    learning_context: dict[str, object],
+) -> dict[str, object]:
+    """Resume la ponderation shadow pour la queue nightly.
+
+    Args:
+        learning_context (dict[str, object]): Guidance issue de la revue.
+
+    Returns:
+        dict[str, object]: Resume compact de ponderation exploitable par l'API.
+    """
+    allowed_symbols = list(learning_context.get("priority_symbols") or CANONICAL_TIMESCALE_SYMBOLS)
+    weighting_profile = _build_shadow_weighting_profile()
+    summary = summarize_shadow_weighting(
+        [SHADOW_DIR],
+        winner_symbols=list(learning_context.get("winner_symbols") or []),
+        risk_symbols=list(learning_context.get("risk_symbols") or []),
+        allowed_symbols=allowed_symbols,
+        max_episodes=_env_int("TRAINING_WEIGHTING_MAX_EPISODES", 250),
+        weighting_profile=weighting_profile,
+    )
+    summary["allowed_symbols"] = list(allowed_symbols)
+    summary["shadow_dirs"] = [str(SHADOW_DIR)]
+    summary["gnn_focus_symbol"] = learning_context.get("gnn_focus_symbol")
+    return summary
+
+
+def _evaluate_gnn_refresh_policy(requested: bool) -> dict[str, object]:
+    """Determine si le refresh nightly du GNN doit vraiment etre lance.
+
+    Args:
+        requested (bool): Intention brute issue de l'environnement.
+
+    Returns:
+        dict[str, object]: Decision normalisee avec fraicheur et raison.
+    """
+    threshold_hours = max(_env_int("TRAINING_GNN_REFRESH_AFTER_HOURS", 72), 1)
+    registry = load_market_gnn_registry()
+    trained_at = _parse_iso_datetime(registry.get("trained_at"))
+    freshness_hours = _hours_since(trained_at)
+    registry_status = str(registry.get("status") or "").strip().lower() or "unavailable"
+    checkpoint_ready = bool(str(registry.get("checkpoint_path") or "").strip())
+    refresh_required = requested
+    reason = "requested"
+
+    if not requested:
+        refresh_required = False
+        reason = "disabled_by_env"
+    elif not checkpoint_ready:
+        refresh_required = True
+        reason = "missing_checkpoint"
+    elif registry_status in {"stale", "unavailable", "draft"}:
+        refresh_required = True
+        reason = f"registry_{registry_status}"
+    elif freshness_hours is None:
+        refresh_required = True
+        reason = "missing_freshness"
+    elif freshness_hours <= threshold_hours:
+        refresh_required = False
+        reason = "already_fresh"
+    else:
+        refresh_required = True
+        reason = "freshness_threshold_exceeded"
+
+    return {
+        "requested": requested,
+        "scheduled": refresh_required,
+        "reason": reason,
+        "threshold_hours": threshold_hours,
+        "freshness_hours": round(freshness_hours, 2) if freshness_hours is not None else None,
+        "registry_status": registry_status,
+        "checkpoint_ready": checkpoint_ready,
+        "trained_at": registry.get("trained_at"),
+        "champion_id": registry.get("version"),
+    }
 
 
 def _load_json_file(path: Path) -> dict[str, object] | None:
@@ -316,6 +427,296 @@ def _canonical_symbols_csv() -> str:
     return ",".join(CANONICAL_TIMESCALE_SYMBOLS)
 
 
+def _unique_symbols(symbols: list[str]) -> list[str]:
+    """Dedoublonne une liste de symboles sans perdre l'ordre.
+
+    Args:
+        symbols (list[str]): Symboles bruts a nettoyer.
+
+    Returns:
+        list[str]: Symboles uniques, trims et non vides.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        normalized = str(symbol or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
+def _candidate_review_paths() -> list[Path]:
+    """Retourne les chemins plausibles de revue a charger.
+
+    Returns:
+        list[Path]: Liste dedoublonnee des chemins candidats.
+    """
+    paths: list[Path] = []
+    for env_name in ("TRAINING_REVIEW_PATH", "BANKER_TRADING_REVIEW_PATH"):
+        raw_value = str(os.getenv(env_name, "")).strip()
+        if raw_value:
+            paths.append(Path(raw_value).expanduser())
+    paths.append(TRADING_REVIEW_PATH)
+    unique_paths: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        resolved = str(path)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique_paths.append(path)
+    return unique_paths
+
+
+def _build_banker_review_url() -> str:
+    """Construit l'URL de repli pour lire la revue du banker.
+
+    Returns:
+        str: URL HTTP cible pour ``/trading/review/latest``.
+    """
+    explicit_url = str(os.getenv("BANKER_REVIEW_URL", "")).strip()
+    if explicit_url:
+        return explicit_url
+    host = str(os.getenv("BANKER_API_HOST", "localhost")).strip() or "localhost"
+    port = str(os.getenv("BANKER_API_PORT", "8100")).strip() or "8100"
+    if host == "0.0.0.0":
+        host = "localhost"
+    return f"http://{host}:{port}/trading/review/latest"
+
+
+def _load_latest_trading_review() -> dict[str, object] | None:
+    """Charge la derniere revue journaliere disponible.
+
+    La resolution suit trois etapes:
+    1. chemin explicite via variables d'environnement ;
+    2. chemin local standard dans ``data/checkpoints/trading_reviews`` ;
+    3. endpoint HTTP du banker si les fichiers sont absents.
+
+    Returns:
+        dict[str, object] | None: Revue chargee ou ``None``.
+    """
+    for review_path in _candidate_review_paths():
+        payload = _load_json_file(review_path)
+        if payload:
+            payload.setdefault("_review_source", "file")
+            payload.setdefault("_review_path", str(review_path))
+            return payload
+
+    review_url = _build_banker_review_url()
+    timeout_seconds = max(1, _env_int("TRAINING_REVIEW_HTTP_TIMEOUT_SECONDS", 3))
+    try:
+        with urllib_request.urlopen(review_url, timeout=timeout_seconds) as response:
+            if getattr(response, "status", 200) >= 400:
+                logger.warning("Lecture HTTP de la revue impossible: %s", review_url)
+                return None
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib_error.URLError, TimeoutError, ValueError, OSError) as exc:
+        logger.info("Aucune revue banker exploitable via %s: %s", review_url, exc)
+        return None
+
+    if isinstance(payload, dict):
+        payload.setdefault("_review_source", "http")
+        payload.setdefault("_review_path", review_url)
+        return payload
+    return None
+
+
+def _collect_review_winner_symbols(review: dict[str, object]) -> list[str]:
+    """Classe les meilleurs symboles du jour a partir de la revue.
+
+    Args:
+        review (dict[str, object]): Revue journaliere du banker.
+
+    Returns:
+        list[str]: Symboles gagnants classes par qualite.
+    """
+    ranked_rows: list[tuple[str, float, float, int]] = []
+    for item in list(review.get("symbols") or []):
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        net_profit = float(item.get("net_profit") or 0.0)
+        win_rate = float(item.get("win_rate") or 0.0)
+        closed_deals = int(item.get("closed_deals") or 0)
+        if net_profit <= 0.0 or closed_deals <= 0:
+            continue
+        ranked_rows.append((symbol, net_profit, win_rate, closed_deals))
+    ranked_rows.sort(key=lambda row: (row[1], row[2], row[3]), reverse=True)
+    return [row[0] for row in ranked_rows]
+
+
+def _collect_review_risk_symbols(review: dict[str, object]) -> list[str]:
+    """Classe les symboles a risque a partir de la revue.
+
+    Args:
+        review (dict[str, object]): Revue journaliere du banker.
+
+    Returns:
+        list[str]: Symboles a surveiller ou penaliser en priorite.
+    """
+    ranked_rows: list[tuple[int, float, int, str]] = []
+    risk_priority = {"quarantaine": 0, "alerte": 1, "surveillance": 2, "normal": 3}
+    for item in list(review.get("symbol_risk_map") or []):
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        risk_level = str(item.get("risk_level") or "normal").strip().lower()
+        net_profit = float(item.get("net_profit") or 0.0)
+        recent_losses = int(item.get("recent_losses_4h") or 0) + int(item.get("recent_events_12h") or 0)
+        if risk_level == "normal" and net_profit >= 0.0 and recent_losses <= 0:
+            continue
+        ranked_rows.append((risk_priority.get(risk_level, 9), net_profit, -recent_losses, symbol))
+    ranked_rows.sort(key=lambda row: (row[0], row[1], row[2]))
+    return [row[3] for row in ranked_rows]
+
+
+def _translate_mutation_priors_to_env(
+    *,
+    review: dict[str, object],
+    winner_symbols: list[str],
+    risk_symbols: list[str],
+) -> dict[str, str]:
+    """Traduit les priors de review en variables MuZero/GNN concretes.
+
+    Args:
+        review (dict[str, object]): Revue journaliere complete.
+        winner_symbols (list[str]): Symboles positifs de reference.
+        risk_symbols (list[str]): Symboles a risque a traiter en priorite.
+
+    Returns:
+        dict[str, str]: Variables d'environnement exploitables par la nightly.
+    """
+    overrides: dict[str, str] = {
+        "TRAINING_REVIEW_AVAILABLE": "1",
+        "TRAINING_REVIEW_GENERATED_AT": str(review.get("generated_at") or ""),
+        "TRAINING_REVIEW_SOURCE": str(review.get("_review_source") or "unknown"),
+        "TRAINING_WINNER_SYMBOLS": ",".join(winner_symbols),
+        "TRAINING_RISK_SYMBOLS": ",".join(risk_symbols),
+    }
+    prioritized_symbols = _unique_symbols(winner_symbols + risk_symbols + CANONICAL_TIMESCALE_SYMBOLS)
+    if prioritized_symbols:
+        overrides["TRAINING_PRIORITY_SYMBOLS"] = ",".join(prioritized_symbols)
+
+    priors = [item for item in list(review.get("mutation_priors") or []) if isinstance(item, dict)]
+    for prior in priors:
+        target = str(prior.get("target") or "").strip().lower()
+        if target == "muzero_mechanics":
+            overrides.update(
+                {
+                    "MUZERO_HOLD_STALE_PENALTY_AFTER_STEPS": "10",
+                    "MUZERO_HOLD_STALE_PENALTY": "1.35",
+                    "MUZERO_HOLD_TREND_PENALTY": "0.35",
+                    "MUZERO_HOLD_RANGE_PENALTY": "0.20",
+                    "MUZERO_SPLIT_MAX_SPLITS": "2",
+                    "MUZERO_SPLIT_MIN_TRADE_RETURN": "0.0025",
+                    "MUZERO_SPLIT_MIN_REALIZED_PCT": "0.0015",
+                    "MUZERO_SPLIT_FAILURE_PENALTY": "0.75",
+                    "MUZERO_CLOSE_WINNER_THRESHOLD": "0.0048",
+                    "MUZERO_CLOSE_STRONG_WINNER_THRESHOLD": "0.0088",
+                    "MUZERO_CLOSE_TP_LIKE_THRESHOLD": "0.0062",
+                }
+            )
+        elif target == "muzero_directional_balance":
+            overrides.update(
+                {
+                    "MUZERO_ACTIVITY_INSUFFICIENT_ENTRIES_PENALTY": "2.50",
+                    "MUZERO_DIRECTIONAL_MAX_IMBALANCE": "0.58",
+                    "MUZERO_DIRECTIONAL_IMBALANCE_PENALTY": "1.75",
+                }
+            )
+        elif target == "gold_live_filters":
+            overrides.setdefault("TRAIN_GNN_FOCUS_SYMBOL", "XAUUSD")
+        elif target == "gnn_consultatif":
+            symbols = _unique_symbols([str(symbol) for symbol in list(prior.get("symbols") or [])])
+            if symbols:
+                overrides["TRAIN_GNN_FOCUS_SYMBOL"] = symbols[0]
+
+    if winner_symbols:
+        overrides.setdefault("MUZERO_CLOSE_WINNER_THRESHOLD", "0.0052")
+        overrides.setdefault("MUZERO_CLOSE_STRONG_WINNER_THRESHOLD", "0.0094")
+        overrides.setdefault("MUZERO_CLOSE_TP_LIKE_THRESHOLD", "0.0066")
+    if risk_symbols and "TRAIN_GNN_FOCUS_SYMBOL" not in overrides:
+        overrides["TRAIN_GNN_FOCUS_SYMBOL"] = risk_symbols[0]
+
+    return overrides
+
+
+def _build_review_learning_context(review: dict[str, object] | None) -> dict[str, object]:
+    """Construit un contexte de guidance a partir de la revue journaliere.
+
+    Args:
+        review (dict[str, object] | None): Revue journaliere chargee.
+
+    Returns:
+        dict[str, object]: Contexte compact pour la queue nightly.
+    """
+    if not review:
+        return {
+            "loaded": False,
+            "source": None,
+            "path": None,
+            "generated_at": None,
+            "winner_symbols": [],
+            "risk_symbols": [],
+            "priority_symbols": list(CANONICAL_TIMESCALE_SYMBOLS),
+            "gnn_focus_symbol": None,
+            "env_overrides": {"TRAINING_REVIEW_AVAILABLE": "0"},
+        }
+
+    winner_symbols = _collect_review_winner_symbols(review)
+    risk_symbols = _collect_review_risk_symbols(review)
+    env_overrides = _translate_mutation_priors_to_env(
+        review=review,
+        winner_symbols=winner_symbols,
+        risk_symbols=risk_symbols,
+    )
+    priority_symbols = _unique_symbols(
+        winner_symbols
+        + risk_symbols
+        + list(
+            review.get("live_universe", {}).get("symbols") or review.get("runtime", {}).get("cpu_live_symbols") or []
+        )
+        + CANONICAL_TIMESCALE_SYMBOLS
+    )
+    if priority_symbols:
+        env_overrides["TRAINING_PRIORITY_SYMBOLS"] = ",".join(priority_symbols)
+    gnn_focus_symbol = str(env_overrides.get("TRAIN_GNN_FOCUS_SYMBOL") or "").strip() or None
+    return {
+        "loaded": True,
+        "source": review.get("_review_source"),
+        "path": review.get("_review_path"),
+        "generated_at": review.get("generated_at"),
+        "winner_symbols": winner_symbols,
+        "risk_symbols": risk_symbols,
+        "priority_symbols": priority_symbols,
+        "gnn_focus_symbol": gnn_focus_symbol,
+        "env_overrides": env_overrides,
+    }
+
+
+def _filter_env_overrides(env_overrides: dict[str, str], prefixes: tuple[str, ...]) -> dict[str, str]:
+    """Filtre un dictionnaire d'environnement par prefixes.
+
+    Args:
+        env_overrides (dict[str, str]): Variables candidates.
+        prefixes (tuple[str, ...]): Prefixes autorises.
+
+    Returns:
+        dict[str, str]: Sous-ensemble filtre.
+    """
+    return {
+        key: value
+        for key, value in env_overrides.items()
+        if any(key.startswith(prefix) for prefix in prefixes)
+    }
+
+
 def _build_champion_snapshot(promoter: ChampionPromoter, horizons: list[str]) -> dict[str, object]:
     """Assemble l'etat des champions par horizon.
 
@@ -518,61 +919,76 @@ def apply_training_strategy(decision: dict[str, object]) -> None:
         _set_env_default("TRAIN_GNN_MAX_SYMBOLS", str(len(CANONICAL_TIMESCALE_SYMBOLS)))
 
 
-def _build_gnn_job() -> dict[str, object]:
+def _build_gnn_job(learning_context: dict[str, object] | None = None) -> dict[str, object]:
     """Construit l'etape explicite de refresh GNN.
+
+    Args:
+        learning_context (dict[str, object] | None): Contexte derive de la review.
 
     Returns:
         dict[str, object]: Definition complete du job GNN.
     """
 
-    canonical_symbols_csv = _canonical_symbols_csv()
+    review_overrides = dict((learning_context or {}).get("env_overrides") or {})
+    focus_symbols = list((learning_context or {}).get("priority_symbols") or CANONICAL_TIMESCALE_SYMBOLS)
+    focus_symbols = _unique_symbols(focus_symbols) or list(CANONICAL_TIMESCALE_SYMBOLS)
+    canonical_symbols_csv = ",".join(focus_symbols)
+    extra_env = {
+        "TRAIN_GNN_SYMBOLS": canonical_symbols_csv,
+        "TRAIN_GNN_CONTEXT_SYMBOLS": canonical_symbols_csv,
+        "TRAIN_GNN_MAX_SYMBOLS": str(len(CANONICAL_TIMESCALE_SYMBOLS)),
+        "TRAIN_GNN_DEPLOYMENT_CLASS": "consultative",
+    }
+    extra_env.update(_filter_env_overrides(review_overrides, ("TRAINING_", "TRAIN_GNN_")))
     return {
         "name": "gnn",
         "engine": "gnn",
         "horizon": None,
         "dataset_source": "timescaledb",
-        "focus_symbols": list(CANONICAL_TIMESCALE_SYMBOLS),
+        "focus_symbols": focus_symbols,
         "command": [sys.executable, "scripts/train_gnn.py"],
-        "extra_env": {
-            "TRAIN_GNN_SYMBOLS": canonical_symbols_csv,
-            "TRAIN_GNN_CONTEXT_SYMBOLS": canonical_symbols_csv,
-            "TRAIN_GNN_MAX_SYMBOLS": str(len(CANONICAL_TIMESCALE_SYMBOLS)),
-            "TRAIN_GNN_DEPLOYMENT_CLASS": "consultative",
-        },
+        "extra_env": extra_env,
     }
 
 
-def _build_muzero_job(horizon: str) -> dict[str, object]:
+def _build_muzero_job(horizon: str, learning_context: dict[str, object] | None = None) -> dict[str, object]:
     """Construit un job nightly MuZero borne a TimeScaleDB.
 
     Args:
         horizon (str): Horizon cible.
+        learning_context (dict[str, object] | None): Contexte derive de la review.
 
     Returns:
         dict[str, object]: Definition complete du job MuZero.
     """
 
     normalized_horizon = str(horizon).strip().lower()
-    canonical_symbols_csv = _canonical_symbols_csv()
+    review_overrides = dict((learning_context or {}).get("env_overrides") or {})
+    focus_symbols = list((learning_context or {}).get("priority_symbols") or CANONICAL_TIMESCALE_SYMBOLS)
+    focus_symbols = _unique_symbols(focus_symbols) or list(CANONICAL_TIMESCALE_SYMBOLS)
+    canonical_symbols_csv = ",".join(focus_symbols)
+    extra_env = {
+        "MUZERO_HORIZON": normalized_horizon,
+        "MUZERO_MODEL_FAMILY": "",
+        "MUZERO_DATASET_SOURCE": "timescaledb",
+        "TRAINING_TIMESCALE_ENABLED": "1",
+        "TRAINING_FOCUS_SYMBOLS": canonical_symbols_csv,
+        "MUZERO_SYMBOLS": canonical_symbols_csv,
+        "ARENA_SYMBOLS": canonical_symbols_csv,
+        f"MUZERO_SYMBOLS_{normalized_horizon.upper()}": canonical_symbols_csv,
+        f"ARENA_SYMBOLS_{normalized_horizon.upper()}": canonical_symbols_csv,
+        "MUZERO_MAX_SYMBOLS": str(len(CANONICAL_TIMESCALE_SYMBOLS)),
+        "ARENA_MAX_SYMBOLS": str(len(CANONICAL_TIMESCALE_SYMBOLS)),
+    }
+    extra_env.update(_filter_env_overrides(review_overrides, ("TRAINING_", "MUZERO_", "ARENA_")))
     return {
         "name": f"muzero_{normalized_horizon}",
         "engine": "muzero",
         "horizon": normalized_horizon,
         "dataset_source": "timescaledb",
-        "focus_symbols": list(CANONICAL_TIMESCALE_SYMBOLS),
+        "focus_symbols": focus_symbols,
         "command": [sys.executable, "scripts/train_global_models.py"],
-        "extra_env": {
-            "MUZERO_HORIZON": normalized_horizon,
-            "MUZERO_DATASET_SOURCE": "timescaledb",
-            "TRAINING_TIMESCALE_ENABLED": "1",
-            "TRAINING_FOCUS_SYMBOLS": canonical_symbols_csv,
-            "MUZERO_SYMBOLS": canonical_symbols_csv,
-            "ARENA_SYMBOLS": canonical_symbols_csv,
-            f"MUZERO_SYMBOLS_{normalized_horizon.upper()}": canonical_symbols_csv,
-            f"ARENA_SYMBOLS_{normalized_horizon.upper()}": canonical_symbols_csv,
-            "MUZERO_MAX_SYMBOLS": str(len(CANONICAL_TIMESCALE_SYMBOLS)),
-            "ARENA_MAX_SYMBOLS": str(len(CANONICAL_TIMESCALE_SYMBOLS)),
-        },
+        "extra_env": extra_env,
     }
 
 
@@ -604,6 +1020,7 @@ def build_nightly_job_queue(
     run_gnn: bool,
     run_muzero: bool,
     run_dreamer: bool,
+    learning_context: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     """Construit la file explicite des jobs nocturnes.
 
@@ -611,6 +1028,7 @@ def build_nightly_job_queue(
         run_gnn (bool): Active le refresh GNN.
         run_muzero (bool): Active les jobs MuZero multi-horizon.
         run_dreamer (bool): Active le job Dreamer offline.
+        learning_context (dict[str, object] | None): Guidance derivee de la review.
 
     Returns:
         list[dict[str, object]]: File ordonnee des jobs a executer.
@@ -618,10 +1036,10 @@ def build_nightly_job_queue(
 
     jobs: list[dict[str, object]] = []
     if run_gnn:
-        jobs.append(_build_gnn_job())
+        jobs.append(_build_gnn_job(learning_context))
     if run_muzero:
         for horizon in _resolve_horizons():
-            jobs.append(_build_muzero_job(horizon))
+            jobs.append(_build_muzero_job(horizon, learning_context))
     if run_dreamer:
         jobs.append(_build_dreamer_job())
     return jobs
@@ -750,6 +1168,44 @@ def main() -> dict[str, object]:
         f"Strategie nightly retenue: {summary['strategy']} ({summary['reason']}).",
         source="nightly",
     )
+    review_payload = _load_latest_trading_review()
+    review_learning = _build_review_learning_context(review_payload)
+    summary["review_learning"] = {
+        "loaded": review_learning.get("loaded", False),
+        "source": review_learning.get("source"),
+        "path": review_learning.get("path"),
+        "generated_at": review_learning.get("generated_at"),
+        "winner_symbols": list(review_learning.get("winner_symbols") or []),
+        "risk_symbols": list(review_learning.get("risk_symbols") or []),
+        "priority_symbols": list(review_learning.get("priority_symbols") or []),
+        "gnn_focus_symbol": review_learning.get("gnn_focus_symbol"),
+    }
+    decision["review_learning"] = summary["review_learning"]
+    training_weighting = _build_training_weighting_summary(review_learning)
+    summary["training_weighting"] = training_weighting
+    decision["training_weighting"] = training_weighting
+    set_training_weighting(training_weighting)
+    persist_summary(summary)
+    if review_learning.get("loaded"):
+        append_training_log(
+            "Review nightly chargee: "
+            f"winners={','.join(summary['review_learning']['winner_symbols']) or 'aucun'} | "
+            f"risks={','.join(summary['review_learning']['risk_symbols']) or 'aucun'}",
+            source="nightly",
+        )
+    else:
+        append_training_log(
+            "Aucune review nightly disponible; file lancee sur priorites canoniques.",
+            source="nightly",
+        )
+    append_training_log(
+        (
+            "Ponderation nightly: "
+            f"episodes={training_weighting.get('episodes_loaded', 0)} | "
+            f"tags={training_weighting.get('weighted_episode_counts', {})}"
+        ),
+        source="nightly",
+    )
 
     if summary["strategy"] == "skip":
         summary["status"] = "skipped"
@@ -770,6 +1226,7 @@ def main() -> dict[str, object]:
         reason=str(summary.get("reason") or "manual"),
         universe=universe_summary,
     )
+    set_training_weighting(training_weighting)
     send_training_run_started(
         run_id=run_id,
         strategy=str(summary.get("strategy") or "research"),
@@ -778,13 +1235,28 @@ def main() -> dict[str, object]:
         universe=universe_summary,
     )
 
-    run_gnn = _env_flag("RUN_TRAIN_GNN", True)
+    requested_run_gnn = _env_flag("RUN_TRAIN_GNN", True)
+    gnn_refresh_policy = _evaluate_gnn_refresh_policy(requested_run_gnn)
+    summary["gnn_refresh_policy"] = gnn_refresh_policy
+    decision["gnn_refresh_policy"] = gnn_refresh_policy
+    persist_summary(summary)
+    run_gnn = bool(gnn_refresh_policy.get("scheduled"))
     run_muzero = _env_flag("RUN_TRAIN_MUZERO", True)
     run_dreamer = _env_flag("RUN_TRAIN_DREAMER", False)
+    if requested_run_gnn and not run_gnn:
+        append_training_log(
+            (
+                "Refresh GNN saute: "
+                f"{gnn_refresh_policy.get('reason')} "
+                f"(fraicheur={gnn_refresh_policy.get('freshness_hours')}h)."
+            ),
+            source="nightly",
+        )
     job_queue = build_nightly_job_queue(
         run_gnn=run_gnn,
         run_muzero=run_muzero,
         run_dreamer=run_dreamer,
+        learning_context=review_learning,
     )
     summary["job_queue"] = [_summarize_job(job) for job in job_queue]
     persist_summary(summary)

@@ -59,6 +59,7 @@ from eva_lab.training_status import (
     load_cpu_scheduler_state,
     load_sequence_state,
     select_effective_training_step,
+    set_service_recovery_snapshot,
     tail_log_file,
     load_training_status,
     tail_training_log,
@@ -545,6 +546,47 @@ async def _probe_tcp_dependency(name: str, host: str, port: int) -> dict[str, An
         }
 
 
+def _pid_is_alive(raw_pid: Any) -> bool | None:
+    """
+    Indique si un PID local est encore present.
+
+    Args:
+        raw_pid (Any): Valeur brute potentiellement serialisee.
+
+    Returns:
+        bool | None: ``True`` si le processus existe, ``False`` s'il est
+        absent, ``None`` si la valeur n'est pas exploitable.
+    """
+    try:
+        pid = int(raw_pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _trainer_process_is_alive(run_status: dict[str, Any]) -> bool:
+    """
+    Indique si le processus d'entrainement annonce existe encore vraiment.
+
+    Args:
+        run_status (dict[str, Any]): Statut training courant.
+
+    Returns:
+        bool: ``True`` si un processus d'entrainement valide est observe.
+    """
+    launcher = dict(run_status.get("launcher") or {})
+    pid_state = _pid_is_alive(launcher.get("remote_pid"))
+    if pid_state is not None:
+        return pid_state
+    return bool(run_status.get("active"))
+
+
 async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str, Any]:
     """
     Agrege les dependances utiles a la lecture du run.
@@ -591,7 +633,7 @@ async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str
     dependencies["timescaledb"]["features_table"] = str(timescale_info.get("features_table") or "")
 
     trainer_container = launcher.get("trainer_container")
-    trainer_running = bool(run_status.get("active")) or bool(trainer_container)
+    trainer_running = _trainer_process_is_alive(run_status)
     dependencies["trainer"] = {
         "name": "trainer",
         "ok": trainer_running,
@@ -600,6 +642,41 @@ async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str
         "pid": launcher.get("remote_pid"),
     }
     return dependencies
+
+
+def _build_lab_service_recovery_snapshot(
+    app: FastAPI,
+    run_status: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Construit un audit compact de reprise service pour le Lab.
+
+    Args:
+        app (FastAPI): Application Lab courante.
+        run_status (dict[str, Any]): Statut training courant normalise.
+
+    Returns:
+        dict[str, Any]: Resume operateur de reprise apres redemarrage.
+    """
+    promoter: ChampionPromoter = app.state.promoter
+    gnn_payload = _compute_gnn_champion_payload(load_market_gnn_registry())
+    dreamer_scalp = promoter.build_engine_horizon_status("dreamer", "scalp")
+    dreamer_live_lock = dict(dreamer_scalp.get("live_lock") or {})
+    timescale_info = describe_timescale_source()
+    return {
+        "audited_at": datetime.now(timezone.utc).isoformat(),
+        "lab_online": True,
+        "training_active": bool(run_status.get("active")) and _trainer_process_is_alive(run_status),
+        "trainer_process_alive": _trainer_process_is_alive(run_status),
+        "gnn_ready": bool(gnn_payload.get("champion_ready")),
+        "gnn_freshness_hours": gnn_payload.get("freshness_hours"),
+        "dreamer_live_locked": bool(dreamer_live_lock.get("active")),
+        "dreamer_live_lock_reason": dreamer_live_lock.get("reason"),
+        "timescaledb_enabled": bool(timescale_info.get("enabled")),
+        "timescaledb_state": str(timescale_info.get("state") or "disabled"),
+        "stale_detected": bool(run_status.get("stale_detected")),
+        "stale_reasons": list(run_status.get("stale_reasons") or []),
+    }
 
 
 async def _publish_training_run_snapshot(
@@ -1164,6 +1241,19 @@ async def lifespan(app: FastAPI):
             }
         )
     app.state.gnn_refresh_queue_task = asyncio.create_task(_gnn_refresh_queue_loop(app))
+
+    recovery_snapshot = _build_lab_service_recovery_snapshot(
+        app,
+        load_effective_training_status(clean_stale=True),
+    )
+    app.state.service_recovery = recovery_snapshot
+    set_service_recovery_snapshot(recovery_snapshot)
+    logger.info(
+        "Audit de reprise Lab: training_active=%s | gnn_ready=%s | dreamer_live_locked=%s",
+        recovery_snapshot.get("training_active"),
+        recovery_snapshot.get("gnn_ready"),
+        recovery_snapshot.get("dreamer_live_locked"),
+    )
 
     asyncio.create_task(hard_heartbeat())
     if _env_flag("ENABLE_LAB_INTERNAL_NIGHTLY_SCHEDULER", False):
@@ -1821,6 +1911,9 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
 
     runtime_profile = _resolve_runtime_profile(run_status)
     eta_payload = _estimate_training_eta(run_view)
+    service_recovery = _build_lab_service_recovery_snapshot(app, run_status)
+    app.state.service_recovery = service_recovery
+    set_service_recovery_snapshot(service_recovery)
     payload = {
         "status": "ok",
         "runtime_profile": runtime_profile,
@@ -1894,6 +1987,8 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         "effective_source_reason": ((run_view.get("dataset_coverage") or {}).get("effective_source_reason")),
         "replay_cache_reuse_ratio": ((run_view.get("dataset_coverage") or {}).get("replay_cache_reuse_ratio")),
         "metrics_by_position_mechanics": run_view.get("metrics_by_position_mechanics", {}),
+        "training_weighting": run_view.get("training_weighting", {}),
+        "service_recovery": service_recovery,
     }
     await _publish_training_run_snapshot(
         run_view=run_view,
@@ -2004,6 +2099,9 @@ async def factory_overview():
         CANONICAL_SCALP_FULL_SYMBOLS,
         CANONICAL_COVERAGE_TIMEFRAMES,
     )
+    service_recovery = _build_lab_service_recovery_snapshot(app, training_state)
+    app.state.service_recovery = service_recovery
+    set_service_recovery_snapshot(service_recovery)
     blockers: list[str] = []
     if not muzero_scalp.get("live_champion_id"):
         blockers.append("Aucun champion MuZero live exploitable.")
@@ -2076,6 +2174,8 @@ async def factory_overview():
         },
         "ga": _build_ga_overview(recent_trials, run_view),
         "timescaledb_coverage": timescaledb_coverage,
+        "training_weighting": run_view.get("training_weighting", {}),
+        "service_recovery": service_recovery,
         "blockers": blockers,
     }
 

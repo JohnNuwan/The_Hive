@@ -152,6 +152,18 @@ class NemesisSystem:
 
         await self._save_state()
 
+    def preview_nemesis_type(self, market_context: Dict[str, Any]) -> str:
+        """
+        Retourne le type Nemesis probable sans modifier l'etat interne.
+
+        Args:
+            market_context (Dict[str, Any]): Contexte capture lors de la perte.
+
+        Returns:
+            str: Type Nemesis estime a partir du contexte courant.
+        """
+        return self._classify_nemesis(market_context)
+
     def _classify_nemesis(self, context: Dict[str, Any]) -> str:
         """
         Classifie la cause probable de la perte.

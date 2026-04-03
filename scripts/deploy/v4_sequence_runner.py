@@ -739,8 +739,6 @@ def _wait_for_matching_terminal_summary(
             ):
                 resolved_path = str((summary or {}).get("path") or summary_path or "").strip() or None
                 return dict(summary), resolved_path
-        if time.time() >= deadline:
-            return None, summary_path
         run_snapshot = _read_run_snapshot()
         if _snapshot_matches_window(
             run_snapshot,
@@ -755,6 +753,14 @@ def _wait_for_matching_terminal_summary(
                 candidate_run_id = str(run_snapshot.get("run_id") or "").strip() or None
                 if candidate_run_id:
                     run_id = candidate_run_id
+            if bool(run_snapshot.get("active")):
+                # Tant que le run de la fenetre courante est encore actif,
+                # l'absence de resume terminal n'est pas anormale.
+                deadline = time.time() + max(5, grace_seconds)
+                time.sleep(max(1, poll_seconds))
+                continue
+        if time.time() >= deadline:
+            return None, summary_path
         time.sleep(max(1, poll_seconds))
 
 

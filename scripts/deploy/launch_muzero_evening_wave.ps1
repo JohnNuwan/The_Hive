@@ -3,7 +3,7 @@ param(
     [int]$MaxGenerations = 3,
     [int]$GenerationSize = 4,
     [int]$PollSeconds = 20,
-    [Nullable[int]]$RandomSeed = $null
+    [string]$RandomSeed = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,8 +32,8 @@ $arguments = @(
     "--poll-seconds", $PollSeconds
 )
 
-if ($RandomSeed -ne $null) {
-    $arguments += @("--random-seed", $RandomSeed.Value)
+if (-not [string]::IsNullOrWhiteSpace($RandomSeed)) {
+    $arguments += @("--random-seed", $RandomSeed.Trim())
 }
 
 Write-Host "Lancement de la vague MuZero du soir..." -ForegroundColor Cyan

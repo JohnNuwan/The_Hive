@@ -157,6 +157,8 @@ def _default_status() -> dict[str, Any]:
         "promotion_state": None,
         "stall_detected": False,
         "stall_reason": None,
+        "training_weighting": {},
+        "service_recovery": {},
     }
 
 
@@ -293,6 +295,30 @@ def _normalize_runtime_state_label(value: Any) -> str | None:
     return label or None
 
 
+def _pid_is_alive(raw_pid: Any) -> bool | None:
+    """Indique si un PID local existe encore.
+
+    Args:
+        raw_pid (Any): Valeur brute potentiellement serialisee.
+
+    Returns:
+        bool | None: ``True`` si le PID repond, ``False`` s'il est absent,
+        ``None`` si la valeur n'est pas exploitable.
+    """
+
+    try:
+        pid = int(raw_pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def normalize_runtime_training_status(
     status: dict[str, Any] | None,
     *,
@@ -327,6 +353,8 @@ def normalize_runtime_training_status(
     terminal_label = _normalize_runtime_state_label(snapshot.get("terminal_status"))
     current_step = dict(snapshot.get("current_step") or {})
     current_step_label = _normalize_runtime_state_label(current_step.get("status"))
+    launcher = dict(snapshot.get("launcher") or {})
+    pid_alive = _pid_is_alive(launcher.get("remote_pid"))
     stale_reasons: list[str] = []
     resolved_final = None
 
@@ -339,6 +367,9 @@ def normalize_runtime_training_status(
             resolved_final = status_label
         elif sequence_label in _FINAL_SEQUENCE_STATES and snapshot.get("finished_at"):
             stale_reasons.append("supervisor_final")
+            resolved_final = terminal_label or status_label or current_step_label or "completed"
+        elif pid_alive is False:
+            stale_reasons.append("launcher_pid_absent")
             resolved_final = terminal_label or status_label or current_step_label or "completed"
 
     if stale_reasons:
@@ -811,6 +842,32 @@ def set_training_runtime_state(**payload: Any) -> dict[str, Any]:
     if not patch:
         return load_training_status()
     return merge_training_status(patch)
+
+
+def set_training_weighting(payload: dict[str, Any]) -> dict[str, Any]:
+    """Met a jour le resume de ponderation utilise par l'entrainement.
+
+    Args:
+        payload (dict[str, Any]): Resume compact du profil de ponderation.
+
+    Returns:
+        dict[str, Any]: Statut training persiste.
+    """
+
+    return merge_training_status({"training_weighting": dict(payload or {})})
+
+
+def set_service_recovery_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    """Met a jour le bloc de reprise service pour les APIs runtime.
+
+    Args:
+        payload (dict[str, Any]): Instantane courant de reprise.
+
+    Returns:
+        dict[str, Any]: Statut training persiste.
+    """
+
+    return merge_training_status({"service_recovery": dict(payload or {})})
 
 
 def set_training_dependency(name: str, payload: dict[str, Any]) -> dict[str, Any]:

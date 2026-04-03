@@ -1,11 +1,11 @@
-"""
+﻿"""
 Outils de chargement du dataset Shadow Learning et des imports MT5.
 """
 
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -21,6 +21,14 @@ ACTION_MAP = {
     "SELL": 2,
     "SPLIT": 3,
     "CLOSE": 4,
+}
+
+DEFAULT_EPISODE_WEIGHTING_PROFILE = {
+    "base_weight": 1.0,
+    "winner_bonus": 0.15,
+    "loser_bonus": 0.35,
+    "nemesis_bonus": 0.55,
+    "risk_symbol_bonus": 0.25,
 }
 
 
@@ -89,7 +97,14 @@ def load_shadow_games(
     data_dirs: Iterable[str | Path],
     observation_size: int,
     action_space_size: int,
-) -> list[GameHistory]:
+    *,
+    winner_symbols: Iterable[str] | None = None,
+    risk_symbols: Iterable[str] | None = None,
+    allowed_symbols: Iterable[str] | None = None,
+    max_games: int | None = None,
+    weighting_profile: dict[str, float] | None = None,
+    include_weighting_summary: bool = False,
+) -> list[GameHistory] | tuple[list[GameHistory], dict[str, Any]]:
     """
     Convertit les episodes shadow en parties compatibles avec le replay buffer.
 
@@ -97,26 +112,69 @@ def load_shadow_games(
         data_dirs (Iterable[str | Path]): Dossiers contenant les fichiers JSONL.
         observation_size (int): Taille attendue du vecteur d'observation.
         action_space_size (int): Taille de l'espace d'actions.
+        winner_symbols (Iterable[str] | None): Symboles gagnants de la review.
+        risk_symbols (Iterable[str] | None): Symboles a risque de la review.
+        allowed_symbols (Iterable[str] | None): Univers autorise pour le run.
+        max_games (int | None): Nombre maximal d'episodes retenus.
+        weighting_profile (dict[str, float] | None): Profil de ponderation.
+        include_weighting_summary (bool): Retourne aussi un resume de ponderation.
 
     Returns:
-        list[GameHistory]: Parties prêtes a etre injectees dans le replay buffer.
+        list[GameHistory] | tuple[list[GameHistory], dict[str, Any]]: Jeux
+        compatibles replay, avec resume optionnel.
     """
+    winner_set = _normalize_symbol_set(winner_symbols)
+    risk_set = _normalize_symbol_set(risk_symbols)
+    allowed_set = _normalize_symbol_set(allowed_symbols)
+    effective_profile = _build_weighting_profile(weighting_profile)
+
+    episodes = load_shadow_episodes(data_dirs)
+    if max_games and max_games > 0:
+        episodes = episodes[-max_games:]
+
     games: list[GameHistory] = []
-    for episode in load_shadow_episodes(data_dirs):
+    weighted_episode_counts: Counter[str] = Counter()
+    weighted_priority_total = 0.0
+    for episode in episodes:
         game = build_game_from_shadow_episode(
             episode,
             observation_size=observation_size,
             action_space_size=action_space_size,
+            winner_symbols=winner_set,
+            risk_symbols=risk_set,
+            allowed_symbols=allowed_set,
+            weighting_profile=effective_profile,
         )
-        if len(game) > 0:
-            games.append(game)
-    return games
+        if len(game) <= 0:
+            continue
+        games.append(game)
+        metadata = dict(game.metadata or {})
+        for tag in list(metadata.get("episode_tags") or []):
+            weighted_episode_counts[str(tag)] += 1
+        weighted_priority_total += float(metadata.get("episode_weight") or 0.0)
+
+    if not include_weighting_summary:
+        return games
+    return games, {
+        "review_loaded": bool(winner_set or risk_set),
+        "winner_symbols": sorted(winner_set),
+        "risk_symbols": sorted(risk_set),
+        "episodes_loaded": len(games),
+        "weighted_episode_counts": dict(weighted_episode_counts),
+        "weighting_profile": effective_profile,
+        "weighted_priority_total": round(weighted_priority_total, 4),
+    }
 
 
 def build_game_from_shadow_episode(
     episode: list[dict[str, Any]],
     observation_size: int,
     action_space_size: int,
+    *,
+    winner_symbols: Iterable[str] | None = None,
+    risk_symbols: Iterable[str] | None = None,
+    allowed_symbols: Iterable[str] | None = None,
+    weighting_profile: dict[str, float] | None = None,
 ) -> GameHistory:
     """
     Convertit un episode shadow en ``GameHistory``.
@@ -125,11 +183,26 @@ def build_game_from_shadow_episode(
         episode (list[dict[str, Any]]): Transitions d'un episode.
         observation_size (int): Taille cible des observations.
         action_space_size (int): Nombre d'actions supportees.
+        winner_symbols (Iterable[str] | None): Symboles gagnants de la review.
+        risk_symbols (Iterable[str] | None): Symboles a risque de la review.
+        allowed_symbols (Iterable[str] | None): Univers autorise du run courant.
+        weighting_profile (dict[str, float] | None): Profil de ponderation.
 
     Returns:
         GameHistory: Episode encode pour MuZero/Dreamer.
     """
+    classification = classify_shadow_episode(
+        episode,
+        winner_symbols=winner_symbols,
+        risk_symbols=risk_symbols,
+        allowed_symbols=allowed_symbols,
+        weighting_profile=weighting_profile,
+    )
     game = GameHistory()
+    game.metadata = classification
+    if not classification.get("allowed", True):
+        return game
+
     uniform_policy = np.full(
         action_space_size,
         1.0 / max(action_space_size, 1),
@@ -148,9 +221,162 @@ def build_game_from_shadow_episode(
 
         reward = float(transition.get("reward", 0.0) or 0.0)
         obs_vec = build_observation_vector(observation, observation_size)
-        game.store(obs_vec, action_one_hot, reward, uniform_policy, 0.0)
+        game.store(
+            obs_vec,
+            action_one_hot,
+            reward,
+            uniform_policy,
+            0.0,
+            priority=float(classification.get("episode_weight") or 1.0),
+        )
 
     return game
+
+
+def classify_shadow_episode(
+    episode: list[dict[str, Any]],
+    *,
+    winner_symbols: Iterable[str] | None = None,
+    risk_symbols: Iterable[str] | None = None,
+    allowed_symbols: Iterable[str] | None = None,
+    weighting_profile: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """
+    Classe un episode shadow pour la ponderation d'entrainement.
+
+    Args:
+        episode (list[dict[str, Any]]): Episode complet a analyser.
+        winner_symbols (Iterable[str] | None): Symboles gagnants de la review.
+        risk_symbols (Iterable[str] | None): Symboles a risque de la review.
+        allowed_symbols (Iterable[str] | None): Univers autorise.
+        weighting_profile (dict[str, float] | None): Profil de ponderation.
+
+    Returns:
+        dict[str, Any]: Classe de l'episode, poids et etiquettes associees.
+    """
+    profile = _build_weighting_profile(weighting_profile)
+    winner_set = _normalize_symbol_set(winner_symbols)
+    risk_set = _normalize_symbol_set(risk_symbols)
+    allowed_set = _normalize_symbol_set(allowed_symbols)
+
+    if not episode:
+        return {
+            "allowed": False,
+            "symbol": None,
+            "done": False,
+            "pnl": 0.0,
+            "nemesis_type": None,
+            "episode_weight": profile["base_weight"],
+            "episode_tags": [],
+            "winner_symbols": sorted(winner_set),
+            "risk_symbols": sorted(risk_set),
+        }
+
+    last_transition = dict(episode[-1] or {})
+    first_transition = dict(episode[0] or {})
+    metadata = dict(last_transition.get("metadata") or {})
+    symbol = (
+        str(last_transition.get("symbol") or metadata.get("symbol") or "").strip().upper()
+        or str(first_transition.get("symbol") or (first_transition.get("metadata") or {}).get("symbol") or "").strip().upper()
+        or None
+    )
+    allowed = not allowed_set or bool(symbol and symbol in allowed_set)
+    done = bool(last_transition.get("done", False))
+    pnl = _safe_float(last_transition.get("reward", last_transition.get("pnl", 0.0)))
+    nemesis_type = str(
+        metadata.get("nemesis_type")
+        or metadata.get("nemesis_type_hint")
+        or ""
+    ).strip()
+
+    episode_tags: list[str] = []
+    weight = float(profile["base_weight"])
+    if done and pnl > 0.0:
+        episode_tags.append("winner_episode")
+        weight += float(profile["winner_bonus"])
+    if done and pnl < 0.0:
+        episode_tags.append("loser_episode")
+        weight += float(profile["loser_bonus"])
+    if nemesis_type:
+        episode_tags.append("nemesis_episode")
+        weight += float(profile["nemesis_bonus"])
+    if symbol and symbol in risk_set:
+        episode_tags.append("risk_symbol_episode")
+        weight += float(profile["risk_symbol_bonus"])
+    if not episode_tags:
+        episode_tags.append("neutral_episode")
+
+    return {
+        "allowed": allowed,
+        "symbol": symbol,
+        "done": done,
+        "pnl": pnl,
+        "nemesis_type": nemesis_type or None,
+        "episode_weight": round(max(weight, float(profile["base_weight"])), 4),
+        "episode_tags": episode_tags,
+        "winner_symbols": sorted(winner_set),
+        "risk_symbols": sorted(risk_set),
+    }
+
+
+def summarize_shadow_weighting(
+    data_dirs: Iterable[str | Path],
+    *,
+    winner_symbols: Iterable[str] | None = None,
+    risk_symbols: Iterable[str] | None = None,
+    allowed_symbols: Iterable[str] | None = None,
+    max_episodes: int | None = None,
+    weighting_profile: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """
+    Resume la ponderation des episodes shadow sans construire le replay complet.
+
+    Args:
+        data_dirs (Iterable[str | Path]): Dossiers shadow a analyser.
+        winner_symbols (Iterable[str] | None): Symboles gagnants de la review.
+        risk_symbols (Iterable[str] | None): Symboles a risque de la review.
+        allowed_symbols (Iterable[str] | None): Univers autorise pour le run.
+        max_episodes (int | None): Nombre maximal d'episodes analyses.
+        weighting_profile (dict[str, float] | None): Profil de ponderation.
+
+    Returns:
+        dict[str, Any]: Resume compact des episodes ponderes.
+    """
+    winner_set = _normalize_symbol_set(winner_symbols)
+    risk_set = _normalize_symbol_set(risk_symbols)
+    allowed_set = _normalize_symbol_set(allowed_symbols)
+    effective_profile = _build_weighting_profile(weighting_profile)
+    episodes = load_shadow_episodes(data_dirs)
+    if max_episodes and max_episodes > 0:
+        episodes = episodes[-max_episodes:]
+
+    counts: Counter[str] = Counter()
+    weighted_priority_total = 0.0
+    episodes_loaded = 0
+    for episode in episodes:
+        classification = classify_shadow_episode(
+            episode,
+            winner_symbols=winner_set,
+            risk_symbols=risk_set,
+            allowed_symbols=allowed_set,
+            weighting_profile=effective_profile,
+        )
+        if not classification.get("allowed", True):
+            continue
+        episodes_loaded += 1
+        for tag in list(classification.get("episode_tags") or []):
+            counts[str(tag)] += 1
+        weighted_priority_total += float(classification.get("episode_weight") or 0.0)
+
+    return {
+        "review_loaded": bool(winner_set or risk_set),
+        "winner_symbols": sorted(winner_set),
+        "risk_symbols": sorted(risk_set),
+        "episodes_loaded": episodes_loaded,
+        "weighted_episode_counts": dict(counts),
+        "weighting_profile": effective_profile,
+        "weighted_priority_total": round(weighted_priority_total, 4),
+    }
 
 
 def build_observation_vector(observation: dict[str, Any], observation_size: int) -> np.ndarray:
@@ -209,6 +435,43 @@ def build_observation_vector(observation: dict[str, Any], observation_size: int)
     )
     obs_vec[: min(len(base_values), observation_size)] = base_values[:observation_size]
     return obs_vec
+
+
+def _build_weighting_profile(profile: dict[str, float] | None) -> dict[str, float]:
+    """
+    Normalise un profil de ponderation des episodes shadow.
+
+    Args:
+        profile (dict[str, float] | None): Profil brut eventuel.
+
+    Returns:
+        dict[str, float]: Profil exploitable et borne.
+    """
+    merged = dict(DEFAULT_EPISODE_WEIGHTING_PROFILE)
+    for key, value in dict(profile or {}).items():
+        try:
+            merged[key] = max(float(value), 0.0)
+        except (TypeError, ValueError):
+            continue
+    return merged
+
+
+def _normalize_symbol_set(symbols: Iterable[str] | None) -> set[str]:
+    """
+    Normalise une liste de symboles en majuscules sans doublons.
+
+    Args:
+        symbols (Iterable[str] | None): Symboles bruts.
+
+    Returns:
+        set[str]: Ensemble nettoye.
+    """
+    normalized: set[str] = set()
+    for symbol in symbols or []:
+        candidate = str(symbol or "").strip().upper()
+        if candidate:
+            normalized.add(candidate)
+    return normalized
 
 
 def _indicator(indicators: dict[str, Any], key: str, fallback: float = 0.0) -> float:

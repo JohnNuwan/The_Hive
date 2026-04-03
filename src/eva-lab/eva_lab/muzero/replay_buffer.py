@@ -1,39 +1,42 @@
 """
-Prioritized Replay Buffer for MuZero — THE HIVE EVA Lab
+Buffer de replay priorise pour MuZero.
 
-Uses a SumTree structure to sample transitions with probability proportional 
-to their error/priority.
+Le buffer s'appuie sur une SumTree afin d'echantillonner les transitions
+avec une probabilite proportionnelle a leur priorite.
 """
 
 import numpy as np
 import random
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 @dataclass
 class GameHistory:
-    """One episode's worth of data."""
+    """Stocke l'ensemble des transitions d'un episode."""
     observations: list = field(default_factory=list)
     actions: list = field(default_factory=list)
     rewards: list = field(default_factory=list)
     policies: list = field(default_factory=list)
     values: list = field(default_factory=list)
     priorities: list = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
-    def store(self, obs, action, reward, policy, value):
+    def store(self, obs, action, reward, policy, value, priority: float = 1.0):
         self.observations.append(obs)
         self.actions.append(action)
         self.rewards.append(reward)
         self.policies.append(policy)
         self.values.append(value)
-        # Initial priority is max or 1.0
-        self.priorities.append(1.0)
+        normalized_priority = float(priority) if priority is not None else 1.0
+        if not np.isfinite(normalized_priority) or normalized_priority <= 0.0:
+            normalized_priority = 1.0
+        self.priorities.append(normalized_priority)
 
     def __len__(self):
         return len(self.observations)
 
 class SumTree:
-    """Binary tree where each node is the sum of its children."""
+    """Arbre binaire dont chaque noeud vaut la somme de ses enfants."""
     def __init__(self, capacity):
         self.capacity = capacity
         self.tree = np.zeros(2 * capacity - 1)
@@ -81,19 +84,20 @@ class SumTree:
         return (idx, self.tree[idx], self.data[data_idx])
 
 class PrioritizedReplayBuffer:
-    """Buffer storing GameHistory objects with priority sampling."""
+    """Buffer de replay stockant des episodes avec echantillonnage priorise."""
     def __init__(self, max_games: int, alpha: float = 0.6):
         self.max_games = max_games
-        self.alpha = alpha  # Prioritization exponent
+        self.alpha = alpha  # Exposant de prioritisation.
         self.tree = SumTree(max_games)
 
     def save_game(self, game: GameHistory):
-        # Priority based on avg priority or max priority of moves in game
+        # On conserve la priorite maximale de l'episode pour favoriser
+        # les trajectoires les plus instructives dans le replay.
         p = np.max(game.priorities) if game.priorities else 1.0
         self.tree.add(p**self.alpha, game)
 
     def sample(self, batch_size: int) -> List[Tuple[GameHistory, int, float]]:
-        """Sample (game, start_idx, weight) batch."""
+        """Echantillonne un lot ``(episode, start_idx, weight)``."""
         batch = []
         segment = self.tree.total() / batch_size
         
@@ -103,7 +107,8 @@ class PrioritizedReplayBuffer:
             s = random.uniform(a, b)
             (idx, p, game) = self.tree.get(s)
             
-            # Pick a random start index in the game
+            # Un point d'entree aleatoire evite de toujours sur-entrainer
+            # les memes prefixes d'episodes.
             start_idx = random.randint(0, len(game) - 1)
             batch.append((game, start_idx, idx))
             

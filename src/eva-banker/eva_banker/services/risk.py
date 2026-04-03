@@ -40,6 +40,9 @@ class RiskValidator:
         max_open_positions: int = 3,
         anti_tilt_losses: int = 2,
         anti_tilt_hours: int = 24,
+        anti_tilt_min_loss_amount: Decimal = Decimal("0"),
+        anti_tilt_min_cumulative_loss_amount: Decimal = Decimal("0"),
+        anti_tilt_reset_streak_on_new_day: bool = False,
     ) -> None:
         """
         Initialise le validateur.
@@ -51,6 +54,9 @@ class RiskValidator:
             max_open_positions (int): Nombre maximal de positions ouvertes.
             anti_tilt_losses (int): Nombre de pertes consecutives avant pause.
             anti_tilt_hours (int): Duree de la pause anti-tilt en heures.
+            anti_tilt_min_loss_amount (Decimal): Perte minimale pour compter dans la serie.
+            anti_tilt_min_cumulative_loss_amount (Decimal): Montant cumule minimal avant pause.
+            anti_tilt_reset_streak_on_new_day (bool): Reinitialise la serie de pertes a l'ouverture.
         """
         self.max_risk_per_trade = max_risk_per_trade
         self.max_daily_drawdown = max_daily_drawdown
@@ -59,6 +65,9 @@ class RiskValidator:
         self.anti_tilt_losses = anti_tilt_losses
         self.anti_tilt_hours = anti_tilt_hours
         self.settings = get_settings()
+        self.anti_tilt_min_loss_amount = anti_tilt_min_loss_amount
+        self.anti_tilt_min_cumulative_loss_amount = anti_tilt_min_cumulative_loss_amount
+        self.anti_tilt_reset_streak_on_new_day = anti_tilt_reset_streak_on_new_day
         self.block_new_entries_drawdown = Decimal(str(self.settings.risk_max_daily_drawdown_percent))
         self.flatten_progressive_drawdown = Decimal(
             str(getattr(self.settings, "risk_flatten_progressive_drawdown_percent", 2.25))
@@ -68,6 +77,7 @@ class RiskValidator:
         )
 
         self._consecutive_losses = 0
+        self._consecutive_loss_amount = Decimal("0")
         self._anti_tilt_until: datetime | None = None
         self._daily_pnl = Decimal("0")
         self._daily_pnl_date = self._get_market_now().date()
@@ -493,17 +503,35 @@ class RiskValidator:
         self._total_pnl += profit
 
         if profit < 0:
-            self._consecutive_losses += 1
-            if self._consecutive_losses >= self.anti_tilt_losses:
-                self._activate_anti_tilt()
+            loss_amount = abs(profit)
+            if loss_amount >= self.anti_tilt_min_loss_amount:
+                self._consecutive_losses += 1
+                self._consecutive_loss_amount += loss_amount
+                if (
+                    self._consecutive_losses >= self.anti_tilt_losses
+                    and self._consecutive_loss_amount >= self.anti_tilt_min_cumulative_loss_amount
+                ):
+                    self._activate_anti_tilt()
+            else:
+                logger.info(
+                    "Perte %s ignoree pour l'anti-tilt car inferieure au seuil minimal %s.",
+                    loss_amount.quantize(Decimal("0.01")),
+                    self.anti_tilt_min_loss_amount.quantize(Decimal("0.01")),
+                )
         else:
             self._consecutive_losses = 0
+            self._consecutive_loss_amount = Decimal("0")
         self._refresh_governor_state()
 
     def _activate_anti_tilt(self) -> None:
         """Active le mode anti-tilt."""
         self._anti_tilt_until = datetime.now() + timedelta(hours=self.anti_tilt_hours)
-        logger.warning("ANTI-TILT active jusqu'a %s", self._anti_tilt_until)
+        logger.warning(
+            "ANTI-TILT active jusqu'a %s apres %s pertes significatives pour %s USD cumules.",
+            self._anti_tilt_until,
+            self._consecutive_losses,
+            self._consecutive_loss_amount.quantize(Decimal("0.01")),
+        )
 
     def update_positions_count(self, count: int) -> None:
         """
@@ -608,6 +636,7 @@ class RiskValidator:
         self._day_open_balance = self._account_balance
         self._day_open_equity = self._account_equity
         self._consecutive_losses = 0
+        self._consecutive_loss_amount = Decimal("0")
         self._anti_tilt_until = None
         self._kill_switch_state = "normal"
         self._kill_switch_reason = None
@@ -641,6 +670,7 @@ class RiskValidator:
                     "account_balance": str(self._account_balance),
                     "account_equity": str(self._account_equity),
                     "consecutive_losses": self._consecutive_losses,
+                    "consecutive_loss_amount": str(self._consecutive_loss_amount),
                     "anti_tilt_until": (
                         self._anti_tilt_until.isoformat()
                         if self._anti_tilt_until
@@ -690,6 +720,9 @@ class RiskValidator:
             self._account_balance = Decimal(str(state.get("account_balance", str(self._account_balance))))
             self._account_equity = Decimal(str(state.get("account_equity", str(self._account_equity))))
             self._consecutive_losses = int(state.get("consecutive_losses", 0))
+            self._consecutive_loss_amount = Decimal(
+                str(state.get("consecutive_loss_amount", str(self._consecutive_loss_amount)))
+            )
 
             raw_anti_tilt_until = state.get("anti_tilt_until")
             self._anti_tilt_until = (
@@ -911,6 +944,13 @@ class RiskValidator:
             "max_total_drawdown_percent": float(self.max_total_drawdown),
             "anti_tilt_losses": int(self.anti_tilt_losses),
             "anti_tilt_hours": int(self.anti_tilt_hours),
+            "anti_tilt_min_loss_amount_usd": float(self.anti_tilt_min_loss_amount),
+            "anti_tilt_min_cumulative_loss_amount_usd": float(
+                self.anti_tilt_min_cumulative_loss_amount
+            ),
+            "anti_tilt_reset_streak_on_new_day": bool(self.anti_tilt_reset_streak_on_new_day),
+            "anti_tilt_current_consecutive_losses": int(self._consecutive_losses),
+            "anti_tilt_current_cumulative_loss_amount_usd": float(self._consecutive_loss_amount),
         }
 
 
@@ -930,4 +970,9 @@ def get_risk_validator() -> RiskValidator:
         max_open_positions=settings.risk_max_open_positions,
         anti_tilt_losses=settings.risk_anti_tilt_losses,
         anti_tilt_hours=settings.risk_anti_tilt_duration_hours,
+        anti_tilt_min_loss_amount=Decimal(str(settings.risk_anti_tilt_min_loss_amount_usd)),
+        anti_tilt_min_cumulative_loss_amount=Decimal(
+            str(settings.risk_anti_tilt_min_cumulative_loss_amount_usd)
+        ),
+        anti_tilt_reset_streak_on_new_day=settings.risk_anti_tilt_reset_streak_on_new_day,
     )

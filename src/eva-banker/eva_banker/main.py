@@ -20,6 +20,8 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query
@@ -256,6 +258,79 @@ async def _read_mt5_snapshot(mt5_service: MT5Service) -> tuple[AccountBalance | 
     return account, positions or []
 
 
+async def _fetch_remote_json(url: str, timeout_seconds: float = 2.0) -> dict[str, Any] | None:
+    """
+    Charge un JSON distant via un appel HTTP simple.
+
+    Args:
+        url (str): URL cible.
+        timeout_seconds (float): Timeout global de lecture.
+
+    Returns:
+        dict[str, Any] | None: Charge utile JSON ou ``None`` en cas d'echec.
+    """
+
+    def _read() -> dict[str, Any] | None:
+        try:
+            with urllib_request.urlopen(url, timeout=timeout_seconds) as response:
+                if getattr(response, "status", 200) >= 400:
+                    return None
+                payload = response.read().decode("utf-8")
+        except (urllib_error.URLError, TimeoutError, ValueError, OSError):
+            return None
+        try:
+            import json
+
+            loaded = json.loads(payload)
+        except Exception:
+            return None
+        return loaded if isinstance(loaded, dict) else None
+
+    return await asyncio.to_thread(_read)
+
+
+async def _build_service_recovery_snapshot(app: FastAPI) -> dict[str, Any]:
+    """
+    Construit un audit compact de reprise service pour le banker.
+
+    Args:
+        app (FastAPI): Application Banker courante.
+
+    Returns:
+        dict[str, Any]: Resume de reprise exploitable par le frontend.
+    """
+
+    mt5_service: MT5Service = app.state.mt5_service
+    risk_validator: RiskValidator = app.state.risk_validator
+    runtime_status = app.state.auto_engine.get_runtime_mode_status()
+    risk = await risk_validator.get_current_status()
+    lab_host = str(os.getenv("LAB_HOST", "localhost")).strip() or "localhost"
+    lab_port = str(os.getenv("LAB_PORT", "8600")).strip() or "8600"
+    base_url = f"http://{lab_host}:{lab_port}"
+    health_payload, training_payload, gnn_payload, dreamer_payload = await asyncio.gather(
+        _fetch_remote_json(f"{base_url}/health"),
+        _fetch_remote_json(f"{base_url}/training/status"),
+        _fetch_remote_json(f"{base_url}/gnn/status"),
+        _fetch_remote_json(f"{base_url}/dreamer/status"),
+    )
+    execution_mechanics = app.state.auto_engine.get_execution_mechanics_status()
+    return {
+        "audited_at": datetime.now().isoformat(),
+        "banker_online": True,
+        "mt5_connected": bool(mt5_service.is_connected),
+        "mock_mode": bool(mt5_service.mock_mode),
+        "anti_tilt_active": bool(risk.anti_tilt_active),
+        "trading_allowed": bool(risk.trading_allowed),
+        "live_champion_loaded": str(execution_mechanics.get("live_champion_id") or "").strip() or None,
+        "lab_reachable": bool(health_payload),
+        "training_active": bool((training_payload or {}).get("run", {}).get("active")),
+        "gnn_ready": bool((gnn_payload or {}).get("champion_ready")),
+        "dreamer_live_locked": bool((dreamer_payload or {}).get("live_lock", {}).get("active")),
+        "dreamer_live_lock_reason": (dreamer_payload or {}).get("live_lock", {}).get("reason"),
+        "runtime_profile": runtime_status.get("runtime_profile"),
+    }
+
+
 def _is_mt5_live_offline(mt5_service: MT5Service) -> bool:
     """
     Indique si le mode reel MT5 est hors ligne.
@@ -314,6 +389,19 @@ def _build_connector_status(app: FastAPI) -> dict[str, Any]:
             cortex_status = dict(auto_engine.cortex.get_runtime_status() or {})
         except Exception:
             cortex_status = {}
+    runtime_status = {}
+    if hasattr(auto_engine, "get_runtime_mode_status"):
+        try:
+            runtime_status = dict(auto_engine.get_runtime_mode_status() or {})
+        except Exception:
+            runtime_status = {}
+    latest_decisions = dict(getattr(auto_engine, "latest_decisions", {}) or {})
+    gnn_signal_seen = any(
+        float(state.get("gnn_scalp_confidence") or state.get("gnn_confidence") or 0.0) > 0.0
+        for state in latest_decisions.values()
+        if isinstance(state, dict)
+    )
+    gnn_consultative = dict(runtime_status.get("gnn_consultative") or {})
 
     mt5_mode = ConnectorMode.LIVE if mt5_service.is_connected and not mt5_service.mock_mode else ConnectorMode.PAPER
     if not mt5_service.is_connected and not mt5_service.mock_mode:
@@ -331,6 +419,8 @@ def _build_connector_status(app: FastAPI) -> dict[str, Any]:
 
     gnn_mode = ConnectorMode.DISABLED
     if gnn_available and not gnn_stub:
+        gnn_mode = ConnectorMode.LIVE
+    elif bool(gnn_consultative.get("enabled")):
         gnn_mode = ConnectorMode.LIVE
 
     vllm_mode = ConnectorMode.DISABLED if bool(getattr(auto_engine, "_cpu_live_mode", False)) else ConnectorMode.LIVE
@@ -354,6 +444,10 @@ def _build_connector_status(app: FastAPI) -> dict[str, Any]:
             "mode": gnn_mode.value,
             "stub": gnn_stub,
             "role": "consultatif" if bool(getattr(auto_engine, "_cpu_live_mode", False)) else "fusionne",
+            "consultative_filter": gnn_consultative.get("mode", "disabled"),
+            "symbols": list(gnn_consultative.get("symbols") or []),
+            "veto_min_confidence": gnn_consultative.get("veto_min_confidence"),
+            "signal_seen": gnn_signal_seen,
         },
         "cortex": {
             "mode": str(cortex_status.get("mode") or "disabled"),
@@ -591,6 +685,14 @@ async def lifespan(app: FastAPI):
             name="banker_news_filter",
         ),
     ]
+    app.state.service_recovery = await _build_service_recovery_snapshot(app)
+    logger.info(
+        "Audit de reprise Banker: mt5_connected=%s | lab_reachable=%s | training_active=%s | gnn_ready=%s",
+        app.state.service_recovery.get("mt5_connected"),
+        app.state.service_recovery.get("lab_reachable"),
+        app.state.service_recovery.get("training_active"),
+        app.state.service_recovery.get("gnn_ready"),
+    )
 
     logger.info("âœ… The Banker (SWARM MODE) READY")
 
@@ -1236,6 +1338,8 @@ async def get_trading_status():
         }
         for symbol, context in market_context.items()
     }
+    service_recovery = await _build_service_recovery_snapshot(app)
+    app.state.service_recovery = service_recovery
 
     payload = {
         "status": "offline" if account is None else "online",
@@ -1325,6 +1429,7 @@ async def get_trading_status():
         "market_context": market_context,
         "event_blockers": event_blockers,
         "risk_overrides": risk_overrides,
+        "service_recovery": service_recovery,
         "degraded_fallback_reason": (
             ((decision_audit.get("recent") or [{}])[-1]).get("degraded_fallback_reason")
             if decision_audit.get("recent")

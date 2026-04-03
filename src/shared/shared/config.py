@@ -166,8 +166,11 @@ class Settings(BaseSettings):
     risk_max_total_drawdown_percent: float = 8.0
     risk_max_single_trade_percent: float = 1.0
     risk_max_open_positions: int = 3
-    risk_anti_tilt_losses: int = 2
-    risk_anti_tilt_duration_hours: int = 24
+    risk_anti_tilt_losses: int = 3
+    risk_anti_tilt_duration_hours: int = 12
+    risk_anti_tilt_min_loss_amount_usd: float = 5.0
+    risk_anti_tilt_min_cumulative_loss_amount_usd: float = 20.0
+    risk_anti_tilt_reset_streak_on_new_day: bool = True
     risk_news_filter_minutes: int = 30
     risk_flatten_progressive_drawdown_percent: float = 2.25
     risk_flatten_immediate_drawdown_percent: float = 2.5
