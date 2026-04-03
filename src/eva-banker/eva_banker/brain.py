@@ -16,6 +16,7 @@ from pathlib import Path
 import aiohttp
 import random
 import uuid
+from typing import Any
 
 from shared.redis_client import get_redis_client
 

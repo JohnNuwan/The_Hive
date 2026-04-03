@@ -38,11 +38,11 @@ class RiskValidator:
         max_daily_drawdown: Decimal = Decimal("4.0"),
         max_total_drawdown: Decimal = Decimal("8.0"),
         max_open_positions: int = 3,
-        anti_tilt_losses: int = 2,
-        anti_tilt_hours: int = 24,
-        anti_tilt_min_loss_amount: Decimal = Decimal("0"),
-        anti_tilt_min_cumulative_loss_amount: Decimal = Decimal("0"),
-        anti_tilt_reset_streak_on_new_day: bool = False,
+        anti_tilt_losses: int = 3,
+        anti_tilt_hours: int = 12,
+        anti_tilt_min_loss_amount: Decimal = Decimal("5"),
+        anti_tilt_min_cumulative_loss_amount: Decimal = Decimal("20"),
+        anti_tilt_reset_streak_on_new_day: bool = True,
     ) -> None:
         """
         Initialise le validateur.
@@ -96,10 +96,14 @@ class RiskValidator:
         self._symbol_asset_classes: dict[str, str] = {}
 
         logger.info(
-            "RiskValidator initialise: max_risk=%s%%, max_dd_daily=%s%%, max_dd_total=%s%%",
+            "RiskValidator initialise: max_risk=%s%%, max_dd_daily=%s%%, max_dd_total=%s%%, anti_tilt=%s pertes/%sh, perte_min=%s USD, cumul_min=%s USD",
             max_risk_per_trade,
             max_daily_drawdown,
             max_total_drawdown,
+            self.anti_tilt_losses,
+            self.anti_tilt_hours,
+            self.anti_tilt_min_loss_amount,
+            self.anti_tilt_min_cumulative_loss_amount,
         )
 
     async def validate_order(self, order: TradeOrder) -> dict[str, Any]:
@@ -857,6 +861,9 @@ class RiskValidator:
         self._flatten_started_at = None
         self._flatten_last_action_at = None
         self._flatten_action_count = 0
+        if self.anti_tilt_reset_streak_on_new_day:
+            self._consecutive_losses = 0
+            self._consecutive_loss_amount = Decimal("0")
 
     def _ensure_day_open_snapshot(self) -> None:
         """

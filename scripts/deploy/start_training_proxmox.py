@@ -12,7 +12,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import paramiko
 
@@ -25,6 +27,8 @@ REMOTE_LOG = f"{REMOTE_DIR}/hive_nightly_training.log"
 REMOTE_SCRIPT = f"{REMOTE_DIR}/scripts/run_nightly_training_remote.sh"
 REMOTE_SEQUENCE_SCRIPT = f"{REMOTE_DIR}/scripts/run_wave1_sequence_remote.sh"
 REMOTE_SEQUENCE_LOG = f"{REMOTE_DIR}/hive_wave1_sequence.log"
+REMOTE_WEEKEND_SCRIPT = f"{REMOTE_DIR}/scripts/run_weekend_intensive_until_monday.sh"
+REMOTE_WEEKEND_LOG = f"{REMOTE_DIR}/data/checkpoints/weekend_intensive_until_monday.log"
 REMOTE_V4_SEQUENCE_DIR = f"{REMOTE_DIR}/data/checkpoints/v4_ga"
 REMOTE_V4_SEQUENCE_RUNNER = f"{REMOTE_DIR}/scripts/deploy/v4_sequence_runner.py"
 LOCAL_ROOT = Path(__file__).resolve().parents[2]
@@ -295,6 +299,7 @@ FAST_MUZERO_FULL_SYMBOLS = [
 ]
 FAST_MUZERO_FULL_TRIGGER = "manual_muzero_full_7_symbols"
 NIGHTLY_STACK_TRIGGER = "manual_nightly_stack_canonical"
+WEEKEND_INTENSIVE_TRIGGER = "weekend_intensive_until_monday"
 
 V4_WINDOW_ORDER = [
     ("muzero", "proxy_ga"),
@@ -1181,6 +1186,72 @@ def _build_nightly_timescaledb_stack_overrides() -> dict[str, str]:
         "TRAIN_GNN_MAX_SYMBOLS": symbol_count,
         "TRAIN_GNN_EPOCHS": "200",
         "TRAIN_GNN_DEPLOYMENT_CLASS": "consultative",
+    }
+
+
+def _build_weekend_intensive_overrides() -> dict[str, str]:
+    """Construit le profil week-end intensif sur l'univers canonique.
+
+    Ce profil monopolise le serveur pour pousser la recherche utile
+    jusqu'au lundi matin :
+    - `GNN` est relance uniquement s'il devient stale via la logique nightly ;
+    - `MuZero` travaille `scalp`, `intraday` et `swing` sur `timescaledb` ;
+    - `Dreamer` reste en recherche offline, jamais en live.
+
+    Returns:
+        dict[str, str]: Variables d'environnement a injecter pour la boucle.
+    """
+
+    symbol_csv = ",".join(FAST_MUZERO_FULL_SYMBOLS)
+    symbol_count = str(len(FAST_MUZERO_FULL_SYMBOLS))
+    return {
+        "TRAINING_PROFILE": "research",
+        "TRAINING_AUTOMATION_MODE": "force_research",
+        "TRAINING_RUN_TRIGGER": WEEKEND_INTENSIVE_TRIGGER,
+        "NIGHTLY_KEEP_VLLM": "0",
+        "NIGHTLY_DEFER_VLLM_RESTART": "1",
+        "NIGHTLY_STOP_COMFYUI": "1",
+        "REBUILD_TRAINER_IMAGE": "1",
+        "RUN_TRAIN_GNN": "1",
+        "RUN_TRAIN_MUZERO": "1",
+        "RUN_TRAIN_DREAMER": "1",
+        "MUZERO_HORIZONS": "scalp,intraday,swing",
+        "MUZERO_TRAINING_STEPS": "32000",
+        "MUZERO_GAMES_PER_SYMBOL": "20",
+        "ARENA_GAMES_PER_SYMBOL": "8",
+        "ARENA_MIN_GAMES": "24",
+        "ARENA_MIN_SYMBOLS": "6",
+        "MUZERO_PROMOTION_MIN_EVAL_GAMES": "24",
+        "MUZERO_PROMOTION_MIN_EVAL_SYMBOLS": "6",
+        "MUZERO_DATASET_SOURCE": "timescaledb",
+        "TRAINING_TIMESCALE_ENABLED": "1",
+        "TRAINING_FOCUS_SYMBOLS": symbol_csv,
+        "MUZERO_SYMBOLS": symbol_csv,
+        "ARENA_SYMBOLS": symbol_csv,
+        "MUZERO_SYMBOLS_SCALP": symbol_csv,
+        "MUZERO_SYMBOLS_INTRADAY": symbol_csv,
+        "MUZERO_SYMBOLS_SWING": symbol_csv,
+        "ARENA_SYMBOLS_SCALP": symbol_csv,
+        "ARENA_SYMBOLS_INTRADAY": symbol_csv,
+        "ARENA_SYMBOLS_SWING": symbol_csv,
+        "MUZERO_MAX_SYMBOLS": symbol_count,
+        "ARENA_MAX_SYMBOLS": symbol_count,
+        "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": symbol_count,
+        "MUZERO_LIVE_TOP_SYMBOLS": symbol_count,
+        "TRAIN_GNN_SYMBOLS": symbol_csv,
+        "TRAIN_GNN_CONTEXT_SYMBOLS": symbol_csv,
+        "TRAIN_GNN_MAX_SYMBOLS": symbol_count,
+        "TRAIN_GNN_EPOCHS": "300",
+        "TRAIN_GNN_DEPLOYMENT_CLASS": "consultative",
+        "DREAMER_EPOCHS": "220",
+        "DREAMER_HORIZON": "scalp",
+        "DREAMER_BATCH_SIZE": "6",
+        "DREAMER_SEQUENCE_LENGTH": "96",
+        "DREAMER_SEQUENCE_STRIDE": "4",
+        "DREAMER_NUM_UNROLL_STEPS": "18",
+        "DREAMER_MAX_START_STATES": "512",
+        "DREAMER_REPLAY_MAX_GAMES": "1500",
+        "DREAMER_SLICE_MAX_SECONDS": "21600",
     }
 
 
@@ -4024,6 +4095,44 @@ if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
   sleep 5
 fi
 
+terminate_matching_processes() {{
+  local pattern="$1"
+  python3 - "$pattern" "$$" "$PPID" <<'PY'
+from __future__ import annotations
+
+import os
+import signal
+import subprocess
+import sys
+
+pattern = sys.argv[1]
+skip_pids = {{int(value) for value in sys.argv[2:] if value.isdigit()}}
+result = subprocess.run(
+    ["ps", "-eo", "pid,args"],
+    capture_output=True,
+    text=True,
+    check=False,
+)
+for raw_line in result.stdout.splitlines()[1:]:
+    parts = raw_line.strip().split(None, 1)
+    if len(parts) != 2:
+        continue
+    pid = int(parts[0])
+    command = parts[1]
+    if pid in skip_pids:
+        continue
+    if pattern not in command:
+        continue
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+PY
+}}
+
+terminate_matching_processes "{REMOTE_WEEKEND_SCRIPT}"
+terminate_matching_processes "{REMOTE_SCRIPT}"
+
 TRAINERS="$(docker ps --format '{{{{.Names}}}}' | grep '^the_hive-eva-trainer-run-' || true)"
 if [ -n "$TRAINERS" ]; then
   printf '%s\\n' "$TRAINERS" | xargs -r docker stop
@@ -4031,6 +4140,7 @@ fi
 
 rm -rf "{REMOTE_DIR}/data/checkpoints/nightly_training.lock.d"
 rm -f "{REMOTE_DIR}/data/checkpoints/nightly_training.lock"
+rm -f "{REMOTE_WEEKEND_LOG}"
 
 PYTHONPATH="{REMOTE_DIR}/src/eva-lab:{REMOTE_DIR}/src/shared" python3 - <<'PY'
 from __future__ import annotations
@@ -4081,16 +4191,271 @@ persist_sequence_state(
 finalize_training_status("aborted", reason="{reason}")
 PY
 """
-    command = f"echo {shlex.quote(sudo_password)} | sudo -S bash -lc {shlex.quote(remote_body)}"
+    command = f"printf '%s\\n' {shlex.quote(sudo_password)} | sudo -S -p '' bash -lc {shlex.quote(remote_body)}"
     output, error, code = run_command(client, command, timeout=90)
     if code != 0:
         raise RuntimeError(error or output or f"Code {code}")
     print("Run distant stoppe proprement.")
 
 
+def _compute_next_monday_deadline_iso(
+    *,
+    hour: int = 7,
+    minute: int = 0,
+    timezone_name: str = "Europe/Paris",
+) -> str:
+    """Calcule la prochaine echeance du lundi matin en ISO.
+
+    Args:
+        hour (int): Heure locale de coupure.
+        minute (int): Minute locale de coupure.
+        timezone_name (str): Fuseau horaire de reference.
+
+    Returns:
+        str: Date ISO timezone-aware de la deadline.
+    """
+
+    timezone = ZoneInfo(timezone_name)
+    now = datetime.now(timezone)
+    days_until_monday = (7 - now.weekday()) % 7
+    deadline = (now + timedelta(days=days_until_monday)).replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+    if deadline <= now:
+        deadline = deadline + timedelta(days=7)
+    return deadline.isoformat()
+
+
+def _build_remote_weekend_wrapper(
+    *,
+    deadline_iso: str,
+    runtime_exports: str,
+) -> str:
+    """Construit le script bash autonome de boucle week-end.
+
+    Args:
+        deadline_iso (str): Date limite absolue du lundi matin.
+        runtime_exports (str): Bloc `export ...;` a reappliquer avant chaque cycle.
+
+    Returns:
+        str: Contenu du script bash distant.
+    """
+
+    quoted_deadline = shlex.quote(deadline_iso)
+    export_block = runtime_exports.strip()
+    if export_block:
+        export_block = export_block + ";"
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="{REMOTE_DIR}"
+RUN_SCRIPT="{REMOTE_SCRIPT}"
+WRAPPER_LOG="{REMOTE_WEEKEND_LOG}"
+DEADLINE_ISO={quoted_deadline}
+CYCLE_SLEEP_SECONDS="${{WEEKEND_INTENSIVE_CYCLE_SLEEP_SECONDS:-90}}"
+
+mkdir -p "$(dirname "$WRAPPER_LOG")"
+touch "$WRAPPER_LOG"
+
+log() {{
+  printf '%s | %s\\n' "$(date -Iseconds)" "$*" | tee -a "$WRAPPER_LOG"
+}}
+
+resolve_deadline_epoch() {{
+  python3 - "$DEADLINE_ISO" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+import sys
+
+deadline = datetime.fromisoformat(sys.argv[1])
+print(int(deadline.timestamp()))
+PY
+}}
+
+refresh_dreamer_resume_env() {{
+  local manifest_path
+  manifest_path="$(find "$PROJECT_DIR/data/muzero/weights/dreamer_runs" -name resume_manifest.json -type f 2>/dev/null | xargs -r ls -1t | head -n 1 || true)"
+  if [ -z "$manifest_path" ]; then
+    unset DREAMER_RESUME_CHECKPOINT_PATH DREAMER_RESUME_STEP
+    return
+  fi
+  local checkpoint_path=""
+  local resume_step=""
+  local manifest_status=""
+  mapfile -t _resume_values < <(python3 - "$manifest_path" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("")
+    print("")
+    print("")
+    raise SystemExit(0)
+
+print(str(payload.get("resume_checkpoint_path") or ""))
+print(str(payload.get("resume_step") or "0"))
+print(str(payload.get("status") or ""))
+PY
+  )
+  checkpoint_path="${{_resume_values[0]:-}}"
+  resume_step="${{_resume_values[1]:-0}}"
+  manifest_status="${{_resume_values[2]:-}}"
+  if [ -n "$checkpoint_path" ] && [ -f "$checkpoint_path" ] && [ "$manifest_status" = "paused" ]; then
+    export DREAMER_RESUME_CHECKPOINT_PATH="$checkpoint_path"
+    export DREAMER_RESUME_STEP="$resume_step"
+    log "Reprise Dreamer active depuis $(basename "$checkpoint_path") au step $resume_step."
+  else
+    unset DREAMER_RESUME_CHECKPOINT_PATH DREAMER_RESUME_STEP
+  fi
+}}
+
+DEADLINE_EPOCH="$(resolve_deadline_epoch)"
+FIRST_CYCLE=1
+log "Boucle week-end intensive active jusqu'au $DEADLINE_ISO."
+
+while true; do
+  NOW_EPOCH="$(date +%s)"
+  if [ "$NOW_EPOCH" -ge "$DEADLINE_EPOCH" ]; then
+    log "Deadline atteinte. Fin de la boucle week-end."
+    break
+  fi
+
+  {export_block}
+  if [ "$FIRST_CYCLE" -eq 0 ]; then
+    export REBUILD_TRAINER_IMAGE=0
+  fi
+  refresh_dreamer_resume_env
+
+  log "Demarrage d'un cycle nightly intensif."
+  if bash "$RUN_SCRIPT" >> "$WRAPPER_LOG" 2>&1; then
+    log "Cycle nightly termine avec succes."
+  else
+    cycle_code="$?"
+    log "Cycle nightly termine en erreur code=$cycle_code."
+  fi
+  FIRST_CYCLE=0
+
+  NOW_EPOCH="$(date +%s)"
+  if [ "$NOW_EPOCH" -ge "$DEADLINE_EPOCH" ]; then
+    log "Deadline atteinte apres un cycle. Arret."
+    break
+  fi
+
+  log "Pause de $CYCLE_SLEEP_SECONDS secondes avant le prochain cycle."
+  sleep "$CYCLE_SLEEP_SECONDS"
+done
+"""
+
+
+def launch_weekend_intensive_remote(
+    *,
+    stop_existing: bool = False,
+    stop_reason: str = "weekend_intensive_cutover",
+) -> None:
+    """Lance une boucle autonome de training intensif jusqu'au lundi matin.
+
+    Args:
+        stop_existing (bool): Coupe proprement le run distant avant lancement.
+        stop_reason (str): Motif explicite de l'arret initial.
+    """
+
+    print(f"Connexion a Proxmox {HOST}...")
+    ssh_password, _ = _require_remote_credentials()
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+        client.connect(HOST, username=USER, password=ssh_password, timeout=15)
+        print("Connexion SSH etablie.")
+
+        if stop_existing:
+            stop_remote_training(client, reason=stop_reason)
+
+        _sync_remote_training_payload(client)
+        print("Payload remote synchronise.")
+
+        deadline_iso = _compute_next_monday_deadline_iso()
+        runtime_overrides = _build_weekend_intensive_overrides()
+        runtime_exports = build_runtime_exports(runtime_overrides)
+        remote_script = _build_remote_weekend_wrapper(
+            deadline_iso=deadline_iso,
+            runtime_exports=runtime_exports,
+        )
+
+        sftp = client.open_sftp()
+        try:
+            ensure_remote_parent(sftp, REMOTE_WEEKEND_SCRIPT)
+            with sftp.file(REMOTE_WEEKEND_SCRIPT, "w") as remote_file:
+                remote_file.write(remote_script)
+            sftp.chmod(
+                REMOTE_WEEKEND_SCRIPT,
+                stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IROTH,
+            )
+        finally:
+            sftp.close()
+
+        launch_body = f"""
+cd {REMOTE_DIR}
+python3 - <<'PY'
+from __future__ import annotations
+
+from pathlib import Path
+import subprocess
+
+script_path = Path("{REMOTE_WEEKEND_SCRIPT}")
+log_path = Path("{REMOTE_WEEKEND_LOG}")
+log_path.parent.mkdir(parents=True, exist_ok=True)
+with log_path.open("ab", buffering=0) as log_stream:
+    process = subprocess.Popen(
+        [str(script_path)],
+        cwd="{REMOTE_DIR}",
+        stdin=subprocess.DEVNULL,
+        stdout=log_stream,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        close_fds=True,
+    )
+    print(process.pid)
+PY
+"""
+        launch_cmd = f"bash -lc {shlex.quote(launch_body)}"
+        output, error, code = run_command(client, launch_cmd, timeout=30)
+        if code != 0:
+            raise RuntimeError(error or output or "Lancement de la boucle week-end impossible.")
+
+        pid_lines = [line.strip() for line in output.splitlines() if line.strip()]
+        pid = pid_lines[-1] if pid_lines else "inconnu"
+        print(f"Boucle week-end demarree. PID={pid}")
+        print(f"Deadline cible: {deadline_iso}")
+
+        time.sleep(6)
+        tail_out, tail_err, _ = run_command(client, f"tail -n 40 {REMOTE_WEEKEND_LOG}", timeout=30)
+        print("\n--- Derniers logs boucle week-end ---")
+        print(tail_out)
+        if tail_err:
+            print(tail_err)
+    except Exception as exc:
+        print(f"Erreur: {exc}")
+        sys.exit(1)
+    finally:
+        client.close()
+
+
 def start_training(
     manual_massive: bool = False,
     *,
+    weekend_intensive: bool = False,
     nightly_stack: bool = False,
     muzero_full_7: bool = False,
     scalp_reduced: bool = False,
@@ -4109,6 +4474,7 @@ def start_training(
 
     Args:
         manual_massive (bool): Force un run massif immediat de recherche.
+        weekend_intensive (bool): Lance une boucle autonome jusqu'au lundi matin.
         nightly_stack (bool): Force la pile nightly canonique `GNN + MuZero`.
         muzero_full_7 (bool): Force un run MuZero `full` sur l'univers 7 symboles.
         scalp_reduced (bool): Force une relance `scalp` reduite.
@@ -4146,6 +4512,8 @@ def start_training(
         runtime_overrides: dict[str, str] = {}
         if manual_massive:
             runtime_overrides = _build_manual_massive_overrides()
+        elif weekend_intensive:
+            runtime_overrides = _build_weekend_intensive_overrides()
         elif nightly_stack:
             runtime_overrides = _build_nightly_timescaledb_stack_overrides()
         elif muzero_full_7:
@@ -4206,6 +4574,14 @@ def parse_args() -> argparse.Namespace:
         "--manual-massive",
         action="store_true",
         help="Force un run massif immediat de recherche (GNN -> MuZero -> Dreamer).",
+    )
+    parser.add_argument(
+        "--weekend-intensive",
+        action="store_true",
+        help=(
+            "Lance une boucle autonome jusqu'au lundi matin sur l'univers canonique "
+            "TimeScaleDB avec MuZero, Dreamer offline et GNN si stale."
+        ),
     )
     parser.add_argument(
         "--nightly-stack",
@@ -4336,6 +4712,7 @@ if __name__ == "__main__":
         1
         for flag in (
             args.manual_massive,
+            args.weekend_intensive,
             args.nightly_stack,
             args.muzero_full_7,
             args.scalp_reduced,
@@ -4353,7 +4730,7 @@ if __name__ == "__main__":
     )
     if selected_profiles > 1:
         raise SystemExit(
-            "Choisissez un seul profil parmi --manual-massive, --nightly-stack, --muzero-full-7, --scalp-reduced, --intraday-reduced, --swing-reduced, --all-reduced, --wave1-profile, --wave1-sequence, --v3-sequence, --v3-profile, --v4-sequence, --v4-profile."
+            "Choisissez un seul profil parmi --manual-massive, --weekend-intensive, --nightly-stack, --muzero-full-7, --scalp-reduced, --intraday-reduced, --swing-reduced, --all-reduced, --wave1-profile, --wave1-sequence, --v3-sequence, --v3-profile, --v4-sequence, --v4-profile."
         )
     requested_symbols = [
         item.strip()
@@ -4398,9 +4775,15 @@ if __name__ == "__main__":
             stop_existing=args.stop_existing,
             stop_reason=str(args.stop_reason or "manual_v4_unified_factory"),
         )
+    elif args.weekend_intensive:
+        launch_weekend_intensive_remote(
+            stop_existing=args.stop_existing,
+            stop_reason=str(args.stop_reason or "weekend_intensive_cutover"),
+        )
     else:
         start_training(
             manual_massive=args.manual_massive,
+            weekend_intensive=args.weekend_intensive,
             nightly_stack=args.nightly_stack,
             muzero_full_7=args.muzero_full_7,
             scalp_reduced=args.scalp_reduced,

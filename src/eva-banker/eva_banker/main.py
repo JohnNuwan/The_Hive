@@ -1388,6 +1388,11 @@ async def get_trading_status():
             "trading_allowed": risk.trading_allowed,
             "open_positions": risk.open_positions_count,
             "anti_tilt_active": risk.anti_tilt_active,
+            "anti_tilt_expires_at": (
+                risk.anti_tilt_expires_at.isoformat()
+                if risk.anti_tilt_expires_at
+                else None
+            ),
             "news_filter_active": risk.news_filter_active,
             "kill_switch_state": risk.kill_switch_state,
             "kill_switch_reason": risk.kill_switch_reason,
