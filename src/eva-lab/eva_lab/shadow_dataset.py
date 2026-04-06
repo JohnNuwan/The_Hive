@@ -215,15 +215,11 @@ def build_game_from_shadow_episode(
         action_name = str(action_payload.get("type", "HOLD")).upper()
         action_index = ACTION_MAP.get(action_name, 0)
 
-        action_one_hot = np.zeros(action_space_size, dtype=np.float32)
-        if 0 <= action_index < action_space_size:
-            action_one_hot[action_index] = 1.0
-
         reward = float(transition.get("reward", 0.0) or 0.0)
         obs_vec = build_observation_vector(observation, observation_size)
         game.store(
             obs_vec,
-            action_one_hot,
+            action_index,
             reward,
             uniform_policy,
             0.0,

@@ -5,11 +5,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pickle
+import subprocess
 import sys
+import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
 import jax
+import numpy as np
 
 package_root = Path(__file__).resolve().parents[1]
 shared_root = package_root.parent / 'shared'
@@ -22,6 +27,10 @@ from eva_lab.arena import Arena
 from eva_lab.champion_promoter import ChampionPromoter
 from eva_lab.genetic_updater import GeneticUpdater
 from eva_lab.muzero.config import MuZeroConfigV3
+from eva_lab.muzero.collector import (
+    CollectorEnvironmentPayload,
+    collect_games_parallel,
+)
 from eva_lab.muzero.environment import TradingEnvironment
 from eva_lab.muzero.jax_agent import JAXMuZeroAgent
 from eva_lab.shadow_dataset import load_shadow_games
@@ -173,6 +182,479 @@ def _load_shadow_replay_bundle(
     summary["replay_buffer_size_after_load"] = agent.replay_buffer.size
     summary["reason"] = "shadow_replay_loaded" if games else "shadow_replay_empty"
     return summary
+
+
+def _build_traceback_tail(exc: Exception, max_lines: int = 12) -> list[str]:
+    """Construit une queue compacte de traceback pour le statut runtime.
+
+    Args:
+        exc (Exception): Exception a serialiser.
+        max_lines (int): Nombre maximal de lignes utiles a conserver.
+
+    Returns:
+        list[str]: Lignes finales du traceback.
+    """
+
+    lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    flattened = [line.strip() for line in "".join(lines).splitlines() if line.strip()]
+    return flattened[-max(max_lines, 1):]
+
+
+def _snapshot_agent_training_state(agent: JAXMuZeroAgent) -> dict[str, object]:
+    """Capture l'etat d'optimisation MuZero pour un precheck reversible.
+
+    Args:
+        agent (JAXMuZeroAgent): Agent a figer temporairement.
+
+    Returns:
+        dict[str, object]: Etat serialisable des poids et de l'optimiseur.
+    """
+
+    return {
+        "params": pickle.loads(pickle.dumps(agent.params)),
+        "opt_state": pickle.loads(pickle.dumps(agent.opt_state)),
+    }
+
+
+def _restore_agent_training_state(agent: JAXMuZeroAgent, snapshot: dict[str, object]) -> None:
+    """Restaure l'etat d'optimisation MuZero apres un precheck.
+
+    Args:
+        agent (JAXMuZeroAgent): Agent a restaurer.
+        snapshot (dict[str, object]): Instantane precedemment capture.
+    """
+
+    agent.params = snapshot["params"]
+    agent.opt_state = snapshot["opt_state"]
+
+
+def _read_gpu_memory_snapshot() -> dict[str, float] | None:
+    """Lit l'occupation memoire du premier GPU visible.
+
+    Returns:
+        dict[str, float] | None: Memoire utilisee, totale et ratio, ou
+        ``None`` si la sonde est indisponible.
+    """
+
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    first_line = str(result.stdout or "").strip().splitlines()
+    if not first_line:
+        return None
+    try:
+        used_raw, total_raw = [part.strip() for part in first_line[0].split(",", 1)]
+        used_mb = float(used_raw)
+        total_mb = float(total_raw)
+    except (TypeError, ValueError):
+        return None
+    if total_mb <= 0.0:
+        return None
+    return {
+        "used_mb": round(used_mb, 3),
+        "total_mb": round(total_mb, 3),
+        "usage_ratio": round(used_mb / total_mb, 6),
+    }
+
+
+def _autotune_muzero_batch_size(
+    *,
+    agent: JAXMuZeroAgent,
+    config: MuZeroConfigV3,
+) -> dict[str, object]:
+    """Calibre automatiquement le batch JAX avant l'optimisation longue.
+
+    Args:
+        agent (JAXMuZeroAgent): Agent MuZero deja initialise.
+        config (MuZeroConfigV3): Configuration courante du run.
+
+    Returns:
+        dict[str, object]: Profil choisi et details des candidats testes.
+    """
+
+    current_batch_size = max(int(getattr(config, "batch_size", 32) or 32), 1)
+    candidates = []
+    for candidate in list(getattr(config, "batch_autotune_candidates", []) or []):
+        try:
+            normalized = max(int(candidate), 1)
+        except (TypeError, ValueError):
+            continue
+        if normalized not in candidates:
+            candidates.append(normalized)
+    if current_batch_size not in candidates:
+        candidates.insert(0, current_batch_size)
+    gpu_memory_limit_ratio = float(
+        str(os.getenv("MUZERO_BATCH_AUTOTUNE_GPU_MAX_RATIO", "0.85")).strip() or 0.85
+    )
+    if not getattr(config, "batch_autotune_enabled", False):
+        return {
+            "enabled": False,
+            "selected_batch_size": current_batch_size,
+            "baseline_batch_size": current_batch_size,
+            "candidates": candidates,
+            "gpu_memory_limit_ratio": gpu_memory_limit_ratio,
+            "reason": "batch_autotune_disabled",
+            "candidate_results": [],
+        }
+
+    base_snapshot = _snapshot_agent_training_state(agent)
+    baseline_batch_size = current_batch_size
+    selected_batch_size = current_batch_size
+    stable_reference_throughput: float | None = None
+    candidate_results: list[dict[str, object]] = []
+
+    append_training_log(
+        (
+            "MuZero %s: autotune batch JAX sur %s."
+            % (config.horizon, ",".join(str(item) for item in candidates))
+        ),
+        source="muzero",
+    )
+    set_training_runtime_state(
+        train_step_phase="batch_autotune",
+        jax_batch_profile={
+            "enabled": True,
+            "status": "running",
+            "selected_batch_size": current_batch_size,
+            "baseline_batch_size": baseline_batch_size,
+            "candidates": list(candidates),
+            "gpu_memory_limit_ratio": gpu_memory_limit_ratio,
+            "candidate_results": [],
+        },
+    )
+
+    try:
+        for candidate_batch in candidates:
+            config.batch_size = candidate_batch
+            _restore_agent_training_state(agent, base_snapshot)
+            try:
+                warmup_result = agent.train_step()
+                if warmup_result is None:
+                    raise RuntimeError(
+                        "BATCH_AUTOTUNE_PRECHECK_FAILED: replay insuffisant pour le candidat "
+                        f"{candidate_batch}."
+                    )
+
+                measured_results: list[dict[str, object]] = []
+                total_wall_time_ms = 0.0
+                for _ in range(3):
+                    step_started_at = time.perf_counter()
+                    step_result = agent.train_step()
+                    if step_result is None:
+                        raise RuntimeError(
+                            "BATCH_AUTOTUNE_PRECHECK_FAILED: aucun batch produit pour le candidat "
+                            f"{candidate_batch}."
+                        )
+                    measured_results.append(step_result)
+                    total_wall_time_ms += max(
+                        (time.perf_counter() - step_started_at) * 1000.0,
+                        0.001,
+                    )
+
+                gpu_snapshot = _read_gpu_memory_snapshot()
+                prepare_batch_ms = round(
+                    sum(
+                        float(item.get("phase_durations_ms", {}).get("prepare_batch", 0.0) or 0.0)
+                        for item in measured_results
+                    )
+                    / max(len(measured_results), 1),
+                    3,
+                )
+                update_fn_ms = round(
+                    sum(
+                        float(item.get("phase_durations_ms", {}).get("update_fn", 0.0) or 0.0)
+                        for item in measured_results
+                    )
+                    / max(len(measured_results), 1),
+                    3,
+                )
+                throughput = round(
+                    (candidate_batch * len(measured_results)) / max(total_wall_time_ms / 1000.0, 1e-6),
+                    3,
+                )
+                memory_ratio = float((gpu_snapshot or {}).get("usage_ratio", 0.0) or 0.0)
+                candidate_result = {
+                    "batch_size": candidate_batch,
+                    "status": "stable",
+                    "prepare_batch_ms": prepare_batch_ms,
+                    "update_fn_ms": update_fn_ms,
+                    "samples_per_second": throughput,
+                    "gpu_memory": gpu_snapshot,
+                    "warmup_phase_durations_ms": dict(
+                        warmup_result.get("phase_durations_ms") or {}
+                    ),
+                    "measured_steps": len(measured_results),
+                }
+                if gpu_snapshot and memory_ratio > gpu_memory_limit_ratio:
+                    candidate_result["status"] = "rejected_memory"
+                    candidate_result["reason"] = (
+                        "Le candidat depasse la limite memoire GPU "
+                        f"({memory_ratio:.2%} > {gpu_memory_limit_ratio:.2%})."
+                    )
+                else:
+                    if stable_reference_throughput is None:
+                        selected_batch_size = candidate_batch
+                        stable_reference_throughput = throughput
+                    elif candidate_batch > selected_batch_size and throughput >= (
+                        stable_reference_throughput * 1.10
+                    ):
+                        selected_batch_size = candidate_batch
+                        stable_reference_throughput = throughput
+                    else:
+                        candidate_result["selection_reason"] = "gain_insuffisant"
+                candidate_results.append(candidate_result)
+            except Exception as exc:
+                candidate_results.append(
+                    {
+                        "batch_size": candidate_batch,
+                        "status": "failed",
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    }
+                )
+            finally:
+                _restore_agent_training_state(agent, base_snapshot)
+    finally:
+        config.batch_size = selected_batch_size
+        _restore_agent_training_state(agent, base_snapshot)
+
+    result = {
+        "enabled": True,
+        "status": "completed",
+        "baseline_batch_size": baseline_batch_size,
+        "selected_batch_size": selected_batch_size,
+        "candidates": list(candidates),
+        "gpu_memory_limit_ratio": gpu_memory_limit_ratio,
+        "candidate_results": candidate_results,
+    }
+    set_training_runtime_state(jax_batch_profile=result)
+    append_training_log(
+        (
+            f"MuZero {config.horizon}: batch JAX selectionne={selected_batch_size} "
+            f"(baseline={baseline_batch_size})."
+        ),
+        source="muzero",
+    )
+    logger.info(
+        "Autotune batch MuZero %s: baseline=%s | selection=%s | candidats=%s",
+        config.horizon,
+        baseline_batch_size,
+        selected_batch_size,
+        candidate_results,
+    )
+    return result
+
+
+def _collect_precheck_warmup_games(
+    *,
+    agent: JAXMuZeroAgent,
+    config: MuZeroConfigV3,
+    required_entries: int,
+    max_wall_time_seconds: float | None,
+) -> dict[str, object]:
+    """Complete un replay minimal avant le precheck d'optimisation.
+
+    Args:
+        agent (JAXMuZeroAgent): Agent MuZero courant.
+        config (MuZeroConfigV3): Configuration du run.
+        required_entries (int): Nombre minimal d'episodes dans le replay.
+        max_wall_time_seconds (float | None): Garde-fou de collecte.
+
+    Returns:
+        dict[str, object]: Resume compact du warmup.
+
+    Raises:
+        RuntimeError: Si aucun buffer minimal ne peut etre produit.
+    """
+
+    attempts = 0
+    collected_symbols: list[str] = []
+    max_attempts = max(len(config.symbols) * max(required_entries, 1), 1)
+    while agent.replay_buffer.size < required_entries and attempts < max_attempts:
+        symbol = config.symbols[attempts % len(config.symbols)]
+        attempts += 1
+        env = build_environment(symbol, config)
+        if env is None:
+            continue
+        agent.play_game(
+            env,
+            exploration=True,
+            collection_mode="policy_only",
+            max_wall_time_seconds=max_wall_time_seconds,
+        )
+        collected_symbols.append(symbol)
+    if agent.replay_buffer.size < required_entries:
+        raise RuntimeError(
+            "OPTIMISATION_PRECHECK_FAILED: buffer insuffisant pour le precheck "
+            f"({agent.replay_buffer.size}/{required_entries})."
+        )
+    return {
+        "attempts": attempts,
+        "collected_symbols": collected_symbols,
+        "buffer_size": agent.replay_buffer.size,
+    }
+
+
+def _record_muzero_failure(
+    *,
+    exc: Exception,
+    failed_phase: str,
+    run_id: str,
+    step_name: str,
+    engine: str,
+    horizon: str,
+    family: str,
+    feature_profile: dict[str, object],
+    mechanics_profile_version: str | None,
+    dataset_id: str,
+    dataset_source: str,
+    focus_symbols: list[str],
+    gate_profile: str,
+    symbol_universe: list[str],
+    ga_trial: str | None,
+    trial_mode: str | None,
+    trial_cost_profile: str | None,
+    resume_checkpoint_path: str | None,
+    resume_step: int | None,
+    last_metrics: dict[str, object] | None = None,
+) -> Path:
+    """Persiste un echec MuZero exploitable par le runtime et l'operateur.
+
+    Args:
+        exc (Exception): Exception capturee.
+        failed_phase (str): Sous-phase runtime ayant echoue.
+        run_id (str): Identifiant du run courant.
+        step_name (str): Etape nightly courante.
+        engine (str): Moteur d'entrainement.
+        horizon (str): Horizon MuZero concerne.
+        family (str): Famille de symboles retenue.
+        feature_profile (dict[str, object]): Profil de features courant.
+        mechanics_profile_version (str | None): Version mecanique active.
+        dataset_id (str): Identifiant de dataset.
+        dataset_source (str): Source effective de dataset.
+        focus_symbols (list[str]): Symboles prioritaires du run.
+        gate_profile (str): Profil de gate actif.
+        symbol_universe (list[str]): Univers reel du run.
+        ga_trial (str | None): Trial GA associe.
+        trial_mode (str | None): Mode de trial.
+        trial_cost_profile (str | None): Profil de cout.
+        resume_checkpoint_path (str | None): Checkpoint de reprise.
+        resume_step (int | None): Step de reprise.
+        last_metrics (dict[str, object] | None): Metriques partielles si disponibles.
+
+    Returns:
+        Path: Chemin du resume terminal ecrit.
+    """
+
+    exception_type = type(exc).__name__
+    exception_message = str(exc)
+    traceback_tail = _build_traceback_tail(exc)
+    runtime_snapshot = dict(load_training_status() or {})
+    error_context = {
+        "step_name": step_name,
+        "failed_phase": failed_phase,
+        "run_id": run_id or None,
+        "exception_type": exception_type,
+        "exception_message": exception_message,
+    }
+    set_training_runtime_state(
+        train_step_phase=failed_phase,
+        failed_phase=failed_phase,
+        exception_type=exception_type,
+        exception_message=exception_message,
+        traceback_tail=traceback_tail,
+        stall_detected=True,
+        stall_reason=exception_message,
+        last_nonzero_exit=error_context,
+    )
+    append_training_log(
+        (
+            f"MuZero {horizon}: echec pendant {failed_phase} | "
+            f"{exception_type}: {exception_message}"
+        ),
+        level="ERROR",
+        source="muzero",
+    )
+    if traceback_tail:
+        append_training_log(
+            "Traceback MuZero: " + " || ".join(traceback_tail[-3:]),
+            level="ERROR",
+            source="muzero",
+        )
+
+    terminal_summary = {
+        "run_id": run_id or None,
+        "sequence_id": str(os.getenv("TRAINING_SEQUENCE_ID", "")).strip() or None,
+        "sequence_profile": str(os.getenv("TRAINING_SEQUENCE_PROFILE", "")).strip() or None,
+        "window_id": str(os.getenv("TRAINING_WINDOW_ID", "")).strip() or None,
+        "trial_id": str(os.getenv("TRAINING_TRIAL_ID", "")).strip() or ga_trial,
+        "engine": engine,
+        "horizon": horizon,
+        "family": family,
+        "feature_profile": feature_profile.get("profile_name"),
+        "mechanics_profile_version": mechanics_profile_version,
+        "ga_trial": ga_trial,
+        "trial_mode": trial_mode,
+        "trial_cost_profile": trial_cost_profile,
+        "dataset_id": dataset_id,
+        "dataset_source": dataset_source,
+        "focus_symbols": focus_symbols,
+        "symbol_universe": list(symbol_universe),
+        "gate_profile": gate_profile,
+        "terminal_status": "error",
+        "failed_step": failed_phase,
+        "failure_mode": "optimization_pipeline_error",
+        "arena_outcome": None,
+        "promotion_gate": {
+            "allowed": False,
+            "status": "blocked",
+            "reason": failed_phase,
+            "failure_mode": "optimization_pipeline_error",
+        },
+        "metrics": dict(last_metrics or {}),
+        "metrics_by_symbol": dict((last_metrics or {}).get("metrics_by_symbol") or {}),
+        "artifact_state": {
+            "arena_report_present": False,
+            "battle_report_present": False,
+            "promotion_present": False,
+            "candidate_checkpoint_present": False,
+        },
+        "resume_checkpoint_path": resume_checkpoint_path,
+        "resume_step": resume_step,
+        "latest_verdict": {
+            "status": "error",
+            "reason": exception_message,
+            "failure_mode": "optimization_pipeline_error",
+        },
+        "collector_profile": {
+            "collector_mode": runtime_snapshot.get("collector_mode"),
+            "collector_workers": runtime_snapshot.get("collector_workers"),
+            "collector_active_symbols": list(runtime_snapshot.get("collector_active_symbols") or []),
+            "collector_queue_depth": runtime_snapshot.get("collector_queue_depth"),
+            "inference_batch_profile": dict(runtime_snapshot.get("inference_batch_profile") or {}),
+        },
+        "batch_autotune_result": dict(runtime_snapshot.get("jax_batch_profile") or {}),
+        "runtime_failure": {
+            **error_context,
+            "traceback_tail": traceback_tail,
+            "model_family": family,
+            "symbol_universe": list(symbol_universe),
+        },
+    }
+    return write_terminal_summary(terminal_summary)
 
 
 
@@ -506,6 +988,154 @@ def main() -> dict[str, object]:
         shadow_buffer_size=int(shadow_weighting.get("episodes_loaded", 0) or 0),
         dataset_coverage=dataset_coverage,
     )
+    required_precheck_entries = max(int(getattr(config, "batch_size", 1) or 1) // 10, 1)
+    precheck_family = infer_family_from_symbols(
+        focus_symbols or list(config.symbols),
+        family=initial_family,
+    )
+    precheck_feature_profile = resolve_feature_profile(horizon, precheck_family)
+    precheck_runtime_state = {
+        "failed_phase": None,
+        "exception_type": None,
+        "exception_message": None,
+        "traceback_tail": [],
+        "last_nonzero_exit": None,
+        "stall_detected": False,
+        "stall_reason": None,
+    }
+    append_training_log(
+        (
+            f"MuZero {horizon}: precheck optimisation sur replay "
+            f"(buffer={agent.replay_buffer.size}, minimum={required_precheck_entries})."
+        ),
+        source="muzero",
+    )
+    mark_step_running(
+        step_name,
+        engine=engine,
+        phase="optimisation_precheck",
+        horizon=horizon,
+        family=precheck_family,
+        symbol_total=len(config.symbols),
+        dataset_id=dataset_id,
+        dataset_source=dataset_source,
+        feature_profile=(str(precheck_feature_profile.get("profile_name") or "").strip() or None),
+        mechanics_profile_version=mechanics_profile_version,
+        ga_status=ga_status,
+        ga_generation=ga_generation,
+        ga_trial=ga_trial,
+        trial_mode=trial_mode,
+        trial_cost_profile=trial_cost_profile,
+        focus_symbols=focus_symbols,
+        gate_profile=gate_profile,
+        replay_cache_status="memoire",
+        replay_cache_key=replay_cache_key,
+        replay_cache_entries=agent.replay_buffer.size,
+        replay_cache_source="memoire",
+        shadow_buffer_size=int(shadow_weighting.get("episodes_loaded", 0) or 0),
+        dataset_coverage=dataset_coverage,
+    )
+    set_training_runtime_state(
+        train_step_phase="optimisation_precheck",
+        phase_durations_ms={},
+        resume_checkpoint_path=resume_checkpoint_path,
+        resume_step=resume_step if resume_step > 0 else None,
+        **precheck_runtime_state,
+    )
+    precheck_warmup = None
+    if agent.replay_buffer.size < required_precheck_entries:
+        precheck_warmup = _collect_precheck_warmup_games(
+            agent=agent,
+            config=config,
+            required_entries=required_precheck_entries,
+            max_wall_time_seconds=collection_timeout_seconds or None,
+        )
+        append_training_log(
+            (
+                f"MuZero {horizon}: warmup precheck effectue "
+                f"({precheck_warmup.get('buffer_size')} episodes, "
+                f"symboles={','.join(precheck_warmup.get('collected_symbols') or []) or 'aucun'})."
+            ),
+            source="muzero",
+        )
+    precheck_snapshot = _snapshot_agent_training_state(agent)
+    precheck_phase_name = "optimisation_precheck"
+
+    def _trace_precheck(phase_name: str) -> None:
+        """Publie la sous-phase exacte du precheck d'optimisation MuZero."""
+
+        nonlocal precheck_phase_name
+        precheck_phase_name = phase_name
+        set_training_runtime_state(
+            train_step_phase=phase_name,
+            failed_phase=None,
+            exception_type=None,
+            exception_message=None,
+            traceback_tail=[],
+            last_nonzero_exit=None,
+            stall_detected=False,
+            stall_reason=None,
+        )
+
+    _trace_precheck("optimisation_enter")
+    try:
+        precheck_result = agent.train_step(trace_hook=_trace_precheck)
+        if precheck_result is None:
+            raise RuntimeError(
+                "OPTIMISATION_PRECHECK_FAILED: aucun batch exploitable n'a ete prepare pour le precheck."
+            )
+    except Exception as exc:
+        terminal_summary_path = _record_muzero_failure(
+            exc=exc,
+            failed_phase=precheck_phase_name,
+            run_id=str(load_training_status().get("run_id") or "").strip(),
+            step_name=step_name,
+            engine=engine,
+            horizon=horizon,
+            family=precheck_family,
+            feature_profile=precheck_feature_profile,
+            mechanics_profile_version=mechanics_profile_version,
+            dataset_id=dataset_id or "",
+            dataset_source=dataset_source or "",
+            focus_symbols=focus_symbols,
+            gate_profile=gate_profile,
+            symbol_universe=focus_symbols or list(config.symbols),
+            ga_trial=ga_trial,
+            trial_mode=trial_mode,
+            trial_cost_profile=trial_cost_profile,
+            resume_checkpoint_path=resume_checkpoint_path,
+            resume_step=resume_step if resume_step > 0 else None,
+        )
+        logger.exception("Precheck optimisation MuZero en echec: %s", exc)
+        append_training_log(
+            f"MuZero {horizon}: echec du precheck optimisation, resume={terminal_summary_path.name}.",
+            level="ERROR",
+            source="muzero",
+        )
+        raise
+    finally:
+        _restore_agent_training_state(agent, precheck_snapshot)
+    append_training_log(
+        (
+            f"MuZero {horizon}: precheck optimisation valide "
+            f"(buffer={precheck_result.get('buffer_size')}, "
+            f"durations={precheck_result.get('phase_durations_ms')})."
+        ),
+        source="muzero",
+    )
+    set_training_runtime_state(
+        train_step_phase="optimisation_precheck_done",
+        phase_durations_ms=dict(precheck_result.get("phase_durations_ms") or {}),
+        resume_checkpoint_path=resume_checkpoint_path,
+        resume_step=resume_step if resume_step > 0 else None,
+        failed_phase=None,
+        exception_type=None,
+        exception_message=None,
+        traceback_tail=[],
+        last_nonzero_exit=None,
+        stall_detected=False,
+        stall_reason=None,
+    )
 
     games_per_symbol = int(os.getenv("MUZERO_GAMES_PER_SYMBOL", "12"))
     if resume_step > 0:
@@ -532,6 +1162,37 @@ def main() -> dict[str, object]:
         raise ValueError(f"Mode de collecte MuZero invalide: {collection_mode}")
     valid_symbols: list[str] = []
     total_games = 0
+    collector_env_payloads: list[CollectorEnvironmentPayload] = []
+    collector_profile: dict[str, object] = {
+        "collector_mode": "sequential",
+        "collector_workers": 1,
+        "collector_queue_depth": int(getattr(config, "collector_queue_depth", 0) or 0),
+        "collector_active_symbols": [],
+        "inference_batch_profile": {
+            "mode": "local_inline",
+            "batch_max": 1,
+            "batch_timeout_ms": 0,
+            "total_requests": 0,
+            "total_batches": 0,
+        },
+    }
+    for symbol in config.symbols:
+        env = build_environment(symbol, config)
+        if env is None:
+            continue
+        valid_symbols.append(symbol)
+        collector_env_payloads.append(
+            CollectorEnvironmentPayload(
+                symbol=symbol,
+                market_data=np.asarray(env.data, dtype=np.float32),
+                max_steps=int(env.max_steps_per_episode),
+                dataset_source=str(
+                    getattr(env, "dataset_source", None)
+                    or getattr(config, "dataset_source", "csv")
+                    or "csv"
+                ),
+            )
+        )
 
     logger.info("Phase 1 - collecte historique par self-play guide")
     if resume_step > 0:
@@ -547,27 +1208,63 @@ def main() -> dict[str, object]:
             ),
             source="muzero",
         )
-    for symbol_index, symbol in enumerate(config.symbols, start=1):
-        env = build_environment(symbol, config)
-        if env is None:
-            continue
-        valid_symbols.append(symbol)
-        append_training_log(
-            f"MuZero {horizon}: collecte sur {symbol} ({symbol_index}/{len(config.symbols)}).",
-            source="muzero",
+
+    if not valid_symbols:
+        raise RuntimeError("Aucun symbole valide pour MuZero.")
+
+    symbol_positions = {symbol: index + 1 for index, symbol in enumerate(valid_symbols)}
+    collector_heartbeat_state = {
+        "last_log_at": 0.0,
+    }
+
+    def _publish_collection_progress(payload: dict[str, object]) -> None:
+        """Propage l'avancement de collecte vers le statut runtime."""
+
+        active_symbols = [
+            str(symbol).strip()
+            for symbol in list(payload.get("collector_active_symbols") or [])
+            if str(symbol).strip()
+        ]
+        live_inference_batch_profile = dict(
+            payload.get("inference_batch_profile")
+            or collector_profile.get("inference_batch_profile")
+            or {}
         )
-        for game_index in range(games_per_symbol):
+        collector_profile["collector_active_symbols"] = list(active_symbols)
+        collector_profile["inference_batch_profile"] = dict(live_inference_batch_profile)
+        set_training_runtime_state(
+            collector_mode=str(collector_profile.get("collector_mode") or "sequential"),
+            collector_workers=int(collector_profile.get("collector_workers") or 1),
+            collector_active_symbols=active_symbols,
+            collector_queue_depth=int(collector_profile.get("collector_queue_depth") or 0),
+            inference_batch_profile=dict(live_inference_batch_profile),
+            gpu_owner="muzero",
+        )
+        event_name = str(payload.get("event") or "").strip().lower()
+        symbol = str(payload.get("symbol") or "").strip()
+        if event_name == "symbol_start" and symbol:
+            append_training_log(
+                f"MuZero {horizon}: collecte sur {symbol} ({symbol_positions.get(symbol, 0)}/{len(valid_symbols)}).",
+                source="muzero",
+            )
+            return
+        if event_name == "symbol_done" and symbol:
+            append_training_log(
+                f"MuZero {horizon}: collecte terminee sur {symbol}.",
+                source="muzero",
+            )
+            return
+        if event_name == "collector_heartbeat":
+            primary_symbol = active_symbols[0] if active_symbols else None
             mark_step_running(
                 step_name,
                 engine=engine,
                 phase="collecte",
                 horizon=horizon,
                 family=initial_family,
-                symbol=symbol,
-                symbol_index=symbol_index,
-                symbol_total=len(config.symbols),
-                part_index=game_index + 1,
-                part_total=games_per_symbol,
+                symbol=primary_symbol,
+                symbol_index=symbol_positions.get(primary_symbol, 0) if primary_symbol else None,
+                symbol_total=len(valid_symbols),
                 dataset_id=dataset_id,
                 dataset_source=dataset_source,
                 feature_profile=feature_profile_name,
@@ -585,33 +1282,232 @@ def main() -> dict[str, object]:
                 replay_cache_source="memoire",
                 dataset_coverage=dataset_coverage,
             )
-            agent.play_game(
-                env,
-                exploration=True,
+            now = time.perf_counter()
+            if (now - float(collector_heartbeat_state["last_log_at"])) >= 60.0:
+                append_training_log(
+                    (
+                        f"MuZero {horizon}: heartbeat collecte | actifs={active_symbols} "
+                        f"| parties={int(payload.get('total_games') or 0)} "
+                        f"| requetes_gpu={int(live_inference_batch_profile.get('total_requests') or 0)} "
+                        f"| batchs_gpu={int(live_inference_batch_profile.get('total_batches') or 0)}"
+                    ),
+                    source="muzero",
+                )
+                collector_heartbeat_state["last_log_at"] = now
+            return
+        if event_name != "game_result" or not symbol:
+            return
+        mark_step_running(
+            step_name,
+            engine=engine,
+            phase="collecte",
+            horizon=horizon,
+            family=initial_family,
+            symbol=symbol,
+            symbol_index=int(payload.get("symbol_index") or symbol_positions.get(symbol, 0)),
+            symbol_total=len(valid_symbols),
+            part_index=int(payload.get("part_index") or 0),
+            part_total=games_per_symbol,
+            dataset_id=dataset_id,
+            dataset_source=dataset_source,
+            feature_profile=feature_profile_name,
+            mechanics_profile_version=mechanics_profile_version,
+            ga_status=ga_status,
+            ga_generation=ga_generation,
+            ga_trial=ga_trial,
+            trial_mode=trial_mode,
+            trial_cost_profile=trial_cost_profile,
+            focus_symbols=focus_symbols,
+            gate_profile=gate_profile,
+            replay_cache_status="warming",
+            replay_cache_key=replay_cache_key,
+            replay_cache_entries=int(payload.get("replay_entries") or agent.replay_buffer.size),
+            replay_cache_source="memoire",
+            dataset_coverage=dataset_coverage,
+        )
+
+    try:
+        if str(getattr(config, "collector_mode", "") or "").strip().lower() == "batched_symbol_workers":
+            collector_profile.update(
+                {
+                    "collector_mode": "batched_symbol_workers",
+                    "collector_workers": min(
+                        max(int(getattr(config, "collector_workers", 1) or 1), 1),
+                        len(collector_env_payloads),
+                    ),
+                    "collector_queue_depth": int(getattr(config, "collector_queue_depth", 0) or 0),
+                }
+            )
+            set_training_runtime_state(
+                collector_mode=str(collector_profile.get("collector_mode") or "batched_symbol_workers"),
+                collector_workers=int(collector_profile.get("collector_workers") or 1),
+                collector_active_symbols=list(valid_symbols),
+                collector_queue_depth=int(collector_profile.get("collector_queue_depth") or 0),
+                inference_batch_profile=dict(collector_profile.get("inference_batch_profile") or {}),
+                gpu_owner="muzero",
+            )
+            parallel_collection_result = collect_games_parallel(
+                agent=agent,
+                config=config,
+                environments=collector_env_payloads,
+                games_per_symbol=games_per_symbol,
                 collection_mode=collection_mode,
                 max_wall_time_seconds=collection_timeout_seconds or None,
+                collector_workers=int(collector_profile.get("collector_workers") or 1),
+                queue_depth=int(getattr(config, "collector_queue_depth", 0) or 0),
+                inference_batch_max=int(getattr(config, "inference_batch_max", 64) or 64),
+                inference_batch_timeout_ms=int(getattr(config, "inference_batch_timeout_ms", 2) or 2),
+                progress_callback=_publish_collection_progress,
+                log_callback=logger.info,
             )
-            summary = env.get_summary()
-            total_games += 1
-            logger.info(
-                "[%s] %s partie %s/%s | return=%.2f%% | trades=%s | buffer=%s",
-                horizon,
-                symbol,
-                game_index + 1,
-                games_per_symbol,
-                summary.get("return_pct", 0.0),
-                summary.get("total_trades", 0),
-                agent.replay_buffer.size,
+            collector_profile.update(dict(parallel_collection_result or {}))
+            total_games = int(collector_profile.get("total_games") or 0)
+            valid_symbols = [
+                str(symbol).strip()
+                for symbol in list(collector_profile.get("valid_symbols") or valid_symbols)
+                if str(symbol).strip()
+            ]
+        else:
+            collector_profile.update(
+                {
+                    "collector_mode": "sequential",
+                    "collector_workers": 1,
+                }
             )
+            set_training_runtime_state(
+                collector_mode="sequential",
+                collector_workers=1,
+                collector_active_symbols=list(valid_symbols),
+                collector_queue_depth=int(collector_profile.get("collector_queue_depth") or 0),
+                inference_batch_profile=dict(collector_profile.get("inference_batch_profile") or {}),
+                gpu_owner="muzero",
+            )
+            for symbol_index, env_payload in enumerate(collector_env_payloads, start=1):
+                _publish_collection_progress(
+                    {
+                        "event": "symbol_start",
+                        "symbol": env_payload.symbol,
+                        "collector_active_symbols": [item.symbol for item in collector_env_payloads[symbol_index - 1 :]],
+                    }
+                )
+                env = TradingEnvironment(
+                    data=np.asarray(env_payload.market_data, dtype=np.float32),
+                    symbol=env_payload.symbol,
+                    config=config,
+                    max_steps=int(env_payload.max_steps),
+                )
+                setattr(env, "dataset_source", env_payload.dataset_source)
+                for game_index in range(games_per_symbol):
+                    mark_step_running(
+                        step_name,
+                        engine=engine,
+                        phase="collecte",
+                        horizon=horizon,
+                        family=initial_family,
+                        symbol=env_payload.symbol,
+                        symbol_index=symbol_index,
+                        symbol_total=len(valid_symbols),
+                        part_index=game_index + 1,
+                        part_total=games_per_symbol,
+                        dataset_id=dataset_id,
+                        dataset_source=dataset_source,
+                        feature_profile=feature_profile_name,
+                        mechanics_profile_version=mechanics_profile_version,
+                        ga_status=ga_status,
+                        ga_generation=ga_generation,
+                        ga_trial=ga_trial,
+                        trial_mode=trial_mode,
+                        trial_cost_profile=trial_cost_profile,
+                        focus_symbols=focus_symbols,
+                        gate_profile=gate_profile,
+                        replay_cache_status="warming",
+                        replay_cache_key=replay_cache_key,
+                        replay_cache_entries=agent.replay_buffer.size,
+                        replay_cache_source="memoire",
+                        dataset_coverage=dataset_coverage,
+                    )
+                    agent.play_game(
+                        env,
+                        exploration=True,
+                        collection_mode=collection_mode,
+                        max_wall_time_seconds=collection_timeout_seconds or None,
+                    )
+                    summary = env.get_summary()
+                    total_games += 1
+                    logger.info(
+                        "[%s] %s partie %s/%s | return=%.2f%% | trades=%s | buffer=%s",
+                        horizon,
+                        env_payload.symbol,
+                        game_index + 1,
+                        games_per_symbol,
+                        summary.get("return_pct", 0.0),
+                        summary.get("total_trades", 0),
+                        agent.replay_buffer.size,
+                    )
+                _publish_collection_progress(
+                    {
+                        "event": "symbol_done",
+                        "symbol": env_payload.symbol,
+                        "collector_active_symbols": [item.symbol for item in collector_env_payloads[symbol_index:]],
+                    }
+                )
+    except Exception as exc:
+        terminal_summary_path = _record_muzero_failure(
+            exc=exc,
+            failed_phase="collecte_parallel" if collector_profile.get("collector_mode") == "batched_symbol_workers" else "collecte",
+            run_id=str(load_training_status().get("run_id") or "").strip(),
+            step_name=step_name,
+            engine=engine,
+            horizon=horizon,
+            family=initial_family,
+            feature_profile=dict(getattr(config, "feature_profile", {}) or {}),
+            mechanics_profile_version=mechanics_profile_version,
+            dataset_id=dataset_id or "",
+            dataset_source=dataset_source or "",
+            focus_symbols=focus_symbols,
+            gate_profile=gate_profile,
+            symbol_universe=valid_symbols or list(config.symbols),
+            ga_trial=ga_trial,
+            trial_mode=trial_mode,
+            trial_cost_profile=trial_cost_profile,
+            resume_checkpoint_path=resume_checkpoint_path,
+            resume_step=resume_step if resume_step > 0 else None,
+        )
+        logger.exception("MuZero %s en erreur pendant la collecte: %s", horizon, exc)
+        append_training_log(
+            f"MuZero {horizon}: echec collecte, resume={terminal_summary_path.name}.",
+            level="ERROR",
+            source="muzero",
+        )
+        raise
 
-    if not valid_symbols:
-        raise RuntimeError("Aucun symbole valide pour MuZero.")
+    collector_profile["collector_active_symbols"] = []
+    set_training_runtime_state(
+        collector_mode=str(collector_profile.get("collector_mode") or "sequential"),
+        collector_workers=int(collector_profile.get("collector_workers") or 1),
+        collector_active_symbols=[],
+        collector_queue_depth=int(collector_profile.get("collector_queue_depth") or 0),
+        inference_batch_profile=dict(collector_profile.get("inference_batch_profile") or {}),
+        gpu_owner="muzero",
+    )
+    append_training_log(
+        (
+            f"MuZero {horizon}: collecte terminee "
+            f"({total_games} parties, mode={collector_profile.get('collector_mode')}, "
+            f"workers={collector_profile.get('collector_workers')})."
+        ),
+        source="muzero",
+    )
 
     family = infer_family_from_symbols(valid_symbols, family=getattr(config, "model_family", None))
     feature_profile = resolve_feature_profile(horizon, family)
     dataset_source = str(getattr(config, "dataset_source", "csv") or "csv")
     dataset_descriptor = dict(getattr(config, "dataset_descriptor", {}) or {})
     dataset_id = str(dataset_descriptor.get("dataset_id") or "")
+    batch_autotune_result = _autotune_muzero_batch_size(
+        agent=agent,
+        config=config,
+    )
 
     logger.info("Phase 2 - optimisation profonde (%s steps)", config.training_steps)
     start_time = datetime.now()
@@ -664,25 +1560,78 @@ def main() -> dict[str, object]:
     set_training_runtime_state(
         last_successful_step=start_optimisation_step if start_optimisation_step > 0 else None,
         last_successful_step_at=datetime.now().isoformat(),
-        train_step_phase="ready",
+        train_step_phase="optimisation_enter",
         phase_durations_ms={},
+        collector_mode=str(collector_profile.get("collector_mode") or "sequential"),
+        collector_workers=int(collector_profile.get("collector_workers") or 1),
+        collector_active_symbols=[],
+        collector_queue_depth=int(collector_profile.get("collector_queue_depth") or 0),
+        inference_batch_profile=dict(collector_profile.get("inference_batch_profile") or {}),
+        jax_batch_profile=dict(batch_autotune_result or {}),
+        gpu_owner="muzero",
         resume_checkpoint_path=resume_checkpoint_path,
         resume_step=start_optimisation_step if start_optimisation_step > 0 else None,
+        failed_phase=None,
+        exception_type=None,
+        exception_message=None,
+        traceback_tail=[],
         stall_detected=False,
         stall_reason=None,
+        last_nonzero_exit=None,
     )
+
+    current_failed_phase = "optimisation_enter"
 
     def _trace_train_step(phase_name: str) -> None:
         """Publie la sous-phase exacte du `train_step` MuZero."""
 
+        nonlocal current_failed_phase
+        current_failed_phase = phase_name
         set_training_runtime_state(
             train_step_phase=phase_name,
+            failed_phase=None,
+            exception_type=None,
+            exception_message=None,
+            traceback_tail=[],
+            last_nonzero_exit=None,
             stall_detected=False,
             stall_reason=None,
         )
 
     for step in range(start_optimisation_step + 1, config.training_steps + 1):
-        step_result = agent.train_step(trace_hook=_trace_train_step)
+        current_failed_phase = "optimisation_enter"
+        try:
+            step_result = agent.train_step(trace_hook=_trace_train_step)
+        except Exception as exc:
+            terminal_summary_path = _record_muzero_failure(
+                exc=exc,
+                failed_phase=current_failed_phase,
+                run_id=str(load_training_status().get("run_id") or "").strip(),
+                step_name=step_name,
+                engine=engine,
+                horizon=horizon,
+                family=family,
+                feature_profile=feature_profile,
+                mechanics_profile_version=mechanics_profile_version,
+                dataset_id=dataset_id,
+                dataset_source=dataset_source,
+                focus_symbols=focus_symbols,
+                gate_profile=gate_profile,
+                symbol_universe=valid_symbols,
+                ga_trial=ga_trial,
+                trial_mode=trial_mode,
+                trial_cost_profile=trial_cost_profile,
+                resume_checkpoint_path=resume_checkpoint_path,
+                resume_step=start_optimisation_step if start_optimisation_step > 0 else None,
+                last_metrics=last_metrics,
+            )
+            logger.exception("MuZero %s en erreur pendant %s: %s", horizon, current_failed_phase, exc)
+            append_training_log(
+                f"MuZero {horizon}: erreur optimisation, resume={terminal_summary_path.name}.",
+                level="ERROR",
+                source="muzero",
+            )
+            raise
         if step_result is None:
             logger.warning("MuZero sans batch suffisant, arret a l'etape %s.", step)
             append_training_log(
@@ -734,6 +1683,11 @@ def main() -> dict[str, object]:
             phase_durations_ms=phase_durations_ms,
             resume_checkpoint_path=resume_checkpoint_path,
             resume_step=start_optimisation_step if start_optimisation_step > 0 else None,
+            failed_phase=None,
+            exception_type=None,
+            exception_message=None,
+            traceback_tail=[],
+            last_nonzero_exit=None,
             stall_detected=False,
             stall_reason=None,
         )
@@ -944,6 +1898,8 @@ def main() -> dict[str, object]:
             "gold_precheck": dict(gold_precheck_payload or {}),
             "precheck_status": (gold_precheck_payload or {}).get("status"),
             "early_kill_reason": (gold_precheck_payload or {}).get("early_kill_reason"),
+            "collector_profile": dict(collector_profile or {}),
+            "batch_autotune_result": dict(batch_autotune_result or {}),
         }
         terminal_summary_path = write_terminal_summary(terminal_summary)
         logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
@@ -985,6 +1941,8 @@ def main() -> dict[str, object]:
             "early_kill_reason": (gold_precheck_payload or {}).get("early_kill_reason"),
             "promotion": promotion_result,
             "terminal_summary_path": str(terminal_summary_path),
+            "collector_profile": dict(collector_profile or {}),
+            "batch_autotune_result": dict(batch_autotune_result or {}),
         }
 
     logger.info("Phase 3 - arena ADN")
@@ -1105,6 +2063,8 @@ def main() -> dict[str, object]:
         "trial_mode": trial_mode,
         "trial_cost_profile": trial_cost_profile,
         "gold_precheck": dict(gold_precheck_payload or {}),
+        "collector_profile": dict(collector_profile or {}),
+        "batch_autotune_result": dict(batch_autotune_result or {}),
         "battle_report": battle_report,
         "promotion": promotion_result,
     }
@@ -1158,6 +2118,8 @@ def main() -> dict[str, object]:
         },
         "gold_precheck": dict(gold_precheck_payload or {}),
         "precheck_status": (gold_precheck_payload or {}).get("status"),
+        "collector_profile": dict(collector_profile or {}),
+        "batch_autotune_result": dict(batch_autotune_result or {}),
     }
     terminal_summary_path = write_terminal_summary(terminal_summary)
     logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
@@ -1178,6 +2140,10 @@ def main() -> dict[str, object]:
 
 
 if __name__ == "__main__":
-    summary = main()
-    logger.info("MuZero termine: %s", summary)
+    try:
+        summary = main()
+        logger.info("MuZero termine: %s", summary)
+    except Exception as exc:  # pragma: no cover - diagnostic operateur
+        logger.exception("MuZero en erreur terminale: %s", exc)
+        raise
 

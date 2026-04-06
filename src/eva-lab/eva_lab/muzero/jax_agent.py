@@ -56,6 +56,58 @@ class JAXMuZeroAgent:
         """Execute l'inference recurrente MuZero sur un etat latent."""
         return self.recurrent_apply(params, None, hidden_state, action_onehot)
 
+    def initial_inference_batch(
+        self,
+        observations: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Execute une inference initiale batchee materialisee cote Python.
+
+        Args:
+            observations (np.ndarray): Observations plates a projeter.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray, np.ndarray]: Etats latents, logits
+            et valeurs sous forme Numpy.
+        """
+
+        batch = np.asarray(observations, dtype=np.float32).reshape(len(observations), -1)
+        hidden_state, logits, value = self._jit_init(self.params, jnp.asarray(batch))
+        return (
+            np.asarray(jax.device_get(hidden_state), dtype=np.float32),
+            np.asarray(jax.device_get(logits), dtype=np.float32),
+            np.asarray(jax.device_get(value), dtype=np.float32),
+        )
+
+    def recurrent_inference_batch(
+        self,
+        hidden_states: np.ndarray,
+        action_onehots: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Execute une inference recurrente batchee materialisee cote Python.
+
+        Args:
+            hidden_states (np.ndarray): Etats latents a propager.
+            action_onehots (np.ndarray): Actions one-hot associees.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: Etats
+            latents suivants, recompenses, logits et valeurs.
+        """
+
+        hidden_batch = np.asarray(hidden_states, dtype=np.float32).reshape(len(hidden_states), -1)
+        action_batch = np.asarray(action_onehots, dtype=np.float32).reshape(len(action_onehots), -1)
+        next_state, reward, logits, value = self._jit_rec(
+            self.params,
+            jnp.asarray(hidden_batch),
+            jnp.asarray(action_batch),
+        )
+        return (
+            np.asarray(jax.device_get(next_state), dtype=np.float32),
+            np.asarray(jax.device_get(reward), dtype=np.float32),
+            np.asarray(jax.device_get(logits), dtype=np.float32),
+            np.asarray(jax.device_get(value), dtype=np.float32),
+        )
+
     def play_game(
         self,
         env,
@@ -194,22 +246,26 @@ class JAXMuZeroAgent:
         phase_durations_ms: dict[str, float] = {}
 
         if trace_hook is not None:
-            trace_hook("sample")
+            trace_hook("replay_sample_start")
         sample_started_at = time.perf_counter()
         samples = self.replay_buffer.sample(self.config.batch_size)
         phase_durations_ms["sample"] = round((time.perf_counter() - sample_started_at) * 1000.0, 3)
+        if trace_hook is not None:
+            trace_hook("replay_sample_done")
 
         if trace_hook is not None:
-            trace_hook("prepare_batch")
+            trace_hook("prepare_batch_start")
         prepare_started_at = time.perf_counter()
         batch = self.trainer.prepare_batch(samples)
         phase_durations_ms["prepare_batch"] = round(
             (time.perf_counter() - prepare_started_at) * 1000.0,
             3,
         )
+        if trace_hook is not None:
+            trace_hook("prepare_batch_done")
 
         if trace_hook is not None:
-            trace_hook("update_fn")
+            trace_hook("update_fn_start")
         update_started_at = time.perf_counter()
         self.params, self.opt_state, metrics = self.trainer.update_fn(
             self.params,
@@ -218,9 +274,11 @@ class JAXMuZeroAgent:
         )
         metrics = jax.tree_util.tree_map(jax.block_until_ready, metrics)
         phase_durations_ms["update_fn"] = round((time.perf_counter() - update_started_at) * 1000.0, 3)
+        if trace_hook is not None:
+            trace_hook("update_fn_done")
 
         if trace_hook is not None:
-            trace_hook("materialize_metrics")
+            trace_hook("metrics_materialize_start")
         materialize_started_at = time.perf_counter()
         materialized_metrics = self._materialize_metrics(metrics)
         phase_durations_ms["materialize_metrics"] = round(
@@ -228,7 +286,7 @@ class JAXMuZeroAgent:
             3,
         )
         if trace_hook is not None:
-            trace_hook("completed")
+            trace_hook("metrics_materialize_done")
         return {
             "metrics": materialized_metrics,
             "phase_durations_ms": phase_durations_ms,

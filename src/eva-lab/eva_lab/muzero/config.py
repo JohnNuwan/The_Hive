@@ -126,7 +126,34 @@ class MuZeroConfigV3:
         )
         self.dataset_id = self.dataset_descriptor["dataset_id"]
 
+        self.collector_mode = str(
+            overrides.get("collector_mode") or os.getenv("MUZERO_COLLECTOR_MODE", "batched_symbol_workers")
+        ).strip().lower()
+        self.collector_workers = int(
+            overrides.get("collector_workers") or os.getenv("MUZERO_COLLECTOR_WORKERS", "7")
+        )
+        self.collector_queue_depth = int(
+            overrides.get("collector_queue_depth") or os.getenv("MUZERO_COLLECTOR_QUEUE_DEPTH", "128")
+        )
+        self.inference_batch_max = int(
+            overrides.get("inference_batch_max") or os.getenv("MUZERO_INFERENCE_BATCH_MAX", "64")
+        )
+        self.inference_batch_timeout_ms = int(
+            overrides.get("inference_batch_timeout_ms")
+            or os.getenv("MUZERO_INFERENCE_BATCH_TIMEOUT_MS", "2")
+        )
         self.batch_size = int(os.getenv("MUZERO_BATCH_SIZE", "32"))
+        self.batch_autotune_enabled = str(
+            overrides.get("batch_autotune_enabled") or os.getenv("MUZERO_BATCH_AUTOTUNE", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self.batch_autotune_candidates = [
+            int(item)
+            for item in str(
+                overrides.get("batch_autotune_candidates")
+                or os.getenv("MUZERO_BATCH_CANDIDATES", "32,64,96,128")
+            ).split(",")
+            if str(item).strip()
+        ]
         self.learning_rate = float(os.getenv("MUZERO_LEARNING_RATE", "5e-5"))
         self.weight_decay = float(os.getenv("MUZERO_WEIGHT_DECAY", "1e-4"))
         self.momentum = 0.9

@@ -188,6 +188,7 @@ class AutoTradingEngine:
             True,
         )
         self._ensemble_enabled = self._env_flag("BANKER_ENSEMBLE_ENABLED", False)
+        self._ensemble_prod_enabled = self._env_flag("BANKER_ENSEMBLE_PROD_ENABLED", False)
         self._ensemble_min_edge = max(0.0, self._env_float("BANKER_ENSEMBLE_MIN_EDGE", 0.15))
         if self._cpu_live_mode:
             # Le mode de compatibilite garde un chemin live minimal et stable
@@ -594,15 +595,22 @@ class AutoTradingEngine:
             str: URL HTTP complete de prediction live.
         """
         explicit_url = self._live_inference_url.strip()
+        ensemble_live_enabled = self._ensemble_enabled and self._ensemble_prod_enabled
         if explicit_url:
             normalized = explicit_url.rstrip("/")
             if (
                 normalized.endswith("/predict/live")
                 or normalized.endswith("/dreamer/predict")
-                or normalized.endswith("/predict/ensemble")
             ):
                 return normalized
-            if self._ensemble_enabled:
+            if normalized.endswith("/predict/ensemble"):
+                if ensemble_live_enabled:
+                    return normalized
+                logger.warning(
+                    "Chemin /predict/ensemble ignore en production; repli sur MuZero."
+                )
+                normalized = normalized[: -len("/predict/ensemble")]
+            if ensemble_live_enabled:
                 return f"{normalized}/predict/ensemble"
             if self._cpu_live_mode:
                 return f"{normalized}/predict/live"
@@ -610,7 +618,7 @@ class AutoTradingEngine:
 
         lab_host = self._env_text("LAB_HOST", "localhost")
         lab_port = self._env_int("LAB_PORT", 8600)
-        if self._ensemble_enabled:
+        if ensemble_live_enabled:
             return f"http://{lab_host}:{lab_port}/predict/ensemble"
         if self._cpu_live_mode:
             return f"http://{lab_host}:{lab_port}/predict/live"
@@ -851,9 +859,15 @@ class AutoTradingEngine:
             dict[str, object]: Etat du chemin live local.
         """
         cortex_status = self.cortex.get_runtime_status()
+        gnn_policy = "weak_veto" if self._gnn_consultative_enabled else "disabled"
+        ensemble_live_enabled = self._ensemble_enabled and self._ensemble_prod_enabled
         return {
             "runtime_mode": self._resolve_runtime_mode().value,
             "runtime_profile": self._runtime_profile,
+            "live_policy": "muzero_only",
+            "gnn_policy": gnn_policy,
+            "dreamer_policy": "offline_locked",
+            "ensemble_prod_enabled": ensemble_live_enabled,
             "shadow_learning_mode": self._shadow_learning_mode,
             "intraday_retrain_allowed": self._intraday_retrain_allowed,
             "intraday_promotion_allowed": self._intraday_promotion_allowed,
@@ -873,13 +887,13 @@ class AutoTradingEngine:
             "cpu_live_symbol_max_volumes": dict(self._cpu_live_symbol_max_volumes),
             "gnn_consultative": {
                 "enabled": self._gnn_consultative_enabled,
-                "mode": "weak_veto" if self._gnn_consultative_enabled else "disabled",
+                "mode": gnn_policy,
                 "symbols": list(self._gnn_consultative_symbols),
                 "veto_min_confidence": self._gnn_consultative_veto_min_confidence,
                 "require_intraday_alignment": self._gnn_consultative_require_intraday_alignment,
             },
             "ensemble_enabled": self._ensemble_enabled,
-            "ensemble_mode": "vote_50_50" if self._ensemble_enabled else "muzero_only",
+            "ensemble_mode": "vote_50_50" if ensemble_live_enabled else "muzero_only",
             "ensemble_min_edge": self._ensemble_min_edge,
         }
 
@@ -891,6 +905,8 @@ class AutoTradingEngine:
         """
         max_open_positions = int(getattr(self.risk, "max_open_positions", 0) or 0)
         cortex_status = self.cortex.get_runtime_status()
+        gnn_policy = "weak_veto" if self._gnn_consultative_enabled else "disabled"
+        ensemble_live_enabled = self._ensemble_enabled and self._ensemble_prod_enabled
         return {
             "max_open_positions": max_open_positions,
             "symbol_entry_cooldown_minutes": int(self._symbol_entry_cooldown.total_seconds() / 60),
@@ -900,11 +916,15 @@ class AutoTradingEngine:
             "cpu_live_symbol_max_volumes": dict(self._cpu_live_symbol_max_volumes),
             "gnn_consultative": {
                 "enabled": self._gnn_consultative_enabled,
-                "mode": "weak_veto" if self._gnn_consultative_enabled else "disabled",
+                "mode": gnn_policy,
                 "symbols": list(self._gnn_consultative_symbols),
                 "veto_min_confidence": self._gnn_consultative_veto_min_confidence,
                 "require_intraday_alignment": self._gnn_consultative_require_intraday_alignment,
             },
+            "live_policy": "muzero_only",
+            "gnn_policy": gnn_policy,
+            "dreamer_policy": "offline_locked",
+            "ensemble_prod_enabled": ensemble_live_enabled,
             "live_family": self._lab_universe_family,
             "live_champion_id": self._lab_universe_live_champion_id,
             "live_champion_id_muzero": self._lab_universe_live_champion_id_muzero,
@@ -917,7 +937,7 @@ class AutoTradingEngine:
             "live_inference_horizon": self._live_inference_horizon,
             "selection_policy_required": "champion_only" if self._cpu_live_mode else "default",
             "ensemble_enabled": self._ensemble_enabled,
-            "ensemble_mode": "vote_50_50" if self._ensemble_enabled else "muzero_only",
+            "ensemble_mode": "vote_50_50" if ensemble_live_enabled else "muzero_only",
             "ensemble_min_edge": self._ensemble_min_edge,
             "cortex": cortex_status,
         }

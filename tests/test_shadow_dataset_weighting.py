@@ -65,6 +65,10 @@ def test_load_shadow_games_applies_weighting_and_filters_symbols(tmp_path):
         games_by_symbol["XAUUSD"].metadata["episode_weight"]
         > games_by_symbol["EURUSD"].metadata["episode_weight"]
     )
+    assert isinstance(games_by_symbol["EURUSD"].actions[0], int)
+    assert games_by_symbol["EURUSD"].actions[0] == 1
+    assert isinstance(games_by_symbol["XAUUSD"].actions[0], int)
+    assert games_by_symbol["XAUUSD"].actions[0] == 2
     assert summary["episodes_loaded"] == 2
     assert summary["weighted_episode_counts"]["winner_episode"] == 1
     assert summary["weighted_episode_counts"]["loser_episode"] == 1

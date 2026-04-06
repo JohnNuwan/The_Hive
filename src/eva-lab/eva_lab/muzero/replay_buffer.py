@@ -10,6 +10,20 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, List, Tuple
 
+
+class ReplayValidationError(ValueError):
+    """Represente une incoherence exploitable dans le replay MuZero."""
+
+    def __init__(self, code: str, message: str):
+        """Construit une erreur de validation avec code stable.
+
+        Args:
+            code (str): Code court exploitable par l'orchestrateur.
+            message (str): Message explicatif en francais.
+        """
+        self.code = str(code or "REPLAY_SAMPLE_INVALID").strip() or "REPLAY_SAMPLE_INVALID"
+        super().__init__(f"{self.code}: {message}")
+
 @dataclass
 class GameHistory:
     """Stocke l'ensemble des transitions d'un episode."""
@@ -98,14 +112,40 @@ class PrioritizedReplayBuffer:
 
     def sample(self, batch_size: int) -> List[Tuple[GameHistory, int, float]]:
         """Echantillonne un lot ``(episode, start_idx, weight)``."""
+        if batch_size <= 0:
+            raise ReplayValidationError(
+                "REPLAY_SAMPLE_INVALID",
+                "La taille de lot MuZero doit etre strictement positive.",
+            )
+        if self.tree.n_entries <= 0:
+            raise ReplayValidationError(
+                "REPLAY_SAMPLE_INVALID",
+                "Le replay MuZero est vide au moment de l'echantillonnage.",
+            )
+        total_priority = float(self.tree.total())
+        if not np.isfinite(total_priority) or total_priority <= 0.0:
+            raise ReplayValidationError(
+                "REPLAY_SAMPLE_INVALID",
+                "La priorite totale du replay MuZero est invalide.",
+            )
         batch = []
-        segment = self.tree.total() / batch_size
+        segment = total_priority / batch_size
         
         for i in range(batch_size):
             a = segment * i
             b = segment * (i + 1)
             s = random.uniform(a, b)
             (idx, p, game) = self.tree.get(s)
+            if game is None:
+                raise ReplayValidationError(
+                    "REPLAY_SAMPLE_INVALID",
+                    "Un episode MuZero absent a ete renvoye par le replay buffer.",
+                )
+            if len(game) <= 0:
+                raise ReplayValidationError(
+                    "REPLAY_SAMPLE_INVALID",
+                    "Un episode MuZero vide a ete renvoye par le replay buffer.",
+                )
             
             # Un point d'entree aleatoire evite de toujours sur-entrainer
             # les memes prefixes d'episodes.

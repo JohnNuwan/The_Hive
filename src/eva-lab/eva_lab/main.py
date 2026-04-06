@@ -59,6 +59,7 @@ from eva_lab.training_status import (
     load_cpu_scheduler_state,
     load_sequence_state,
     select_effective_training_step,
+    set_runtime_truth_snapshot,
     set_service_recovery_snapshot,
     tail_log_file,
     load_training_status,
@@ -582,9 +583,17 @@ def _trainer_process_is_alive(run_status: dict[str, Any]) -> bool:
     """
     launcher = dict(run_status.get("launcher") or {})
     pid_state = _pid_is_alive(launcher.get("remote_pid"))
-    if pid_state is not None:
-        return pid_state
-    return bool(run_status.get("active"))
+    if pid_state is True:
+        return True
+    launcher_phase = str(launcher.get("phase") or "").strip().lower()
+    trainer_container = str(launcher.get("trainer_container") or "").strip()
+    current_step = dict(run_status.get("current_step") or {})
+    current_step_status = str(current_step.get("status") or "").strip().lower()
+    if launcher_phase in {"trainer_running", "container_running", "running"}:
+        return True
+    if trainer_container and current_step_status == "running":
+        return True
+    return bool(run_status.get("active")) and current_step_status == "running"
 
 
 async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str, Any]:
@@ -663,11 +672,20 @@ def _build_lab_service_recovery_snapshot(
     dreamer_scalp = promoter.build_engine_horizon_status("dreamer", "scalp")
     dreamer_live_lock = dict(dreamer_scalp.get("live_lock") or {})
     timescale_info = describe_timescale_source()
+    trainer_running = _trainer_process_is_alive(run_status)
+    launcher = dict(run_status.get("launcher") or {})
+    runtime_truth = {
+        "container_up": bool(launcher.get("trainer_container")) and trainer_running,
+        "launcher_phase": str(launcher.get("phase") or "idle"),
+        "failed_phase": run_status.get("failed_phase"),
+        "last_nonzero_exit": run_status.get("last_nonzero_exit"),
+    }
+    set_runtime_truth_snapshot(runtime_truth)
     return {
         "audited_at": datetime.now(timezone.utc).isoformat(),
         "lab_online": True,
-        "training_active": bool(run_status.get("active")) and _trainer_process_is_alive(run_status),
-        "trainer_process_alive": _trainer_process_is_alive(run_status),
+        "training_active": trainer_running,
+        "trainer_process_alive": trainer_running,
         "gnn_ready": bool(gnn_payload.get("champion_ready")),
         "gnn_freshness_hours": gnn_payload.get("freshness_hours"),
         "dreamer_live_locked": bool(dreamer_live_lock.get("active")),
@@ -676,6 +694,7 @@ def _build_lab_service_recovery_snapshot(
         "timescaledb_state": str(timescale_info.get("state") or "disabled"),
         "stale_detected": bool(run_status.get("stale_detected")),
         "stale_reasons": list(run_status.get("stale_reasons") or []),
+        "runtime_truth": runtime_truth,
     }
 
 
@@ -1951,6 +1970,18 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         "slice_budget_seconds": run_view.get("slice_budget_seconds"),
         "slice_elapsed_seconds": run_view.get("slice_elapsed_seconds"),
         "terminal_status": run_view.get("terminal_status"),
+        "failed_phase": run_view.get("failed_phase"),
+        "exception_type": run_view.get("exception_type"),
+        "exception_message": run_view.get("exception_message"),
+        "traceback_tail": run_view.get("traceback_tail", []),
+        "runtime_truth": run_view.get("runtime_truth", {}),
+        "collector_mode": run_view.get("collector_mode"),
+        "collector_workers": run_view.get("collector_workers"),
+        "collector_active_symbols": run_view.get("collector_active_symbols", []),
+        "collector_queue_depth": run_view.get("collector_queue_depth"),
+        "inference_batch_profile": run_view.get("inference_batch_profile", {}),
+        "jax_batch_profile": run_view.get("jax_batch_profile", {}),
+        "gpu_owner": run_view.get("gpu_owner"),
         "battle_report_path": run_view.get("battle_report_path"),
         "promotion_state": run_view.get("promotion_state"),
         "stall_detected": run_view.get("stall_detected"),
@@ -2131,6 +2162,10 @@ async def factory_overview():
         "live": {
             "selection_policy": promoter.get_live_selection_policy(),
             "active_engine": "muzero" if muzero_scalp.get("live_champion_id") else None,
+            "live_policy": "muzero_only",
+            "gnn_policy": "weak_veto",
+            "dreamer_policy": "offline_locked",
+            "ensemble_prod_enabled": False,
             "muzero_live_champion_id": muzero_scalp.get("live_champion_id"),
             "dreamer_live_champion_id": (
                 dreamer_scalp.get("live_champion_id")
@@ -2160,6 +2195,13 @@ async def factory_overview():
             "trial_mode": run_view.get("trial_mode"),
             "ga_status": run_view.get("ga_status"),
             "ga_trial": run_view.get("ga_trial"),
+            "collector_mode": run_view.get("collector_mode"),
+            "collector_workers": run_view.get("collector_workers"),
+            "collector_active_symbols": run_view.get("collector_active_symbols", []),
+            "collector_queue_depth": run_view.get("collector_queue_depth"),
+            "inference_batch_profile": run_view.get("inference_batch_profile", {}),
+            "jax_batch_profile": run_view.get("jax_batch_profile", {}),
+            "gpu_owner": run_view.get("gpu_owner"),
         },
         "champions": {
             "muzero_scalp": _build_engine_overview_card("muzero", "scalp", muzero_scalp),
@@ -2176,6 +2218,11 @@ async def factory_overview():
         "timescaledb_coverage": timescaledb_coverage,
         "training_weighting": run_view.get("training_weighting", {}),
         "service_recovery": service_recovery,
+        "runtime_truth": run_view.get("runtime_truth", {}),
+        "live_policy": "muzero_only",
+        "gnn_policy": "weak_veto",
+        "dreamer_policy": "offline_locked",
+        "ensemble_prod_enabled": False,
         "blockers": blockers,
     }
 

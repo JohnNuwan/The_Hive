@@ -20,10 +20,12 @@ from eva_lab.training_status import (
     append_training_log,
     build_training_universe_summary,
     finalize_training_status,
+    load_training_status,
     mark_skip_status,
     mark_step_finished,
     mark_step_running,
     reset_training_status,
+    set_training_runtime_state,
     set_training_weighting,
 )
 
@@ -972,6 +974,8 @@ def _build_muzero_job(horizon: str, learning_context: dict[str, object] | None =
         "MUZERO_MODEL_FAMILY": "",
         "MUZERO_DATASET_SOURCE": "timescaledb",
         "TRAINING_TIMESCALE_ENABLED": "1",
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": os.getenv("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.85"),
         "TRAINING_FOCUS_SYMBOLS": canonical_symbols_csv,
         "MUZERO_SYMBOLS": canonical_symbols_csv,
         "ARENA_SYMBOLS": canonical_symbols_csv,
@@ -979,6 +983,13 @@ def _build_muzero_job(horizon: str, learning_context: dict[str, object] | None =
         f"ARENA_SYMBOLS_{normalized_horizon.upper()}": canonical_symbols_csv,
         "MUZERO_MAX_SYMBOLS": str(len(CANONICAL_TIMESCALE_SYMBOLS)),
         "ARENA_MAX_SYMBOLS": str(len(CANONICAL_TIMESCALE_SYMBOLS)),
+        "MUZERO_COLLECTOR_MODE": os.getenv("MUZERO_COLLECTOR_MODE", "batched_symbol_workers"),
+        "MUZERO_COLLECTOR_WORKERS": os.getenv("MUZERO_COLLECTOR_WORKERS", "7"),
+        "MUZERO_COLLECTOR_QUEUE_DEPTH": os.getenv("MUZERO_COLLECTOR_QUEUE_DEPTH", "128"),
+        "MUZERO_INFERENCE_BATCH_MAX": os.getenv("MUZERO_INFERENCE_BATCH_MAX", "64"),
+        "MUZERO_INFERENCE_BATCH_TIMEOUT_MS": os.getenv("MUZERO_INFERENCE_BATCH_TIMEOUT_MS", "2"),
+        "MUZERO_BATCH_AUTOTUNE": os.getenv("MUZERO_BATCH_AUTOTUNE", "1"),
+        "MUZERO_BATCH_CANDIDATES": os.getenv("MUZERO_BATCH_CANDIDATES", "32,64,96,128"),
     }
     extra_env.update(_filter_env_overrides(review_overrides, ("TRAINING_", "MUZERO_", "ARENA_")))
     return {
@@ -1079,6 +1090,7 @@ def append_step(
     name: str,
     status: str,
     error: str | None = None,
+    details: dict[str, object] | None = None,
 ) -> None:
     """Ajoute le resultat d'une etape dans le resume JSON.
 
@@ -1087,22 +1099,28 @@ def append_step(
         name (str): Nom de l'etape.
         status (str): Statut final de l'etape.
         error (str | None): Erreur eventuelle.
+        details (dict[str, object] | None): Metadonnees compactes optionnelles.
     """
     step: dict[str, object] = {"name": name, "status": status}
     if error:
         step["error"] = error
+    if details:
+        step["details"] = dict(details)
     summary.setdefault("steps", []).append(step)
     persist_summary(summary)
     mark_step_finished(name, status, error)
 
 
-def run_step(name: str, command: list[str], extra_env: dict[str, str] | None = None) -> None:
+def run_step(name: str, command: list[str], extra_env: dict[str, str] | None = None) -> dict[str, object]:
     """Execute une etape d'entrainement dans un processus isole.
 
     Args:
         name (str): Nom de l'etape.
         command (list[str]): Commande a lancer.
         extra_env (dict[str, str] | None): Variables d'environnement additionnelles.
+
+    Returns:
+        dict[str, object]: Resume court de l'execution.
 
     Raises:
         RuntimeError: Si le sous-processus se termine en erreur.
@@ -1112,17 +1130,82 @@ def run_step(name: str, command: list[str], extra_env: dict[str, str] | None = N
     env["PYTHONPATH"] = os.pathsep.join([entry for entry in pythonpath_entries if entry])
     if extra_env:
         env.update(extra_env)
+    gpu_owner = "idle"
+    if name.startswith("muzero_"):
+        gpu_owner = "muzero"
+    elif name.startswith("dreamer"):
+        gpu_owner = "dreamer"
+    elif name.startswith("gnn"):
+        gpu_owner = "gnn"
 
     logger.info("Debut etape %s: %s", name, command)
     mark_step_running(name, phase="demarrage")
+    set_training_runtime_state(gpu_owner=gpu_owner)
     append_training_log(
         f"Debut de l'etape {name}.",
         source="nightly",
     )
-    result = subprocess.run(command, cwd=WORKDIR, env=env, check=False)
+    result = subprocess.run(
+        command,
+        cwd=WORKDIR,
+        env=env,
+        check=False,
+        text=True,
+        stderr=subprocess.PIPE,
+        errors="replace",
+    )
+    stderr_tail = [
+        line.strip()
+        for line in str(result.stderr or "").splitlines()
+        if str(line or "").strip()
+    ][-12:]
+    runtime_status = dict(load_training_status())
+    failed_phase = runtime_status.get("failed_phase")
+    run_id = runtime_status.get("run_id")
     if result.returncode != 0:
-        raise RuntimeError(f"Echec de l'etape {name} (code {result.returncode}).")
+        set_training_runtime_state(gpu_owner="idle")
+        error_summary = {
+            "step_name": name,
+            "return_code": int(result.returncode),
+            "stderr_tail": stderr_tail,
+            "failed_phase": failed_phase,
+            "run_id": run_id,
+            "gpu_owner": gpu_owner,
+        }
+        append_training_log(
+            (
+                f"Echec de l'etape {name} "
+                f"(code={result.returncode}, phase={failed_phase or 'inconnue'}, run_id={run_id or 'n/a'})."
+            ),
+            level="ERROR",
+            source="nightly",
+        )
+        if stderr_tail:
+            append_training_log(
+                "stderr nightly: " + " || ".join(stderr_tail[-3:]),
+                level="ERROR",
+                source="nightly",
+            )
+        raise RuntimeError(
+            "Echec de l'etape "
+            f"{name} | code={result.returncode} | phase={failed_phase or 'inconnue'} | "
+            f"run_id={run_id or 'n/a'} | stderr_tail={stderr_tail!r}"
+        )
     logger.info("Etape %s terminee avec succes.", name)
+    set_training_runtime_state(gpu_owner="idle")
+    return {
+        "step_name": name,
+        "return_code": int(result.returncode),
+        "stderr_tail": stderr_tail,
+        "failed_phase": failed_phase,
+        "run_id": run_id,
+        "gpu_owner": gpu_owner,
+        "batch_autotune_result": runtime_status.get("jax_batch_profile"),
+        "collector_mode": runtime_status.get("collector_mode"),
+        "collector_workers": runtime_status.get("collector_workers"),
+        "collector_queue_depth": runtime_status.get("collector_queue_depth"),
+        "inference_batch_profile": runtime_status.get("inference_batch_profile"),
+    }
 
 
 def main() -> dict[str, object]:
@@ -1239,6 +1322,33 @@ def main() -> dict[str, object]:
     gnn_refresh_policy = _evaluate_gnn_refresh_policy(requested_run_gnn)
     summary["gnn_refresh_policy"] = gnn_refresh_policy
     decision["gnn_refresh_policy"] = gnn_refresh_policy
+    summary["gnn_policy"] = {
+        "mode": "refresh_if_stale",
+        "refresh_after_hours": gnn_refresh_policy.get("threshold_hours"),
+        "scheduled": bool(gnn_refresh_policy.get("scheduled")),
+        "reason": gnn_refresh_policy.get("reason"),
+        "concurrent_with_muzero": False,
+    }
+    summary["dreamer_policy"] = {
+        "live_policy": "offline_locked",
+        "queue_position": "after_muzero",
+        "battle_report_required": True,
+    }
+    summary["muzero_scheduler_policy"] = {
+        "gpu_priority": "muzero_first",
+        "collector_mode": os.getenv("MUZERO_COLLECTOR_MODE", "batched_symbol_workers"),
+        "collector_workers": _env_int("MUZERO_COLLECTOR_WORKERS", 7),
+        "collector_queue_depth": _env_int("MUZERO_COLLECTOR_QUEUE_DEPTH", 128),
+        "inference_batch_max": _env_int("MUZERO_INFERENCE_BATCH_MAX", 64),
+        "inference_batch_timeout_ms": _env_int("MUZERO_INFERENCE_BATCH_TIMEOUT_MS", 2),
+        "batch_autotune": _env_flag("MUZERO_BATCH_AUTOTUNE", True),
+        "batch_candidates": [
+            int(item)
+            for item in str(os.getenv("MUZERO_BATCH_CANDIDATES", "32,64,96,128")).split(",")
+            if str(item).strip()
+        ],
+    }
+    summary["batch_autotune_result"] = None
     persist_summary(summary)
     run_gnn = bool(gnn_refresh_policy.get("scheduled"))
     run_muzero = _env_flag("RUN_TRAIN_MUZERO", True)
@@ -1268,12 +1378,23 @@ def main() -> dict[str, object]:
 
     try:
         for job in job_queue:
-            run_step(
+            step_result = run_step(
                 str(job.get("name") or "unknown"),
                 list(job.get("command") or []),
                 extra_env=dict(job.get("extra_env") or {}),
             )
-            append_step(summary, str(job.get("name") or "unknown"), "ok")
+            if (
+                str(job.get("engine") or "").strip().lower() == "muzero"
+                and isinstance(step_result.get("batch_autotune_result"), dict)
+                and step_result.get("batch_autotune_result")
+            ):
+                summary["batch_autotune_result"] = dict(step_result.get("batch_autotune_result") or {})
+            append_step(
+                summary,
+                str(job.get("name") or "unknown"),
+                "ok",
+                details=step_result,
+            )
 
         summary["status"] = "ok"
         summary["finished_at"] = datetime.now().isoformat()
@@ -1286,6 +1407,15 @@ def main() -> dict[str, object]:
         logger.exception("Sequence nocturne en echec: %s", exc)
         summary["status"] = "error"
         summary["error"] = str(exc)
+        current_status = dict(load_training_status())
+        summary["failure_context"] = {
+            "failed_phase": current_status.get("failed_phase"),
+            "run_id": current_status.get("run_id"),
+            "exception_type": current_status.get("exception_type"),
+            "exception_message": current_status.get("exception_message"),
+            "traceback_tail": list(current_status.get("traceback_tail") or []),
+            "last_nonzero_exit": current_status.get("last_nonzero_exit"),
+        }
         summary["finished_at"] = datetime.now().isoformat()
         persist_summary(summary)
         finalize_training_status("error", reason=str(exc))

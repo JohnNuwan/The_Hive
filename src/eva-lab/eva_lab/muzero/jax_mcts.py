@@ -60,27 +60,50 @@ class MinMaxStats:
 class JAXMuZeroMCTS:
     """Execute la recherche d'arbre MuZero a partir des fonctions JAX jittees."""
 
-    def __init__(self, config, params, apply_fns):
-        """Memorise la configuration, les poids et les hooks d'inference."""
+    def __init__(self, config, params=None, apply_fns=None, recurrent_inference_fn=None):
+        """Memorise la configuration et les hooks d'inference.
+
+        Args:
+            config (Any): Configuration MuZero.
+            params (Any | None): Poids JAX pour le mode local.
+            apply_fns (tuple | None): Hooks ``(init, recurrent)`` jittes pour
+                le mode local.
+            recurrent_inference_fn (Callable | None): Callback recurrente
+                distante pour le mode collecteur.
+        """
         self.config = config
         self.params = params
-        self.init_apply, self.rec_apply = apply_fns
+        self.init_apply = None
+        self.rec_apply = None
+        if apply_fns is not None:
+            self.init_apply, self.rec_apply = apply_fns
+        self.recurrent_inference_fn = recurrent_inference_fn
 
     def run(
         self,
         root_state: jnp.ndarray,
         legal_actions: list | None = None,
         add_exploration_noise: bool = False,
+        root_logits: jnp.ndarray | np.ndarray | None = None,
+        root_value: jnp.ndarray | np.ndarray | None = None,
     ) -> Node:
         """Lance la recherche MCTS depuis un etat latent racine."""
         root = Node(0.0)
         root.hidden_state = root_state
 
-        dummy_action = jnp.zeros((1, self.config.action_space_size))
-        _, _, logits, value = self.rec_apply(self.params, root_state, dummy_action)
+        if root_logits is None or root_value is None:
+            if self.rec_apply is None or self.params is None:
+                raise ValueError(
+                    "MCTS MuZero requiert des logits de racine ou une inference locale valide."
+                )
+            dummy_action = jnp.zeros((1, self.config.action_space_size))
+            _, _, logits, value = self.rec_apply(self.params, root_state, dummy_action)
+        else:
+            logits = jnp.asarray(root_logits)
+            value = jnp.asarray(root_value)
         policy = jax.nn.softmax(logits)
         self._expand_node(root, policy, legal_actions)
-        root.value_sum = float(value[0, 0])
+        root.value_sum = self._scalar_from_tensor(value)
         root.visit_count = 1
 
         if add_exploration_noise:
@@ -105,17 +128,25 @@ class JAXMuZeroMCTS:
             action_onehot = jnp.zeros((1, self.config.action_space_size))
             action_onehot = action_onehot.at[0, last_action].set(1.0)
 
-            next_state, reward, logits, value = self.rec_apply(
-                self.params,
-                parent.hidden_state,
-                action_onehot,
-            )
+            if self.recurrent_inference_fn is not None:
+                next_state, reward, logits, value = self.recurrent_inference_fn(
+                    parent.hidden_state,
+                    action_onehot,
+                )
+            elif self.rec_apply is not None and self.params is not None:
+                next_state, reward, logits, value = self.rec_apply(
+                    self.params,
+                    parent.hidden_state,
+                    action_onehot,
+                )
+            else:
+                raise ValueError("Aucun chemin d'inference recurrente MuZero n'est disponible.")
 
             node.hidden_state = next_state
-            node.reward = float(reward[0, 0])
-            policy = jax.nn.softmax(logits)
+            node.reward = self._scalar_from_tensor(reward)
+            policy = jax.nn.softmax(jnp.asarray(logits))
             self._expand_node(node, policy, legal_actions)
-            self._backpropagate(search_path, float(value[0, 0]), min_max_stats)
+            self._backpropagate(search_path, self._scalar_from_tensor(value), min_max_stats)
 
         return root
 
@@ -148,12 +179,41 @@ class JAXMuZeroMCTS:
         return prior_score + value_score
 
     def _expand_node(self, node: Node, policy: jnp.ndarray, legal_actions: list | None = None) -> None:
-        """Cree les enfants d'un noeud a partir de la politique predite."""
-        policy_np = np.array(policy[0])
+        """Cree les enfants d'un noeud a partir de la politique predite.
+
+        Args:
+            node (Node): Noeud a etendre.
+            policy (jnp.ndarray): Politique predite, acceptee en forme
+                ``[actions]`` ou ``[batch, actions]``.
+            legal_actions (list | None): Sous-ensemble d'actions autorisees.
+        """
+
+        policy_np = np.asarray(policy, dtype=np.float32)
+        if policy_np.ndim == 0:
+            policy_np = np.full(
+                int(self.config.action_space_size),
+                1.0 / max(int(self.config.action_space_size), 1),
+                dtype=np.float32,
+            )
+        elif policy_np.ndim >= 2:
+            policy_np = np.asarray(policy_np[0], dtype=np.float32)
+        else:
+            policy_np = policy_np.reshape(-1)
+        if policy_np.size != int(self.config.action_space_size):
+            policy_np = np.resize(policy_np, int(self.config.action_space_size))
         for action in range(self.config.action_space_size):
             if legal_actions and action not in legal_actions:
                 continue
             node.children[action] = Node(float(policy_np[action]))
+
+    @staticmethod
+    def _scalar_from_tensor(value: jnp.ndarray | np.ndarray) -> float:
+        """Materialise un scalaire JAX/Numpy en float Python."""
+
+        value_np = np.asarray(jax.device_get(value), dtype=np.float32).reshape(-1)
+        if value_np.size <= 0:
+            return 0.0
+        return float(value_np[0])
 
     def _backpropagate(self, search_path: list[Node], value: float, min_max_stats: MinMaxStats) -> None:
         """Retropropage la valeur le long du chemin visite."""

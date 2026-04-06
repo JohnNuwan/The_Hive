@@ -1347,6 +1347,14 @@ async def get_trading_status():
         "shadow_learning_mode": runtime_status.get("shadow_learning_mode"),
         "intraday_retrain_allowed": runtime_status.get("intraday_retrain_allowed"),
         "intraday_promotion_allowed": runtime_status.get("intraday_promotion_allowed"),
+        "live_policy": runtime_status.get("live_policy") or execution_mechanics.get("live_policy"),
+        "gnn_policy": runtime_status.get("gnn_policy") or execution_mechanics.get("gnn_policy"),
+        "dreamer_policy": runtime_status.get("dreamer_policy") or execution_mechanics.get("dreamer_policy"),
+        "ensemble_prod_enabled": bool(
+            runtime_status.get("ensemble_prod_enabled")
+            if runtime_status.get("ensemble_prod_enabled") is not None
+            else execution_mechanics.get("ensemble_prod_enabled")
+        ),
         "runtime": runtime_status,
         "connection": {
             "mt5_connected": mt5_service.is_connected,

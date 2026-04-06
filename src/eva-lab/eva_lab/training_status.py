@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +22,7 @@ V4_SEQUENCE_STATE_PATH = V4_SEQUENCE_DIR / "sequence_state.json"
 V4_SEQUENCE_PID_PATH = V4_SEQUENCE_DIR / "sequence_supervisor.pid"
 TERMINAL_SUMMARY_DIR = Path(os.getenv("TRAINING_TERMINAL_SUMMARY_DIR", "data/muzero/results"))
 MAX_LOG_LINES = int(os.getenv("TRAINING_STATUS_MAX_LOG_LINES", "400"))
+_ATOMIC_WRITE_LOCK = threading.Lock()
 
 FOREX_CODES = {
     "AUD",
@@ -143,6 +147,10 @@ def _default_status() -> dict[str, Any]:
         "last_successful_step": None,
         "last_successful_step_at": None,
         "train_step_phase": None,
+        "failed_phase": None,
+        "exception_type": None,
+        "exception_message": None,
+        "traceback_tail": [],
         "phase_durations_ms": {},
         "resume_checkpoint_path": None,
         "resume_step": None,
@@ -157,8 +165,17 @@ def _default_status() -> dict[str, Any]:
         "promotion_state": None,
         "stall_detected": False,
         "stall_reason": None,
+        "last_nonzero_exit": None,
         "training_weighting": {},
         "service_recovery": {},
+        "runtime_truth": {},
+        "collector_mode": None,
+        "collector_workers": None,
+        "collector_active_symbols": [],
+        "collector_queue_depth": None,
+        "inference_batch_profile": {},
+        "jax_batch_profile": {},
+        "gpu_owner": None,
     }
 
 
@@ -205,12 +222,44 @@ def _ensure_status_dir() -> None:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Ecrit un JSON de facon atomique."""
+    """Ecrit un JSON de facon atomique sans partager le meme fichier temporaire.
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
-    tmp_path.replace(path)
+    Args:
+        path (Path): Chemin cible a ecrire.
+        payload (dict[str, Any]): Charge utile JSON a persister.
+    """
+
+    with _ATOMIC_WRITE_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        serialized = json.dumps(payload, indent=2, ensure_ascii=True)
+        prefix = f"{path.name}."
+        suffix = ".tmp"
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=prefix,
+                suffix=suffix,
+                delete=False,
+            ) as handle:
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+                tmp_path = Path(handle.name)
+            for attempt in range(8):
+                try:
+                    os.replace(tmp_path, path)
+                    tmp_path = None
+                    break
+                except PermissionError:
+                    if attempt == 7:
+                        raise
+                    time.sleep(0.01 * (attempt + 1))
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
 
 
 def load_nightly_summary() -> dict[str, Any] | None:
@@ -355,8 +404,22 @@ def normalize_runtime_training_status(
     current_step_label = _normalize_runtime_state_label(current_step.get("status"))
     launcher = dict(snapshot.get("launcher") or {})
     pid_alive = _pid_is_alive(launcher.get("remote_pid"))
+    launcher_phase = _normalize_runtime_state_label(launcher.get("phase"))
+    trainer_container = str(launcher.get("trainer_container") or "").strip()
     stale_reasons: list[str] = []
     resolved_final = None
+
+    if not bool(snapshot.get("active")):
+        runtime_running = pid_alive is True or (
+            current_step_label == "running"
+            and (launcher_phase in {"running", "trainer_running", "container_running"} or bool(trainer_container))
+        )
+        if runtime_running:
+            snapshot["active"] = True
+            snapshot["status"] = "running"
+            if current_step and not current_step.get("status"):
+                current_step["status"] = "running"
+                snapshot["current_step"] = current_step
 
     if bool(snapshot.get("active")):
         if terminal_label in _FINAL_TRAINING_STATES:
@@ -818,6 +881,10 @@ def set_training_runtime_state(**payload: Any) -> dict[str, Any]:
         "last_successful_step",
         "last_successful_step_at",
         "train_step_phase",
+        "failed_phase",
+        "exception_type",
+        "exception_message",
+        "traceback_tail",
         "phase_durations_ms",
         "resume_checkpoint_path",
         "resume_step",
@@ -833,6 +900,14 @@ def set_training_runtime_state(**payload: Any) -> dict[str, Any]:
         "promotion_state",
         "stall_detected",
         "stall_reason",
+        "last_nonzero_exit",
+        "collector_mode",
+        "collector_workers",
+        "collector_active_symbols",
+        "collector_queue_depth",
+        "inference_batch_profile",
+        "jax_batch_profile",
+        "gpu_owner",
     }
     patch = {
         key: value
@@ -868,6 +943,19 @@ def set_service_recovery_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     """
 
     return merge_training_status({"service_recovery": dict(payload or {})})
+
+
+def set_runtime_truth_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    """Met a jour la source de verite runtime du trainer.
+
+    Args:
+        payload (dict[str, Any]): Resume compact de l'etat runtime observe.
+
+    Returns:
+        dict[str, Any]: Statut training persiste.
+    """
+
+    return merge_training_status({"runtime_truth": dict(payload or {})})
 
 
 def set_training_dependency(name: str, payload: dict[str, Any]) -> dict[str, Any]:
