@@ -14,6 +14,9 @@ STATUS_PATH = STATUS_DIR / "training_status.json"
 RUN_LOG_PATH = STATUS_DIR / "training_run.log"
 NIGHTLY_SUMMARY_PATH = STATUS_DIR / "nightly_training_summary.json"
 CPU_SCHEDULER_STATE_PATH = STATUS_DIR / "cpu_scheduler" / "state.json"
+GA_SEEDED_MUZERO_DIR = STATUS_DIR / "ga_seeded_muzero"
+GA_SEEDED_MUZERO_STATE_PATH = GA_SEEDED_MUZERO_DIR / "current_campaign.json"
+ARENA_SUMMARY_DIR = STATUS_DIR / "arena_reports"
 V4_SEQUENCE_DIR = STATUS_DIR / "v4_ga"
 V4_SEQUENCE_STATE_PATH = V4_SEQUENCE_DIR / "sequence_state.json"
 V4_SEQUENCE_PID_PATH = V4_SEQUENCE_DIR / "sequence_supervisor.pid"
@@ -121,6 +124,9 @@ def _default_status() -> dict[str, Any]:
         "ga_status": None,
         "ga_generation": None,
         "ga_trial": None,
+        "ga_campaign_id": None,
+        "ga_scope": None,
+        "ga_parent_champion_id": None,
         "trial_mode": None,
         "trial_cost_profile": None,
         "replay_cache_status": None,
@@ -134,6 +140,14 @@ def _default_status() -> dict[str, Any]:
         "dataset_coverage": {},
         "metrics_by_position_mechanics": {},
         "arena_progress": None,
+        "last_successful_step": None,
+        "last_successful_step_at": None,
+        "train_step_phase": None,
+        "phase_durations_ms": {},
+        "resume_checkpoint_path": None,
+        "resume_step": None,
+        "stall_detected": False,
+        "stall_reason": None,
         "gold_precheck": None,
         "precheck_status": None,
         "precheck_step": None,
@@ -178,6 +192,8 @@ def _ensure_status_dir() -> None:
     """Cree le dossier de statut si necessaire."""
 
     STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    GA_SEEDED_MUZERO_DIR.mkdir(parents=True, exist_ok=True)
+    ARENA_SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -199,6 +215,121 @@ def load_nightly_summary() -> dict[str, Any] | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def load_seeded_muzero_campaign_state() -> dict[str, Any]:
+    """Charge l'etat de la campagne GA seedee MuZero.
+
+    Returns:
+        dict[str, Any]: Etat persiste de la campagne ou structure vide.
+    """
+
+    if not GA_SEEDED_MUZERO_STATE_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(GA_SEEDED_MUZERO_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def persist_seeded_muzero_campaign_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Persiste l'etat courant de la campagne GA seedee MuZero.
+
+    Args:
+        state (dict[str, Any]): Etat complet ou partiel de la campagne.
+
+    Returns:
+        dict[str, Any]: Etat ecrit sur disque.
+    """
+
+    _ensure_status_dir()
+    snapshot = dict(state or {})
+    snapshot["updated_at"] = _now_iso()
+    _atomic_write_json(GA_SEEDED_MUZERO_STATE_PATH, snapshot)
+    return snapshot
+
+
+def merge_seeded_muzero_campaign_state(patch: dict[str, Any]) -> dict[str, Any]:
+    """Fusionne un patch dans l'etat de campagne GA seedee MuZero.
+
+    Args:
+        patch (dict[str, Any]): Charge utile partielle a fusionner.
+
+    Returns:
+        dict[str, Any]: Etat complet persiste apres fusion.
+    """
+
+    state = load_seeded_muzero_campaign_state()
+    for key, value in dict(patch or {}).items():
+        if isinstance(value, dict) and isinstance(state.get(key), dict):
+            merged = dict(state.get(key) or {})
+            merged.update(value)
+            state[key] = merged
+        else:
+            state[key] = value
+    return persist_seeded_muzero_campaign_state(state)
+
+
+def get_arena_summary_path(
+    *,
+    engine: str,
+    run_id: str,
+    horizon: str,
+    family: str | None = None,
+    trial_id: str | None = None,
+) -> Path:
+    """Construit le chemin d'un rapport Arena unique par run.
+
+    Args:
+        engine (str): Moteur du run.
+        run_id (str): Identifiant de run unique.
+        horizon (str): Horizon strategique.
+        family (str | None): Famille d'actifs si disponible.
+        trial_id (str | None): Identifiant de trial si disponible.
+
+    Returns:
+        Path: Chemin cible du rapport Arena.
+    """
+
+    safe_engine = _sanitize_summary_token(engine, "unknown_engine")
+    safe_horizon = _sanitize_summary_token(horizon, "unknown_horizon")
+    safe_family = _sanitize_summary_token(family, "unknown_family")
+    safe_trial = _sanitize_summary_token(trial_id, "arena")
+    safe_run_id = _sanitize_summary_token(run_id, "unknown_run")
+    filename = f"arena_{safe_engine}_{safe_horizon}_{safe_family}_{safe_trial}_{safe_run_id}.json"
+    return ARENA_SUMMARY_DIR / filename
+
+
+def write_arena_summary(summary: dict[str, Any]) -> Path:
+    """Ecrit un rapport Arena unique rattache a un run.
+
+    Args:
+        summary (dict[str, Any]): Rapport Arena structure.
+
+    Returns:
+        Path: Chemin final du rapport ecrit.
+
+    Raises:
+        ValueError: Si le rapport ne contient pas de ``run_id``.
+    """
+
+    run_id = str(summary.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("Impossible d'ecrire un rapport Arena sans run_id.")
+
+    path = get_arena_summary_path(
+        engine=str(summary.get("engine") or "unknown"),
+        run_id=run_id,
+        horizon=str(summary.get("horizon") or ""),
+        family=str(summary.get("family") or ""),
+        trial_id=str(summary.get("trial_id") or summary.get("ga_trial") or ""),
+    )
+    payload = dict(summary)
+    payload["path"] = str(path)
+    payload.setdefault("generated_at", _now_iso())
+    _atomic_write_json(path, payload)
+    return path
 
 
 def load_training_status() -> dict[str, Any]:
@@ -364,6 +495,7 @@ def write_terminal_summary(summary: dict[str, Any]) -> Path:
     _atomic_write_json(path, payload)
 
     status = load_training_status()
+    persisted = status
     if str(status.get("run_id") or "").strip() == run_id:
         status["terminal_summary_path"] = str(path)
         persisted = persist_training_status(status)
@@ -539,6 +671,12 @@ def set_arena_progress(progress: dict[str, Any] | None) -> dict[str, Any]:
             status["ga_generation"] = progress.get("ga_generation")
         if progress.get("ga_trial") is not None:
             status["ga_trial"] = progress.get("ga_trial")
+        if progress.get("ga_campaign_id") is not None:
+            status["ga_campaign_id"] = progress.get("ga_campaign_id")
+        if progress.get("ga_scope") is not None:
+            status["ga_scope"] = progress.get("ga_scope")
+        if progress.get("ga_parent_champion_id") is not None:
+            status["ga_parent_champion_id"] = progress.get("ga_parent_champion_id")
         if progress.get("trial_mode") is not None:
             status["trial_mode"] = progress.get("trial_mode")
         if progress.get("trial_cost_profile") is not None:
@@ -597,6 +735,62 @@ def set_gold_precheck(progress: dict[str, Any] | None) -> dict[str, Any]:
         status["precheck_step"] = None
         status["precheck_metrics"] = {}
         status["precheck_summary_path"] = None
+    return persist_training_status(status)
+
+
+def set_training_runtime_state(
+    *,
+    last_successful_step: int | None = None,
+    last_successful_step_at: str | None = None,
+    train_step_phase: str | None = None,
+    phase_durations_ms: dict[str, Any] | None = None,
+    resume_checkpoint_path: str | None = None,
+    resume_step: int | None = None,
+    stall_detected: bool | None = None,
+    stall_reason: str | None = None,
+) -> dict[str, Any]:
+    """Met a jour les metadonnees fines de progression d'un run.
+
+    Args:
+        last_successful_step (int | None): Derniere mise a jour completement terminee.
+        last_successful_step_at (str | None): Horodatage ISO du dernier progres confirme.
+        train_step_phase (str | None): Sous-phase courante d'optimisation.
+        phase_durations_ms (dict[str, Any] | None): Durees recentes par sous-phase.
+        resume_checkpoint_path (str | None): Checkpoint explicite utilise pour la reprise.
+        resume_step (int | None): Step de reprise associe au checkpoint.
+        stall_detected (bool | None): Indique si un gel a ete detecte.
+        stall_reason (str | None): Raison humaine du gel detecte.
+
+    Returns:
+        dict[str, Any]: Statut training persiste.
+    """
+
+    status = load_training_status()
+    if last_successful_step is not None:
+        status["last_successful_step"] = int(last_successful_step)
+    if last_successful_step_at is not None:
+        status["last_successful_step_at"] = str(last_successful_step_at).strip() or None
+    if train_step_phase is not None:
+        status["train_step_phase"] = str(train_step_phase).strip() or None
+    if phase_durations_ms is not None:
+        normalized: dict[str, float] = {}
+        for key, value in dict(phase_durations_ms).items():
+            token = str(key).strip()
+            if not token:
+                continue
+            try:
+                normalized[token] = float(value)
+            except (TypeError, ValueError):
+                continue
+        status["phase_durations_ms"] = normalized
+    if resume_checkpoint_path is not None:
+        status["resume_checkpoint_path"] = str(resume_checkpoint_path).strip() or None
+    if resume_step is not None:
+        status["resume_step"] = int(resume_step)
+    if stall_detected is not None:
+        status["stall_detected"] = bool(stall_detected)
+    if stall_reason is not None:
+        status["stall_reason"] = str(stall_reason).strip() or None
     return persist_training_status(status)
 
 
@@ -820,6 +1014,37 @@ def _step_rank(step: dict[str, Any] | None) -> tuple[int, int]:
     return PHASE_ORDER.get(phase, -1), progress
 
 
+def _infer_step_engine(step: dict[str, Any] | None) -> str | None:
+    """Infere le moteur associe a une etape."""
+
+    if not step:
+        return None
+    name = str(step.get("name") or "").strip().lower()
+    if name.startswith("dreamer"):
+        return "dreamer"
+    if name.startswith("muzero"):
+        return "muzero"
+    return None
+
+
+def _steps_are_compatible(
+    reported_step: dict[str, Any] | None,
+    observed_step: dict[str, Any] | None,
+) -> bool:
+    """Retourne vrai si les etapes decrivent vraisemblablement le meme moteur."""
+
+    reported_engine = _infer_step_engine(reported_step)
+    observed_engine = _infer_step_engine(observed_step)
+    if reported_engine and observed_engine and reported_engine != observed_engine:
+        return False
+
+    reported_horizon = str((reported_step or {}).get("horizon") or "").strip().lower()
+    observed_horizon = str((observed_step or {}).get("horizon") or "").strip().lower()
+    if reported_horizon and observed_horizon and reported_horizon != observed_horizon:
+        return False
+    return True
+
+
 def select_effective_training_step(
     reported_step: dict[str, Any] | None,
     observed_step: dict[str, Any] | None,
@@ -837,6 +1062,8 @@ def select_effective_training_step(
         return reported_step
     if not reported_step:
         return observed_step
+    if not _steps_are_compatible(reported_step, observed_step):
+        return reported_step
     return observed_step if _step_rank(observed_step) > _step_rank(reported_step) else reported_step
 
 
@@ -908,7 +1135,24 @@ def reset_training_status(
         or str(os.getenv("TRAINING_GA_TRIAL", "")).strip()
         or None
     )
+    status["ga_campaign_id"] = str(os.getenv("TRAINING_GA_CAMPAIGN_ID", "")).strip() or None
+    status["ga_scope"] = str(os.getenv("TRAINING_GA_SCOPE", "")).strip() or None
+    status["ga_parent_champion_id"] = (
+        str(os.getenv("TRAINING_GA_PARENT_CHAMPION_ID", "")).strip() or None
+    )
     status["terminal_summary_path"] = None
+    status["last_successful_step"] = None
+    status["last_successful_step_at"] = None
+    status["train_step_phase"] = None
+    status["phase_durations_ms"] = {}
+    status["resume_checkpoint_path"] = str(os.getenv("TRAINING_RESUME_CHECKPOINT_PATH", "")).strip() or None
+    status["resume_step"] = (
+        int(os.getenv("TRAINING_RESUME_STEP", "0"))
+        if str(os.getenv("TRAINING_RESUME_STEP", "")).strip()
+        else None
+    )
+    status["stall_detected"] = False
+    status["stall_reason"] = None
     status["focus_symbols"] = focus_symbols
     status["gate_profile"] = str(os.getenv("TRAINING_GATE_PROFILE", "")).strip() or None
     status["supervisor_state"] = str(os.getenv("TRAINING_SUPERVISOR_STATE", "")).strip() or None
@@ -949,6 +1193,9 @@ def mark_step_running(
     ga_status: str | None = None,
     ga_generation: int | None = None,
     ga_trial: str | None = None,
+    ga_campaign_id: str | None = None,
+    ga_scope: str | None = None,
+    ga_parent_champion_id: str | None = None,
     trial_mode: str | None = None,
     trial_cost_profile: str | None = None,
     replay_cache_status: str | None = None,
@@ -1015,6 +1262,12 @@ def mark_step_running(
         status["ga_generation"] = ga_generation
     if ga_trial is not None:
         status["ga_trial"] = ga_trial
+    if ga_campaign_id is not None:
+        status["ga_campaign_id"] = ga_campaign_id
+    if ga_scope is not None:
+        status["ga_scope"] = ga_scope
+    if ga_parent_champion_id is not None:
+        status["ga_parent_champion_id"] = ga_parent_champion_id
     if trial_mode is not None:
         status["trial_mode"] = trial_mode
     if trial_cost_profile is not None:

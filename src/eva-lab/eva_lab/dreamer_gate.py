@@ -36,6 +36,10 @@ class DreamerGate:
         self._jax_inference_agents: dict[str, object] = {}
         self._jax_inference_meta: dict[str, dict[str, object]] = {}
         self._promoter = ChampionPromoter()
+        self._ensemble_enabled = self._env_flag(
+            "LIVE_ENSEMBLE_ENABLED",
+            self._env_flag("BANKER_ENSEMBLE_ENABLED", False),
+        )
         self._ensemble_min_edge = float(os.getenv("ENSEMBLE_MIN_EDGE", "0.15"))
         self._ensemble_requires_double_validation = True
 
@@ -43,6 +47,37 @@ class DreamerGate:
             logger.info("[DreamerGate] Mode shadow training actif.")
         else:
             logger.info("[DreamerGate] Mode inference uniquement actif.")
+
+    @staticmethod
+    def _env_flag(name: str, default: bool = False) -> bool:
+        """Lit un booleen depuis l'environnement.
+
+        Args:
+            name (str): Nom de la variable a lire.
+            default (bool): Valeur par defaut si la variable est absente.
+
+        Returns:
+            bool: Valeur booleenne normalisee.
+        """
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+        return str(raw_value).strip().lower() not in {"0", "false", "no", "off"}
+
+    @staticmethod
+    def _build_agent_cache_key(engine: str, horizon: str) -> str:
+        """Construit une cle de cache stable pour un moteur et un horizon.
+
+        Args:
+            engine (str): Moteur cible.
+            horizon (str): Horizon cible.
+
+        Returns:
+            str: Cle de cache unique.
+        """
+        normalized_engine = ChampionPromoter.normalize_engine_name(engine)
+        normalized_horizon = str(horizon or "scalp").strip().lower() or "scalp"
+        return f"{normalized_engine}:{normalized_horizon}"
 
     def _get_muzero_agent(self):
         """Charge l'ancien agent MuZero pour le shadow training.
@@ -106,12 +141,13 @@ class DreamerGate:
             object | None: Agent JAX charge, sinon ``None``.
         """
         horizon = (horizon or "intraday").lower()
+        cache_key = self._build_agent_cache_key("muzero", horizon)
         checkpoint_path, selection_meta = self._resolve_inference_checkpoint(
             horizon,
             selection_policy_override=selection_policy_override,
         )
         checkpoint_mtime = checkpoint_path.stat().st_mtime if checkpoint_path else None
-        meta = self._jax_inference_meta.get(horizon)
+        meta = self._jax_inference_meta.get(cache_key)
 
         if (
             meta
@@ -120,11 +156,11 @@ class DreamerGate:
             and meta.get("selection") == selection_meta.get("selection")
             and meta.get("policy") == selection_meta.get("policy")
         ):
-            return self._jax_inference_agents.get(horizon)
+            return self._jax_inference_agents.get(cache_key)
 
         if checkpoint_path is None:
-            self._jax_inference_agents.pop(horizon, None)
-            self._jax_inference_meta[horizon] = selection_meta
+            self._jax_inference_agents.pop(cache_key, None)
+            self._jax_inference_meta[cache_key] = selection_meta
             logger.warning(
                 "[DreamerGate] Aucun checkpoint live promu pour %s. Aucun agent JAX charge.",
                 horizon,
@@ -138,8 +174,8 @@ class DreamerGate:
             config = MuZeroConfigV3(horizon=horizon)
             agent = JAXMuZeroAgent(config)
             agent.load(str(checkpoint_path))
-            self._jax_inference_agents[horizon] = agent
-            self._jax_inference_meta[horizon] = {
+            self._jax_inference_agents[cache_key] = agent
+            self._jax_inference_meta[cache_key] = {
                 "path": str(checkpoint_path),
                 "mtime": checkpoint_mtime,
                 **selection_meta,
@@ -153,8 +189,80 @@ class DreamerGate:
             return agent
         except Exception as exc:
             logger.warning("[DreamerGate] Chargement JAX impossible pour %s: %s", horizon, exc)
-            self._jax_inference_agents.pop(horizon, None)
-            self._jax_inference_meta.pop(horizon, None)
+            self._jax_inference_agents.pop(cache_key, None)
+            self._jax_inference_meta.pop(cache_key, None)
+            return None
+
+    def _get_dreamer_inference_agent(
+        self,
+        horizon: str,
+        selection_policy_override: str | None = None,
+    ):
+        """Charge a la demande un agent Dreamer JAX pour l'inference live.
+
+        Args:
+            horizon (str): Horizon de prediction.
+            selection_policy_override (str | None): Politique de selection a imposer.
+
+        Returns:
+            object | None: Agent JAX charge, sinon ``None``.
+        """
+        horizon = (horizon or "intraday").lower()
+        cache_key = self._build_agent_cache_key("dreamer", horizon)
+        checkpoint_path, selection_meta = self._resolve_inference_checkpoint(
+            horizon,
+            selection_policy_override=selection_policy_override,
+            engine="dreamer",
+        )
+        checkpoint_mtime = checkpoint_path.stat().st_mtime if checkpoint_path else None
+        meta = self._jax_inference_meta.get(cache_key)
+
+        if (
+            meta
+            and meta.get("path") == str(checkpoint_path)
+            and meta.get("mtime") == checkpoint_mtime
+            and meta.get("selection") == selection_meta.get("selection")
+            and meta.get("policy") == selection_meta.get("policy")
+        ):
+            return self._jax_inference_agents.get(cache_key)
+
+        if checkpoint_path is None:
+            self._jax_inference_agents.pop(cache_key, None)
+            self._jax_inference_meta[cache_key] = selection_meta
+            logger.warning(
+                "[DreamerGate] Aucun checkpoint Dreamer live promu pour %s. Aucun agent JAX charge.",
+                horizon,
+            )
+            return None
+
+        try:
+            from eva_lab.muzero.config import MuZeroConfigV3
+            from eva_lab.muzero.dreamer_agent import JAXDreamerAgent
+
+            config = MuZeroConfigV3(horizon=horizon)
+            agent = JAXDreamerAgent(config)
+            agent.load(str(checkpoint_path))
+            self._jax_inference_agents[cache_key] = agent
+            self._jax_inference_meta[cache_key] = {
+                "path": str(checkpoint_path),
+                "mtime": checkpoint_mtime,
+                **selection_meta,
+            }
+            logger.info(
+                "[DreamerGate] Agent Dreamer JAX %s charge depuis %s (%s).",
+                horizon,
+                checkpoint_path,
+                selection_meta.get("selection", "unknown"),
+            )
+            return agent
+        except Exception as exc:
+            logger.warning(
+                "[DreamerGate] Chargement Dreamer JAX impossible pour %s: %s",
+                horizon,
+                exc,
+            )
+            self._jax_inference_agents.pop(cache_key, None)
+            self._jax_inference_meta.pop(cache_key, None)
             return None
 
     @staticmethod
@@ -330,11 +438,12 @@ class DreamerGate:
             )
 
         if normalized_engine == "muzero":
+            cache_key = self._build_agent_cache_key("muzero", horizon)
             agent = self._get_muzero_inference_agent(
                 horizon,
                 selection_policy_override="champion_only" if strict_live else selection_policy,
             )
-            checkpoint_meta = self._jax_inference_meta.get(horizon, {})
+            checkpoint_meta = self._jax_inference_meta.get(cache_key, {})
             checkpoint_path = checkpoint_meta.get("path")
             model_version = self._build_model_version(checkpoint_meta, checkpoint_path)
             if agent is not None:
@@ -403,16 +512,62 @@ class DreamerGate:
                 service="dreamer_predict",
             )
 
-        return self._build_blocked_live_response(
-            observation=observation,
-            horizon=horizon,
-            checkpoint_meta=checkpoint_meta,
-            reason="Le runtime DreamerV3 live n'est pas encore active dans cette usine.",
-            prediction="DREAMER_RUNTIME_UNAVAILABLE",
-            engine="dreamer",
-            model_status="unavailable",
-            service="dreamer_predict",
+        cache_key = self._build_agent_cache_key("dreamer", horizon)
+        agent = self._get_dreamer_inference_agent(
+            horizon,
+            selection_policy_override="champion_only" if strict_live else selection_policy,
         )
+        checkpoint_meta = self._jax_inference_meta.get(cache_key, checkpoint_meta)
+        checkpoint_path = checkpoint_meta.get("path")
+        model_version = self._build_model_version(checkpoint_meta, checkpoint_path)
+        if agent is None:
+            return self._build_blocked_live_response(
+                observation=observation,
+                horizon=horizon,
+                checkpoint_meta=checkpoint_meta,
+                reason="Chargement Dreamer impossible pour le live.",
+                prediction="DREAMER_RUNTIME_UNAVAILABLE",
+                engine="dreamer",
+                model_status="unavailable",
+                service="dreamer_predict",
+            )
+
+        try:
+            result = agent.infer_action(observation)
+            return {
+                "action": result["action"],
+                "prediction": result["action_name"],
+                "confidence": result["confidence"],
+                "policy": result["policy"],
+                "value": result["value"],
+                "price_input": observation.get("price", 0.0),
+                "engine": "DreamerV3 JAX Live CPU",
+                "engine_name": "dreamer",
+                "horizon": horizon,
+                "checkpoint": checkpoint_path,
+                "selection": checkpoint_meta.get("selection"),
+                "selection_policy": "champion_only" if strict_live else checkpoint_meta.get("policy"),
+                "manifest": checkpoint_meta.get("manifest"),
+                "simulations": result["simulations"],
+                "mode": "training" if self._training_active else "inference_only",
+                "inference_count": self._inference_count,
+                "service": "dreamer_predict" if not strict_live else "live_inference_cpu",
+                "device": "cpu" if strict_live else "jax_default",
+                "model_status": "live",
+                "model_version": model_version,
+            }
+        except Exception as exc:
+            logger.warning("[DreamerGate] Inference live Dreamer impossible pour %s: %s", horizon, exc)
+            return self._build_blocked_live_response(
+                observation=observation,
+                horizon=horizon,
+                checkpoint_meta=checkpoint_meta,
+                reason=f"Inference Dreamer impossible: {exc}",
+                prediction="DREAMER_INFERENCE_ERROR",
+                engine="dreamer",
+                model_status="error",
+                service="dreamer_predict" if not strict_live else "live_inference_cpu",
+            )
 
     def can_train(self) -> bool:
         """Indique si le shadow training est autorise.
@@ -521,8 +676,9 @@ class DreamerGate:
         """
         self._inference_count += 1
         horizon = str(observation.get("horizon", os.getenv("DREAMER_DEFAULT_HORIZON", "intraday"))).lower()
+        cache_key = self._build_agent_cache_key("muzero", horizon)
         agent = self._get_muzero_inference_agent(horizon)
-        checkpoint_meta = self._jax_inference_meta.get(horizon, {})
+        checkpoint_meta = self._jax_inference_meta.get(cache_key, {})
         if agent is not None:
             try:
                 result = agent.infer_action(observation)
@@ -744,30 +900,59 @@ class DreamerGate:
             dict: Statut d'activation, agents charges et mode courant.
         """
         jax_agents = {
-            horizon: {
+            key: {
                 "path": meta.get("path"),
                 "selection": meta.get("selection"),
                 "policy": meta.get("policy"),
             }
-            for horizon, meta in self._jax_inference_meta.items()
+            for key, meta in self._jax_inference_meta.items()
         }
+        engine_status = self._promoter.build_engine_matrix_status(["scalp"])
+        muzero_status = dict(engine_status.get("muzero", {}).get("scalp") or {})
+        dreamer_status = dict(engine_status.get("dreamer", {}).get("scalp") or {})
+        registered_live_champion_muzero = (
+            str(muzero_status.get("live_champion_id") or "").strip() or None
+        )
+        registered_live_champion_dreamer = (
+            str(dreamer_status.get("live_champion_id") or "").strip() or None
+        )
+        muzero_can_activate_live = bool(muzero_status.get("can_activate_live", False))
+        dreamer_can_activate_live = bool(dreamer_status.get("can_activate_live", False))
+        ensemble_ready = bool(
+            registered_live_champion_muzero
+            and registered_live_champion_dreamer
+            and muzero_can_activate_live
+            and dreamer_can_activate_live
+        )
+        ensemble_active = bool(self._ensemble_enabled and ensemble_ready)
         return {
             "enable_training": self.enable_training,
             "training_active": self._training_active,
             "inference_count": self._inference_count,
             "mode": "FULL" if self.enable_training else "SHADOW_ONLY",
             "engine": "MuZero JAX" if bool(jax_agents) else "RSI Heuristic",
-            "muzero_loaded": bool(jax_agents),
+            "muzero_loaded": bool(self._jax_inference_agents.get(self._build_agent_cache_key("muzero", "scalp"))),
             "live_selection_policy": self._promoter.get_live_selection_policy(),
             "jax_agents": jax_agents,
             "legacy_agent_loaded": self._muzero_agent is not None,
             "live_cpu_supported_horizons": ["scalp"],
             "live_cpu_selection_policy": "champion_only",
             "ensemble_mode": "vote_50_50",
+            "ensemble_enabled": self._ensemble_enabled,
+            "ensemble_ready": ensemble_ready,
+            "ensemble_active": ensemble_active,
             "ensemble_min_edge": self._ensemble_min_edge,
             "double_validation_required": self._ensemble_requires_double_validation,
+            "registered_live_champion_muzero": registered_live_champion_muzero,
+            "registered_live_champion_dreamer": registered_live_champion_dreamer,
+            "muzero_promotion_state": muzero_status.get("promotion_state"),
+            "dreamer_promotion_state": dreamer_status.get("promotion_state"),
+            "muzero_can_activate_live": muzero_can_activate_live,
+            "dreamer_can_activate_live": dreamer_can_activate_live,
+            "dreamer_live_enabled": bool(ensemble_active and dreamer_can_activate_live),
+            "active_live_engine": "ensemble" if ensemble_active else ("muzero" if muzero_can_activate_live else None),
             "dreamer_pipeline": {
                 "status": "shadow_orchestrated",
-                "live_runtime": "degraded_until_promoted",
+                "live_runtime": "ready" if dreamer_can_activate_live else "degraded_until_promoted",
             },
         }

@@ -37,7 +37,12 @@ from eva_lab.gnn_registry import (
 from eva_lab.live_inference_models import LivePredictRequest
 from eva_lab.shadow_learning import ShadowLearningService
 from eva_lab.dreamer_gate import DreamerGate
-from eva_lab.timescale_store import describe_timescale_source, record_ga_trial, record_run_window
+from eva_lab.timescale_store import (
+    describe_timescale_source,
+    load_ga_trials,
+    record_ga_trial,
+    record_run_window,
+)
 from eva_lab.training_status import (
     CPU_SCHEDULER_STATE_PATH,
     RUN_LOG_PATH,
@@ -49,11 +54,13 @@ from eva_lab.training_status import (
     load_latest_terminal_summary,
     load_nightly_summary,
     load_cpu_scheduler_state,
+    load_seeded_muzero_campaign_state,
     load_sequence_state,
     select_effective_training_step,
     tail_log_file,
     load_training_status,
     tail_training_log,
+    persist_seeded_muzero_campaign_state,
     write_terminal_summary,
 )
 from eva_lab.training_utils import get_gnn_model_kwargs
@@ -1184,6 +1191,25 @@ async def dreamer_status():
                 "reason": horizon_status.get("gate_reason"),
                 "failure_mode": horizon_status.get("failure_mode"),
             }
+    if pipeline.get("active") and not latest_summary:
+        latest_run_id = latest_run_id or pipeline.get("run_id")
+        failed_step = failed_step or training_run.get("failed_step")
+        artifact_state = artifact_state or {"battle_report_present": False}
+        if latest_verdict is None:
+            latest_verdict = {
+                "engine": "dreamer",
+                "horizon": str((training_run.get("current_step") or {}).get("horizon") or "").strip() or None,
+                "status": "running",
+                "reason": "dreamer_run_in_progress",
+                "failure_mode": None,
+            }
+    effective_horizon = str(
+        ((latest_verdict or {}).get("horizon"))
+        or ((latest_candidate or {}).get("horizon"))
+        or ((training_run.get("current_step") or {}).get("horizon"))
+        or "scalp"
+    ).strip().lower() or "scalp"
+    effective_horizon_status = dict(engine_horizons.get(effective_horizon) or {})
     return {
         **gate.get_status(),
         "pipeline": pipeline,
@@ -1196,6 +1222,23 @@ async def dreamer_status():
         "focus_symbols": list(pipeline.get("focus_symbols") or []),
         "gate_profile": pipeline.get("gate_profile"),
         "terminal_summary": latest_summary,
+        "terminal_summary_path": (
+            str((latest_summary or {}).get("path") or "").strip()
+            or str(pipeline.get("terminal_summary_path") or "").strip()
+            or str(effective_horizon_status.get("terminal_summary_path") or "").strip()
+            or None
+        ),
+        "battle_report_path": effective_horizon_status.get("battle_report_path"),
+        "promotion_gate": effective_horizon_status.get("promotion_gate"),
+        "promotion_state": effective_horizon_status.get("promotion_state"),
+        "can_activate_live": bool(effective_horizon_status.get("can_activate_live", False)),
+        "cross_engine_live_comparison": effective_horizon_status.get("cross_engine_live_comparison"),
+        "last_successful_step": active_run.get("last_successful_step"),
+        "last_successful_step_at": active_run.get("last_successful_step_at"),
+        "train_step_phase": active_run.get("train_step_phase"),
+        "phase_durations_ms": active_run.get("phase_durations_ms"),
+        "stall_detected": bool(active_run.get("stall_detected", False)),
+        "stall_reason": active_run.get("stall_reason"),
     }
 
 
@@ -1262,6 +1305,249 @@ async def dreamer_logs_tail(limit: int = Query(default=80, ge=1, le=500)):
     }
 
 
+def _build_live_governance_snapshot(
+    engine_status: dict[str, dict[str, Any]],
+    horizon: str = "scalp",
+) -> dict[str, Any]:
+    """Construit une vue stable des champions enregistres et actifs.
+
+    Args:
+        engine_status (dict[str, dict[str, Any]]): Matrice de statut par moteur.
+        horizon (str): Horizon live a synthetiser.
+
+    Returns:
+        dict[str, Any]: Resume stable pour distinguer enregistre, actif et ensemble.
+    """
+    normalized_horizon = str(horizon or "scalp").strip().lower() or "scalp"
+    muzero_status = dict(engine_status.get("muzero", {}).get(normalized_horizon) or {})
+    dreamer_status_payload = dict(engine_status.get("dreamer", {}).get(normalized_horizon) or {})
+    registered_live_champion_muzero = (
+        str(muzero_status.get("live_champion_id") or "").strip() or None
+    )
+    registered_live_champion_dreamer = (
+        str(dreamer_status_payload.get("live_champion_id") or "").strip() or None
+    )
+    muzero_can_activate_live = bool(muzero_status.get("can_activate_live", False))
+    dreamer_can_activate_live = bool(dreamer_status_payload.get("can_activate_live", False))
+    ensemble_enabled = str(
+        os.getenv("LIVE_ENSEMBLE_ENABLED", os.getenv("BANKER_ENSEMBLE_ENABLED", "false"))
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    ensemble_ready = bool(
+        registered_live_champion_muzero
+        and registered_live_champion_dreamer
+        and muzero_can_activate_live
+        and dreamer_can_activate_live
+    )
+    ensemble_active = bool(ensemble_enabled and ensemble_ready)
+    return {
+        "active_live_engine": (
+            "ensemble"
+            if ensemble_active
+            else ("muzero" if registered_live_champion_muzero and muzero_can_activate_live else None)
+        ),
+        "registered_live_champion_muzero": registered_live_champion_muzero,
+        "registered_live_champion_dreamer": registered_live_champion_dreamer,
+        "muzero_promotion_state": muzero_status.get("promotion_state"),
+        "dreamer_promotion_state": dreamer_status_payload.get("promotion_state"),
+        "muzero_can_activate_live": muzero_can_activate_live,
+        "dreamer_can_activate_live": dreamer_can_activate_live,
+        "dreamer_live_enabled": bool(
+            ensemble_enabled
+            and registered_live_champion_dreamer
+            and dreamer_can_activate_live
+            and ensemble_ready
+        ),
+        "ensemble_ready": ensemble_ready,
+        "ensemble_active": ensemble_active,
+    }
+
+
+def _resolve_runtime_profile(run_status: dict[str, Any] | None = None) -> str:
+    """Derive le profil d'exploitation courant du Lab.
+
+    Args:
+        run_status (dict[str, Any] | None): Statut training courant si deja charge.
+
+    Returns:
+        str: Profil canonique ``day_live_full_stack`` ou ``night_research_training``.
+    """
+
+    override = str(os.getenv("HIVE_RUNTIME_PROFILE", "")).strip().lower()
+    if override in {"day_live_full_stack", "night_research_training"}:
+        return override
+
+    status = dict(run_status or load_training_status() or {})
+    launcher = dict(status.get("launcher") or {})
+    vllm_state = str(launcher.get("vllm_state") or "").strip().lower()
+    if bool(status.get("active")) or vllm_state == "stopped_for_training":
+        return "night_research_training"
+    return "day_live_full_stack"
+
+
+async def _build_daytime_activation_snapshot(
+    governance_status: dict[str, Any],
+    *,
+    run_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Construit la readiness daytime du full stack trading.
+
+    Args:
+        governance_status (dict[str, Any]): Gouvernance live calculee.
+        run_status (dict[str, Any] | None): Statut training courant si disponible.
+
+    Returns:
+        dict[str, Any]: Readiness des briques actives de jour.
+    """
+
+    status = dict(run_status or load_training_status() or {})
+    launcher = dict(status.get("launcher") or {})
+    gnn_registry = load_market_gnn_registry()
+    vllm_host = os.getenv("VLLM_API_HOST", "vllm")
+    vllm_state = str(launcher.get("vllm_state") or "").strip().lower()
+    if vllm_state == "stopped_for_training":
+        vllm_ready = False
+        vllm_mode = "stopped_for_training"
+    else:
+        vllm_probe = await _probe_tcp_dependency("vllm", vllm_host, 8000)
+        vllm_ready = bool(vllm_probe.get("ok", False))
+        vllm_mode = "online" if vllm_ready else str(vllm_probe.get("state") or "offline")
+
+    muzero_live_ok = bool(
+        governance_status.get("registered_live_champion_muzero")
+        and governance_status.get("muzero_can_activate_live", False)
+    )
+    dreamer_live_ok = bool(
+        governance_status.get("registered_live_champion_dreamer")
+        and governance_status.get("dreamer_can_activate_live", False)
+    )
+    gnn_consultative_ok = bool(gnn_registry.get("champion_ready", False))
+    full_stack_ready = bool(
+        governance_status.get("ensemble_ready", False)
+        and muzero_live_ok
+        and dreamer_live_ok
+        and gnn_consultative_ok
+        and vllm_ready
+    )
+    return {
+        "muzero_live_ok": muzero_live_ok,
+        "dreamer_live_ok": dreamer_live_ok,
+        "gnn_consultative_ok": gnn_consultative_ok,
+        "vllm_ready": vllm_ready,
+        "vllm_mode": vllm_mode,
+        "shadow_learning_mode": "shadow_only",
+        "intraday_retrain_allowed": False,
+        "intraday_promotion_allowed": False,
+        "full_stack_ready": full_stack_ready,
+    }
+
+
+def _derive_ga_trial_promotion_state(trial: dict[str, Any]) -> str:
+    """Derive un etat de promotion lisible pour un trial GA.
+
+    Args:
+        trial (dict[str, Any]): Trial brut charge depuis Timescale.
+
+    Returns:
+        str: Etat de promotion stable pour l'API publique.
+    """
+
+    payload = dict(trial.get("payload") or {})
+    promotion_gate = dict(trial.get("promotion_gate") or payload.get("promotion_gate") or {})
+    live_comparison = dict(trial.get("live_comparison") or payload.get("live_comparison") or {})
+    gate_status = str(promotion_gate.get("status") or "").strip().lower()
+    if gate_status:
+        return gate_status
+    if bool(live_comparison.get("allowed", False)):
+        return "candidate_only"
+    if str(trial.get("failure_mode") or "").strip():
+        return "blocked"
+    return "candidate_only"
+
+
+def _build_seeded_ga_generation_views(campaign_state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Construit une vue agrégée des trials GA par generation.
+
+    Args:
+        campaign_state (dict[str, Any]): Etat courant de campagne seedee.
+
+    Returns:
+        list[dict[str, Any]]: Generations ordonnees avec leurs trials.
+    """
+
+    campaign_id = str(campaign_state.get("campaign_id") or "").strip()
+    if not campaign_id:
+        return []
+
+    raw_trials = load_ga_trials(campaign_id=campaign_id, limit=512)
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for trial in raw_trials:
+        generation = int(trial.get("ga_generation") or 0)
+        grouped.setdefault(generation, []).append(
+            {
+                "trial_id": trial.get("trial_id"),
+                "run_id": trial.get("run_id"),
+                "trial_mode": trial.get("trial_mode"),
+                "fitness_score": trial.get("fitness_score"),
+                "failure_mode": trial.get("failure_mode"),
+                "promotion_state": _derive_ga_trial_promotion_state(trial),
+                "finished_at": trial.get("finished_at"),
+            }
+        )
+
+    generations: list[dict[str, Any]] = []
+    for generation in sorted(grouped):
+        trials = sorted(
+            grouped[generation],
+            key=lambda item: (
+                str(item.get("finished_at") or ""),
+                str(item.get("trial_id") or ""),
+            ),
+        )
+        generations.append(
+            {
+                "generation": generation,
+                "trial_count": len(trials),
+                "trials": trials,
+            }
+        )
+    return generations
+
+
+def _build_ga_status_snapshot(
+    engine_status: dict[str, dict[str, Any]],
+    genetic: GeneticUpdater,
+) -> dict[str, Any]:
+    """Construit une vue consultative du champion GA.
+
+    Args:
+        engine_status (dict[str, dict[str, Any]]): Matrice de statut des moteurs.
+        genetic (GeneticUpdater): Registre genetique courant.
+
+    Returns:
+        dict[str, Any]: Vue stable du gagnant de gouvernance par horizon.
+    """
+    by_horizon: dict[str, dict[str, Any]] = {}
+    for horizon in ["scalp", "intraday", "swing"]:
+        muzero_status = dict(engine_status.get("muzero", {}).get(horizon) or {})
+        by_horizon[horizon] = {
+            "champion_id": genetic.get_champion(horizon),
+            "source_engine": "muzero",
+            "source_run_id": muzero_status.get("latest_run_id"),
+            "battle_outcome": ((muzero_status.get("arena_report") or {}).get("outcome")),
+            "promotion_gate": muzero_status.get("promotion_gate"),
+            "selection_basis": "arena + gate",
+            "promotion_state": muzero_status.get("promotion_state"),
+            "can_activate_live": bool(muzero_status.get("can_activate_live", False)),
+        }
+    seeded_campaign = dict(load_seeded_muzero_campaign_state() or {})
+    seeded_campaign["generations"] = _build_seeded_ga_generation_views(seeded_campaign)
+    return {
+        "champion_kind": "governance",
+        "horizons": by_horizon,
+        "seeded_muzero_campaign": seeded_campaign,
+    }
+
+
 @app.get("/champions/status")
 async def champion_status():
     """
@@ -1290,6 +1576,7 @@ async def champion_status():
         logger.warning("Lecture du resume nocturne impossible: %s", exc)
 
     engine_status = promoter.build_engine_matrix_status(horizons, registry_champions)
+    runtime_profile = _resolve_runtime_profile()
     horizon_status = dict(engine_status.get("muzero") or {})
     live_champions = {
         horizon: status.get("live_champion_id")
@@ -1302,9 +1589,16 @@ async def champion_status():
         }
         for engine, statuses in engine_status.items()
     }
+    governance_status = _build_live_governance_snapshot(engine_status, horizon="scalp")
+    ga_status_payload = _build_ga_status_snapshot(engine_status, genetic)
+    daytime_activation = await _build_daytime_activation_snapshot(
+        governance_status,
+        run_status=load_training_status(),
+    )
 
     payload = {
         "status": "ok",
+        "runtime_profile": runtime_profile,
         "selection_policy": promoter.get_live_selection_policy(),
         "dreamer_gate": gate.get_status(),
         "data_source": timescale_source.get("source"),
@@ -1317,10 +1611,51 @@ async def champion_status():
         "performance_summary": performance_summary,
         "horizons": horizon_status,
         "engines": engine_status,
+        "ga": ga_status_payload,
+        "daytime_activation": daytime_activation,
         "nightly_summary": nightly_summary,
+        **governance_status,
     }
     await _publish_champion_status_snapshot(payload)
     return payload
+
+
+@app.get("/ga/status")
+async def ga_status():
+    """Retourne le champion GA de gouvernance sans l'exposer au live.
+
+    Returns:
+        dict: Vue stable du champion GA par horizon.
+    """
+    promoter: ChampionPromoter = app.state.promoter
+    genetic: GeneticUpdater = app.state.genetic
+    horizons = ["scalp", "intraday", "swing"]
+    engine_status = promoter.build_engine_matrix_status(horizons, genetic.get_all_champions())
+    runtime_profile = _resolve_runtime_profile()
+    return {
+        "status": "ok",
+        "runtime_profile": runtime_profile,
+        "ga": _build_ga_status_snapshot(engine_status, genetic),
+    }
+
+
+@app.post("/internal/ga-seeded-campaign")
+async def persist_seeded_ga_campaign(payload: dict[str, Any]):
+    """Persiste l'etat d'une campagne GA seedee depuis un superviseur externe.
+
+    Args:
+        payload (dict[str, Any]): Etat partiel ou complet de campagne.
+
+    Returns:
+        dict[str, Any]: Etat persiste et identifiant de campagne.
+    """
+
+    persisted = persist_seeded_muzero_campaign_state(payload)
+    return {
+        "status": "ok",
+        "campaign_id": str(persisted.get("campaign_id") or "") or None,
+        "persisted": persisted,
+    }
 
 
 @app.get("/training/status")
@@ -1335,6 +1670,7 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         dict: Progression courante, dependances et resume d'univers.
     """
     run_status = load_training_status()
+    runtime_profile = _resolve_runtime_profile(run_status)
     nightly_summary = load_nightly_summary()
     sequence_state = load_sequence_state()
     universe_summary = run_status.get("universe") or build_training_universe_summary()
@@ -1363,6 +1699,7 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
 
     payload = {
         "status": "ok",
+        "runtime_profile": runtime_profile,
         "run": run_view,
         "dependencies": dependencies,
         "universe": universe_summary,
@@ -1396,6 +1733,14 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         "trial_mode": run_view.get("trial_mode"),
         "trial_cost_profile": run_view.get("trial_cost_profile"),
         "terminal_summary_path": run_view.get("terminal_summary_path"),
+        "last_successful_step": run_view.get("last_successful_step"),
+        "last_successful_step_at": run_view.get("last_successful_step_at"),
+        "train_step_phase": run_view.get("train_step_phase"),
+        "phase_durations_ms": run_view.get("phase_durations_ms", {}),
+        "resume_checkpoint_path": run_view.get("resume_checkpoint_path"),
+        "resume_step": run_view.get("resume_step"),
+        "stall_detected": run_view.get("stall_detected"),
+        "stall_reason": run_view.get("stall_reason"),
         "supervisor_state": run_view.get("supervisor_state"),
         "replay_cache_status": run_view.get("replay_cache_status"),
         "replay_cache_key": run_view.get("replay_cache_key"),
@@ -1583,6 +1928,10 @@ async def live_universe(
         )
         for engine_name, statuses in engine_matrix.items()
     }
+    governance_status = _build_live_governance_snapshot(
+        engine_matrix,
+        horizon=normalized_horizon,
+    )
     return {
         "status": "ok",
         "engine": normalized_engine,
@@ -1603,6 +1952,7 @@ async def live_universe(
         "top_live_symbols": status.get("top_live_symbols"),
         "promotion_gate": status.get("promotion_gate"),
         "live_universe": status.get("live_universe"),
+        **governance_status,
     }
 
 
@@ -1778,6 +2128,9 @@ async def gnn_status():
     return {
         "status": "ok",
         "gnn": registry,
+        "champion_id": registry.get("champion_id"),
+        "champion_ready": bool(registry.get("champion_ready", False)),
+        "champion_kind": registry.get("champion_kind"),
         "focus_symbol": registry.get("focus_symbol"),
         "context_symbols": registry.get("context_symbols", []),
         "deployment_class": registry.get("deployment_class"),
@@ -1897,6 +2250,9 @@ async def gnn_metrics():
         "status": "ok",
         "version": registry.get("version"),
         "model_status": registry.get("status"),
+        "champion_id": registry.get("champion_id"),
+        "champion_ready": bool(registry.get("champion_ready", False)),
+        "champion_kind": registry.get("champion_kind"),
         "status_reason": registry.get("status_reason"),
         "trained_at": registry.get("trained_at"),
         "source_run_id": registry.get("source_run_id"),

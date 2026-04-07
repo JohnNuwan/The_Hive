@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from eva_lab.timescale_store import record_arena_result, record_training_dataset
 from eva_lab.training_notifier import send_horizon_summary, send_training_horizon_started
 from eva_lab.training_status import (
     append_training_log,
+    write_arena_summary,
     load_training_status,
     mark_step_running,
     set_gold_precheck,
@@ -198,9 +200,34 @@ def main() -> dict[str, object]:
         else None
     )
     ga_trial = str(os.getenv("TRAINING_GA_TRIAL", "")).strip() or None
+    ga_campaign_id = str(os.getenv("TRAINING_GA_CAMPAIGN_ID", "")).strip() or None
+    ga_scope = str(os.getenv("TRAINING_GA_SCOPE", "")).strip() or None
+    ga_parent_champion_id = str(os.getenv("TRAINING_GA_PARENT_CHAMPION_ID", "")).strip() or None
+    ga_defer_promotion = str(os.getenv("TRAINING_GA_DEFER_PROMOTION", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    ga_seed_checkpoint_path = str(os.getenv("TRAINING_GA_SEED_CHECKPOINT_PATH", "")).strip() or None
+    ga_genome_raw = str(os.getenv("TRAINING_GA_GENOME_JSON", "")).strip()
+    ga_genome: dict[str, object] = {}
+    if ga_genome_raw:
+        try:
+            decoded_genome = json.loads(ga_genome_raw)
+        except json.JSONDecodeError:
+            logger.warning("Genotype GA invalide ignore pour le run %s.", step_name)
+        else:
+            if isinstance(decoded_genome, dict):
+                ga_genome = decoded_genome
     trial_mode = str(os.getenv("TRAINING_TRIAL_MODE", "")).strip() or None
     trial_cost_profile = str(os.getenv("TRAINING_TRIAL_COST_PROFILE", "")).strip() or None
     gate_profile = str(os.getenv("TRAINING_GATE_PROFILE", "")).strip() or "standard"
+    mechanics_only_mode = bool(
+        ga_scope == "mechanics_only"
+        and ga_seed_checkpoint_path
+        and ga_status in {"proxy", "proxy_ga", "final", "full"}
+    )
     focus_symbols = list(dict.fromkeys(str(symbol).strip() for symbol in config.symbols if str(symbol).strip()))
     replay_cache_key = f"{engine}:{horizon}:{initial_family or 'global'}:{mechanics_profile_version or 'default'}"
     gold_precheck_enabled = _is_gold_proxy_precheck_enabled(
@@ -234,6 +261,9 @@ def main() -> dict[str, object]:
         ga_status=ga_status,
         ga_generation=ga_generation,
         ga_trial=ga_trial,
+        ga_campaign_id=ga_campaign_id,
+        ga_scope=ga_scope,
+        ga_parent_champion_id=ga_parent_champion_id,
         trial_mode=trial_mode,
         trial_cost_profile=trial_cost_profile,
         focus_symbols=focus_symbols,
@@ -265,7 +295,15 @@ def main() -> dict[str, object]:
     results_dir.mkdir(parents=True, exist_ok=True)
 
     latest_path = weights_dir / f"muzero_{horizon}_latest.pkl"
-    if latest_path.exists():
+    if mechanics_only_mode:
+        try:
+            agent.load(str(ga_seed_checkpoint_path))
+            logger.info("Mode GA seede mecanique: checkpoint fixe charge depuis %s", ga_seed_checkpoint_path)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Impossible de charger le checkpoint seed MuZero {ga_seed_checkpoint_path}: {exc}"
+            ) from exc
+    elif latest_path.exists():
         try:
             agent.load(str(latest_path))
             logger.info("Reprise MuZero depuis %s", latest_path)
@@ -276,228 +314,259 @@ def main() -> dict[str, object]:
     valid_symbols: list[str] = []
     total_games = 0
 
-    logger.info("Phase 1 - collecte historique par self-play guide")
-    for symbol_index, symbol in enumerate(config.symbols, start=1):
-        env = build_environment(symbol, config)
-        if env is None:
-            continue
-        valid_symbols.append(symbol)
-        append_training_log(
-            f"MuZero {horizon}: collecte sur {symbol} ({symbol_index}/{len(config.symbols)}).",
-            source="muzero",
-        )
-        for game_index in range(games_per_symbol):
-            mark_step_running(
-                step_name,
-                engine=engine,
-                phase="collecte",
-                horizon=horizon,
-                family=initial_family,
-                symbol=symbol,
-                symbol_index=symbol_index,
-                symbol_total=len(config.symbols),
-                part_index=game_index + 1,
-                part_total=games_per_symbol,
-                dataset_id=dataset_id,
-                dataset_source=dataset_source,
-                feature_profile=feature_profile_name,
-                mechanics_profile_version=mechanics_profile_version,
-                ga_status=ga_status,
-                ga_generation=ga_generation,
-                ga_trial=ga_trial,
-                trial_mode=trial_mode,
-                trial_cost_profile=trial_cost_profile,
-                focus_symbols=focus_symbols,
-                gate_profile=gate_profile,
-                replay_cache_status="warming",
-                replay_cache_key=replay_cache_key,
-                replay_cache_entries=agent.replay_buffer.size,
-                replay_cache_source="memoire",
-                dataset_coverage=dataset_coverage,
-            )
-            agent.play_game(env, exploration=True)
-            summary = env.get_summary()
-            total_games += 1
-            logger.info(
-                "[%s] %s partie %s/%s | return=%.2f%% | trades=%s | buffer=%s",
-                horizon,
-                symbol,
-                game_index + 1,
-                games_per_symbol,
-                summary.get("return_pct", 0.0),
-                summary.get("total_trades", 0),
-                agent.replay_buffer.size,
-            )
-
-    if not valid_symbols:
-        raise RuntimeError("Aucun symbole valide pour MuZero.")
-
-    family = infer_family_from_symbols(valid_symbols, family=getattr(config, "model_family", None))
+    family = infer_family_from_symbols(config.symbols, family=getattr(config, "model_family", None))
     feature_profile = resolve_feature_profile(horizon, family)
     dataset_source = str(getattr(config, "dataset_source", "csv") or "csv")
     dataset_descriptor = dict(getattr(config, "dataset_descriptor", {}) or {})
     dataset_id = str(dataset_descriptor.get("dataset_id") or "")
-
-    logger.info("Phase 2 - optimisation profonde (%s steps)", config.training_steps)
     start_time = datetime.now()
-    last_metrics = None
+    last_metrics: dict[str, object] | None = None
     gold_precheck_payload: dict[str, object] | None = None
     gold_precheck_executed = False
     killed_after_precheck = False
-    append_training_log(
-        f"MuZero {horizon}: optimisation profonde sur {config.training_steps} steps.",
-        source="muzero",
-    )
 
-    for step in range(1, config.training_steps + 1):
-        mark_step_running(
-            step_name,
-            engine=engine,
-            phase="optimisation",
-            horizon=horizon,
-            family=family,
-            symbol_total=len(valid_symbols),
-            training_step_current=step,
-            training_step_total=config.training_steps,
-            dataset_id=dataset_id,
-            dataset_source=dataset_source,
-            feature_profile=(str(feature_profile.get("profile_name") or "").strip() or None),
-            mechanics_profile_version=mechanics_profile_version,
-            ga_status=ga_status,
-            ga_generation=ga_generation,
-            ga_trial=ga_trial,
-            trial_mode=trial_mode,
-            trial_cost_profile=trial_cost_profile,
-            focus_symbols=focus_symbols,
-            gate_profile=gate_profile,
-            replay_cache_status="memoire",
-            replay_cache_key=f"{engine}:{horizon}:{family}:{mechanics_profile_version or 'default'}",
-            replay_cache_entries=agent.replay_buffer.size,
-            replay_cache_source="memoire",
-            dataset_coverage=dataset_coverage,
+    if mechanics_only_mode:
+        valid_symbols = [str(symbol).strip() for symbol in config.symbols if str(symbol).strip()]
+        total_games = 0
+        last_metrics = {
+            "mode": "seeded_ga_mechanics_only",
+            "seed_checkpoint_path": ga_seed_checkpoint_path,
+            "feature_profile": str(feature_profile.get("profile_name") or "").strip() or None,
+            "mechanics_profile_version": mechanics_profile_version,
+        }
+        append_training_log(
+            (
+                f"MuZero {horizon}: mode GA seede mecanique active. "
+                f"Checkpoint fixe={ga_seed_checkpoint_path}."
+            ),
+            source="muzero",
         )
-        metrics = agent.train_step()
-        if metrics is None:
-            logger.warning("MuZero sans batch suffisant, arret a l'etape %s.", step)
+    else:
+        logger.info("Phase 1 - collecte historique par self-play guide")
+        for symbol_index, symbol in enumerate(config.symbols, start=1):
+            env = build_environment(symbol, config)
+            if env is None:
+                continue
+            valid_symbols.append(symbol)
             append_training_log(
-                f"MuZero {horizon}: arret anticipe a l'etape {step} faute de batch suffisant.",
-                level="WARNING",
+                f"MuZero {horizon}: collecte sur {symbol} ({symbol_index}/{len(config.symbols)}).",
                 source="muzero",
             )
-            break
-        last_metrics = metrics
+            for game_index in range(games_per_symbol):
+                mark_step_running(
+                    step_name,
+                    engine=engine,
+                    phase="collecte",
+                    horizon=horizon,
+                    family=initial_family,
+                    symbol=symbol,
+                    symbol_index=symbol_index,
+                    symbol_total=len(config.symbols),
+                    part_index=game_index + 1,
+                    part_total=games_per_symbol,
+                    dataset_id=dataset_id,
+                    dataset_source=dataset_source,
+                    feature_profile=feature_profile_name,
+                    mechanics_profile_version=mechanics_profile_version,
+                    ga_status=ga_status,
+                    ga_generation=ga_generation,
+                    ga_trial=ga_trial,
+                    ga_campaign_id=ga_campaign_id,
+                    ga_scope=ga_scope,
+                    ga_parent_champion_id=ga_parent_champion_id,
+                    trial_mode=trial_mode,
+                    trial_cost_profile=trial_cost_profile,
+                    focus_symbols=focus_symbols,
+                    gate_profile=gate_profile,
+                    replay_cache_status="warming",
+                    replay_cache_key=replay_cache_key,
+                    replay_cache_entries=agent.replay_buffer.size,
+                    replay_cache_source="memoire",
+                    dataset_coverage=dataset_coverage,
+                )
+                agent.play_game(env, exploration=True)
+                summary = env.get_summary()
+                total_games += 1
+                logger.info(
+                    "[%s] %s partie %s/%s | return=%.2f%% | trades=%s | buffer=%s",
+                    horizon,
+                    symbol,
+                    game_index + 1,
+                    games_per_symbol,
+                    summary.get("return_pct", 0.0),
+                    summary.get("total_trades", 0),
+                    agent.replay_buffer.size,
+                )
 
-        if (
-            gold_precheck_enabled
-            and not gold_precheck_executed
-            and step >= gold_precheck_step
-        ):
-            checkpoint_path = weights_dir / f"muzero_{horizon}_gold_precheck_{step}.pkl"
-            agent.save(str(checkpoint_path))
-            append_training_log(
-                (
-                    f"MuZero {horizon}: lancement du precheck Gold a l'etape "
-                    f"{step} sur {gold_precheck_games} segments."
-                ),
-                source="muzero",
-            )
-            running_precheck = {
-                "status": "running",
-                "run_id": str(load_training_status().get("run_id") or "").strip() or None,
-                "trial_id": ga_trial,
-                "engine": engine,
-                "horizon": horizon,
-                "family": family,
-                "feature_profile": str(feature_profile.get("profile_name") or "").strip() or None,
-                "step": step,
-                "eval_symbols": list(focus_symbols),
-                "games": gold_precheck_games,
-                "reason": "precheck_en_cours",
-            }
-            set_gold_precheck(running_precheck)
-            arena = Arena(weights_dir=config.weights_path)
-            precheck_report = arena.evaluate_candidate(
-                checkpoint_path.stem,
+        if not valid_symbols:
+            raise RuntimeError("Aucun symbole valide pour MuZero.")
+
+        logger.info("Phase 2 - optimisation profonde (%s steps)", config.training_steps)
+        append_training_log(
+            f"MuZero {horizon}: optimisation profonde sur {config.training_steps} steps.",
+            source="muzero",
+        )
+
+        for step in range(1, config.training_steps + 1):
+            mark_step_running(
+                step_name,
+                engine=engine,
+                phase="optimisation",
                 horizon=horizon,
-                eval_symbols=list(focus_symbols),
-                games_per_symbol=gold_precheck_games,
+                family=family,
+                symbol_total=len(valid_symbols),
+                training_step_current=step,
+                training_step_total=config.training_steps,
+                dataset_id=dataset_id,
+                dataset_source=dataset_source,
+                feature_profile=(str(feature_profile.get("profile_name") or "").strip() or None),
+                mechanics_profile_version=mechanics_profile_version,
+                ga_status=ga_status,
+                ga_generation=ga_generation,
+                ga_trial=ga_trial,
+                ga_campaign_id=ga_campaign_id,
+                ga_scope=ga_scope,
+                ga_parent_champion_id=ga_parent_champion_id,
+                trial_mode=trial_mode,
+                trial_cost_profile=trial_cost_profile,
+                focus_symbols=focus_symbols,
+                gate_profile=gate_profile,
+                replay_cache_status="memoire",
+                replay_cache_key=f"{engine}:{horizon}:{family}:{mechanics_profile_version or 'default'}",
+                replay_cache_entries=agent.replay_buffer.size,
+                replay_cache_source="memoire",
+                dataset_coverage=dataset_coverage,
             )
-            precheck_metrics = dict(((precheck_report.get("challenger") or {}).get("metrics")) or {})
-            precheck_mechanics = dict(precheck_metrics.get("metrics_by_position_mechanics") or {})
-            verdict = _evaluate_gold_precheck_verdict(
-                metrics=precheck_metrics,
-                mechanics=precheck_mechanics,
-            )
-            gold_precheck_payload = {
-                "status": verdict.get("status"),
-                "run_id": str(load_training_status().get("run_id") or "").strip() or None,
-                "trial_id": ga_trial,
-                "engine": engine,
-                "horizon": horizon,
-                "family": family,
-                "feature_profile": str(feature_profile.get("profile_name") or "").strip() or None,
-                "step": step,
-                "eval_symbols": list(precheck_report.get("eval_symbols") or focus_symbols),
-                "games": int(precheck_report.get("games_per_symbol") or gold_precheck_games),
-                "metrics": precheck_metrics,
-                "metrics_by_position_mechanics": precheck_mechanics,
-                "reason": verdict.get("reason"),
-                "failure_mode": verdict.get("failure_mode"),
-            }
-            precheck_path = write_precheck_summary(gold_precheck_payload)
-            gold_precheck_payload["path"] = str(precheck_path)
-            set_gold_precheck(gold_precheck_payload)
-            gold_precheck_executed = True
-            append_training_log(
-                (
-                    f"MuZero {horizon}: precheck Gold {gold_precheck_payload.get('status')} "
-                    f"({gold_precheck_payload.get('reason')})."
-                ),
-                level="WARNING" if gold_precheck_payload.get("status") == "fail" else "INFO",
-                source="muzero",
-            )
-            if gold_precheck_payload.get("status") == "fail":
-                logger.warning(
-                    "MuZero %s coupe apres precheck Gold a l'etape %s: %s",
+            metrics = agent.train_step()
+            if metrics is None:
+                logger.warning("MuZero sans batch suffisant, arret a l'etape %s.", step)
+                append_training_log(
+                    f"MuZero {horizon}: arret anticipe a l'etape {step} faute de batch suffisant.",
+                    level="WARNING",
+                    source="muzero",
+                )
+                break
+            last_metrics = metrics
+
+            if (
+                gold_precheck_enabled
+                and not gold_precheck_executed
+                and step >= gold_precheck_step
+            ):
+                checkpoint_path = weights_dir / f"muzero_{horizon}_gold_precheck_{step}.pkl"
+                agent.save(str(checkpoint_path))
+                append_training_log(
+                    (
+                        f"MuZero {horizon}: lancement du precheck Gold a l'etape "
+                        f"{step} sur {gold_precheck_games} segments."
+                    ),
+                    source="muzero",
+                )
+                running_precheck = {
+                    "status": "running",
+                    "run_id": str(load_training_status().get("run_id") or "").strip() or None,
+                    "trial_id": ga_trial,
+                    "engine": engine,
+                    "horizon": horizon,
+                    "family": family,
+                    "feature_profile": str(feature_profile.get("profile_name") or "").strip() or None,
+                    "step": step,
+                    "eval_symbols": list(focus_symbols),
+                    "games": gold_precheck_games,
+                    "reason": "precheck_en_cours",
+                }
+                set_gold_precheck(running_precheck)
+                arena = Arena(weights_dir=config.weights_path)
+                precheck_report = arena.evaluate_candidate(
+                    checkpoint_path.stem,
+                    horizon=horizon,
+                    eval_symbols=list(focus_symbols),
+                    games_per_symbol=gold_precheck_games,
+                )
+                precheck_metrics = dict(((precheck_report.get("challenger") or {}).get("metrics")) or {})
+                precheck_mechanics = dict(precheck_metrics.get("metrics_by_position_mechanics") or {})
+                verdict = _evaluate_gold_precheck_verdict(
+                    metrics=precheck_metrics,
+                    mechanics=precheck_mechanics,
+                )
+                gold_precheck_payload = {
+                    "status": verdict.get("status"),
+                    "run_id": str(load_training_status().get("run_id") or "").strip() or None,
+                    "trial_id": ga_trial,
+                    "engine": engine,
+                    "horizon": horizon,
+                    "family": family,
+                    "feature_profile": str(feature_profile.get("profile_name") or "").strip() or None,
+                    "step": step,
+                    "eval_symbols": list(precheck_report.get("eval_symbols") or focus_symbols),
+                    "games": int(precheck_report.get("games_per_symbol") or gold_precheck_games),
+                    "metrics": precheck_metrics,
+                    "metrics_by_position_mechanics": precheck_mechanics,
+                    "reason": verdict.get("reason"),
+                    "failure_mode": verdict.get("failure_mode"),
+                }
+                precheck_path = write_precheck_summary(gold_precheck_payload)
+                gold_precheck_payload["path"] = str(precheck_path)
+                set_gold_precheck(gold_precheck_payload)
+                gold_precheck_executed = True
+                append_training_log(
+                    (
+                        f"MuZero {horizon}: precheck Gold {gold_precheck_payload.get('status')} "
+                        f"({gold_precheck_payload.get('reason')})."
+                    ),
+                    level="WARNING" if gold_precheck_payload.get("status") == "fail" else "INFO",
+                    source="muzero",
+                )
+                if gold_precheck_payload.get("status") == "fail":
+                    logger.warning(
+                        "MuZero %s coupe apres precheck Gold a l'etape %s: %s",
+                        horizon,
+                        step,
+                        gold_precheck_payload.get("reason"),
+                    )
+                    killed_after_precheck = True
+                    break
+
+            if step % 50 == 0:
+                elapsed = max((datetime.now() - start_time).total_seconds(), 1.0)
+                logger.info(
+                    "[%s] step %05d/%05d | loss=%.4f | val=%.4f | rew=%.4f | pol=%.4f | %.2f steps/s",
                     horizon,
                     step,
-                    gold_precheck_payload.get("reason"),
+                    config.training_steps,
+                    float(metrics["loss_total"]),
+                    float(metrics["loss_val"]),
+                    float(metrics["loss_rew"]),
+                    float(metrics["loss_pol"]),
+                    step / elapsed,
                 )
-                killed_after_precheck = True
-                break
+                append_training_log(
+                    "MuZero "
+                    f"{horizon}: step {step}/{config.training_steps} | "
+                    f"loss={float(metrics['loss_total']):.4f}",
+                    source="muzero",
+                )
 
-        if step % 50 == 0:
-            elapsed = max((datetime.now() - start_time).total_seconds(), 1.0)
-            logger.info(
-                "[%s] step %05d/%05d | loss=%.4f | val=%.4f | rew=%.4f | pol=%.4f | %.2f steps/s",
-                horizon,
-                step,
-                config.training_steps,
-                float(metrics["loss_total"]),
-                float(metrics["loss_val"]),
-                float(metrics["loss_rew"]),
-                float(metrics["loss_pol"]),
-                step / elapsed,
-            )
-            append_training_log(
-                "MuZero "
-                f"{horizon}: step {step}/{config.training_steps} | "
-                f"loss={float(metrics['loss_total']):.4f}",
-                source="muzero",
-            )
+            if step % config.checkpoint_interval == 0:
+                checkpoint_path = weights_dir / f"muzero_{horizon}_ckpt_{step}.pkl"
+                agent.save(str(checkpoint_path))
+                logger.info("Checkpoint MuZero sauvegarde: %s", checkpoint_path)
 
-        if step % config.checkpoint_interval == 0:
-            checkpoint_path = weights_dir / f"muzero_{horizon}_ckpt_{step}.pkl"
-            agent.save(str(checkpoint_path))
-            logger.info("Checkpoint MuZero sauvegarde: %s", checkpoint_path)
-
-    agent.save(str(latest_path))
-    logger.info("Checkpoint latest mis a jour: %s", latest_path)
+        agent.save(str(latest_path))
+        logger.info("Checkpoint latest mis a jour: %s", latest_path)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     challenger_id = f"gen_{horizon}_{timestamp}"
     challenger_path = weights_dir / f"{challenger_id}.pkl"
-    agent.save(str(challenger_path))
+    if mechanics_only_mode:
+        shutil.copy2(Path(ga_seed_checkpoint_path), challenger_path)
+    else:
+        agent.save(str(challenger_path))
+    latest_checkpoint_reference = (
+        str(ga_seed_checkpoint_path)
+        if mechanics_only_mode and ga_seed_checkpoint_path
+        else str(latest_path)
+    )
     active_run_id = str(load_training_status().get("run_id") or "").strip() or None
 
     if killed_after_precheck:
@@ -617,6 +686,9 @@ def main() -> dict[str, object]:
         ga_status=ga_status,
         ga_generation=ga_generation,
         ga_trial=ga_trial,
+        ga_campaign_id=ga_campaign_id,
+        ga_scope=ga_scope,
+        ga_parent_champion_id=ga_parent_champion_id,
         trial_mode=trial_mode,
         trial_cost_profile=trial_cost_profile,
         replay_cache_status="memoire",
@@ -653,15 +725,43 @@ def main() -> dict[str, object]:
         "battles_won": {horizon: 1 if battle_report["outcome"] == "VICTORY" else 0},
         "horizon_accuracy": {horizon: challenger_metrics.get("win_rate", 0.0) / 100.0},
     }
-    promotion_result = promoter.promote_muzero_challenger(
-        challenger_path=challenger_path,
-        horizon=horizon,
-        battle_report=battle_report,
-        training_metrics=last_metrics,
-        latest_checkpoint=latest_path,
-        challenger_id=challenger_id,
-        gate_profile=gate_profile,
-    )
+    if ga_defer_promotion:
+        promotion_gate = promoter.evaluate_promotion_gate(
+            battle_report,
+            gate_profile="standard",
+        )
+        live_comparison = promoter._compare_with_live_champion(
+            horizon=horizon,
+            candidate_gate=promotion_gate,
+            engine=engine,
+            challenger_id=challenger_id,
+        )
+        promotion_result = {
+            "status": "candidate_only",
+            "reason": "deferred_ga_selection",
+            "engine": engine,
+            "horizon": horizon,
+            "source_path": str(challenger_path),
+            "champion_paths": [],
+            "promotion_gate": promotion_gate,
+            "requested_gate_profile": promoter.normalize_gate_profile(gate_profile or "standard"),
+            "live_gate_profile": "standard",
+            "live_comparison": live_comparison,
+            "promotion_state": "candidate_only",
+            "deferred_promotion": True,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_scope": ga_scope,
+        }
+    else:
+        promotion_result = promoter.promote_muzero_challenger(
+            challenger_path=challenger_path,
+            horizon=horizon,
+            battle_report=battle_report,
+            training_metrics=last_metrics,
+            latest_checkpoint=(Path(ga_seed_checkpoint_path) if mechanics_only_mode and ga_seed_checkpoint_path else latest_path),
+            challenger_id=challenger_id,
+            gate_profile=gate_profile,
+        )
     logger.info("Promotion live %s: %s", horizon, promotion_result.get("status"))
     append_training_log(
         "MuZero "
@@ -695,7 +795,7 @@ def main() -> dict[str, object]:
         "dataset_coverage": dict(getattr(config, "dataset_coverage", {}) or {}),
         "games_per_symbol": games_per_symbol,
         "total_games": total_games,
-        "latest_checkpoint": str(latest_path),
+        "latest_checkpoint": latest_checkpoint_reference,
         "challenger_path": str(challenger_path),
         "live_champion_reference": champion_reference,
         "live_champion_id": live_champion_id or None,
@@ -708,12 +808,19 @@ def main() -> dict[str, object]:
             else None
         ),
         "ga_trial": str(os.getenv("TRAINING_GA_TRIAL", "")).strip() or None,
+        "ga_campaign_id": ga_campaign_id,
+        "ga_scope": ga_scope,
+        "ga_parent_champion_id": ga_parent_champion_id,
+        "ga_defer_promotion": ga_defer_promotion,
+        "ga_genome": ga_genome,
         "trial_mode": trial_mode,
         "trial_cost_profile": trial_cost_profile,
         "gold_precheck": dict(gold_precheck_payload or {}),
         "battle_report": battle_report,
         "promotion": promotion_result,
     }
+    unique_report_path = write_arena_summary(report_payload)
+    report_payload["battle_report_path"] = str(unique_report_path)
     report_path.write_text(json.dumps(report_payload, indent=2, default=float), encoding="utf-8")
     logger.info("Rapport MuZero ecrit dans %s", report_path)
     promotion_gate = dict(promotion_result.get("promotion_gate") or {})
@@ -730,6 +837,10 @@ def main() -> dict[str, object]:
         "family": family,
         "feature_profile": feature_profile.get("profile_name"),
         "ga_trial": ga_trial,
+        "ga_campaign_id": ga_campaign_id,
+        "ga_scope": ga_scope,
+        "ga_parent_champion_id": ga_parent_champion_id,
+        "ga_genome": ga_genome,
         "trial_mode": trial_mode,
         "dataset_id": dataset_id,
         "dataset_source": dataset_source,
@@ -748,6 +859,11 @@ def main() -> dict[str, object]:
         "metrics_by_position_mechanics": dict(
             challenger_metrics_full.get("metrics_by_position_mechanics") or {}
         ),
+        "training_metrics": dict(last_metrics or {}),
+        "challenger_path": str(challenger_path),
+        "latest_checkpoint": latest_checkpoint_reference,
+        "battle_report_path": str(unique_report_path),
+        "live_comparison": dict(promotion_result.get("live_comparison") or {}),
         "artifact_state": {
             "arena_report_present": True,
             "battle_report_present": True,

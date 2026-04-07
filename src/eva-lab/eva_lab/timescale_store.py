@@ -868,6 +868,141 @@ def record_ga_trial(trial_payload: dict[str, Any]) -> bool:
     )
 
 
+def load_ga_trials(
+    *,
+    campaign_id: str | None = None,
+    generation: int | None = None,
+    limit: int = 128,
+) -> list[dict[str, Any]]:
+    """Charge les essais GA recents depuis TimeDB.
+
+    Args:
+        campaign_id (str | None): Identifiant optionnel de campagne seedee.
+        generation (int | None): Generation optionnelle a filtrer.
+        limit (int): Nombre maximal d'essais a retourner.
+
+    Returns:
+        list[dict[str, Any]]: Liste normalisee des essais charges.
+    """
+
+    settings = get_timescale_settings()
+    if not settings["enabled"]:
+        return []
+
+    safe_limit = max(1, min(int(limit or 128), 512))
+    where_clauses: list[str] = []
+    params: list[Any] = []
+
+    normalized_campaign_id = str(campaign_id or "").strip()
+    if normalized_campaign_id:
+        where_clauses.append("(payload->>'campaign_id') = %s")
+        params.append(normalized_campaign_id)
+
+    if generation is not None:
+        where_clauses.append("ga_generation = %s")
+        params.append(int(generation))
+
+    where_sql = ""
+    if where_clauses:
+        where_sql = "WHERE " + " AND ".join(where_clauses)
+
+    query = f"""
+        SELECT
+            trial_id,
+            engine,
+            sequence_id,
+            profile,
+            horizon,
+            family,
+            feature_profile,
+            mechanics_profile_version,
+            ga_generation,
+            ga_trial,
+            trial_mode,
+            trial_cost_profile,
+            fitness_score,
+            failure_mode,
+            run_id,
+            dataset_id,
+            payload,
+            created_at,
+            finished_at
+        FROM {_sql_identifier(settings['tables'].ga_trials)}
+        {where_sql}
+        ORDER BY ga_generation ASC NULLS LAST, COALESCE(finished_at, created_at) DESC
+        LIMIT %s
+    """
+    params.append(safe_limit)
+
+    with _connect() as connection:
+        if connection is None:
+            return []
+        try:
+            _ensure_schema_objects(connection, settings)
+            with connection.cursor() as cursor:
+                cursor.execute(query, tuple(params))
+                rows = cursor.fetchall()
+        except Exception as exc:
+            logger.warning("Lecture des essais GA impossible: %s", exc)
+            return []
+
+    records: list[dict[str, Any]] = []
+    for (
+        trial_id,
+        engine,
+        sequence_id,
+        profile,
+        horizon,
+        family,
+        feature_profile,
+        mechanics_profile_version,
+        ga_generation,
+        ga_trial,
+        trial_mode,
+        trial_cost_profile,
+        fitness_score,
+        failure_mode,
+        run_id,
+        dataset_id,
+        payload,
+        created_at,
+        finished_at,
+    ) in rows:
+        parsed_payload = payload
+        if isinstance(parsed_payload, str):
+            try:
+                parsed_payload = json.loads(parsed_payload)
+            except Exception:
+                parsed_payload = {}
+        if not isinstance(parsed_payload, dict):
+            parsed_payload = {}
+
+        records.append(
+            {
+                "trial_id": str(trial_id or "").strip() or None,
+                "engine": str(engine or "").strip() or None,
+                "sequence_id": str(sequence_id or "").strip() or None,
+                "profile": str(profile or "").strip() or None,
+                "horizon": str(horizon or "").strip() or None,
+                "family": str(family or "").strip() or None,
+                "feature_profile": str(feature_profile or "").strip() or None,
+                "mechanics_profile_version": str(mechanics_profile_version or "").strip() or None,
+                "ga_generation": int(ga_generation) if ga_generation is not None else None,
+                "ga_trial": str(ga_trial or "").strip() or None,
+                "trial_mode": str(trial_mode or "").strip() or None,
+                "trial_cost_profile": str(trial_cost_profile or "").strip() or None,
+                "fitness_score": float(fitness_score) if fitness_score is not None else None,
+                "failure_mode": str(failure_mode or "").strip() or None,
+                "run_id": str(run_id or "").strip() or None,
+                "dataset_id": str(dataset_id or "").strip() or None,
+                "payload": parsed_payload,
+                "created_at": created_at.isoformat() if created_at is not None else None,
+                "finished_at": finished_at.isoformat() if finished_at is not None else None,
+            }
+        )
+    return records
+
+
 def record_replay_metadata(replay_payload: dict[str, Any]) -> bool:
     """Enregistre l'etat d'un cache replay partage."""
 

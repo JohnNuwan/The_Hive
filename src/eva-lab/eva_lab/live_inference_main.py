@@ -1,4 +1,4 @@
-"""API dediee a l'inference live CPU MuZero."""
+"""API dediee a l'inference live CPU MuZero et Ensemble."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="EVA Live Inference API",
-    description="Inference MuZero scalp epinglee CPU pour le live.",
+    description="Inference scalp CPU pour MuZero seul ou ensemble MuZero/Dreamer.",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -95,3 +95,17 @@ async def predict_live(request: LivePredictRequest) -> dict[str, object]:
     """
     gate: DreamerGate = app.state.dreamer_gate
     return gate.run_live_inference(request.model_dump())
+
+
+@app.post("/predict/ensemble")
+async def predict_ensemble(request: LivePredictRequest) -> dict[str, object]:
+    """Execute une inference d'ensemble CPU entre MuZero et Dreamer.
+
+    Args:
+        request (LivePredictRequest): Observation live du banker.
+
+    Returns:
+        dict[str, object]: Decision arbitree entre MuZero et Dreamer.
+    """
+    gate: DreamerGate = app.state.dreamer_gate
+    return gate.run_ensemble_inference(request.model_dump())

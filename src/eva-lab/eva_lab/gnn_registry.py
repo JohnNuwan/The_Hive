@@ -18,7 +18,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from eva_lab.training_utils import classify_training_symbol, load_history_frame
+from eva_lab.training_utils import (
+    classify_training_symbol,
+    get_scalp_multi_universe_symbols,
+    load_history_frame,
+    normalize_training_symbols,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -330,25 +335,25 @@ def load_market_gnn_registry(
     metrics_file = _file_description(metrics_path)
 
     trained_at = checkpoint.get("modified_at") or metrics_file.get("modified_at")
-    symbols = list(dict.fromkeys(metrics_payload.get("symbols") or previous_registry.get("universe", {}).get("symbols") or []))
-    focus_symbols = list(
-        dict.fromkeys(
-            metrics_payload.get("focus_symbols")
-            or previous_registry.get("focus_symbols")
-            or symbols
-        )
+    symbols = normalize_training_symbols(
+        metrics_payload.get("symbols")
+        or previous_registry.get("universe", {}).get("symbols")
+        or []
+    )
+    focus_symbols = normalize_training_symbols(
+        metrics_payload.get("focus_symbols")
+        or previous_registry.get("focus_symbols")
+        or symbols
     )
     focus_symbol = str(
         metrics_payload.get("focus_symbol")
         or previous_registry.get("focus_symbol")
         or (focus_symbols[0] if focus_symbols else "")
     ).strip() or None
-    context_symbols = list(
-        dict.fromkeys(
-            metrics_payload.get("context_symbols")
-            or previous_registry.get("context_symbols")
-            or [symbol for symbol in symbols if symbol != focus_symbol]
-        )
+    context_symbols = normalize_training_symbols(
+        metrics_payload.get("context_symbols")
+        or previous_registry.get("context_symbols")
+        or [symbol for symbol in symbols if symbol != focus_symbol]
     )
     deployment_class = str(
         metrics_payload.get("deployment_class")
@@ -376,12 +381,30 @@ def load_market_gnn_registry(
         "finished_at": refresh_state.get("finished_at"),
         "failure_reason": refresh_state.get("failure_reason"),
     }
+    consultative_universe = normalize_training_symbols(get_scalp_multi_universe_symbols())
+    universe_ready = bool(symbols) and all(symbol in symbols for symbol in consultative_universe)
+    metrics_ready = bool(metrics.get("epochs", 0) > 0 and metrics.get("samples", 0) > 0)
+    champion_kind = "consultative"
+    champion_id = str(previous_registry.get("champion_id") or "").strip() or None
+    if champion_id is None and checkpoint.get("exists") and trained_at:
+        safe_timestamp = trained_at.replace(":", "").replace("-", "").replace("+", "_").replace(".", "_")
+        champion_id = f"gnn_consultative_{safe_timestamp}"
+    champion_ready = bool(
+        status in {"validated", "live"}
+        and not _is_stale(trained_at)
+        and bool(previous_registry.get("source_run_id") or refresh_state.get("source_run_id"))
+        and metrics_ready
+        and universe_ready
+    )
     registry = {
         "name": "market_gnn",
         "version": str(previous_registry.get("version") or checkpoint_path.stem),
         "status": status,
         "status_reason": status_reason,
         "trained_at": trained_at,
+        "champion_id": champion_id,
+        "champion_ready": champion_ready,
+        "champion_kind": champion_kind,
         "checkpoint_path": checkpoint["path"] if checkpoint["exists"] else None,
         "source_run_id": previous_registry.get("source_run_id") or refresh_state.get("source_run_id"),
         "focus_symbols": focus_symbols,
@@ -393,6 +416,8 @@ def load_market_gnn_registry(
             "symbols": symbols,
             "count": len(symbols),
             "family_counts": _build_family_counts(symbols),
+            "canonical_scalp_multi_universe": consultative_universe,
+            "universe_ready": universe_ready,
         },
         "metrics": metrics,
         "last_refresh_requested_at": previous_registry.get("last_refresh_requested_at") or refresh_state.get("requested_at"),

@@ -6,6 +6,10 @@ import json
 import logging
 import os
 import pickle
+import signal
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -13,6 +17,7 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
+from eva_lab.arena import Arena
 from eva_lab.champion_promoter import ChampionPromoter
 from eva_lab.gold_cpu_prep import load_dreamer_replay_cache
 from eva_lab.muzero.config import MuZeroConfigV3
@@ -25,13 +30,18 @@ from eva_lab.training_status import (
     append_training_log,
     load_training_status,
     mark_step_running,
+    set_training_runtime_state,
     write_terminal_summary,
 )
-from eva_lab.training_utils import load_history_frame
+from eva_lab.training_utils import load_history_frame, normalize_training_symbols
 from shared.indicators import IndicatorFactory
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class DreamerSoftHangError(RuntimeError):
+    """Signale un gel detecte dans une sous-phase critique de Dreamer."""
 
 
 class OfflineTrainer:
@@ -127,6 +137,98 @@ class OfflineTrainer:
         self.total_steps = 0
         self.total_shadow_games = 0
         self.last_training_metrics: dict[str, Any] = {}
+        self.phase_timeout_seconds = max(int(os.getenv("DREAMER_PHASE_TIMEOUT_SECONDS", "900")), 0)
+        self.phase_warning_seconds = max(float(os.getenv("DREAMER_PHASE_WARNING_SECONDS", "30")), 0.0)
+        self.phase_durations_ms: dict[str, float] = {}
+        self.last_successful_step = 0
+
+    def _normalize_phase_durations(self) -> dict[str, float]:
+        """Retourne les durees recentes des sous-phases sous forme serialisable."""
+
+        return {
+            str(key): round(float(value), 3)
+            for key, value in self.phase_durations_ms.items()
+            if str(key).strip()
+        }
+
+    def _set_runtime_state(
+        self,
+        *,
+        train_step_phase: str | None = None,
+        last_successful_step: int | None = None,
+        last_successful_step_at: str | None = None,
+        stall_detected: bool | None = None,
+        stall_reason: str | None = None,
+    ) -> None:
+        """Persiste les metadonnees fines d'execution Dreamer."""
+
+        set_training_runtime_state(
+            last_successful_step=last_successful_step,
+            last_successful_step_at=last_successful_step_at,
+            train_step_phase=train_step_phase,
+            phase_durations_ms=self._normalize_phase_durations(),
+            stall_detected=stall_detected,
+            stall_reason=stall_reason,
+        )
+
+    @contextmanager
+    def _phase_timeout(self, phase_name: str, context_label: str) -> Iterable[None]:
+        """Declenche une erreur si une sous-phase critique depasse le delai autorise."""
+
+        if (
+            self.phase_timeout_seconds <= 0
+            or os.name == "nt"
+            or threading.current_thread() is not threading.main_thread()
+            or not hasattr(signal, "SIGALRM")
+            or not hasattr(signal, "setitimer")
+        ):
+            yield
+            return
+
+        previous_handler = signal.getsignal(signal.SIGALRM)
+
+        def _handle_timeout(signum: int, frame: Any) -> None:
+            raise DreamerSoftHangError(
+                f"Soft hang Dreamer detecte dans la phase {phase_name} ({context_label}) "
+                f"apres {self.phase_timeout_seconds} secondes."
+            )
+
+        signal.signal(signal.SIGALRM, _handle_timeout)
+        signal.setitimer(signal.ITIMER_REAL, float(self.phase_timeout_seconds))
+        try:
+            yield
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0.0)
+            signal.signal(signal.SIGALRM, previous_handler)
+
+    def _record_phase_duration(self, phase_name: str, started_at: float) -> float:
+        """Enregistre la duree d'une sous-phase critique."""
+
+        duration_ms = max((time.perf_counter() - started_at) * 1000.0, 0.0)
+        self.phase_durations_ms[phase_name] = duration_ms
+        if self.phase_warning_seconds > 0 and duration_ms >= self.phase_warning_seconds * 1000.0:
+            append_training_log(
+                f"Dreamer: phase {phase_name} lente ({duration_ms:.1f} ms).",
+                level="WARNING",
+                source="dreamer",
+            )
+        return duration_ms
+
+    def _materialize_metrics(self, metrics: dict[str, Any]) -> dict[str, Any]:
+        """Convertit les metriques JAX en scalaires Python quand c'est possible."""
+
+        payload: dict[str, Any] = {}
+        for key, value in dict(metrics or {}).items():
+            try:
+                array_value = np.asarray(value)
+            except Exception:
+                payload[key] = value
+                continue
+            if array_value.shape == ():
+                payload[key] = float(array_value)
+            else:
+                payload[key] = value
+        return payload
 
     def _load_prepared_replay_cache(self) -> bool:
         """Charge un replay Dreamer deja prepare par un job CPU.
@@ -452,11 +554,20 @@ class OfflineTrainer:
 
         avg_loss = 0.0
         total_updates = 0
+        self.phase_durations_ms = {}
+        self.last_successful_step = 0
+        self._set_runtime_state(
+            train_step_phase="demarrage",
+            last_successful_step=0,
+            last_successful_step_at=None,
+            stall_detected=False,
+            stall_reason="",
+        )
         for epoch in range(epochs):
             mark_step_running(
                 "dreamer_offline",
                 phase="optimisation",
-                epoch_current=epoch + 1,
+                epoch_current=epoch,
                 epoch_total=epochs,
                 **self._build_status_kwargs(world_model_steps=total_updates),
             )
@@ -464,23 +575,87 @@ class OfflineTrainer:
             steps = 0
             effective_batch_size = min(self.config.batch_size, self.replay_buffer.size)
             updates_per_epoch = max(1, self.replay_buffer.size // max(effective_batch_size, 1))
-            for _ in range(updates_per_epoch):
-                samples = self.replay_buffer.sample(effective_batch_size)
-                games = [
-                    game
-                    for game, _, _ in samples
-                    if len(game) >= self.sequence_length
-                ]
-                if not games:
-                    raise RuntimeError(
-                        "Aucune sequence Dreamer exploitable n'a ete echantillonnee pour le batch courant."
+            for update_index in range(updates_per_epoch):
+                context_label = (
+                    f"epoch {epoch + 1}/{epochs}, mise a jour {update_index + 1}/{updates_per_epoch}"
+                )
+                current_phase = "sample"
+                try:
+                    self._set_runtime_state(
+                        train_step_phase=current_phase,
+                        last_successful_step=total_updates,
+                        stall_detected=False,
+                        stall_reason="",
                     )
-                batch = self.trainer.prepare_batch(games)
-                metrics = self.trainer.train_step(batch)
-                loss_sum += float(metrics["loss_total"])
-                steps += 1
-                total_updates += 1
+                    sample_started_at = time.perf_counter()
+                    with self._phase_timeout("sample", context_label):
+                        samples = self.replay_buffer.sample(effective_batch_size)
+                    self._record_phase_duration("sample", sample_started_at)
+
+                    games = [
+                        game
+                        for game, _, _ in samples
+                        if len(game) >= self.sequence_length
+                    ]
+                    if not games:
+                        raise RuntimeError(
+                            "Aucune sequence Dreamer exploitable n'a ete echantillonnee pour le batch courant."
+                        )
+
+                    current_phase = "prepare_batch"
+                    self._set_runtime_state(
+                        train_step_phase=current_phase,
+                        last_successful_step=total_updates,
+                    )
+                    prepare_started_at = time.perf_counter()
+                    with self._phase_timeout("prepare_batch", context_label):
+                        batch = self.trainer.prepare_batch(games)
+                    self._record_phase_duration("prepare_batch", prepare_started_at)
+
+                    current_phase = "train_step"
+                    self._set_runtime_state(
+                        train_step_phase=current_phase,
+                        last_successful_step=total_updates,
+                    )
+                    step_started_at = time.perf_counter()
+                    with self._phase_timeout("train_step", context_label):
+                        metrics = self.trainer.train_step(batch)
+                    self._record_phase_duration("train_step", step_started_at)
+                    metrics = self._materialize_metrics(metrics)
+
+                    loss_sum += float(metrics["loss_total"])
+                    steps += 1
+                    total_updates += 1
+                    self.last_successful_step = total_updates
+                    self._set_runtime_state(
+                        train_step_phase="train_step_complete",
+                        last_successful_step=total_updates,
+                        last_successful_step_at=datetime.now().isoformat(),
+                        stall_detected=False,
+                        stall_reason="",
+                    )
+                except Exception as exc:
+                    stall_detected = isinstance(exc, DreamerSoftHangError)
+                    self._set_runtime_state(
+                        train_step_phase=current_phase,
+                        last_successful_step=total_updates,
+                        stall_detected=stall_detected,
+                        stall_reason=str(exc),
+                    )
+                    append_training_log(
+                        f"Dreamer: echec dans la phase {current_phase} ({context_label}) : {exc}",
+                        level="WARNING" if stall_detected else "ERROR",
+                        source="dreamer",
+                    )
+                    raise
             avg_loss = loss_sum / steps if steps > 0 else 0.0
+            mark_step_running(
+                "dreamer_offline",
+                phase="optimisation",
+                epoch_current=epoch + 1,
+                epoch_total=epochs,
+                **self._build_status_kwargs(world_model_steps=total_updates),
+            )
             logger.info("Epoch %s/%s - Loss: %.4f", epoch + 1, epochs, avg_loss)
             if epoch == 0 or (epoch + 1) % 10 == 0 or epoch + 1 == epochs:
                 append_training_log(
@@ -493,7 +668,16 @@ class OfflineTrainer:
             "avg_loss": avg_loss,
             "world_model_steps": total_updates,
             "buffer_size": self.replay_buffer.size,
+            "last_successful_step": self.last_successful_step,
+            "phase_durations_ms": self._normalize_phase_durations(),
         }
+        self._set_runtime_state(
+            train_step_phase="termine",
+            last_successful_step=total_updates,
+            last_successful_step_at=datetime.now().isoformat(),
+            stall_detected=False,
+            stall_reason="",
+        )
         return dict(self.last_training_metrics)
 
     def save_checkpoint(self, path: str) -> str:
@@ -507,10 +691,82 @@ class OfflineTrainer:
         """
         target = Path(path).with_suffix(".pkl")
         target.parent.mkdir(parents=True, exist_ok=True)
+        status = load_training_status()
+        self.params = self.trainer.params.get("wm", self.params)
+        payload = {
+            "params": self.params,
+            "opt_states": dict(self.trainer.opt_states or {}),
+            "step": int(self.last_successful_step or 0),
+            "run_id": str(status.get("run_id") or "").strip() or None,
+            "trial_id": str(status.get("trial_id") or "").strip() or self.ga_trial,
+            "engine": "dreamer",
+            "horizon": self.horizon,
+            "family": self.family,
+            "gate_profile": self.gate_profile,
+            "focus_symbols": normalize_training_symbols(self.focus_symbols),
+            "created_at": datetime.now().isoformat(),
+        }
         with open(target, "wb") as file_obj:
-            pickle.dump(self.trainer.params, file_obj)
+            pickle.dump(payload, file_obj)
         logger.info("Checkpoint Dreamer sauvegarde dans %s", target)
         return str(target)
+
+    def _build_manifest_payload(
+        self,
+        *,
+        status: str,
+        challenger_id: str,
+        latest_checkpoint: str,
+        challenger_checkpoint: str,
+        training_metrics: dict[str, Any],
+        battle_report: dict[str, Any] | None,
+        promotion_gate: dict[str, Any] | None,
+        promotion_result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Construit un manifeste Dreamer stable pour le registre live.
+
+        Args:
+            status (str): Etat du manifeste (`candidate_only`, `blocked`, `promoted`).
+            challenger_id (str): Identifiant du challenger courant.
+            latest_checkpoint (str): Checkpoint latest du run.
+            challenger_checkpoint (str): Checkpoint du challenger.
+            training_metrics (dict[str, Any]): Metriques d'optimisation.
+            battle_report (dict[str, Any] | None): Rapport Arena si disponible.
+            promotion_gate (dict[str, Any] | None): Verdict de gate si disponible.
+            promotion_result (dict[str, Any] | None): Resultat detaille de promotion.
+
+        Returns:
+            dict[str, Any]: Charge utile complete du manifeste.
+        """
+        result_payload = dict(promotion_result or {})
+        champion_paths = list(result_payload.get("champion_paths") or [])
+        champion_path = champion_paths[0] if champion_paths else None
+        variant = "champion" if status == "promoted" else "blocked"
+        return {
+            "status": status,
+            "promoted_at": datetime.now().isoformat() if status == "promoted" else None,
+            "engine": "dreamer",
+            "horizon": self.horizon,
+            "family": self.family,
+            "feature_profile": self.feature_profile_name,
+            "dataset_id": self.dataset_id,
+            "dataset_source": self.dataset_source,
+            "mechanics_profile_version": self.mechanics_profile_version,
+            "dataset_coverage": self.dataset_coverage,
+            "focus_symbols": normalize_training_symbols(self.focus_symbols),
+            "gate_profile": self.gate_profile,
+            "selection_policy": "champion_only",
+            "engine_label": self.promoter.get_engine_label("dreamer", variant=variant),
+            "challenger_id": challenger_id,
+            "source_path": challenger_checkpoint,
+            "latest_checkpoint": latest_checkpoint,
+            "champion_path": champion_path,
+            "battle_report": battle_report,
+            "training_metrics": training_metrics,
+            "promotion_gate": promotion_gate,
+            "live_comparison": result_payload.get("live_comparison"),
+            "cross_engine_live_comparison": result_payload.get("cross_engine_live_comparison"),
+        }
 
     def _build_activity_metrics(self) -> dict[str, Any]:
         """Construit des metriques minimales de direction et d'activite.
@@ -681,6 +937,8 @@ class OfflineTrainer:
         """
 
         message = str(exc or "").strip().lower()
+        if "soft hang dreamer" in message or isinstance(exc, DreamerSoftHangError):
+            return "error", "soft_hang", "optimisation"
         if (
             "buffer dreamer est vide" in message
             or "aucune sequence dreamer exploitable" in message
@@ -708,9 +966,12 @@ class OfflineTrainer:
         """
 
         terminal_status, failure_mode, failed_step = self._classify_terminal_failure(exc)
+        effective_metrics = dict(training_metrics or self.last_training_metrics)
+        effective_metrics.setdefault("last_successful_step", self.last_successful_step)
+        effective_metrics.setdefault("phase_durations_ms", self._normalize_phase_durations())
         summary = self._build_terminal_summary(
             terminal_status=terminal_status,
-            training_metrics=training_metrics or self.last_training_metrics,
+            training_metrics=effective_metrics,
             failed_step=failed_step,
             failure_mode=failure_mode,
             reason=str(exc),
@@ -737,6 +998,9 @@ class OfflineTrainer:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         challenger_id = f"gen_dreamer_{self.horizon}_{timestamp}"
         challenger_checkpoint = self.save_checkpoint(str(self.weights_dir / challenger_id))
+        normalized_focus_symbols = normalize_training_symbols(self.focus_symbols)
+        battle_report: dict[str, Any] | None = None
+        promotion_gate: dict[str, Any] | None = None
         promotion_result = {
             "status": "skipped",
             "reason": "dreamer_validation_pending",
@@ -746,6 +1010,47 @@ class OfflineTrainer:
             "champion_paths": [],
             "promotion_gate": None,
         }
+        manifest_status = "candidate_only"
+        terminal_reason = "dreamer_validation_pending"
+
+        if self.trial_mode == "full":
+            logger.info(
+                "Dreamer full: lancement de l'Arena standard sur %s pour %s.",
+                normalized_focus_symbols,
+                challenger_id,
+            )
+            arena = Arena(weights_dir=str(self.weights_dir), data_dir=self.data_dir)
+            battle_report = arena.battle(
+                challenger_id=challenger_id,
+                champion_id="dreamer_champion",
+                horizon=self.horizon,
+                engine="dreamer",
+            )
+            promotion_result = self.promoter.promote_dreamer_challenger(
+                challenger_path=challenger_checkpoint,
+                horizon=self.horizon,
+                battle_report=battle_report,
+                training_metrics=training_metrics,
+                latest_checkpoint=latest_checkpoint,
+                challenger_id=challenger_id,
+                gate_profile=self.gate_profile,
+            )
+            promotion_gate = dict(
+                promotion_result.get("promotion_gate")
+                or self.promoter.resolve_promotion_gate({}, {"battle_report": battle_report})
+                or {}
+            )
+            if promotion_result.get("status") == "promoted":
+                manifest_status = "promoted"
+                terminal_reason = "dreamer_promoted"
+            else:
+                manifest_status = "blocked"
+                terminal_reason = str(
+                    promotion_result.get("reason")
+                    or promotion_gate.get("reason")
+                    or "dreamer_full_blocked"
+                )
+
         report_payload = {
             "engine": "dreamer",
             "horizon": self.horizon,
@@ -754,7 +1059,7 @@ class OfflineTrainer:
             "mechanics_profile_version": self.mechanics_profile_version,
             "dataset_id": self.dataset_id,
             "dataset_source": self.dataset_source,
-            "focus_symbols": self.focus_symbols,
+            "focus_symbols": normalized_focus_symbols,
             "gate_profile": self.gate_profile,
             "dataset_descriptor": self.dataset_descriptor,
             "dataset_coverage": self.dataset_coverage,
@@ -767,37 +1072,25 @@ class OfflineTrainer:
             "ga_status": self.ga_status,
             "ga_generation": self.ga_generation,
             "ga_trial": self.ga_trial,
-            "battle_report": None,
+            "battle_report": battle_report,
             "promotion": promotion_result,
             "training_metrics": training_metrics,
         }
         report_path = self.promoter.get_arena_report_path(self.horizon, engine="dreamer")
         report_path.write_text(json.dumps(report_payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        manifest_payload = {
-            "status": "candidate_only",
-            "promoted_at": None,
-            "engine": "dreamer",
-            "horizon": self.horizon,
-            "family": self.family,
-            "feature_profile": self.feature_profile_name,
-            "dataset_id": self.dataset_id,
-            "dataset_source": self.dataset_source,
-            "mechanics_profile_version": self.mechanics_profile_version,
-            "dataset_coverage": self.dataset_coverage,
-            "focus_symbols": self.focus_symbols,
-            "gate_profile": self.gate_profile,
-            "selection_policy": "champion_only",
-            "engine_label": self.promoter.get_engine_label("dreamer", variant="blocked"),
-            "challenger_id": challenger_id,
-            "source_path": challenger_checkpoint,
-            "latest_checkpoint": latest_checkpoint,
-            "champion_path": None,
-            "battle_report": None,
-            "training_metrics": training_metrics,
-            "promotion_gate": None,
-        }
-        manifest_path = self.promoter.get_manifest_path(self.horizon, engine="dreamer")
-        manifest_path.write_text(json.dumps(manifest_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        if manifest_status != "promoted":
+            manifest_payload = self._build_manifest_payload(
+                status=manifest_status,
+                challenger_id=challenger_id,
+                latest_checkpoint=latest_checkpoint,
+                challenger_checkpoint=challenger_checkpoint,
+                training_metrics=training_metrics,
+                battle_report=battle_report,
+                promotion_gate=promotion_gate,
+                promotion_result=promotion_result,
+            )
+            manifest_path = self.promoter.get_manifest_path(self.horizon, engine="dreamer")
+            manifest_path.write_text(json.dumps(manifest_payload, indent=2, ensure_ascii=False), encoding="utf-8")
         record_arena_result(
             report_payload,
             metadata={
@@ -814,7 +1107,9 @@ class OfflineTrainer:
             latest_checkpoint=latest_checkpoint,
             challenger_id=challenger_id,
             challenger_checkpoint=challenger_checkpoint,
-            reason="dreamer_validation_pending",
+            battle_report=battle_report,
+            promotion_gate=promotion_gate,
+            reason=terminal_reason,
         )
         terminal_summary_path = write_terminal_summary(terminal_summary)
         append_training_log(
@@ -822,6 +1117,7 @@ class OfflineTrainer:
             source="dreamer",
         )
         report_payload["terminal_summary_path"] = str(terminal_summary_path)
+        report_path.write_text(json.dumps(report_payload, indent=2, ensure_ascii=False), encoding="utf-8")
         return report_payload
 
 

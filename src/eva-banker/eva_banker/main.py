@@ -1073,6 +1073,9 @@ async def get_trading_status():
     execution_mechanics = app.state.auto_engine.get_execution_mechanics_status()
     decision_audit = app.state.auto_engine.get_decision_audit_snapshot()
     live_universe_status = app.state.auto_engine.get_live_universe_status()
+    latest_review = app.state.auto_engine.get_latest_trading_review_metadata()
+    nemesis_status = app.state.nemesis.get_status()
+    connectors = _build_connector_status(app)
     live_family = str(
         execution_mechanics.get("live_family")
         or live_universe_status.get("live_family")
@@ -1110,6 +1113,8 @@ async def get_trading_status():
 
     payload = {
         "status": "offline" if account is None else "online",
+        "runtime_profile": runtime_status.get("runtime_profile"),
+        "shadow_learning_mode": runtime_status.get("shadow_learning_mode", "shadow_only"),
         "runtime": runtime_status,
         "connection": {
             "mt5_connected": mt5_service.is_connected,
@@ -1119,8 +1124,12 @@ async def get_trading_status():
             "execution_authority": "banker_local_mt5",
             "server_role": "modeles_supervision_memoire",
             "runtime_mode": _derive_runtime_mode(app.state.auto_engine).value,
+            "runtime_profile": runtime_status.get("runtime_profile"),
         },
-        "connectors": _build_connector_status(app),
+        "connectors": connectors,
+        "vllm": connectors.get("vllm", {}),
+        "gnn": connectors.get("gnn", {}),
+        "nemesis": nemesis_status,
         "account": {
             "equity": float(account.equity) if account is not None else 0.0,
             "balance": float(account.balance) if account is not None else 0.0,
@@ -1155,7 +1164,19 @@ async def get_trading_status():
         "live_family": execution_mechanics.get("live_family"),
         "live_champion_id_muzero": execution_mechanics.get("live_champion_id_muzero"),
         "live_champion_id_dreamer": execution_mechanics.get("live_champion_id_dreamer"),
+        "active_live_engine": execution_mechanics.get("active_live_engine"),
+        "registered_live_champion_muzero": execution_mechanics.get("registered_live_champion_muzero"),
+        "registered_live_champion_dreamer": execution_mechanics.get("registered_live_champion_dreamer"),
+        "muzero_promotion_state": execution_mechanics.get("muzero_promotion_state"),
+        "dreamer_promotion_state": execution_mechanics.get("dreamer_promotion_state"),
+        "muzero_can_activate_live": bool(execution_mechanics.get("muzero_can_activate_live", False)),
+        "dreamer_can_activate_live": bool(execution_mechanics.get("dreamer_can_activate_live", False)),
+        "dreamer_live_enabled": bool(execution_mechanics.get("dreamer_live_enabled", False)),
+        "ensemble_ready": bool(execution_mechanics.get("ensemble_ready", False)),
+        "ensemble_active": bool(execution_mechanics.get("ensemble_active", False)),
+        "force_maintenance": bool(runtime_status.get("force_maintenance", False)),
         "research_mode": "consultatif",
+        "latest_review": latest_review,
         "live_data_source": live_universe_status.get("source") or execution_mechanics.get("selection_policy_required"),
         "market_context": market_context,
         "event_blockers": event_blockers,
@@ -1174,6 +1195,46 @@ async def get_trading_status():
     }
     await _publish_trading_status_snapshot(payload)
     return payload
+
+
+@app.get("/trading/review/latest", tags=["Trading"])
+async def get_latest_trading_review():
+    """
+    Retourne la derniere revue de trading persistee.
+
+    Returns:
+        dict[str, Any]: Rapport complet si disponible, sinon statut d'absence.
+    """
+
+    return app.state.auto_engine.get_latest_trading_review()
+
+
+@app.post("/trading/review/generate", tags=["Trading"])
+async def generate_trading_review(
+    hours: int = Query(default=12, ge=1, le=72),
+    period_name: str | None = Query(default=None),
+):
+    """
+    Genere une revue de trading structuree sur une fenetre glissante.
+
+    Args:
+        hours (int): Taille de la fenetre analysee en heures.
+        period_name (str | None): Libelle optionnel du rapport.
+
+    Returns:
+        dict[str, Any]: Rapport persiste et chemins de stockage.
+    """
+
+    period_end = datetime.now()
+    period_start = period_end - timedelta(hours=hours)
+    review_label = str(period_name or f"Fenetre {hours}h").strip() or f"Fenetre {hours}h"
+    review = await app.state.auto_engine.generate_trading_review(
+        period_start=period_start,
+        period_end=period_end,
+        period_name=review_label,
+        report_kind="manual",
+    )
+    return review
 
 
 

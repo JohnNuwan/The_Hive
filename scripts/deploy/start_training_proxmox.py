@@ -28,6 +28,15 @@ REMOTE_SEQUENCE_LOG = f"{REMOTE_DIR}/hive_wave1_sequence.log"
 REMOTE_V4_SEQUENCE_DIR = f"{REMOTE_DIR}/data/checkpoints/v4_ga"
 REMOTE_V4_SEQUENCE_RUNNER = f"{REMOTE_DIR}/scripts/deploy/v4_sequence_runner.py"
 LOCAL_ROOT = Path(__file__).resolve().parents[2]
+CANONICAL_SCALP_MULTI_UNIVERSE = [
+    "EURUSD",
+    "XAUUSD",
+    "GBPUSD",
+    "USDJPY",
+    "US30.cash",
+    "GER40.cash",
+    "US500.cash",
+]
 
 SYNC_FILES = [
     Path("docker-compose.yml"),
@@ -40,6 +49,7 @@ SYNC_FILES = [
     Path("src/eva-lab/eva_lab/gold_cpu_prep.py"),
     Path("src/eva-lab/eva_lab/live_inference_main.py"),
     Path("src/eva-lab/eva_lab/live_inference_models.py"),
+    Path("src/eva-lab/eva_lab/muzero/dreamer_agent.py"),
     Path("src/eva-lab/eva_lab/muzero/dreamer_networks.py"),
     Path("src/eva-lab/eva_lab/muzero/dreamer_trainer.py"),
     Path("src/eva-lab/eva_lab/muzero/imagination.py"),
@@ -214,6 +224,14 @@ PASSTHROUGH_VARS = [
     "TRAINING_GA_STATUS",
     "TRAINING_GA_GENERATION",
     "TRAINING_GA_TRIAL",
+    "TRAINING_GA_CAMPAIGN_ID",
+    "TRAINING_GA_SCOPE",
+    "TRAINING_GA_PARENT_CHAMPION_ID",
+    "TRAINING_GA_DEFER_PROMOTION",
+    "TRAINING_GA_GENOME_JSON",
+    "TRAINING_GA_SEED_CHECKPOINT_PATH",
+    "TRAINING_RESUME_CHECKPOINT_PATH",
+    "TRAINING_RESUME_STEP",
     "TRAINING_GATE_PROFILE",
     "TRAINING_FOCUS_SYMBOLS",
     "TRAINING_SEQUENCE_ID",
@@ -1142,6 +1160,119 @@ def _build_scalp_reduced_overrides(symbols: list[str] | None = None) -> dict[str
         "MUZERO_TRAINING_STEPS": "12000",
         "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": "5",
         "MUZERO_LIVE_TOP_SYMBOLS": "5",
+    }
+
+
+def _normalize_scalp_multi_universe_symbols(symbols: list[str] | None = None) -> list[str]:
+    """Normalise l'univers canonique `scalp` multi-univers a 7 symboles.
+
+    Args:
+        symbols (list[str] | None): Liste optionnelle a normaliser.
+
+    Returns:
+        list[str]: Univers final dedoublonne et ordonne.
+    """
+    alias_map = {
+        "US30.CASH": "US30.cash",
+        "GER40.CASH": "GER40.cash",
+        "US500.CASH": "US500.cash",
+    }
+    requested = symbols or CANONICAL_SCALP_MULTI_UNIVERSE
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for symbol in requested:
+        label = alias_map.get(str(symbol or "").strip().upper(), str(symbol or "").strip())
+        if not label or label in seen:
+            continue
+        normalized.append(label)
+        seen.add(label)
+    return normalized
+
+
+def _build_muzero_scalp_multi_universe_full_overrides(
+    symbols: list[str] | None = None,
+) -> dict[str, str]:
+    """Construit un `full` MuZero `scalp` force sur 7 symboles.
+
+    Args:
+        symbols (list[str] | None): Univers explicite a imposer.
+
+    Returns:
+        dict[str, str]: Variables d'environnement pretes pour Proxmox.
+    """
+    full_symbols = _normalize_scalp_multi_universe_symbols(symbols)
+    symbol_csv = ",".join(full_symbols)
+    symbol_count = str(len(full_symbols))
+    return {
+        "TRAINING_PROFILE": "refresh",
+        "TRAINING_AUTOMATION_MODE": "force_refresh",
+        "TRAINING_RUN_TRIGGER": "manual_muzero_scalp_multi_universe_full",
+        "TRAINING_ENGINE": "muzero",
+        "TRAINING_TRIAL_MODE": "full",
+        "TRAINING_TRIAL_COST_PROFILE": "full",
+        "TRAINING_GA_STATUS": "full",
+        "TRAINING_GATE_PROFILE": "standard",
+        "NIGHTLY_KEEP_VLLM": "0",
+        "RUN_TRAIN_GNN": "0",
+        "RUN_TRAIN_MUZERO": "1",
+        "RUN_TRAIN_DREAMER": "0",
+        "MUZERO_HORIZONS": "scalp",
+        "MUZERO_SYMBOLS_SCALP": symbol_csv,
+        "ARENA_SYMBOLS_SCALP": symbol_csv,
+        "MUZERO_MAX_SYMBOLS": symbol_count,
+        "ARENA_MAX_SYMBOLS": symbol_count,
+        "MUZERO_TRAINING_STEPS": "18000",
+        "MUZERO_GAMES_PER_SYMBOL": "12",
+        "ARENA_GAMES_PER_SYMBOL": "6",
+        "ARENA_MIN_GAMES": "12",
+        "ARENA_MIN_SYMBOLS": "7",
+        "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": symbol_count,
+        "MUZERO_LIVE_TOP_SYMBOLS": symbol_count,
+    }
+
+
+def _build_dreamer_scalp_multi_universe_full_overrides(
+    symbols: list[str] | None = None,
+) -> dict[str, str]:
+    """Construit un `full` Dreamer `scalp` force sur 7 symboles.
+
+    Args:
+        symbols (list[str] | None): Univers explicite a imposer.
+
+    Returns:
+        dict[str, str]: Variables d'environnement pretes pour Proxmox.
+    """
+    full_symbols = _normalize_scalp_multi_universe_symbols(symbols)
+    symbol_csv = ",".join(full_symbols)
+    symbol_count = str(len(full_symbols))
+    return {
+        "TRAINING_PROFILE": "refresh",
+        "TRAINING_AUTOMATION_MODE": "force_refresh",
+        "TRAINING_RUN_TRIGGER": "manual_dreamer_scalp_multi_universe_full",
+        "TRAINING_ENGINE": "dreamer",
+        "TRAINING_TRIAL_MODE": "full",
+        "TRAINING_TRIAL_COST_PROFILE": "full",
+        "TRAINING_GA_STATUS": "full",
+        "TRAINING_GATE_PROFILE": "standard",
+        "NIGHTLY_KEEP_VLLM": "0",
+        "RUN_TRAIN_GNN": "0",
+        "RUN_TRAIN_MUZERO": "0",
+        "RUN_TRAIN_DREAMER": "1",
+        "MUZERO_HORIZONS": "scalp",
+        "DREAMER_HORIZON": "scalp",
+        "MUZERO_SYMBOLS_SCALP": symbol_csv,
+        "ARENA_SYMBOLS_SCALP": symbol_csv,
+        "MUZERO_MAX_SYMBOLS": symbol_count,
+        "ARENA_MAX_SYMBOLS": symbol_count,
+        "DREAMER_EPOCHS": "220",
+        "DREAMER_BATCH_SIZE": "6",
+        "DREAMER_REPLAY_MAX_GAMES": "1800",
+        "DREAMER_SEQUENCE_LENGTH": "96",
+        "DREAMER_SEQUENCE_STRIDE": "4",
+        "DREAMER_NUM_UNROLL_STEPS": "18",
+        "ARENA_GAMES_PER_SYMBOL": "6",
+        "ARENA_MIN_GAMES": "12",
+        "ARENA_MIN_SYMBOLS": "7",
     }
 
 
@@ -3790,6 +3921,8 @@ def start_training(
     manual_massive: bool = False,
     *,
     scalp_reduced: bool = False,
+    muzero_scalp_full_7: bool = False,
+    dreamer_scalp_full_7: bool = False,
     intraday_reduced: bool = False,
     swing_reduced: bool = False,
     all_reduced: bool = False,
@@ -3806,6 +3939,8 @@ def start_training(
     Args:
         manual_massive (bool): Force un run massif immediat de recherche.
         scalp_reduced (bool): Force une relance `scalp` reduite.
+        muzero_scalp_full_7 (bool): Lance un `full` MuZero `scalp` 7-symboles.
+        dreamer_scalp_full_7 (bool): Lance un `full` Dreamer `scalp` 7-symboles.
         intraday_reduced (bool): Force une relance `intraday` reduite.
         swing_reduced (bool): Force une relance `swing` reduite.
         all_reduced (bool): Force une relance reduite `scalp+intraday+swing`.
@@ -3842,6 +3977,10 @@ def start_training(
             runtime_overrides = _build_manual_massive_overrides()
         elif scalp_reduced:
             runtime_overrides = _build_scalp_reduced_overrides(symbols)
+        elif muzero_scalp_full_7:
+            runtime_overrides = _build_muzero_scalp_multi_universe_full_overrides(symbols)
+        elif dreamer_scalp_full_7:
+            runtime_overrides = _build_dreamer_scalp_multi_universe_full_overrides(symbols)
         elif intraday_reduced:
             runtime_overrides = _build_intraday_reduced_overrides(symbols)
         elif swing_reduced:
@@ -3901,6 +4040,16 @@ def parse_args() -> argparse.Namespace:
         "--scalp-reduced",
         action="store_true",
         help="Relance uniquement `scalp` sur un univers reduit multi-actifs.",
+    )
+    parser.add_argument(
+        "--muzero-scalp-full-7",
+        action="store_true",
+        help="Lance un `full` MuZero `scalp` force sur l'univers canonique a 7 symboles.",
+    )
+    parser.add_argument(
+        "--dreamer-scalp-full-7",
+        action="store_true",
+        help="Lance un `full` Dreamer `scalp` force sur l'univers canonique a 7 symboles.",
     )
     parser.add_argument(
         "--intraday-reduced",
@@ -4014,6 +4163,8 @@ if __name__ == "__main__":
         for flag in (
             args.manual_massive,
             args.scalp_reduced,
+            args.muzero_scalp_full_7,
+            args.dreamer_scalp_full_7,
             args.intraday_reduced,
             args.swing_reduced,
             args.all_reduced,
@@ -4028,7 +4179,7 @@ if __name__ == "__main__":
     )
     if selected_profiles > 1:
         raise SystemExit(
-            "Choisissez un seul profil parmi --manual-massive, --scalp-reduced, --intraday-reduced, --swing-reduced, --all-reduced, --wave1-profile, --wave1-sequence, --v3-sequence, --v3-profile, --v4-sequence, --v4-profile."
+            "Choisissez un seul profil parmi --manual-massive, --scalp-reduced, --muzero-scalp-full-7, --dreamer-scalp-full-7, --intraday-reduced, --swing-reduced, --all-reduced, --wave1-profile, --wave1-sequence, --v3-sequence, --v3-profile, --v4-sequence, --v4-profile."
         )
     requested_symbols = [
         item.strip()
@@ -4077,6 +4228,8 @@ if __name__ == "__main__":
         start_training(
             manual_massive=args.manual_massive,
             scalp_reduced=args.scalp_reduced,
+            muzero_scalp_full_7=args.muzero_scalp_full_7,
+            dreamer_scalp_full_7=args.dreamer_scalp_full_7,
             intraday_reduced=args.intraday_reduced,
             swing_reduced=args.swing_reduced,
             all_reduced=args.all_reduced,

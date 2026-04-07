@@ -12,6 +12,7 @@ import numpy as np
 
 from eva_lab.muzero.config import MuZeroConfigV3
 from eva_lab.muzero.environment import TradingEnvironment
+from eva_lab.muzero.dreamer_agent import JAXDreamerAgent
 from eva_lab.muzero.jax_agent import JAXMuZeroAgent
 from eva_lab.training_utils import (
     build_muzero_market_data,
@@ -534,16 +535,24 @@ class Arena:
             "dataset_coverage": dataset_coverage,
         }
 
-    def _resolve_model_path(self, model_id: str, horizon: str) -> Path | None:
+    def _resolve_model_path(
+        self,
+        model_id: str,
+        horizon: str,
+        *,
+        engine: str = "muzero",
+    ) -> Path | None:
         """Retourne le chemin d'un modele, avec fallback sur les champions historiques.
 
         Args:
             model_id (str): Identifiant du modele.
             horizon (str): Horizon strategique evalue.
+            engine (str): Moteur cible (`muzero` ou `dreamer`).
 
         Returns:
             Path | None: Chemin vers les poids du modele si disponible.
         """
+        normalized_engine = str(engine or "muzero").strip().lower()
         direct_path = self.weights_dir / f"{model_id}.pkl"
         if direct_path.exists():
             return direct_path
@@ -553,21 +562,30 @@ class Arena:
             return raw_candidate
 
         candidates = []
-        if model_id == "gen_000_baseline":
-            candidates.extend(
-                [
-                    self.weights_dir / f"muzero_champion_{horizon}.pkl",
-                    self.weights_dir / "muzero_champion.pkl",
-                    self.weights_dir / "muzero_global_latest.pkl",
-                ]
-            )
-        elif model_id == "muzero_champion":
-            candidates.extend(
-                [
-                    self.weights_dir / f"muzero_champion_{horizon}.pkl",
-                    self.weights_dir / "muzero_champion.pkl",
-                ]
-            )
+        if normalized_engine == "dreamer":
+            if model_id in {"gen_000_baseline", "dreamer_champion"}:
+                candidates.extend(
+                    [
+                        self.weights_dir / f"dreamer_champion_{horizon}.pkl",
+                        self.weights_dir / "dreamer_champion.pkl",
+                    ]
+                )
+        else:
+            if model_id == "gen_000_baseline":
+                candidates.extend(
+                    [
+                        self.weights_dir / f"muzero_champion_{horizon}.pkl",
+                        self.weights_dir / "muzero_champion.pkl",
+                        self.weights_dir / "muzero_global_latest.pkl",
+                    ]
+                )
+            elif model_id == "muzero_champion":
+                candidates.extend(
+                    [
+                        self.weights_dir / f"muzero_champion_{horizon}.pkl",
+                        self.weights_dir / "muzero_champion.pkl",
+                    ]
+                )
 
         for candidate in candidates:
             if candidate.exists():
@@ -641,12 +659,54 @@ class Arena:
                 segments.append(segment)
         return segments
 
+    def _load_agent(
+        self,
+        *,
+        engine: str,
+        horizon: str,
+        symbols: list[str],
+        weights_path: Path,
+    ) -> object | None:
+        """Charge l'agent d'inference adapte au moteur demande.
+
+        Args:
+            engine (str): Moteur cible (`muzero` ou `dreamer`).
+            horizon (str): Horizon strategique evalue.
+            symbols (list[str]): Univers utilise pour l'evaluation.
+            weights_path (Path): Checkpoint a charger.
+
+        Returns:
+            object | None: Agent charge ou ``None`` si le chargement echoue.
+        """
+        config = MuZeroConfigV3(
+            horizon=horizon,
+            primary_timeframe=get_horizon_timeframe(horizon),
+            symbols=symbols,
+        )
+        normalized_engine = str(engine or "muzero").strip().lower()
+        try:
+            if normalized_engine == "dreamer":
+                agent = JAXDreamerAgent(config)
+            else:
+                agent = JAXMuZeroAgent(config)
+            agent.load(str(weights_path))
+            return agent
+        except Exception as exc:
+            logger.error(
+                "Chargement %s impossible pour %s: %s",
+                normalized_engine,
+                weights_path,
+                exc,
+            )
+            return None
+
     def _evaluate_model(
         self,
         weights_path: Path,
         symbols: list[str],
         horizon: str,
         *,
+        engine: str = "muzero",
         role: str | None = None,
         eval_games_per_symbol: int | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -676,11 +736,13 @@ class Arena:
             primary_timeframe=get_horizon_timeframe(horizon),
             symbols=symbols,
         )
-        try:
-            agent = JAXMuZeroAgent(config)
-            agent.load(str(weights_path))
-        except Exception as exc:
-            logger.error("Chargement MuZero impossible pour %s: %s", weights_path, exc)
+        agent = self._load_agent(
+            engine=engine,
+            horizon=horizon,
+            symbols=symbols,
+            weights_path=weights_path,
+        )
+        if agent is None:
             return self._empty_metrics()
 
         effective_games_per_symbol = (
@@ -848,6 +910,7 @@ class Arena:
         challenger_id: str,
         *,
         horizon: str = "intraday",
+        engine: str = "muzero",
         eval_symbols: list[str] | None = None,
         games_per_symbol: int = 6,
     ) -> dict[str, Any]:
@@ -859,6 +922,7 @@ class Arena:
         Args:
             challenger_id (str): Identifiant du challenger a tester.
             horizon (str): Horizon strategique evalue.
+            engine (str): Moteur du challenger (`muzero` ou `dreamer`).
             eval_symbols (list[str] | None): Univers explicite de symboles.
             games_per_symbol (int): Nombre de segments d'evaluation par symbole.
 
@@ -887,7 +951,12 @@ class Arena:
         if not symbols:
             symbols = ["XAUUSD"]
 
-        challenger_path = self._resolve_model_path(challenger_id, normalized_horizon)
+        normalized_engine = str(engine or "muzero").strip().lower()
+        challenger_path = self._resolve_model_path(
+            challenger_id,
+            normalized_horizon,
+            engine=normalized_engine,
+        )
         if challenger_path is None:
             raise FileNotFoundError(f"Modele challenger introuvable: {challenger_id}")
 
@@ -895,12 +964,18 @@ class Arena:
             challenger_path,
             symbols,
             normalized_horizon,
+            engine=normalized_engine,
             role="challenger",
             eval_games_per_symbol=max(1, int(games_per_symbol)),
         )
         return {
             "timestamp": datetime.now().isoformat(),
-            "evaluation_type": "MUZERO_GOLD_PRECHECK",
+            "evaluation_type": (
+                "DREAMER_GOLD_PRECHECK"
+                if normalized_engine == "dreamer"
+                else "MUZERO_GOLD_PRECHECK"
+            ),
+            "engine": normalized_engine,
             "horizon": normalized_horizon,
             "timeframe": timeframe,
             "eval_symbols": symbols,
@@ -918,6 +993,7 @@ class Arena:
         challenger_id: str,
         champion_id: str = "gen_000_baseline",
         horizon: str = "intraday",
+        engine: str = "muzero",
     ) -> dict[str, Any]:
         """Compare deux generations MuZero et retourne le verdict ADN.
 
@@ -925,10 +1001,12 @@ class Arena:
             challenger_id (str): Identifiant du challenger.
             champion_id (str): Identifiant du champion courant.
             horizon (str): Horizon strategique evalue.
+            engine (str): Moteur du duel (`muzero` ou `dreamer`).
 
         Returns:
             dict[str, Any]: Rapport complet de duel et de validation.
         """
+        normalized_engine = str(engine or "muzero").strip().lower()
         horizon = horizon.lower()
         timeframe = get_horizon_timeframe(horizon)
         eval_symbols = resolve_training_symbols(
@@ -945,13 +1023,22 @@ class Arena:
         if not eval_symbols:
             eval_symbols = ["XAUUSD", "EURUSD", "BTCUSD", "GBPUSD", "USDJPY"]
 
-        challenger_path = self._resolve_model_path(challenger_id, horizon)
-        champion_path = self._resolve_model_path(champion_id, horizon)
+        challenger_path = self._resolve_model_path(
+            challenger_id,
+            horizon,
+            engine=normalized_engine,
+        )
+        champion_path = self._resolve_model_path(
+            champion_id,
+            horizon,
+            engine=normalized_engine,
+        )
         if challenger_path is None:
             raise FileNotFoundError(f"Modele challenger introuvable: {challenger_id}")
 
         logger.info(
-            "Arena %s: challenger=%s | champion=%s | symboles=%s",
+            "Arena %s/%s: challenger=%s | champion=%s | symboles=%s",
+            normalized_engine,
             horizon,
             challenger_path,
             champion_path,
@@ -960,6 +1047,7 @@ class Arena:
 
         arena_progress: dict[str, Any] = {
             "status": "running",
+            "engine": normalized_engine,
             "horizon": horizon,
             "timeframe": timeframe,
             "family": infer_family_from_symbols(eval_symbols),
@@ -1049,6 +1137,7 @@ class Arena:
             challenger_path,
             eval_symbols,
             horizon,
+            engine=normalized_engine,
             role="challenger",
             progress_callback=publish_progress,
         )
@@ -1057,6 +1146,7 @@ class Arena:
                 champion_path,
                 eval_symbols,
                 horizon,
+                engine=normalized_engine,
                 role="champion",
                 progress_callback=publish_progress,
             )
@@ -1082,7 +1172,12 @@ class Arena:
 
         report = {
             "timestamp": datetime.now().isoformat(),
-            "combat_type": "MUZERO_HISTORICAL_ARENA",
+            "combat_type": (
+                "DREAMER_HISTORICAL_ARENA"
+                if normalized_engine == "dreamer"
+                else "MUZERO_HISTORICAL_ARENA"
+            ),
+            "engine": normalized_engine,
             "horizon": horizon,
             "timeframe": timeframe,
             "family": challenger_metrics.get("family") or arena_progress.get("family"),

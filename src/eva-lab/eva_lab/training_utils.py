@@ -16,6 +16,71 @@ from shared.indicators import IndicatorFactory
 
 logger = logging.getLogger(__name__)
 
+SCALP_MULTI_UNIVERSE_SYMBOLS = [
+    "EURUSD",
+    "XAUUSD",
+    "GBPUSD",
+    "USDJPY",
+    "US30.cash",
+    "GER40.cash",
+    "US500.cash",
+]
+CANONICAL_SYMBOL_ALIASES = {
+    "US30.CASH": "US30.cash",
+    "GER40.CASH": "GER40.cash",
+    "US500.CASH": "US500.cash",
+}
+
+
+def normalize_training_symbol_name(symbol: str) -> str:
+    """Normalise un symbole de marche vers l'ecriture canonique du projet.
+
+    Args:
+        symbol (str): Symbole brut fourni par un utilisateur ou un manifeste.
+
+    Returns:
+        str: Symbole canonique exploitable dans les runs et registres.
+    """
+    raw_symbol = str(symbol or "").strip()
+    if not raw_symbol:
+        return ""
+
+    symbol_upper = raw_symbol.upper()
+    if symbol_upper in CANONICAL_SYMBOL_ALIASES:
+        return CANONICAL_SYMBOL_ALIASES[symbol_upper]
+    if symbol_upper.endswith(".CASH"):
+        return f"{symbol_upper[:-5]}.cash"
+    return symbol_upper
+
+
+def normalize_training_symbols(symbols: list[str] | tuple[str, ...] | None) -> list[str]:
+    """Normalise une liste de symboles tout en supprimant les doublons.
+
+    Args:
+        symbols (list[str] | tuple[str, ...] | None): Liste brute a nettoyer.
+
+    Returns:
+        list[str]: Liste canonique dedoublonnee, en conservant l'ordre.
+    """
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for symbol in list(symbols or []):
+        normalized_symbol = normalize_training_symbol_name(str(symbol or ""))
+        if not normalized_symbol or normalized_symbol in seen:
+            continue
+        normalized.append(normalized_symbol)
+        seen.add(normalized_symbol)
+    return normalized
+
+
+def get_scalp_multi_universe_symbols() -> list[str]:
+    """Retourne l'univers canonique 7 symboles du scalp multi-univers.
+
+    Returns:
+        list[str]: Univers stable a reutiliser pour les runs `full`.
+    """
+    return list(SCALP_MULTI_UNIVERSE_SYMBOLS)
+
 GNN_ASSET_DIM = 20
 GNN_TEMPORAL_DIM = 64
 GNN_HIDDEN_DIM = 128
