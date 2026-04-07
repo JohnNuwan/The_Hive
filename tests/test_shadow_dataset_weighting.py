@@ -74,3 +74,49 @@ def test_load_shadow_games_applies_weighting_and_filters_symbols(tmp_path):
     assert summary["weighted_episode_counts"]["loser_episode"] == 1
     assert summary["weighted_episode_counts"]["nemesis_episode"] == 1
     assert summary["weighted_episode_counts"]["risk_symbol_episode"] == 1
+
+
+def test_load_shadow_games_prioritizes_seed_candidate_episodes(tmp_path):
+    payloads = [
+        {
+            "timestamp": "2026-04-01T21:00:00",
+            "observation": {"price": 1.10, "indicators": {}},
+            "action": {"type": "SELL", "symbol": "GBPUSD"},
+            "reward": 4.0,
+            "next_observation": {"price": 1.09, "indicators": {}},
+            "metadata": {
+                "episode_id": "seed-1",
+                "symbol": "GBPUSD",
+                "model_version": "gen_scalp_20260406_053030",
+                "checkpoint": "/tmp/gen_scalp_20260406_053030.pkl",
+            },
+            "done": True,
+        },
+        {
+            "timestamp": "2026-04-01T21:05:00",
+            "observation": {"price": 1.11, "indicators": {}},
+            "action": {"type": "BUY", "symbol": "GBPUSD"},
+            "reward": 2.0,
+            "next_observation": {"price": 1.12, "indicators": {}},
+            "metadata": {
+                "episode_id": "plain-1",
+                "symbol": "GBPUSD",
+            },
+            "done": True,
+        },
+    ]
+    shadow_file = tmp_path / "seed_episodes.jsonl"
+    shadow_file.write_text("\n".join(json.dumps(item) for item in payloads) + "\n", encoding="utf-8")
+
+    games, summary = load_shadow_games(
+        [tmp_path],
+        observation_size=32,
+        action_space_size=5,
+        seed_model_versions=["gen_scalp_20260406_053030"],
+        seed_checkpoints=["/tmp/gen_scalp_20260406_053030.pkl", "gen_scalp_20260406_053030.pkl"],
+        include_weighting_summary=True,
+    )
+
+    games_by_episode = {game.metadata.get("pnl"): game for game in games}
+    assert summary["weighted_episode_counts"]["seed_candidate_episode"] == 1
+    assert games_by_episode[4.0].metadata["episode_weight"] > games_by_episode[2.0].metadata["episode_weight"]

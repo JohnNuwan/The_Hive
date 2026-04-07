@@ -2019,6 +2019,7 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         "replay_cache_reuse_ratio": ((run_view.get("dataset_coverage") or {}).get("replay_cache_reuse_ratio")),
         "metrics_by_position_mechanics": run_view.get("metrics_by_position_mechanics", {}),
         "training_weighting": run_view.get("training_weighting", {}),
+        "continuous_scheduler": run_view.get("continuous_scheduler", {}),
         "service_recovery": service_recovery,
     }
     await _publish_training_run_snapshot(
@@ -2202,6 +2203,7 @@ async def factory_overview():
             "inference_batch_profile": run_view.get("inference_batch_profile", {}),
             "jax_batch_profile": run_view.get("jax_batch_profile", {}),
             "gpu_owner": run_view.get("gpu_owner"),
+            "continuous_scheduler": run_view.get("continuous_scheduler", {}),
         },
         "champions": {
             "muzero_scalp": _build_engine_overview_card("muzero", "scalp", muzero_scalp),
@@ -2217,6 +2219,7 @@ async def factory_overview():
         "ga": _build_ga_overview(recent_trials, run_view),
         "timescaledb_coverage": timescaledb_coverage,
         "training_weighting": run_view.get("training_weighting", {}),
+        "continuous_scheduler": run_view.get("continuous_scheduler", {}),
         "service_recovery": service_recovery,
         "runtime_truth": run_view.get("runtime_truth", {}),
         "live_policy": "muzero_only",

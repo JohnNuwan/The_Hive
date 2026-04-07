@@ -1013,12 +1013,17 @@ class OfflineTrainer:
                 "pyramid_efficiency": 0.0,
                 "slbe_capture_rate": 0.0,
                 "hold_drag_score": 1.0,
+                "hold_drag_score_normalized": 1.0,
                 "close_quality_score": 0.0,
                 "split_executed": 0.0,
+                "split_profitable_count": 0.0,
                 "pyramids_opened": 0.0,
+                "pyramid_profitable_count": 0.0,
                 "slbe_triggered": 0.0,
+                "slbe_profitable_exits": 0.0,
                 "close_winner_count": 0.0,
                 "close_loser_count": 0.0,
+                "meaningful_exit_count": 0.0,
             },
         }
 

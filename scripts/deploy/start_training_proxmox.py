@@ -29,6 +29,8 @@ REMOTE_SEQUENCE_SCRIPT = f"{REMOTE_DIR}/scripts/run_wave1_sequence_remote.sh"
 REMOTE_SEQUENCE_LOG = f"{REMOTE_DIR}/hive_wave1_sequence.log"
 REMOTE_WEEKEND_SCRIPT = f"{REMOTE_DIR}/scripts/run_weekend_intensive_until_monday.sh"
 REMOTE_WEEKEND_LOG = f"{REMOTE_DIR}/data/checkpoints/weekend_intensive_until_monday.log"
+REMOTE_CONTINUOUS_SCRIPT = f"{REMOTE_DIR}/scripts/run_continuous_auto_improve.sh"
+REMOTE_CONTINUOUS_LOG = f"{REMOTE_DIR}/data/checkpoints/continuous_auto_improve.log"
 REMOTE_V4_SEQUENCE_DIR = f"{REMOTE_DIR}/data/checkpoints/v4_ga"
 REMOTE_V4_SEQUENCE_RUNNER = f"{REMOTE_DIR}/scripts/deploy/v4_sequence_runner.py"
 LOCAL_ROOT = Path(__file__).resolve().parents[2]
@@ -83,10 +85,13 @@ SYNC_DIRS = [
 PASSTHROUGH_VARS = [
     "TRAINING_PROFILE",
     "TRAINING_AUTOMATION_MODE",
+    "TRAINING_CONTINUOUS_MODE",
+    "TRAINING_CONTINUOUS_DREAMER_MIN_INTERVAL_HOURS",
     "TRAINING_REFRESH_AFTER_HOURS",
     "TRAINING_MAX_CHAMPION_AGE_HOURS",
     "TRAINING_GNN_REFRESH_AFTER_HOURS",
     "TRAINING_MIN_SHADOW_RECORDS",
+    "TRAINING_EPISODE_WEIGHT_SEED_CANDIDATE_BONUS",
     "NIGHTLY_KEEP_VLLM",
     "NIGHTLY_DEFER_VLLM_RESTART",
     "NIGHTLY_STOP_COMFYUI",
@@ -309,6 +314,7 @@ FAST_MUZERO_FULL_SYMBOLS = [
 FAST_MUZERO_FULL_TRIGGER = "manual_muzero_full_7_symbols"
 NIGHTLY_STACK_TRIGGER = "manual_nightly_stack_canonical"
 WEEKEND_INTENSIVE_TRIGGER = "weekend_intensive_until_monday"
+CONTINUOUS_AUTO_IMPROVE_TRIGGER = "continuous_auto_improve"
 
 V4_WINDOW_ORDER = [
     ("muzero", "proxy_ga"),
@@ -548,6 +554,10 @@ release_lock() {
 
 export TRAINING_PROFILE=\"${TRAINING_PROFILE:-smart}\"
 export TRAINING_AUTOMATION_MODE=\"${TRAINING_AUTOMATION_MODE:-smart}\"
+export TRAINING_CONTINUOUS_MODE=\"${TRAINING_CONTINUOUS_MODE:-0}\"
+export TRAINING_CONTINUOUS_DREAMER_MIN_INTERVAL_HOURS=\"${TRAINING_CONTINUOUS_DREAMER_MIN_INTERVAL_HOURS:-24}\"
+export TRAINING_GNN_REFRESH_AFTER_HOURS=\"${TRAINING_GNN_REFRESH_AFTER_HOURS:-72}\"
+export TRAINING_EPISODE_WEIGHT_SEED_CANDIDATE_BONUS=\"${TRAINING_EPISODE_WEIGHT_SEED_CANDIDATE_BONUS:-0.45}\"
 export TRAINING_RUN_LOCK_ALREADY_HELD=1
 
 if [ \"$TRAINING_PROFILE\" = \"research\" ]; then
@@ -587,10 +597,16 @@ fi
 
 if [ \"$NIGHTLY_STOP_COMFYUI\" = \"1\" ]; then
   echo \"[nightly] Arret temporaire de ComfyUI\"
-  docker compose stop comfyui || true
-  COMFYUI_STOPPED=1
-  emit_launcher_state \"preflight\" \"$([ \"$VLLM_STOPPED\" = \"1\" ] && echo stopped_for_training || echo online)\" \"stopped_for_training\"
-  emit_training_log INFO launcher \"ComfyUI arrete temporairement pour le run.\"
+  if timeout 20s docker compose stop comfyui >/dev/null 2>&1; then
+    COMFYUI_STOPPED=1
+    emit_launcher_state \"preflight\" \"$([ \"$VLLM_STOPPED\" = \"1\" ] && echo stopped_for_training || echo online)\" \"stopped_for_training\"
+    emit_training_log INFO launcher \"ComfyUI arretee temporairement pour le run.\"
+  else
+    COMFYUI_STOPPED=0
+    echo \"[nightly] ComfyUI encore active apres timeout, poursuite sans blocage\"
+    emit_launcher_state \"preflight\" \"$([ \"$VLLM_STOPPED\" = \"1\" ] && echo stopped_for_training || echo online)\" \"stop_timeout\"
+    emit_training_log WARNING launcher \"ComfyUI n'a pas pu etre arretee rapidement; poursuite du run.\"
+  fi
 fi
 
 cleanup() {
@@ -751,16 +767,31 @@ if [ \"$REBUILD_TRAINER_IMAGE\" = \"1\" ]; then
   fi
 fi
 
+TRAINER_RUNTIME_PROBE_TIMEOUT_SECONDS=\"${TRAINER_RUNTIME_PROBE_TIMEOUT_SECONDS:-45}\"
+echo \"[nightly] Verification du runtime Docker du trainer\"
+emit_training_log INFO launcher \"Verification du runtime Docker du trainer avant lancement.\"
+if ! timeout \"${TRAINER_RUNTIME_PROBE_TIMEOUT_SECONDS}s\" docker run --rm --entrypoint bash thehive/eva-trainer:latest -lc \"echo '[nightly] Probe runtime trainer OK'\" >/dev/null 2>&1; then
+  echo \"[nightly] Probe runtime trainer en echec\"
+  emit_launcher_state \"preflight_failed\" \"$([ \"$VLLM_STOPPED\" = \"1\" ] && echo stopped_for_training || echo online)\" \"$([ \"$COMFYUI_STOPPED\" = \"1\" ] && echo stopped_for_training || echo online)\"
+  emit_training_log ERROR launcher \"Le runtime Docker n'a pas pu demarrer un conteneur trainer dans le delai imparti.\"
+  write_skip_marker \"trainer_runtime_unavailable\"
+  exit 1
+fi
+
 echo \"[nightly] Installation runtime JAX CUDA validee\"
 emit_launcher_state \"trainer_running\" \"$([ \"$VLLM_STOPPED\" = \"1\" ] && echo stopped_for_training || echo online)\" \"$([ \"$COMFYUI_STOPPED\" = \"1\" ] && echo stopped_for_training || echo online)\"
 emit_training_log INFO launcher \"Demarrage du conteneur trainer pour le run nightly.\"
-docker compose run --rm \
+docker compose run --rm --no-deps -T \
   -e PYTHONPATH=/app/eva-lab:/app/shared \
   -e TRAINING_PROFILE=\"$TRAINING_PROFILE\" \
   -e TRAINING_AUTOMATION_MODE=\"$TRAINING_AUTOMATION_MODE\" \
+  -e TRAINING_CONTINUOUS_MODE=\"$TRAINING_CONTINUOUS_MODE\" \
+  -e TRAINING_CONTINUOUS_DREAMER_MIN_INTERVAL_HOURS=\"$TRAINING_CONTINUOUS_DREAMER_MIN_INTERVAL_HOURS\" \
   -e TRAINING_REFRESH_AFTER_HOURS=\"${TRAINING_REFRESH_AFTER_HOURS:-24}\" \
   -e TRAINING_MAX_CHAMPION_AGE_HOURS=\"${TRAINING_MAX_CHAMPION_AGE_HOURS:-72}\" \
+  -e TRAINING_GNN_REFRESH_AFTER_HOURS=\"${TRAINING_GNN_REFRESH_AFTER_HOURS:-72}\" \
   -e TRAINING_MIN_SHADOW_RECORDS=\"${TRAINING_MIN_SHADOW_RECORDS:-25}\" \
+  -e TRAINING_EPISODE_WEIGHT_SEED_CANDIDATE_BONUS=\"${TRAINING_EPISODE_WEIGHT_SEED_CANDIDATE_BONUS:-0.45}\" \
   -e XLA_PYTHON_CLIENT_PREALLOCATE=\"$XLA_PYTHON_CLIENT_PREALLOCATE\" \
   -e XLA_PYTHON_CLIENT_MEM_FRACTION=\"$XLA_PYTHON_CLIENT_MEM_FRACTION\" \
   -e REBUILD_TRAINER_IMAGE=\"$REBUILD_TRAINER_IMAGE\" \
@@ -1262,6 +1293,26 @@ def _build_weekend_intensive_overrides() -> dict[str, str]:
         "DREAMER_REPLAY_MAX_GAMES": "1500",
         "DREAMER_SLICE_MAX_SECONDS": "21600",
     }
+
+
+def _build_continuous_auto_improve_overrides() -> dict[str, str]:
+    """Construit le profil continu d'auto-amelioration serveur.
+
+    Returns:
+        dict[str, str]: Variables d'environnement a injecter dans la boucle.
+    """
+
+    overrides = _build_weekend_intensive_overrides()
+    overrides.update(
+        {
+            "TRAINING_RUN_TRIGGER": CONTINUOUS_AUTO_IMPROVE_TRIGGER,
+            "TRAINING_CONTINUOUS_MODE": "1",
+            "TRAINING_CONTINUOUS_DREAMER_MIN_INTERVAL_HOURS": "24",
+            "TRAINING_GNN_REFRESH_AFTER_HOURS": "72",
+            "TRAINING_EPISODE_WEIGHT_SEED_CANDIDATE_BONUS": "0.60",
+        }
+    )
+    return overrides
 
 
 def _build_scalp_reduced_overrides(symbols: list[str] | None = None) -> dict[str, str]:
@@ -4113,9 +4164,22 @@ import os
 import signal
 import subprocess
 import sys
+from pathlib import Path
 
 pattern = sys.argv[1]
 skip_pids = {{int(value) for value in sys.argv[2:] if value.isdigit()}}
+ancestor_pid = os.getpid()
+while ancestor_pid > 1:
+    skip_pids.add(ancestor_pid)
+    try:
+        parent_pid = os.getppid() if ancestor_pid == os.getpid() else int(
+            Path(f"/proc/{{ancestor_pid}}/stat").read_text(encoding="utf-8").split()[3]
+        )
+    except Exception:
+        break
+    if parent_pid <= 1 or parent_pid == ancestor_pid:
+        break
+    ancestor_pid = parent_pid
 result = subprocess.run(
     ["ps", "-eo", "pid,args"],
     capture_output=True,
@@ -4140,6 +4204,7 @@ PY
 }}
 
 terminate_matching_processes "{REMOTE_WEEKEND_SCRIPT}"
+terminate_matching_processes "{REMOTE_CONTINUOUS_SCRIPT}"
 terminate_matching_processes "{REMOTE_SCRIPT}"
 
 TRAINERS="$(docker ps --format '{{{{.Names}}}}' | grep '^the_hive-eva-trainer-run-' || true)"
@@ -4150,6 +4215,7 @@ fi
 rm -rf "{REMOTE_DIR}/data/checkpoints/nightly_training.lock.d"
 rm -f "{REMOTE_DIR}/data/checkpoints/nightly_training.lock"
 rm -f "{REMOTE_WEEKEND_LOG}"
+rm -f "{REMOTE_CONTINUOUS_LOG}"
 
 PYTHONPATH="{REMOTE_DIR}/src/eva-lab:{REMOTE_DIR}/src/shared" python3 - <<'PY'
 from __future__ import annotations
@@ -4367,6 +4433,108 @@ done
 """
 
 
+def _build_remote_continuous_wrapper(
+    *,
+    runtime_exports: str,
+) -> str:
+    """Construit le script bash autonome du scheduler continu.
+
+    Args:
+        runtime_exports (str): Bloc `export ...;` a reappliquer avant chaque cycle.
+
+    Returns:
+        str: Contenu du script bash distant.
+    """
+
+    export_block = runtime_exports.strip()
+    if export_block:
+        export_block = export_block + ";"
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="{REMOTE_DIR}"
+RUN_SCRIPT="{REMOTE_SCRIPT}"
+WRAPPER_LOG="{REMOTE_CONTINUOUS_LOG}"
+CYCLE_SLEEP_SECONDS="${{CONTINUOUS_AUTO_IMPROVE_SLEEP_SECONDS:-120}}"
+FIRST_CYCLE=1
+
+mkdir -p "$(dirname "$WRAPPER_LOG")"
+touch "$WRAPPER_LOG"
+
+log() {{
+  printf '%s | %s\\n' "$(date -Iseconds)" "$*" | tee -a "$WRAPPER_LOG"
+}}
+
+refresh_dreamer_resume_env() {{
+  local manifest_path
+  manifest_path="$(find "$PROJECT_DIR/data/muzero/weights/dreamer_runs" -name resume_manifest.json -type f 2>/dev/null | xargs -r ls -1t | head -n 1 || true)"
+  if [ -z "$manifest_path" ]; then
+    unset DREAMER_RESUME_CHECKPOINT_PATH DREAMER_RESUME_STEP
+    return
+  fi
+  local checkpoint_path=""
+  local resume_step=""
+  local manifest_status=""
+  mapfile -t _resume_values < <(python3 - "$manifest_path" <<'PY'
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import sys
+
+manifest_path = Path(sys.argv[1])
+try:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+except Exception:
+    print("")
+    print("")
+    print("")
+    raise SystemExit(0)
+
+checkpoint_path = str(payload.get("checkpoint_path") or "")
+resume_step = str(payload.get("resume_step") or 0)
+manifest_status = str(payload.get("status") or "")
+print(checkpoint_path)
+print(resume_step)
+print(manifest_status)
+PY
+)
+  checkpoint_path="${{_resume_values[0]:-}}"
+  resume_step="${{_resume_values[1]:-0}}"
+  manifest_status="${{_resume_values[2]:-}}"
+  if [ -n "$checkpoint_path" ] && [ -f "$checkpoint_path" ] && [ "$manifest_status" = "paused" ]; then
+    export DREAMER_RESUME_CHECKPOINT_PATH="$checkpoint_path"
+    export DREAMER_RESUME_STEP="$resume_step"
+    log "Reprise Dreamer active depuis $(basename "$checkpoint_path") au step $resume_step."
+  else
+    unset DREAMER_RESUME_CHECKPOINT_PATH DREAMER_RESUME_STEP
+  fi
+}}
+
+log "Boucle continue d'auto-amelioration active."
+
+while true; do
+  {export_block}
+  if [ "$FIRST_CYCLE" -eq 0 ]; then
+    export REBUILD_TRAINER_IMAGE=0
+  fi
+  refresh_dreamer_resume_env
+
+  log "Demarrage d'un cycle continu d'auto-amelioration."
+  if bash "$RUN_SCRIPT" >> "$WRAPPER_LOG" 2>&1; then
+    log "Cycle continu termine avec succes."
+  else
+    cycle_code="$?"
+    log "Cycle continu termine en erreur code=$cycle_code."
+  fi
+  FIRST_CYCLE=0
+
+  log "Pause de $CYCLE_SLEEP_SECONDS secondes avant le prochain cycle."
+  sleep "$CYCLE_SLEEP_SECONDS"
+done
+"""
+
+
 def launch_weekend_intensive_remote(
     *,
     stop_existing: bool = False,
@@ -4451,6 +4619,97 @@ PY
         time.sleep(6)
         tail_out, tail_err, _ = run_command(client, f"tail -n 40 {REMOTE_WEEKEND_LOG}", timeout=30)
         print("\n--- Derniers logs boucle week-end ---")
+        print(tail_out)
+        if tail_err:
+            print(tail_err)
+    except Exception as exc:
+        print(f"Erreur: {exc}")
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+def launch_continuous_auto_improve_remote(
+    *,
+    stop_existing: bool = False,
+    stop_reason: str = "continuous_auto_improve_cutover",
+) -> None:
+    """Lance une boucle autonome d'auto-amelioration sans date de fin.
+
+    Args:
+        stop_existing (bool): Coupe proprement le run distant avant lancement.
+        stop_reason (str): Motif explicite de l'arret initial.
+    """
+
+    print(f"Connexion a Proxmox {HOST}...")
+    ssh_password, _ = _require_remote_credentials()
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+        client.connect(HOST, username=USER, password=ssh_password, timeout=15)
+        print("Connexion SSH etablie.")
+
+        if stop_existing:
+            stop_remote_training(client, reason=stop_reason)
+
+        _sync_remote_training_payload(client)
+        print("Payload remote synchronise.")
+
+        runtime_overrides = _build_continuous_auto_improve_overrides()
+        runtime_exports = build_runtime_exports(runtime_overrides)
+        remote_script = _build_remote_continuous_wrapper(
+            runtime_exports=runtime_exports,
+        )
+
+        sftp = client.open_sftp()
+        try:
+            ensure_remote_parent(sftp, REMOTE_CONTINUOUS_SCRIPT)
+            with sftp.file(REMOTE_CONTINUOUS_SCRIPT, "w") as remote_file:
+                remote_file.write(remote_script)
+            sftp.chmod(
+                REMOTE_CONTINUOUS_SCRIPT,
+                stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IROTH,
+            )
+        finally:
+            sftp.close()
+
+        launch_body = f"""
+cd {REMOTE_DIR}
+python3 - <<'PY'
+from __future__ import annotations
+
+from pathlib import Path
+import subprocess
+
+script_path = Path("{REMOTE_CONTINUOUS_SCRIPT}")
+log_path = Path("{REMOTE_CONTINUOUS_LOG}")
+log_path.parent.mkdir(parents=True, exist_ok=True)
+with log_path.open("ab", buffering=0) as log_stream:
+    process = subprocess.Popen(
+        [str(script_path)],
+        cwd="{REMOTE_DIR}",
+        stdin=subprocess.DEVNULL,
+        stdout=log_stream,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        close_fds=True,
+    )
+    print(process.pid)
+PY
+"""
+        launch_cmd = f"bash -lc {shlex.quote(launch_body)}"
+        output, error, code = run_command(client, launch_cmd, timeout=30)
+        if code != 0:
+            raise RuntimeError(error or output or "Lancement de la boucle continue impossible.")
+
+        pid_lines = [line.strip() for line in output.splitlines() if line.strip()]
+        pid = pid_lines[-1] if pid_lines else "inconnu"
+        print(f"Boucle continue demarree. PID={pid}")
+
+        time.sleep(6)
+        tail_out, tail_err, _ = run_command(client, f"tail -n 40 {REMOTE_CONTINUOUS_LOG}", timeout=30)
+        print("\n--- Derniers logs boucle continue ---")
         print(tail_out)
         if tail_err:
             print(tail_err)
@@ -4593,6 +4852,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--continuous-auto-improve",
+        action="store_true",
+        help=(
+            "Lance la boucle continue d'auto-amelioration `MuZero scalp-first`, "
+            "avec seed automatique, GNN si stale et Dreamer offline cadence."
+        ),
+    )
+    parser.add_argument(
         "--nightly-stack",
         action="store_true",
         help=(
@@ -4722,6 +4989,7 @@ if __name__ == "__main__":
         for flag in (
             args.manual_massive,
             args.weekend_intensive,
+            args.continuous_auto_improve,
             args.nightly_stack,
             args.muzero_full_7,
             args.scalp_reduced,
@@ -4739,7 +5007,7 @@ if __name__ == "__main__":
     )
     if selected_profiles > 1:
         raise SystemExit(
-            "Choisissez un seul profil parmi --manual-massive, --weekend-intensive, --nightly-stack, --muzero-full-7, --scalp-reduced, --intraday-reduced, --swing-reduced, --all-reduced, --wave1-profile, --wave1-sequence, --v3-sequence, --v3-profile, --v4-sequence, --v4-profile."
+            "Choisissez un seul profil parmi --manual-massive, --weekend-intensive, --continuous-auto-improve, --nightly-stack, --muzero-full-7, --scalp-reduced, --intraday-reduced, --swing-reduced, --all-reduced, --wave1-profile, --wave1-sequence, --v3-sequence, --v3-profile, --v4-sequence, --v4-profile."
         )
     requested_symbols = [
         item.strip()
@@ -4788,6 +5056,11 @@ if __name__ == "__main__":
         launch_weekend_intensive_remote(
             stop_existing=args.stop_existing,
             stop_reason=str(args.stop_reason or "weekend_intensive_cutover"),
+        )
+    elif args.continuous_auto_improve:
+        launch_continuous_auto_improve_remote(
+            stop_existing=args.stop_existing,
+            stop_reason=str(args.stop_reason or "continuous_auto_improve_cutover"),
         )
     else:
         start_training(

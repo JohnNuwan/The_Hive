@@ -29,6 +29,7 @@ DEFAULT_EPISODE_WEIGHTING_PROFILE = {
     "loser_bonus": 0.35,
     "nemesis_bonus": 0.55,
     "risk_symbol_bonus": 0.25,
+    "seed_candidate_bonus": 0.45,
 }
 
 
@@ -100,6 +101,8 @@ def load_shadow_games(
     *,
     winner_symbols: Iterable[str] | None = None,
     risk_symbols: Iterable[str] | None = None,
+    seed_model_versions: Iterable[str] | None = None,
+    seed_checkpoints: Iterable[str] | None = None,
     allowed_symbols: Iterable[str] | None = None,
     max_games: int | None = None,
     weighting_profile: dict[str, float] | None = None,
@@ -114,6 +117,8 @@ def load_shadow_games(
         action_space_size (int): Taille de l'espace d'actions.
         winner_symbols (Iterable[str] | None): Symboles gagnants de la review.
         risk_symbols (Iterable[str] | None): Symboles a risque de la review.
+        seed_model_versions (Iterable[str] | None): Versions seed a surponderer.
+        seed_checkpoints (Iterable[str] | None): Checkpoints seed a surponderer.
         allowed_symbols (Iterable[str] | None): Univers autorise pour le run.
         max_games (int | None): Nombre maximal d'episodes retenus.
         weighting_profile (dict[str, float] | None): Profil de ponderation.
@@ -125,6 +130,8 @@ def load_shadow_games(
     """
     winner_set = _normalize_symbol_set(winner_symbols)
     risk_set = _normalize_symbol_set(risk_symbols)
+    seed_model_set = _normalize_text_set(seed_model_versions)
+    seed_checkpoint_set = _normalize_text_set(seed_checkpoints)
     allowed_set = _normalize_symbol_set(allowed_symbols)
     effective_profile = _build_weighting_profile(weighting_profile)
 
@@ -142,6 +149,8 @@ def load_shadow_games(
             action_space_size=action_space_size,
             winner_symbols=winner_set,
             risk_symbols=risk_set,
+            seed_model_versions=seed_model_set,
+            seed_checkpoints=seed_checkpoint_set,
             allowed_symbols=allowed_set,
             weighting_profile=effective_profile,
         )
@@ -156,9 +165,11 @@ def load_shadow_games(
     if not include_weighting_summary:
         return games
     return games, {
-        "review_loaded": bool(winner_set or risk_set),
+        "review_loaded": bool(winner_set or risk_set or seed_model_set or seed_checkpoint_set),
         "winner_symbols": sorted(winner_set),
         "risk_symbols": sorted(risk_set),
+        "seed_model_versions": sorted(seed_model_set),
+        "seed_checkpoints": sorted(seed_checkpoint_set),
         "episodes_loaded": len(games),
         "weighted_episode_counts": dict(weighted_episode_counts),
         "weighting_profile": effective_profile,
@@ -173,6 +184,8 @@ def build_game_from_shadow_episode(
     *,
     winner_symbols: Iterable[str] | None = None,
     risk_symbols: Iterable[str] | None = None,
+    seed_model_versions: Iterable[str] | None = None,
+    seed_checkpoints: Iterable[str] | None = None,
     allowed_symbols: Iterable[str] | None = None,
     weighting_profile: dict[str, float] | None = None,
 ) -> GameHistory:
@@ -185,6 +198,8 @@ def build_game_from_shadow_episode(
         action_space_size (int): Nombre d'actions supportees.
         winner_symbols (Iterable[str] | None): Symboles gagnants de la review.
         risk_symbols (Iterable[str] | None): Symboles a risque de la review.
+        seed_model_versions (Iterable[str] | None): Versions seed a prioriser.
+        seed_checkpoints (Iterable[str] | None): Checkpoints seed a prioriser.
         allowed_symbols (Iterable[str] | None): Univers autorise du run courant.
         weighting_profile (dict[str, float] | None): Profil de ponderation.
 
@@ -195,6 +210,8 @@ def build_game_from_shadow_episode(
         episode,
         winner_symbols=winner_symbols,
         risk_symbols=risk_symbols,
+        seed_model_versions=seed_model_versions,
+        seed_checkpoints=seed_checkpoints,
         allowed_symbols=allowed_symbols,
         weighting_profile=weighting_profile,
     )
@@ -234,6 +251,8 @@ def classify_shadow_episode(
     *,
     winner_symbols: Iterable[str] | None = None,
     risk_symbols: Iterable[str] | None = None,
+    seed_model_versions: Iterable[str] | None = None,
+    seed_checkpoints: Iterable[str] | None = None,
     allowed_symbols: Iterable[str] | None = None,
     weighting_profile: dict[str, float] | None = None,
 ) -> dict[str, Any]:
@@ -244,6 +263,8 @@ def classify_shadow_episode(
         episode (list[dict[str, Any]]): Episode complet a analyser.
         winner_symbols (Iterable[str] | None): Symboles gagnants de la review.
         risk_symbols (Iterable[str] | None): Symboles a risque de la review.
+        seed_model_versions (Iterable[str] | None): Versions seed a prioriser.
+        seed_checkpoints (Iterable[str] | None): Checkpoints seed a prioriser.
         allowed_symbols (Iterable[str] | None): Univers autorise.
         weighting_profile (dict[str, float] | None): Profil de ponderation.
 
@@ -253,6 +274,8 @@ def classify_shadow_episode(
     profile = _build_weighting_profile(weighting_profile)
     winner_set = _normalize_symbol_set(winner_symbols)
     risk_set = _normalize_symbol_set(risk_symbols)
+    seed_model_set = _normalize_text_set(seed_model_versions)
+    seed_checkpoint_set = _normalize_text_set(seed_checkpoints)
     allowed_set = _normalize_symbol_set(allowed_symbols)
 
     if not episode:
@@ -266,6 +289,8 @@ def classify_shadow_episode(
             "episode_tags": [],
             "winner_symbols": sorted(winner_set),
             "risk_symbols": sorted(risk_set),
+            "seed_model_versions": sorted(seed_model_set),
+            "seed_checkpoints": sorted(seed_checkpoint_set),
         }
 
     last_transition = dict(episode[-1] or {})
@@ -284,6 +309,13 @@ def classify_shadow_episode(
         or metadata.get("nemesis_type_hint")
         or ""
     ).strip()
+    model_version = str(
+        metadata.get("model_version")
+        or metadata.get("selection")
+        or ""
+    ).strip()
+    checkpoint = str(metadata.get("checkpoint") or "").strip()
+    checkpoint_name = Path(checkpoint).name if checkpoint else ""
 
     episode_tags: list[str] = []
     weight = float(profile["base_weight"])
@@ -299,6 +331,18 @@ def classify_shadow_episode(
     if symbol and symbol in risk_set:
         episode_tags.append("risk_symbol_episode")
         weight += float(profile["risk_symbol_bonus"])
+    if (
+        model_version
+        and model_version.lower() in seed_model_set
+    ) or (
+        checkpoint
+        and (
+            checkpoint.lower() in seed_checkpoint_set
+            or checkpoint_name.lower() in seed_checkpoint_set
+        )
+    ):
+        episode_tags.append("seed_candidate_episode")
+        weight += float(profile["seed_candidate_bonus"])
     if not episode_tags:
         episode_tags.append("neutral_episode")
 
@@ -312,6 +356,8 @@ def classify_shadow_episode(
         "episode_tags": episode_tags,
         "winner_symbols": sorted(winner_set),
         "risk_symbols": sorted(risk_set),
+        "seed_model_versions": sorted(seed_model_set),
+        "seed_checkpoints": sorted(seed_checkpoint_set),
     }
 
 
@@ -320,6 +366,8 @@ def summarize_shadow_weighting(
     *,
     winner_symbols: Iterable[str] | None = None,
     risk_symbols: Iterable[str] | None = None,
+    seed_model_versions: Iterable[str] | None = None,
+    seed_checkpoints: Iterable[str] | None = None,
     allowed_symbols: Iterable[str] | None = None,
     max_episodes: int | None = None,
     weighting_profile: dict[str, float] | None = None,
@@ -331,6 +379,8 @@ def summarize_shadow_weighting(
         data_dirs (Iterable[str | Path]): Dossiers shadow a analyser.
         winner_symbols (Iterable[str] | None): Symboles gagnants de la review.
         risk_symbols (Iterable[str] | None): Symboles a risque de la review.
+        seed_model_versions (Iterable[str] | None): Versions seed a prioriser.
+        seed_checkpoints (Iterable[str] | None): Checkpoints seed a prioriser.
         allowed_symbols (Iterable[str] | None): Univers autorise pour le run.
         max_episodes (int | None): Nombre maximal d'episodes analyses.
         weighting_profile (dict[str, float] | None): Profil de ponderation.
@@ -340,6 +390,8 @@ def summarize_shadow_weighting(
     """
     winner_set = _normalize_symbol_set(winner_symbols)
     risk_set = _normalize_symbol_set(risk_symbols)
+    seed_model_set = _normalize_text_set(seed_model_versions)
+    seed_checkpoint_set = _normalize_text_set(seed_checkpoints)
     allowed_set = _normalize_symbol_set(allowed_symbols)
     effective_profile = _build_weighting_profile(weighting_profile)
     episodes = load_shadow_episodes(data_dirs)
@@ -354,6 +406,8 @@ def summarize_shadow_weighting(
             episode,
             winner_symbols=winner_set,
             risk_symbols=risk_set,
+            seed_model_versions=seed_model_set,
+            seed_checkpoints=seed_checkpoint_set,
             allowed_symbols=allowed_set,
             weighting_profile=effective_profile,
         )
@@ -365,9 +419,11 @@ def summarize_shadow_weighting(
         weighted_priority_total += float(classification.get("episode_weight") or 0.0)
 
     return {
-        "review_loaded": bool(winner_set or risk_set),
+        "review_loaded": bool(winner_set or risk_set or seed_model_set or seed_checkpoint_set),
         "winner_symbols": sorted(winner_set),
         "risk_symbols": sorted(risk_set),
+        "seed_model_versions": sorted(seed_model_set),
+        "seed_checkpoints": sorted(seed_checkpoint_set),
         "episodes_loaded": episodes_loaded,
         "weighted_episode_counts": dict(counts),
         "weighting_profile": effective_profile,
@@ -465,6 +521,24 @@ def _normalize_symbol_set(symbols: Iterable[str] | None) -> set[str]:
     normalized: set[str] = set()
     for symbol in symbols or []:
         candidate = str(symbol or "").strip().upper()
+        if candidate:
+            normalized.add(candidate)
+    return normalized
+
+
+def _normalize_text_set(values: Iterable[str] | None) -> set[str]:
+    """
+    Normalise une liste generique de textes en minuscules sans doublons.
+
+    Args:
+        values (Iterable[str] | None): Valeurs brutes a nettoyer.
+
+    Returns:
+        set[str]: Ensemble nettoye.
+    """
+    normalized: set[str] = set()
+    for value in values or []:
+        candidate = str(value or "").strip().lower()
         if candidate:
             normalized.add(candidate)
     return normalized

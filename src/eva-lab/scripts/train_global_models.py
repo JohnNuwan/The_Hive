@@ -122,6 +122,12 @@ def _load_shadow_replay_bundle(
         for item in str(os.getenv("TRAINING_RISK_SYMBOLS", "") or "").split(",")
         if item.strip()
     ]
+    seed_candidate_id = str(os.getenv("TRAINING_SEED_CANDIDATE_ID", "") or "").strip()
+    seed_checkpoints = [
+        item.strip()
+        for item in str(os.getenv("TRAINING_SEED_CHECKPOINTS", "") or "").split(",")
+        if item.strip()
+    ]
     weighting_profile = {
         "base_weight": float(str(os.getenv("TRAINING_EPISODE_WEIGHT_BASE", "1.0")).strip() or 1.0),
         "winner_bonus": float(
@@ -136,6 +142,9 @@ def _load_shadow_replay_bundle(
         "risk_symbol_bonus": float(
             str(os.getenv("TRAINING_EPISODE_WEIGHT_RISK_BONUS", "0.25")).strip() or 0.25
         ),
+        "seed_candidate_bonus": float(
+            str(os.getenv("TRAINING_EPISODE_WEIGHT_SEED_CANDIDATE_BONUS", "0.45")).strip() or 0.45
+        ),
     }
     observation_size = 1
     for dimension in tuple(getattr(config, "observation_shape", ()) or ()):
@@ -148,6 +157,8 @@ def _load_shadow_replay_bundle(
         "focus_symbols": list(focus_symbols),
         "winner_symbols": list(winner_symbols),
         "risk_symbols": list(risk_symbols),
+        "seed_candidate_id": seed_candidate_id or None,
+        "seed_checkpoints": list(seed_checkpoints),
         "weighting_profile": dict(weighting_profile),
         "episodes_loaded": 0,
         "loaded_into_replay": 0,
@@ -168,10 +179,16 @@ def _load_shadow_replay_bundle(
         action_space_size=int(getattr(config, "action_space_size", 5) or 5),
         winner_symbols=winner_symbols,
         risk_symbols=risk_symbols,
+        seed_model_versions=[seed_candidate_id] if seed_candidate_id else [],
+        seed_checkpoints=seed_checkpoints,
         allowed_symbols=focus_symbols,
         max_games=max_games,
         weighting_profile=weighting_profile,
         include_weighting_summary=True,
+    )
+    games.sort(
+        key=lambda item: float(dict(item.metadata or {}).get("episode_weight") or 1.0),
+        reverse=True,
     )
     for game in games:
         agent.replay_buffer.save_game(game)
@@ -180,6 +197,9 @@ def _load_shadow_replay_bundle(
     summary["loaded_into_replay"] = len(games)
     summary["episodes_loaded"] = int(weighting_summary.get("episodes_loaded", len(games)) or len(games))
     summary["replay_buffer_size_after_load"] = agent.replay_buffer.size
+    summary["seed_priority_loaded"] = int(
+        dict(weighting_summary.get("weighted_episode_counts") or {}).get("seed_candidate_episode", 0) or 0
+    )
     summary["reason"] = "shadow_replay_loaded" if games else "shadow_replay_empty"
     return summary
 

@@ -167,6 +167,7 @@ def _default_status() -> dict[str, Any]:
         "stall_reason": None,
         "last_nonzero_exit": None,
         "training_weighting": {},
+        "continuous_scheduler": {},
         "service_recovery": {},
         "runtime_truth": {},
         "collector_mode": None,
@@ -389,6 +390,11 @@ def normalize_runtime_training_status(
 
     snapshot = _default_status()
     snapshot.update(status or {})
+    scheduler_state = load_cpu_scheduler_state() or {}
+    if scheduler_state:
+        snapshot["continuous_scheduler"] = dict(
+            snapshot.get("continuous_scheduler") or scheduler_state
+        )
 
     merged_sequence = _default_sequence_state()
     merged_sequence.update(sequence_state or load_sequence_state())
@@ -488,10 +494,19 @@ def load_effective_training_status(
         load_training_status(),
         sequence_state=merged_sequence,
     )
+    scheduler_state = load_cpu_scheduler_state() or {}
+    if scheduler_state:
+        normalized["continuous_scheduler"] = dict(
+            normalized.get("continuous_scheduler") or scheduler_state
+        )
     if clean_stale and normalized.get("stale_detected"):
         persisted = persist_training_status(_strip_runtime_training_markers(normalized))
         persisted["stale_detected"] = True
         persisted["stale_reasons"] = list(normalized.get("stale_reasons") or [])
+        if scheduler_state:
+            persisted["continuous_scheduler"] = dict(
+                persisted.get("continuous_scheduler") or scheduler_state
+            )
         return persisted
     return normalized
 
@@ -901,6 +916,7 @@ def set_training_runtime_state(**payload: Any) -> dict[str, Any]:
         "stall_detected",
         "stall_reason",
         "last_nonzero_exit",
+        "continuous_scheduler",
         "collector_mode",
         "collector_workers",
         "collector_active_symbols",
@@ -1067,6 +1083,35 @@ def load_cpu_scheduler_state() -> dict[str, Any] | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def persist_cpu_scheduler_state(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persiste l'etat du scheduler continu sur disque.
+
+    Args:
+        payload (dict[str, Any]): Etat compact a conserver.
+
+    Returns:
+        dict[str, Any]: Etat persiste tel qu'ecrit.
+    """
+
+    normalized = dict(payload or {})
+    _atomic_write_json(CPU_SCHEDULER_STATE_PATH, normalized)
+    return normalized
+
+
+def set_continuous_scheduler_state(payload: dict[str, Any]) -> dict[str, Any]:
+    """Met a jour l'etat du scheduler continu dans le statut runtime.
+
+    Args:
+        payload (dict[str, Any]): Etat courant du scheduler continu.
+
+    Returns:
+        dict[str, Any]: Statut training persiste.
+    """
+
+    normalized = persist_cpu_scheduler_state(payload)
+    return merge_training_status({"continuous_scheduler": normalized})
 
 
 def _extract_log_timestamp(line: str) -> str | None:
@@ -1272,6 +1317,9 @@ def reset_training_status(
     status["supervisor_state"] = str(os.getenv("TRAINING_SUPERVISOR_STATE", "")).strip() or None
     status["launcher"] = dict(previous.get("launcher") or {})
     status["dependencies"] = dict(previous.get("dependencies") or {})
+    status["continuous_scheduler"] = dict(
+        previous.get("continuous_scheduler") or load_cpu_scheduler_state() or {}
+    )
     status["universe"] = universe or build_training_universe_summary()
     status["arena_progress"] = None
     persisted = persist_training_status(status)

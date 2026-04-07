@@ -21,6 +21,9 @@ from eva_lab.training_status import load_latest_terminal_summary
 
 logger = logging.getLogger(__name__)
 
+SCALP_CORE_SYMBOLS = ("EURUSD", "XAUUSD", "GBPUSD", "USDJPY")
+SCALP_INDEX_SYMBOLS = ("US30.cash", "GER40.cash", "US500.cash")
+
 
 class ChampionPromoter:
     """Centralise la promotion et la resolution des champions live.
@@ -403,11 +406,178 @@ class ChampionPromoter:
             return "insufficient_sample"
         if not checks.get("return_pct", True) or not checks.get("net_realized_pct", True) or not checks.get("profit_factor", True):
             return "unprofitable"
+        if reason == "core_symbol_balance":
+            return "core_symbol_balance"
+        if reason in {"meaningful_exits", "close_quality_score", "hold_drag_score"}:
+            return "bad_exit"
         if not checks.get("close_quality_score", True) or not checks.get("split_efficiency", True):
             return "bad_exit"
         if reason in {"directional_balance", "directional_entries"}:
             return "inactive" if reason == "directional_entries" else directional_bias or "inactive"
         return str(reason or "blocked")
+
+    @staticmethod
+    def _resolve_hold_drag_score(mechanics_metrics: dict[str, Any]) -> float:
+        """Retourne le score de hold normalise a privilegier.
+
+        Args:
+            mechanics_metrics (dict[str, Any]): Metriques mecaniques du candidat.
+
+        Returns:
+            float: Score de hold normalise.
+        """
+        if "hold_drag_score_normalized" in mechanics_metrics:
+            return ChampionPromoter._to_float(mechanics_metrics.get("hold_drag_score_normalized"))
+        return ChampionPromoter._to_float(mechanics_metrics.get("hold_drag_score"))
+
+    @staticmethod
+    def _compute_scalp_family_metrics(metrics_by_symbol: dict[str, Any]) -> dict[str, float]:
+        """Agrege les resultats scalp par familles de symboles.
+
+        Args:
+            metrics_by_symbol (dict[str, Any]): Metriques par symbole issues de l'Arena.
+
+        Returns:
+            dict[str, float]: Vue agregee noyau FX/XAU contre indices.
+        """
+        core_net_realized_pct = 0.0
+        index_net_realized_pct = 0.0
+        core_positive_symbols = 0
+        total_positive_profit = 0.0
+        index_positive_profit = 0.0
+        for symbol, raw_metrics in dict(metrics_by_symbol or {}).items():
+            symbol_name = str(symbol or "").strip()
+            metrics = dict(raw_metrics or {})
+            net_realized_pct = ChampionPromoter._to_float(metrics.get("net_realized_pct"))
+            if symbol_name in SCALP_CORE_SYMBOLS:
+                core_net_realized_pct += net_realized_pct
+                if net_realized_pct > 0.0:
+                    core_positive_symbols += 1
+            elif symbol_name in SCALP_INDEX_SYMBOLS:
+                index_net_realized_pct += net_realized_pct
+
+            if net_realized_pct > 0.0:
+                total_positive_profit += net_realized_pct
+                if symbol_name in SCALP_INDEX_SYMBOLS:
+                    index_positive_profit += net_realized_pct
+
+        index_profit_share = (
+            index_positive_profit / total_positive_profit if total_positive_profit > 0.0 else 0.0
+        )
+        return {
+            "core_net_realized_pct": round(core_net_realized_pct, 6),
+            "core_positive_symbols": float(core_positive_symbols),
+            "index_net_realized_pct": round(index_net_realized_pct, 6),
+            "index_profit_share": round(index_profit_share, 6),
+        }
+
+    @staticmethod
+    def _is_scalp_metrics(
+        *,
+        battle_report: dict[str, Any] | None,
+        challenger_metrics: dict[str, Any],
+    ) -> bool:
+        """Determine si les metriques appartiennent a l'horizon scalp.
+
+        Args:
+            battle_report (dict[str, Any] | None): Rapport de duel complet.
+            challenger_metrics (dict[str, Any]): Metriques challenger consolidees.
+
+        Returns:
+            bool: ``True`` si le rapport concerne le scalp.
+        """
+        horizon = str((battle_report or {}).get("horizon") or "").strip().lower()
+        if horizon == "scalp":
+            return True
+        feature_profile = str(challenger_metrics.get("feature_profile") or "").strip().lower()
+        return "scalp" in feature_profile
+
+    def evaluate_scalp_seed_gate(self, challenger_metrics: dict[str, Any] | None) -> dict[str, Any]:
+        """Evalue la gate mecanique specifique au scalp.
+
+        Args:
+            challenger_metrics (dict[str, Any] | None): Metriques consolidees du challenger.
+
+        Returns:
+            dict[str, Any]: Verdict, raisons et sous-metriques de la gate scalp.
+        """
+        metrics = dict(challenger_metrics or {})
+        mechanics_metrics = dict(metrics.get("metrics_by_position_mechanics") or {})
+        metrics_by_symbol = dict(metrics.get("metrics_by_symbol") or {})
+        family_metrics = self._compute_scalp_family_metrics(metrics_by_symbol)
+        total_trades = self._to_float(metrics.get("total_trades"))
+        long_entry_share = self._to_float(metrics.get("long_entry_share"))
+        short_entry_share = self._to_float(metrics.get("short_entry_share"))
+        directional_imbalance = self._to_float(metrics.get("directional_imbalance"), default=1.0)
+        close_quality_score = self._to_float(mechanics_metrics.get("close_quality_score"))
+        hold_drag_score_normalized = self._resolve_hold_drag_score(mechanics_metrics)
+        slbe_profitable_exits = self._to_float(mechanics_metrics.get("slbe_profitable_exits"))
+        tp_like_exit_count = self._to_float(mechanics_metrics.get("tp_like_exit_count"))
+        meaningful_exit_count = self._to_float(
+            mechanics_metrics.get("meaningful_exit_count"),
+            default=(
+                self._to_float(mechanics_metrics.get("close_winner_count"))
+                + self._to_float(mechanics_metrics.get("close_loser_count"))
+                + slbe_profitable_exits
+                + tp_like_exit_count
+            ),
+        )
+        thresholds = {
+            "max_directional_imbalance": 0.65,
+            "min_long_entry_share": 0.18,
+            "min_short_entry_share": 0.18,
+            "min_meaningful_exit_count": 1.0,
+            "meaningful_exit_total_trades_threshold": 24.0,
+            "min_close_quality_score": 0.15,
+            "max_hold_drag_score_normalized": 0.45,
+            "min_core_net_realized_pct": 0.0,
+            "min_core_positive_symbols": 2.0,
+            "max_index_profit_share": 0.75,
+        }
+        checks = {
+            "core_symbol_balance": (
+                family_metrics["core_net_realized_pct"] >= thresholds["min_core_net_realized_pct"]
+                and family_metrics["core_positive_symbols"] >= thresholds["min_core_positive_symbols"]
+                and family_metrics["index_profit_share"] <= thresholds["max_index_profit_share"]
+            ),
+            "directional_balance": (
+                long_entry_share >= thresholds["min_long_entry_share"]
+                and short_entry_share >= thresholds["min_short_entry_share"]
+                and directional_imbalance <= thresholds["max_directional_imbalance"]
+            ),
+            "meaningful_exits": (
+                total_trades < thresholds["meaningful_exit_total_trades_threshold"]
+                or meaningful_exit_count >= thresholds["min_meaningful_exit_count"]
+            ),
+            "close_quality_score": (
+                close_quality_score >= thresholds["min_close_quality_score"]
+                or slbe_profitable_exits >= 1.0
+                or tp_like_exit_count >= 1.0
+            ),
+            "hold_drag_score": (
+                hold_drag_score_normalized <= thresholds["max_hold_drag_score_normalized"]
+            ),
+        }
+        failed_checks = [name for name, passed in checks.items() if not passed]
+        return {
+            "allowed": not failed_checks,
+            "primary_reason": failed_checks[0] if failed_checks else "eligible",
+            "failed_checks": failed_checks,
+            "checks": checks,
+            "thresholds": thresholds,
+            "metrics": {
+                **family_metrics,
+                "directional_imbalance": directional_imbalance,
+                "long_entry_share": long_entry_share,
+                "short_entry_share": short_entry_share,
+                "total_trades": total_trades,
+                "close_quality_score": close_quality_score,
+                "hold_drag_score_normalized": hold_drag_score_normalized,
+                "meaningful_exit_count": meaningful_exit_count,
+                "slbe_profitable_exits": slbe_profitable_exits,
+                "tp_like_exit_count": tp_like_exit_count,
+            },
+        }
 
     def evaluate_promotion_gate(
         self,
@@ -432,9 +602,11 @@ class ChampionPromoter:
                 "allowed": False,
                 "status": "blocked",
                 "reason": "missing_battle_report",
+                "primary_reason": "missing_battle_report",
                 "gate_profile": normalized_gate_profile,
                 "failure_mode": "insufficient_sample",
                 "checks": {"arena_victory": False},
+                "failed_checks": ["arena_victory"],
                 "thresholds": thresholds,
                 "metrics": {
                     "win_rate": 0.0,
@@ -452,6 +624,8 @@ class ChampionPromoter:
                     "long_entry_share": 0.0,
                     "short_entry_share": 0.0,
                     "directional_imbalance": 1.0,
+                    "meaningful_exit_count": 0.0,
+                    "hold_drag_score_normalized": 1.0,
                 },
             }
 
@@ -476,10 +650,11 @@ class ChampionPromoter:
             challenger_metrics.get("directional_imbalance"),
             default=1.0,
         )
+        metrics_by_symbol = dict(challenger_metrics.get("metrics_by_symbol") or {})
         split_efficiency = self._to_float(mechanics_metrics.get("split_efficiency"))
         pyramid_efficiency = self._to_float(mechanics_metrics.get("pyramid_efficiency"))
         slbe_capture_rate = self._to_float(mechanics_metrics.get("slbe_capture_rate"))
-        hold_drag_score = self._to_float(mechanics_metrics.get("hold_drag_score"))
+        hold_drag_score = self._resolve_hold_drag_score(mechanics_metrics)
         close_quality_score = self._to_float(mechanics_metrics.get("close_quality_score"))
         split_executed = self._to_float(mechanics_metrics.get("split_executed"))
         pyramids_opened = self._to_float(mechanics_metrics.get("pyramids_opened"))
@@ -487,7 +662,20 @@ class ChampionPromoter:
         close_events = self._to_float(mechanics_metrics.get("close_winner_count")) + self._to_float(
             mechanics_metrics.get("close_loser_count")
         )
-        checks = {
+        is_scalp = self._is_scalp_metrics(
+            battle_report=battle_report,
+            challenger_metrics=challenger_metrics,
+        )
+        family_metrics = self._compute_scalp_family_metrics(metrics_by_symbol) if is_scalp else {}
+        meaningful_exit_count = self._to_float(
+            mechanics_metrics.get("meaningful_exit_count"),
+            default=(
+                close_events
+                + self._to_float(mechanics_metrics.get("slbe_profitable_exits"))
+                + self._to_float(mechanics_metrics.get("tp_like_exit_count"))
+            ),
+        )
+        ordered_checks: dict[str, bool] = {
             "arena_victory": str(battle_report.get("outcome", "")).upper() == "VICTORY",
             "validation_sample": bool(validation.get("sample_size_ok", False)),
             "evaluation_games": evaluation_games >= thresholds["min_eval_games"],
@@ -496,37 +684,41 @@ class ChampionPromoter:
             "max_drawdown_pct": max_drawdown_pct <= thresholds["max_drawdown_pct"],
             "directional_entries": (long_entries + short_entries) > 0,
         }
-
-        if thresholds["require_positive_metrics"]:
-            checks["win_rate"] = win_rate >= thresholds["min_win_rate"]
-            checks["return_pct"] = return_pct > thresholds["min_return_pct"]
-            checks["net_realized_pct"] = net_realized_pct >= thresholds["min_net_realized_pct"]
-            checks["profit_factor"] = profit_factor > thresholds["min_profit_factor"]
-            checks["expectancy_pct"] = expectancy_pct >= thresholds["min_expectancy_pct"]
-            checks["positive_episode_rate"] = (
-                positive_episode_rate >= thresholds["min_positive_episode_rate"]
-            )
-            checks["directional_balance"] = (
+        if is_scalp:
+            scalp_seed_gate = self.evaluate_scalp_seed_gate(challenger_metrics)
+            ordered_checks.update(dict(scalp_seed_gate.get("checks") or {}))
+        else:
+            ordered_checks["directional_balance"] = (
                 long_entry_share >= thresholds["min_long_entry_share"]
                 and short_entry_share >= thresholds["min_short_entry_share"]
                 and directional_imbalance <= thresholds["max_directional_imbalance"]
             )
+            ordered_checks["hold_drag_score"] = hold_drag_score <= thresholds["max_hold_drag_score"]
+            ordered_checks["close_quality_score"] = (
+                close_events <= 0 or close_quality_score >= thresholds["min_close_quality_score"]
+            )
 
-        checks["hold_drag_score"] = hold_drag_score <= thresholds["max_hold_drag_score"]
-        checks["split_efficiency"] = (
+        if thresholds["require_positive_metrics"]:
+            ordered_checks["win_rate"] = win_rate >= thresholds["min_win_rate"]
+            ordered_checks["return_pct"] = return_pct > thresholds["min_return_pct"]
+            ordered_checks["net_realized_pct"] = net_realized_pct >= thresholds["min_net_realized_pct"]
+            ordered_checks["profit_factor"] = profit_factor > thresholds["min_profit_factor"]
+            ordered_checks["expectancy_pct"] = expectancy_pct >= thresholds["min_expectancy_pct"]
+            ordered_checks["positive_episode_rate"] = (
+                positive_episode_rate >= thresholds["min_positive_episode_rate"]
+            )
+
+        ordered_checks["split_efficiency"] = (
             split_executed <= 0 or split_efficiency >= thresholds["min_split_efficiency"]
         )
-        checks["pyramid_efficiency"] = (
+        ordered_checks["pyramid_efficiency"] = (
             pyramids_opened <= 0 or pyramid_efficiency >= thresholds["min_pyramid_efficiency"]
         )
-        checks["slbe_capture_rate"] = (
+        ordered_checks["slbe_capture_rate"] = (
             slbe_triggered <= 0 or slbe_capture_rate >= thresholds["min_slbe_capture_rate"]
         )
-        checks["close_quality_score"] = (
-            close_events <= 0 or close_quality_score >= thresholds["min_close_quality_score"]
-        )
-
-        failure_reason = next((name for name, passed in checks.items() if not passed), "eligible")
+        failed_checks = [name for name, passed in ordered_checks.items() if not passed]
+        failure_reason = failed_checks[0] if failed_checks else "eligible"
         metrics_payload = {
             "win_rate": win_rate,
             "return_pct": return_pct,
@@ -545,29 +737,38 @@ class ChampionPromoter:
             "directional_imbalance": directional_imbalance,
             "directional_bias": str(challenger_metrics.get("directional_bias") or "inactive"),
             "metrics_by_position_mechanics": mechanics_metrics,
+            "metrics_by_symbol": metrics_by_symbol,
             "split_efficiency": split_efficiency,
             "pyramid_efficiency": pyramid_efficiency,
             "slbe_capture_rate": slbe_capture_rate,
             "hold_drag_score": hold_drag_score,
+            "hold_drag_score_normalized": hold_drag_score,
             "close_quality_score": close_quality_score,
+            "meaningful_exit_count": meaningful_exit_count,
             "feature_profile": challenger_metrics.get("feature_profile"),
             "dataset_id": challenger_metrics.get("dataset_id"),
             "dataset_source": challenger_metrics.get("dataset_source"),
             "mechanics_profile_version": challenger_metrics.get("mechanics_profile_version"),
             "dataset_coverage": challenger_metrics.get("dataset_coverage") or {},
         }
+        metrics_payload.update(family_metrics)
+        thresholds_payload = dict(thresholds)
+        if is_scalp:
+            thresholds_payload.update(dict((scalp_seed_gate or {}).get("thresholds") or {}))
         return {
-            "allowed": all(checks.values()),
-            "status": "eligible" if all(checks.values()) else "blocked",
+            "allowed": not failed_checks,
+            "status": "eligible" if not failed_checks else "blocked",
             "reason": failure_reason,
+            "primary_reason": failure_reason,
             "gate_profile": normalized_gate_profile,
             "failure_mode": self._derive_failure_mode(
                 reason=failure_reason,
                 metrics=metrics_payload,
-                checks=checks,
+                checks=ordered_checks,
             ),
-            "checks": checks,
-            "thresholds": thresholds,
+            "checks": ordered_checks,
+            "failed_checks": failed_checks,
+            "thresholds": thresholds_payload,
             "metrics": metrics_payload,
         }
 

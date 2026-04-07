@@ -887,6 +887,12 @@ class TradingEnvironment:
         hold_drag_score = (
             self.hold_under_trend_penalty_count / max(self.current_step - self.start_step, 1)
         )
+        meaningful_exit_count = (
+            self.close_winner_count
+            + self.close_loser_count
+            + self.slbe_profitable_exits
+            + self.tp_like_exit_count
+        )
         close_quality_score = (
             self.close_winner_count / max(self.close_winner_count + self.close_loser_count, 1)
             if (self.close_winner_count + self.close_loser_count) > 0
@@ -902,17 +908,22 @@ class TradingEnvironment:
             "pyramid_efficiency": pyramid_efficiency,
             "slbe_capture_rate": slbe_capture_rate,
             "hold_drag_score": hold_drag_score,
+            "hold_drag_score_normalized": hold_drag_score,
             "close_quality_score": close_quality_score,
             "mechanics_profile_version": self.mechanics_profile_version,
             "pyramids_opened": self.pyramids_opened,
             "pyramids_rejected": self.pyramids_rejected,
+            "pyramid_profitable_count": self.pyramid_profitable_count,
             "slbe_triggered": self.slbe_triggered,
             "slbe_hit": self.slbe_hit,
+            "slbe_profitable_exits": self.slbe_profitable_exits,
             "split_executed": self.split_executed,
+            "split_profitable_count": self.split_profitable_count,
             "split_rejected": self.split_rejected,
             "split_rejected_no_value": self.split_rejected_no_value,
             "close_winner_count": self.close_winner_count,
             "close_loser_count": self.close_loser_count,
+            "meaningful_exit_count": meaningful_exit_count,
             "hold_streak_mean": hold_streak_mean,
             "hold_under_trend_penalty_count": self.hold_under_trend_penalty_count,
             "tp_like_exit_count": self.tp_like_exit_count,

@@ -31,14 +31,19 @@ POSITION_MECHANICS_KEYS = (
     "pyramid_efficiency",
     "slbe_capture_rate",
     "hold_drag_score",
+    "hold_drag_score_normalized",
     "close_quality_score",
     "pyramids_opened",
     "pyramids_rejected",
+    "pyramid_profitable_count",
     "slbe_triggered",
     "slbe_hit",
+    "slbe_profitable_exits",
     "split_executed",
+    "split_profitable_count",
     "close_winner_count",
     "close_loser_count",
+    "meaningful_exit_count",
     "hold_streak_mean",
     "hold_under_trend_penalty_count",
     "tp_like_exit_count",
@@ -66,6 +71,7 @@ POSITION_MECHANICS_RATIO_KEYS = {
     "pyramid_efficiency",
     "slbe_capture_rate",
     "hold_drag_score",
+    "hold_drag_score_normalized",
     "close_quality_score",
     "hold_streak_mean",
 }
@@ -268,6 +274,7 @@ class Arena:
             "short_entries": 0,
             "ema200_blocked_buy": 0,
             "ema200_blocked_sell": 0,
+            "hold_drag_score_sum": 0.0,
             "metrics_by_position_mechanics": {},
             "family": "mixed",
             "feature_profile": None,
@@ -296,6 +303,15 @@ class Arena:
         close_loser_count = int(state.get("close_loser_count", 0) or 0)
         hold_under_trend_penalty_count = int(state.get("hold_under_trend_penalty_count", 0) or 0)
         evaluation_games = int(state.get("evaluation_games", 0) or 0)
+        hold_drag_score_normalized = (
+            float(state.get("hold_drag_score_sum", 0.0) or 0.0) / max(evaluation_games, 1)
+        )
+        meaningful_exit_count = (
+            close_winner_count
+            + close_loser_count
+            + slbe_profitable_exits
+            + int(state.get("tp_like_exit_count", 0) or 0)
+        )
 
         return {
             "split_efficiency": (
@@ -307,9 +323,8 @@ class Arena:
             "slbe_capture_rate": (
                 slbe_profitable_exits / slbe_triggered if slbe_triggered > 0 else 0.0
             ),
-            "hold_drag_score": (
-                hold_under_trend_penalty_count / max(evaluation_games, 1)
-            ),
+            "hold_drag_score": hold_drag_score_normalized,
+            "hold_drag_score_normalized": hold_drag_score_normalized,
             "close_quality_score": (
                 close_winner_count / max(close_winner_count + close_loser_count, 1)
                 if (close_winner_count + close_loser_count) > 0
@@ -317,6 +332,7 @@ class Arena:
             ),
             "pyramids_opened": pyramids_opened,
             "pyramids_rejected": pyramids_rejected,
+            "pyramid_profitable_count": pyramid_profitable_count,
             "slbe_triggered": slbe_triggered,
             "slbe_hit": int(state.get("slbe_hit", 0) or 0),
             "slbe_profitable_exits": slbe_profitable_exits,
@@ -324,6 +340,7 @@ class Arena:
             "split_profitable_count": split_profitable_count,
             "close_winner_count": close_winner_count,
             "close_loser_count": close_loser_count,
+            "meaningful_exit_count": meaningful_exit_count,
             "hold_streak_mean": float(state.get("hold_streak_mean_sum", 0.0) or 0.0) / max(evaluation_games, 1),
             "hold_under_trend_penalty_count": hold_under_trend_penalty_count,
             "tp_like_exit_count": int(state.get("tp_like_exit_count", 0) or 0),
@@ -709,6 +726,7 @@ class Arena:
             "ema200_blocked_buy": 0,
             "ema200_blocked_sell": 0,
             "hold_streak_mean_sum": 0.0,
+            "hold_drag_score_sum": 0.0,
             "family": str(getattr(config, "model_family", None) or infer_family_from_symbols(symbols)),
             "feature_profile": str((getattr(config, "feature_profile", {}) or {}).get("profile_name") or ""),
             "mechanics_profile_version": str(getattr(config, "mechanics_profile_version", "") or ""),
@@ -781,6 +799,13 @@ class Arena:
                 state["ema200_blocked_sell"] += episode_blocked_sell
                 mechanics_metrics = dict(summary.get("metrics_by_position_mechanics") or {})
                 state["hold_streak_mean_sum"] += float(mechanics_metrics.get("hold_streak_mean", 0.0) or 0.0)
+                state["hold_drag_score_sum"] += float(
+                    mechanics_metrics.get(
+                        "hold_drag_score_normalized",
+                        mechanics_metrics.get("hold_drag_score", 0.0),
+                    )
+                    or 0.0
+                )
                 for key in POSITION_MECHANICS_COUNTER_KEYS:
                     state[key] += int(mechanics_metrics.get(key, 0) or 0)
 
@@ -815,6 +840,15 @@ class Arena:
                 symbol_metrics["hold_streak_mean_sum"] = float(
                     symbol_metrics.get("hold_streak_mean_sum", 0.0) or 0.0
                 ) + float(mechanics_metrics.get("hold_streak_mean", 0.0) or 0.0)
+                symbol_metrics["hold_drag_score_sum"] = float(
+                    symbol_metrics.get("hold_drag_score_sum", 0.0) or 0.0
+                ) + float(
+                    mechanics_metrics.get(
+                        "hold_drag_score_normalized",
+                        mechanics_metrics.get("hold_drag_score", 0.0),
+                    )
+                    or 0.0
+                )
                 for key in POSITION_MECHANICS_COUNTER_KEYS:
                     symbol_metrics[key] = int(symbol_metrics.get(key, 0) or 0) + int(
                         mechanics_metrics.get(key, 0) or 0
