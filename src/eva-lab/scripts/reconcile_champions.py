@@ -124,6 +124,9 @@ def reconcile_horizon(
         "promotion": promotion,
     }
     report_path.write_text(json.dumps(refreshed_report, indent=2, default=float), encoding="utf-8")
+    
+    # Garbage collection automatique pour ne pas saturer le disque
+    promoter.garbage_collect_checkpoints(horizon)
 
     return {
         "horizon": horizon,

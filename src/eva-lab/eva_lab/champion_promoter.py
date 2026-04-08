@@ -1898,3 +1898,46 @@ class ChampionPromoter:
             "manifest": manifest,
             "promotion_gate": promotion_gate,
         }
+
+    def garbage_collect_checkpoints(self, horizon: str, engine: str = "muzero") -> dict[str, Any]:
+        """Supprime tous les checkpoints intermediaires devenus inutiles pour liberer le disque.
+        
+        Conserve uniquement:
+        - Le champion actuel (champion_*.pkl)
+        - Le checkoint latest (*_latest.pkl)
+        
+        Args:
+            horizon (str): Horizon cible.
+            engine (str): Moteur cible.
+            
+        Returns:
+            dict[str, Any]: Rapport du nettoyage contenant le nombre et la taille supprimee.
+        """
+        deleted_count = 0
+        deleted_size = 0
+        
+        # 1. Identifier les cibles intouchables
+        champion_path = self.get_champion_path(horizon, engine)
+        latest_path = self.get_latest_model_path(horizon, engine)
+        
+        # 2. Chercher tout le reste
+        glob_pattern = self.get_checkpoint_glob(horizon, engine)
+        for ckpt in self.weights_dir.glob(glob_pattern):
+            if ckpt.is_file() and ckpt.name != champion_path.name and ckpt.name != latest_path.name:
+                try:
+                    size = ckpt.stat().st_size
+                    ckpt.unlink(missing_ok=True)
+                    deleted_count += 1
+                    deleted_size += size
+                except Exception as exc:
+                    logger.debug("GC impossible sur %s: %s", ckpt.name, exc)
+                    
+        if deleted_count > 0:
+            freed_gb = deleted_size / (1024 ** 3)
+            logger.info("Garbage Collector [%s]: %d checkpoints purges (%.2f GB liberes)", 
+                        horizon, deleted_count, freed_gb)
+                        
+        return {
+            "deleted_files": deleted_count,
+            "freed_bytes": deleted_size,
+        }
