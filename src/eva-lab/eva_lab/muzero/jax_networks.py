@@ -1,10 +1,31 @@
-﻿"""Reseaux MuZero JAX/Haiku avec representation, dynamique et prediction partagees."""
+"""Reseaux MuZero JAX/Haiku avec representation, dynamique et prediction partagees."""
 
 from __future__ import annotations
 
 import haiku as hk
 import jax
 import jax.numpy as jnp
+
+
+def support_to_scalar(logits: jnp.ndarray, support_size: int) -> jnp.ndarray:
+    """Transforme les logits categories en valeur scalaire par esperance (valeur * proba)."""
+    probabilities = jax.nn.softmax(logits, axis=-1)
+    support = jnp.arange(-support_size, support_size + 1, dtype=logits.dtype)
+    return jnp.sum(probabilities * support, axis=-1, keepdims=True)
+
+
+def scalar_to_support(scalar: jnp.ndarray, support_size: int) -> jnp.ndarray:
+    """Transforme un scalaire en distribution croisee sur le support [-support_size, support_size]."""
+    scalar = jnp.clip(jnp.squeeze(scalar, -1), -support_size, support_size)
+    b = scalar + support_size
+    lower = jnp.floor(b).astype(jnp.int32)
+    upper = jnp.ceil(b).astype(jnp.int32)
+    fraction_upper = b - lower
+    fraction_lower = 1.0 - fraction_upper
+    num_bins = 2 * support_size + 1
+    lower_hot = jax.nn.one_hot(lower, num_bins) * jnp.expand_dims(fraction_lower, -1)
+    upper_hot = jax.nn.one_hot(upper, num_bins) * jnp.expand_dims(fraction_upper, -1)
+    return lower_hot + upper_hot
 
 
 class RepresentationNetwork(hk.Module):
@@ -29,11 +50,12 @@ class RepresentationNetwork(hk.Module):
 class DynamicsNetwork(hk.Module):
     """Prevoit le prochain etat latent et la recompense immediate."""
 
-    def __init__(self, state_dim: int, hidden_dims: list[int]):
-        """Memorise la taille de l'etat latent et les couches cachees."""
+    def __init__(self, state_dim: int, hidden_dims: list[int], support_size: int):
+        """Memorise la taille de l'etat latent, les couches cachees et le support."""
         super().__init__()
         self.state_dim = state_dim
         self.hidden_dims = hidden_dims
+        self.support_size = support_size
 
     def __call__(self, hidden_state: jnp.ndarray, action_onehot: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Propage un etat latent avec une action one-hot."""
@@ -43,18 +65,19 @@ class DynamicsNetwork(hk.Module):
             hidden = jax.nn.relu(hidden)
 
         next_state = hk.Linear(self.state_dim)(hidden)
-        reward = hk.Linear(1)(hidden)
-        return jnp.tanh(next_state), reward
+        reward_logits = hk.Linear(2 * self.support_size + 1)(hidden)
+        return jnp.tanh(next_state), reward_logits
 
 
 class PredictionNetwork(hk.Module):
     """Prevoit la politique et la valeur a partir d'un etat latent."""
 
-    def __init__(self, action_dim: int, hidden_dims: list[int]):
-        """Memorise la taille d'action et les couches cachees."""
+    def __init__(self, action_dim: int, hidden_dims: list[int], support_size: int):
+        """Memorise la taille d'action, les couches cachees et le support."""
         super().__init__()
         self.action_dim = action_dim
         self.hidden_dims = hidden_dims
+        self.support_size = support_size
 
     def __call__(self, hidden_state: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Produit les logits de politique et la valeur scalaire."""
@@ -64,8 +87,8 @@ class PredictionNetwork(hk.Module):
             hidden = jax.nn.relu(hidden)
 
         logits = hk.Linear(self.action_dim)(hidden)
-        value = hk.Linear(1)(hidden)
-        return logits, value
+        value_logits = hk.Linear(2 * self.support_size + 1)(hidden)
+        return logits, value_logits
 
 
 def make_muzero_networks(config):
@@ -79,10 +102,12 @@ def make_muzero_networks(config):
         dynamics = DynamicsNetwork(
             config.hidden_state_size,
             config.network_hidden_dims,
+            config.support_size,
         )
         prediction = PredictionNetwork(
             config.action_space_size,
             config.network_hidden_dims,
+            config.support_size,
         )
 
         def initial_inference(observation: jnp.ndarray):

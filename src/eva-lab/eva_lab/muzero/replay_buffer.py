@@ -92,7 +92,7 @@ class PrioritizedReplayBuffer:
         p = np.max(game.priorities) if game.priorities else 1.0
         self.tree.add(p**self.alpha, game)
 
-    def sample(self, batch_size: int) -> List[Tuple[GameHistory, int, float]]:
+    def sample(self, batch_size: int, num_unroll_steps: int = 5) -> List[Tuple[GameHistory, int, float]]:
         """Sample (game, start_idx, weight) batch."""
         batch = []
         segment = self.tree.total() / batch_size
@@ -104,7 +104,8 @@ class PrioritizedReplayBuffer:
             (idx, p, game) = self.tree.get(s)
             
             # Pick a random start index in the game
-            start_idx = random.randint(0, len(game) - 1)
+            max_idx = max(0, len(game) - num_unroll_steps - 1)
+            start_idx = random.randint(0, max_idx)
             batch.append((game, start_idx, idx))
             
         return batch

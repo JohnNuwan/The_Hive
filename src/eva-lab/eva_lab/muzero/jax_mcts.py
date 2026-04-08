@@ -1,4 +1,4 @@
-﻿"""MCTS MuZero pour les reseaux JAX, avec expansion et retropropagation."""
+"""MCTS MuZero pour les reseaux JAX, avec expansion et retropropagation."""
 
 from __future__ import annotations
 
@@ -77,8 +77,12 @@ class JAXMuZeroMCTS:
         root.hidden_state = root_state
 
         dummy_action = jnp.zeros((1, self.config.action_space_size))
-        _, _, logits, value = self.rec_apply(self.params, root_state, dummy_action)
+        _, _, logits, value_logits = self.rec_apply(self.params, root_state, dummy_action)
         policy = jax.nn.softmax(logits)
+        
+        from eva_lab.muzero.jax_networks import support_to_scalar
+        value = support_to_scalar(value_logits, self.config.support_size)
+        
         self._expand_node(root, policy, legal_actions)
         root.value_sum = float(value[0, 0])
         root.visit_count = 1
@@ -105,11 +109,15 @@ class JAXMuZeroMCTS:
             action_onehot = jnp.zeros((1, self.config.action_space_size))
             action_onehot = action_onehot.at[0, last_action].set(1.0)
 
-            next_state, reward, logits, value = self.rec_apply(
+            next_state, reward_logits, logits, value_logits = self.rec_apply(
                 self.params,
                 parent.hidden_state,
                 action_onehot,
             )
+
+            from eva_lab.muzero.jax_networks import support_to_scalar
+            reward = support_to_scalar(reward_logits, self.config.support_size)
+            value = support_to_scalar(value_logits, self.config.support_size)
 
             node.hidden_state = next_state
             node.reward = float(reward[0, 0])

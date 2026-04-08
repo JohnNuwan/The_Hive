@@ -1,4 +1,4 @@
-﻿"""Trainer MuZero JAX/Optax avec loss hybride, unroll et mise a jour JIT."""
+"""Trainer MuZero JAX/Optax avec loss hybride, unroll et mise a jour JIT."""
 
 from __future__ import annotations
 
@@ -47,8 +47,13 @@ class MuZeroTrainerJAX:
 
     def loss_fn(self, params, batch: TrainingBatch):
         """Calcule la loss hybride MuZero sur un lot."""
-        hidden_state, logits, value = self.initial_apply(params, None, batch.observations)
-        loss_val = jnp.mean(optax.l2_loss(value.squeeze(-1), batch.target_values[:, 0]))
+        from eva_lab.muzero.jax_networks import scalar_to_support
+        
+        hidden_state, logits, value_logits = self.initial_apply(params, None, batch.observations)
+        
+        target_value_support = scalar_to_support(batch.target_values[:, 0], self.config.support_size)
+        loss_val = jnp.mean(optax.softmax_cross_entropy(value_logits, target_value_support))
+        
         loss_pol = jnp.mean(optax.softmax_cross_entropy(logits, batch.target_policies[:, 0]))
         loss_rew = 0.0
 
@@ -57,7 +62,7 @@ class MuZeroTrainerJAX:
                 batch.actions[:, step_idx],
                 self.config.action_space_size,
             )
-            next_hidden_state, reward, logits, value = self.recurrent_apply(
+            next_hidden_state, reward_logits, logits, value_logits = self.recurrent_apply(
                 params,
                 None,
                 hidden_state,
@@ -65,8 +70,11 @@ class MuZeroTrainerJAX:
             )
             hidden_state = next_hidden_state
 
-            loss_rew += jnp.mean(optax.l2_loss(reward.squeeze(-1), batch.target_rewards[:, step_idx]))
-            loss_val += jnp.mean(optax.l2_loss(value.squeeze(-1), batch.target_values[:, step_idx + 1]))
+            target_reward_support = scalar_to_support(batch.target_rewards[:, step_idx], self.config.support_size)
+            target_value_support = scalar_to_support(batch.target_values[:, step_idx + 1], self.config.support_size)
+            
+            loss_rew += jnp.mean(optax.softmax_cross_entropy(reward_logits, target_reward_support))
+            loss_val += jnp.mean(optax.softmax_cross_entropy(value_logits, target_value_support))
             loss_pol += jnp.mean(
                 optax.softmax_cross_entropy(logits, batch.target_policies[:, step_idx + 1])
             )

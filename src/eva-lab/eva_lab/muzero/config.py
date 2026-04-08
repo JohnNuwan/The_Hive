@@ -1,4 +1,4 @@
-﻿"""Configuration centralisee pour MuZero et Dreamer cote EVA Lab."""
+"""Configuration centralisee pour MuZero et Dreamer cote EVA Lab."""
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ class MuZeroConfigV3:
         self.action_space_size = 5
         self.hidden_state_size = 256
         self.network_hidden_dims = [512, 512, 512]
+        self.support_size = int(overrides.get("support_size") or os.getenv("MUZERO_SUPPORT_SIZE", "100"))
 
         self.horizon = str(overrides.get("horizon") or os.getenv("MUZERO_HORIZON", "intraday")).lower()
         self.primary_timeframe = str(

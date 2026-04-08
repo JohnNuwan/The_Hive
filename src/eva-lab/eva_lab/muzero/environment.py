@@ -1,4 +1,4 @@
-﻿"""Environnement de trading MuZero pour THE HIVE."""
+"""Environnement de trading MuZero pour THE HIVE."""
 
 from __future__ import annotations
 
@@ -395,35 +395,35 @@ class TradingEnvironment:
 
         if context["adx"] < min_adx and not fallback_direction_ok:
             self.entry_blocked_adx += 1
-            return HOLD, "adx"
+            return action, "adx"
 
         if action == BUY:
             if ema_mode == "strict" and context["close"] < context["ema_200"]:
                 self.ema200_blocked_buy += 1
-                return HOLD, "ema200"
+                return action, "ema200"
             if ema_mode == "moderate" and context["close"] < context["ema_200"] and context["price_vs_vwap"] < 0:
                 self.ema200_blocked_buy += 1
-                return HOLD, "ema200"
+                return action, "ema200"
             if require_vwap_alignment and context["price_vs_vwap"] < 0 and not fallback_direction_ok:
                 self.entry_blocked_vwap += 1
-                return HOLD, "vwap"
+                return action, "vwap"
             if require_obv_confirmation and context["obv_slope"] <= 0 and not fallback_direction_ok:
                 self.entry_blocked_obv += 1
-                return HOLD, "obv"
+                return action, "obv"
             return BUY, None
 
         if ema_mode == "strict" and context["close"] > context["ema_200"]:
             self.ema200_blocked_sell += 1
-            return HOLD, "ema200"
+            return action, "ema200"
         if ema_mode == "moderate" and context["close"] > context["ema_200"] and context["price_vs_vwap"] > 0:
             self.ema200_blocked_sell += 1
-            return HOLD, "ema200"
+            return action, "ema200"
         if require_vwap_alignment and context["price_vs_vwap"] > 0 and not fallback_direction_ok:
             self.entry_blocked_vwap += 1
-            return HOLD, "vwap"
+            return action, "vwap"
         if require_obv_confirmation and context["obv_slope"] >= 0 and not fallback_direction_ok:
             self.entry_blocked_obv += 1
-            return HOLD, "obv"
+            return action, "obv"
         return SELL, None
 
     def _get_unrealized_return(self, price: float) -> float:
@@ -538,7 +538,9 @@ class TradingEnvironment:
             tuple[np.ndarray, float, bool, bool, dict]: Sortie Gymnasium.
         """
         context = self._get_market_context()
-        price = context["close"]
+        # Lookahead bias correction: Orders fire at the OPEN price of the next bar.
+        next_step = min(self.current_step + 1, len(self.data) - 1)
+        price = float(self.data[next_step, 0])
         reward = 0.0
         done = False
         realized_pnl = 0.0
@@ -598,6 +600,8 @@ class TradingEnvironment:
             action = HOLD
 
         action, veto_reason = self._apply_entry_filter(action, context)
+        if veto_reason:
+            reward -= 5.0  # Massive penalty for ignoring rules, but we STILL EXECUTE to preserve MDP.
 
         final_action_name = ACTION_NAMES[action] if 0 <= action < len(ACTION_NAMES) else f"ACT_{action}"
         self.action_counts[final_action_name] = self.action_counts.get(final_action_name, 0) + 1
