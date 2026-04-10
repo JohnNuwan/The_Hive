@@ -2104,30 +2104,30 @@ class AutoTradingEngine:
         sup = indicators.get("sr_sup", 0.0)
         res = indicators.get("sr_res", 0.0)
         
-        # Visual MACD
-        macd_icon = "UP" if macd > 0 else "DOWN"
+        macd_icon = "\u2197" if macd > 0 else "\u2198"
         
         return (
-            f"*E.V.A | Nouvelle position (M1/M15)*\n"
-            f"-------------------\n"
-            f"Actif: {symbol}\n"
-            f"Action: {action}\n"
-            f"Entree: {entry_price:.5f}\n"
-            f"SL: {sl_price:.5f} ({sl_dist_pips:.1f} pips)\n\n"
-            f"*Marches & signaux*\n"
-            f"- RSI: {rsi:.1f} | ADX: {adx:.1f}\n"
-            f"- VWAP: {vwap:.2f}\n"
-            f"- MACD: {macd_icon} {macd:.4f}\n"
-            f"- Vol relatif: {rvol:.1f}x\n"
-            f"- Position BB: {bb_pct*100:.1f}%\n"
-            f"- S/R: {sup:.2f} / {res:.2f}\n\n"
-            f"*Analyse IA*\n"
-            f"- Cortex: {cortex_bias}\n"
-            f"- GNN (Proxmox): {gnn_bias}\n"
-            f"- Synthese: {ai_summary}\n"
-            f"- Logique: {logic_comment}\n\n"
-            f"{datetime.now().strftime('%H:%M')} | The Hive"
+            f"\U0001F916 *E.V.A | NOUVELLE POSITION*\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            f"\u2022 *Actif:* {symbol}\n"
+            f"\u2022 *Action:* {action}\n"
+            f"\u2022 *Entr\u00e9e:* {entry_price:.5f}\n"
+            f"\u2022 *SL:* {sl_price:.5f} ({sl_dist_pips:.1f} pips)\n\n"
+            f"\U0001F4CA *March\u00e9 & Signaux*\n"
+            f"  \u2022 RSI: {rsi:.1f} | ADX: {adx:.1f}\n"
+            f"  \u2022 VWAP: {vwap:.2f}\n"
+            f"  \u2022 MACD: {macd_icon} {macd:.4f}\n"
+            f"  \u2022 Vol Relatif: {rvol:.1f}x\n"
+            f"  \u2022 Pos BB: {bb_pct*100:.1f}%\n"
+            f"  \u2022 S/R: {sup:.2f} / {res:.2f}\n\n"
+            f"\U0001F9E0 *Analyse IA*\n"
+            f"  \u2022 Cortex: {cortex_bias}\n"
+            f"  \u2022 GNN: {gnn_bias}\n"
+            f"  \u2022 Synth\u00e8se: {ai_summary}\n"
+            f"  \u2022 Logique: {logic_comment}\n\n"
+            f"_{datetime.now().strftime('%H:%M')} | The Hive_"
         )
+
 
     def _fmt_close_msg(self, symbol: str, action: str, entry_price: float, exit_price: float,
                        profit: float, duration_min: int, reason: str = "SL/TP atteint") -> str:
@@ -2135,7 +2135,6 @@ class AutoTradingEngine:
         action_label = self._normalize_trade_action(action)
         pips_display = self._compute_signed_pips(symbol, action_label, entry_price, exit_price)
         
-        emoji = "WIN" if profit >= 0 else "LOSS"
         pnl_sign = "+" if profit >= 0 else ""
         
         # Duration formatting
@@ -2144,30 +2143,31 @@ class AutoTradingEngine:
         else:
             dur_str = f"{duration_min}min"
         
+        result_icon = "\u2705" if profit >= 0 else "\u274C"
         return (
-            f"*E.V.A | Trade ferme*\n"
-            f"-------------------\n"
-            f"Actif: {symbol}\n"
-            f"Action: {action_label}\n"
-            f"Resultat: {emoji} {pips_display:+.1f} pips\n\n"
-            f"*Financier*\n"
-            f"- Entree: {entry_price:.5f}\n"
-            f"- Sortie: {exit_price:.5f}\n"
-            f"- P&L: {pnl_sign}${profit:.2f}\n"
-            f"- Duree: {dur_str}\n\n"
-            f"Raison: {reason}\n"
-            f"{datetime.now().strftime('%H:%M')} | The Hive"
+            f"{result_icon} *E.V.A | TRADE FERM\u00c9*\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            f"\u2022 *Actif:* {symbol}\n"
+            f"\u2022 *Action:* {action_label}\n"
+            f"\u2022 *R\u00e9sultat:* {pips_display:+.1f} pips\n\n"
+            f"\U0001F4CA *Bilan Financier*\n"
+            f"  \u2022 Entr\u00e9e: {entry_price:.5f}\n"
+            f"  \u2022 Sortie: {exit_price:.5f}\n"
+            f"  \u2022 P&L: {pnl_sign}${profit:.2f}\n"
+            f"  \u2022 Dur\u00e9e: {dur_str}\n\n"
+            f"*Raison:* {reason}\n"
+            f"_{datetime.now().strftime('%H:%M')} | The Hive_"
         )
 
     def _fmt_shepherd_msg(self, symbol: str, action: str, event: str, 
                           new_sl: float, profit_pips: float) -> str:
         """Formate un message Shepherd lisible en ASCII."""
         return (
-            f"*E.V.A Shepherd | {event}*\n"
-            f"-------------------\n"
-            f"Actif: {symbol} {action}\n"
-            f"Nouveau SL: {new_sl:.5f}\n"
-            f"Profit protege: +{profit_pips:.1f} pips"
+            f"\U0001F6E1\uFE0F *SHEPHERD | {event}*\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            f"\u2022 *Actif:* {symbol} ({action})\n"
+            f"\u2022 *Nouv. SL:* {new_sl:.5f}\n"
+            f"\u2022 *R\u00e9serv\u00e9:* +{profit_pips:.1f} pips"
         )
 
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -2388,21 +2388,21 @@ class AutoTradingEngine:
             dd_pct = float((review.get("risk") or {}).get("daily_drawdown_percent", 0.0) or 0.0)
             
             msg = (
-                f"ðŸ“ˆ *E.V.A | Bilan {period_name}*\n"
-                f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
-                f"ðŸ“† Date: {now.strftime('%d/%m/%Y %H:%M')}\n\n"
-                f"ðŸ“Š *Performances*\n"
-                f"  â€¢ P&L: {pnl_sign}${total_pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)\n"
-                f"  â€¢ Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)\n"
-                f"  â€¢ Balance: ${float(account.get('balance', 0.0) or 0.0):,.2f}\n"
-                f"  â€¢ Drawdown JournÃ©e: {dd_pct}%\n\n"
-                f"ðŸ† *Top / Flop*\n"
-                f"  â€¢ Best: {best_str}\n"
-                f"  â€¢ Worst: {worst_str}\n\n"
-                f"ðŸ›¡ï¸ *SÃ©curitÃ©*\n"
-                f"  â€¢ Marge Libre: ${float(account.get('margin_free', 0.0) or 0.0):,.2f}\n"
-                f"  â€¢ Nemesis (Anti-Tilt): {nemesis_str}\n\n"
-                f"ðŸ§  _Shadow only en journee, revue persistee pour la nuit._"
+                f"\U0001F4C8 *E.V.A | Bilan {period_name}*\n"
+                f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+                f"\U0001F4C6 *Date:* {now.strftime('%d/%m/%Y %H:%M')}\n\n"
+                f"\U0001F4CA *Performances*\n"
+                f"  \u2022 P&L: {pnl_sign}${total_pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)\n"
+                f"  \u2022 Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)\n"
+                f"  \u2022 Balance: ${float(account.get('balance', 0.0) or 0.0):,.2f}\n"
+                f"  \u2022 Drawdown Journ\u00e9e: {dd_pct}%\n\n"
+                f"\U0001F3C6 *Top / Flop*\n"
+                f"  \u2022 Best: {best_str}\n"
+                f"  \u2022 Worst: {worst_str}\n\n"
+                f"\U0001F6E1\uFE0F *S\u00e9curit\u00e9*\n"
+                f"  \u2022 Marge Libre: ${float(account.get('margin_free', 0.0) or 0.0):,.2f}\n"
+                f"  \u2022 Nemesis: {nemesis_str}\n\n"
+                f"\U0001F9E0 _Shadow mode actif, apprentissage nocturne._"
             )
             
             self.telegram.send_sync(msg)

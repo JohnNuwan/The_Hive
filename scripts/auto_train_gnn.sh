@@ -55,7 +55,7 @@ echo "$PASS" | sudo -S docker run --rm --gpus all \
     -e MT5_SERVER="${MT5_SERVER:-FTMO-Demo}" \
     -e MT5_PASSWORD="${MT5_PASSWORD:-changeme}" \
     -e CUDA_VISIBLE_DEVICES=0 \
-    -v "$PROJECT_DIR/src/eva-lab/data":/app/eva-lab/data \
+    -v "$PROJECT_DIR/data":/app/eva-lab/data \
     -v "$PROJECT_DIR/src/eva-lab/scripts":/app/eva-lab/scripts \
     -v "$PROJECT_DIR/src/eva-lab/eva_lab":/app/eva-lab/eva_lab \
     --add-host host.docker.internal:host-gateway \
@@ -74,10 +74,13 @@ START=$(date +%s)
 echo "$PASS" | sudo -S docker run --rm --gpus all \
     -e CUDA_VISIBLE_DEVICES=0 \
     -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
-    -v "$PROJECT_DIR/src/eva-lab/data":/app/eva-lab/data \
+    -e REDIS_HOST=host.docker.internal \
+    -e REDIS_PASSWORD=devpassword \
+    -v "$PROJECT_DIR/data":/app/eva-lab/data \
     -v "$PROJECT_DIR/src/eva-lab/scripts":/app/eva-lab/scripts \
     -v "$PROJECT_DIR/src/eva-lab/eva_lab":/app/eva-lab/eva_lab \
     -w /app/eva-lab \
+    --add-host host.docker.internal:host-gateway \
     "$IMAGE" \
     python scripts/train_global_models.py >> "$LOG_FILE" 2>&1
 
