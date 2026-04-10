@@ -105,7 +105,11 @@ def resolve_gnn_dataset_cache_path(
         },
         "version": 1,
     }
-    label = "_".join(_slugify_token(symbol) for symbol in ordered_symbols) or "empty"
+    if len(ordered_symbols) > 5:
+        label = "_".join(_slugify_token(s) for s in ordered_symbols[:5]) + f"_and_{len(ordered_symbols)-5}more"
+    else:
+        label = "_".join(_slugify_token(symbol) for symbol in ordered_symbols) or "empty"
+        
     filename = f"gnn_dataset_{label}_{_fingerprint(signature)}.pkl"
     return resolve_cpu_prep_dir(cache_dir) / filename
 
@@ -542,7 +546,11 @@ def resolve_dreamer_replay_cache_path(
         "sequence_stride": int(sequence_stride),
         "version": 1,
     }
-    label = "_".join(_slugify_token(symbol) for symbol in ordered_symbols) or "empty"
+    if len(ordered_symbols) > 5:
+        label = "_".join(_slugify_token(s) for s in ordered_symbols[:5]) + f"_and_{len(ordered_symbols)-5}more"
+    else:
+        label = "_".join(_slugify_token(symbol) for symbol in ordered_symbols) or "empty"
+        
     filename = (
         f"dreamer_replay_{_slugify_token(horizon)}_{_slugify_token(family)}_"
         f"len{int(sequence_length)}_stride{int(sequence_stride)}_{label}_{_fingerprint(signature)}.pkl"
