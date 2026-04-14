@@ -29,6 +29,22 @@ except ImportError:  # pragma: no cover - dependance optionnelle pour la persist
     psycopg2 = None
     execute_values = None
 
+LOCAL_ROOT = Path(__file__).resolve().parents[1]
+EVA_LAB_SRC = LOCAL_ROOT / "src" / "eva-lab"
+if EVA_LAB_SRC.is_dir():
+    sys.path.insert(0, str(EVA_LAB_SRC))
+
+try:
+    from eva_lab.timescale_store import (
+        evaluate_ohlc_write_request,
+        get_timescale_runtime_status,
+        get_timescale_settings,
+    )
+except ImportError:  # pragma: no cover - utile si le script est isole hors depot.
+    evaluate_ohlc_write_request = None
+    get_timescale_runtime_status = None
+    get_timescale_settings = None
+
 if load_dotenv is not None:
     load_dotenv()
 
@@ -52,6 +68,25 @@ TIMEFRAMES: dict[str, tuple[int, int]] = {
     "W1": (mt5.TIMEFRAME_W1, int(os.getenv("HISTORY_W1_BARS", "1040"))),
 }
 TIMESCALE_BATCH_SIZE = int(os.getenv("HISTORY_TIMESCALE_BATCH_SIZE", "5000"))
+
+
+def _sql_identifier(identifier: str) -> str:
+    """Quote un identifiant SQL simple ou schema.table.
+
+    Args:
+        identifier (str): Identifiant brut.
+
+    Returns:
+        str: Identifiant quote pour PostgreSQL.
+
+    Raises:
+        ValueError: Si l'identifiant est vide.
+    """
+
+    parts = [part.strip() for part in str(identifier or "").split(".") if part.strip()]
+    if not parts:
+        raise ValueError("Identifiant SQL vide pour TimeScaleDB.")
+    return ".".join(f'"{part.replace(chr(34), chr(34) * 2)}"' for part in parts)
 
 
 @dataclass
@@ -84,6 +119,8 @@ class TimescaleWriter:
         """
         self.enabled = bool(enabled)
         self._disabled_reason: str | None = None
+        self._storage_profile = "balanced"
+        self._bars_table = "market.market_bars"
         if not self.enabled:
             return
         if psycopg2 is None or execute_values is None:
@@ -92,6 +129,41 @@ class TimescaleWriter:
             logger.warning(
                 "Persistence TimescaleDB desactivee: %s. Les CSV restent la source de secours.",
                 self._disabled_reason,
+            )
+            return
+        if evaluate_ohlc_write_request is None or get_timescale_runtime_status is None:
+            self.enabled = False
+            self._disabled_reason = "socle eva_lab.timescale_store indisponible"
+            logger.warning(
+                "Persistence TimescaleDB desactivee: %s. Les CSV restent la source de secours.",
+                self._disabled_reason,
+            )
+            return
+
+        # Le flag CLI doit pouvoir activer explicitement l'ecriture OHLC.
+        os.environ["TRAINING_TIMESCALE_ENABLED"] = "1"
+        settings = get_timescale_settings() if get_timescale_settings is not None else {}
+        self._storage_profile = str(settings.get("storage_profile") or "balanced")
+        self._bars_table = str(settings.get("bars_table") or "market.market_bars")
+        runtime = get_timescale_runtime_status(repair=True)
+        if not bool(runtime.get("database_exists", False)):
+            self._disable_writer("base applicative TimeScaleDB absente")
+            return
+        if not bool(runtime.get("extension_ready", False)):
+            self._disable_writer("extension TimescaleDB absente")
+            return
+        if not bool(runtime.get("schema_ready", False)):
+            self._disable_writer("schema TimeScaleDB incomplet")
+            return
+        guard_status = dict(runtime.get("write_guard_status") or {})
+        if str(guard_status.get("status") or "") == "blocked":
+            self._disable_writer("limite disque TimeScaleDB atteinte")
+            return
+        if str(guard_status.get("status") or "") == "degraded":
+            logger.warning(
+                "TimeScaleDB en mode degrade: taille=%s octets, profil=%s.",
+                guard_status.get("db_size_bytes"),
+                self._storage_profile,
             )
 
     def write_ohlc(self, symbol: str, timeframe_name: str, frame: pd.DataFrame) -> None:
@@ -107,61 +179,72 @@ class TimescaleWriter:
         if frame.empty:
             return
 
+        guard_before = self._validate_write_guard(timeframe_name, repair=True)
+        if guard_before is None:
+            return
+
         rows = self._build_rows(symbol, timeframe_name, frame)
         if not rows:
             return
 
         try:
+            inserted_rows = 0
             with psycopg2.connect(self._build_dsn()) as connection:
-                self._ensure_schema(connection)
                 with connection.cursor() as cursor:
-                    execute_values(
-                        cursor,
-                        """
-                        INSERT INTO market.market_bars (
-                            timestamp,
-                            symbol,
-                            timeframe,
-                            open,
-                            high,
-                            low,
-                            close,
-                            tick_volume,
-                            real_volume,
-                            spread,
-                            source,
-                            ingested_at
+                    for chunk in self._chunk_rows(rows):
+                        execute_values(
+                            cursor,
+                            f"""
+                            INSERT INTO {_sql_identifier(self._bars_table)} (
+                                timestamp,
+                                symbol,
+                                timeframe,
+                                open,
+                                high,
+                                low,
+                                close,
+                                tick_volume,
+                                real_volume,
+                                spread,
+                                source,
+                                ingested_at
+                            )
+                            VALUES %s
+                            ON CONFLICT (symbol, timeframe, timestamp) DO UPDATE SET
+                                open = EXCLUDED.open,
+                                high = EXCLUDED.high,
+                                low = EXCLUDED.low,
+                                close = EXCLUDED.close,
+                                tick_volume = EXCLUDED.tick_volume,
+                                real_volume = EXCLUDED.real_volume,
+                                spread = EXCLUDED.spread,
+                                source = EXCLUDED.source,
+                                ingested_at = EXCLUDED.ingested_at
+                            """,
+                            chunk,
+                            page_size=min(len(chunk), TIMESCALE_BATCH_SIZE),
                         )
-                        VALUES %s
-                        ON CONFLICT (symbol, timeframe, timestamp) DO UPDATE SET
-                            open = EXCLUDED.open,
-                            high = EXCLUDED.high,
-                            low = EXCLUDED.low,
-                            close = EXCLUDED.close,
-                            tick_volume = EXCLUDED.tick_volume,
-                            real_volume = EXCLUDED.real_volume,
-                            spread = EXCLUDED.spread,
-                            source = EXCLUDED.source,
-                            ingested_at = EXCLUDED.ingested_at
-                        """,
-                        rows,
-                        page_size=TIMESCALE_BATCH_SIZE,
-                    )
-                connection.commit()
+                        connection.commit()
+                        inserted_rows += len(chunk)
+                        guard_after_batch = self._validate_write_guard(timeframe_name, repair=False)
+                        if guard_after_batch is None:
+                            logger.warning(
+                                "Arret de l'ecriture OHLC apres lot sur %s [%s].",
+                                symbol,
+                                timeframe_name,
+                            )
+                            break
             logger.info(
-                "TimescaleDB mis a jour: %s [%s] (%s lignes).",
+                "TimescaleDB mis a jour: %s [%s] (%s lignes, profil=%s).",
                 symbol,
                 timeframe_name,
-                len(rows),
+                inserted_rows,
+                self._storage_profile,
             )
         except Exception as exc:  # pragma: no cover - depend du service externe.
-            self.enabled = False
-            self._disabled_reason = str(exc)
-            logger.warning(
-                "Ecriture TimescaleDB desactivee apres echec sur %s [%s]: %s",
-                symbol,
-                timeframe_name,
-                exc,
+            self._disable_writer(
+                f"echec d'ecriture sur {symbol} [{timeframe_name}]",
+                details=str(exc),
             )
 
     @staticmethod
@@ -203,62 +286,120 @@ class TimescaleWriter:
         Returns:
             str: DSN de connexion TimescaleDB.
         """
-        host = os.getenv("TRAINING_TIMESCALE_HOST", os.getenv("TIMESCALE_HOST", "localhost"))
-        port = os.getenv("TRAINING_TIMESCALE_PORT", os.getenv("TIMESCALE_PORT", "5432"))
-        database = os.getenv("TRAINING_TIMESCALE_DB", os.getenv("TIMESCALE_DB", "thehive"))
-        user = os.getenv("TRAINING_TIMESCALE_USER", os.getenv("TIMESCALE_USER", "eva"))
-        password = os.getenv("TRAINING_TIMESCALE_PASSWORD", os.getenv("TIMESCALE_PASSWORD", ""))
+        settings = get_timescale_settings() if get_timescale_settings is not None else {}
+        host = str(
+            settings.get("host")
+            or os.getenv("TRAINING_TIMESCALE_HOST")
+            or os.getenv("TIMESCALE_HOST")
+            or "localhost"
+        )
+        port = str(
+            settings.get("port")
+            or os.getenv("TRAINING_TIMESCALE_PORT")
+            or os.getenv("TIMESCALE_PORT")
+            or "5432"
+        )
+        database = str(
+            settings.get("database")
+            or os.getenv("TRAINING_TIMESCALE_DB")
+            or os.getenv("TIMESCALE_DB")
+            or "thehive"
+        )
+        user = str(
+            settings.get("user")
+            or os.getenv("TRAINING_TIMESCALE_USER")
+            or os.getenv("TIMESCALE_USER")
+            or "eva"
+        )
+        password = str(
+            settings.get("password")
+            or os.getenv("TRAINING_TIMESCALE_PASSWORD")
+            or os.getenv("TIMESCALE_PASSWORD")
+            or ""
+        )
         return (
             f"host={host} port={port} dbname={database} "
             f"user={user} password={password}"
         )
 
     @staticmethod
-    def _ensure_schema(connection: Any) -> None:
-        """Cree le schema et la table canonique si necessaire."""
+    def _chunk_rows(rows: list[tuple[Any, ...]]) -> Iterable[list[tuple[Any, ...]]]:
+        """Decoupe un lot de lignes pour verifier le garde-fou regulierement.
 
-        with connection.cursor() as cursor:
-            cursor.execute('CREATE SCHEMA IF NOT EXISTS "market"')
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS market.market_bars (
-                    timestamp TIMESTAMPTZ NOT NULL,
-                    symbol TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    open DOUBLE PRECISION NOT NULL,
-                    high DOUBLE PRECISION NOT NULL,
-                    low DOUBLE PRECISION NOT NULL,
-                    close DOUBLE PRECISION NOT NULL,
-                    tick_volume BIGINT NOT NULL DEFAULT 0,
-                    real_volume BIGINT NOT NULL DEFAULT 0,
-                    spread INTEGER NOT NULL DEFAULT 0,
-                    source TEXT NOT NULL DEFAULT 'mt5',
-                    ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    PRIMARY KEY (symbol, timeframe, timestamp)
-                )
-                """
+        Args:
+            rows (list[tuple[Any, ...]]): Lignes a inserer.
+
+        Yields:
+            Iterable[list[tuple[Any, ...]]]: Paquets de taille controlee.
+        """
+
+        if not rows:
+            return
+        batch_size = max(TIMESCALE_BATCH_SIZE, 1)
+        for index in range(0, len(rows), batch_size):
+            yield rows[index:index + batch_size]
+
+    def _disable_writer(self, reason: str, *, details: str | None = None) -> None:
+        """Desactive l'ecriture TimescaleDB apres un echec structurel.
+
+        Args:
+            reason (str): Raison stable de desactivation.
+            details (str | None): Detail technique optionnel.
+        """
+
+        self.enabled = False
+        self._disabled_reason = str(reason or "").strip() or "raison_inconnue"
+        if details:
+            logger.warning(
+                "Ecriture TimescaleDB desactivee: %s (%s).",
+                self._disabled_reason,
+                details,
             )
-            cursor.execute("DROP VIEW IF EXISTS public.market_ohlc")
-            cursor.execute(
-                """
-                CREATE VIEW public.market_ohlc AS
-                SELECT
-                    timestamp AS time,
-                    symbol,
-                    timeframe,
-                    open,
-                    high,
-                    low,
-                    close,
-                    tick_volume,
-                    real_volume,
-                    spread,
-                    source,
-                    ingested_at
-                FROM market.market_bars
-                """
+        else:
+            logger.warning(
+                "Ecriture TimescaleDB desactivee: %s.",
+                self._disabled_reason,
             )
-        connection.commit()
+
+    def _validate_write_guard(self, timeframe_name: str, *, repair: bool) -> dict[str, Any] | None:
+        """Valide le timeframe et la volumetrie avant ou apres un lot.
+
+        Args:
+            timeframe_name (str): Timeframe a valider.
+            repair (bool): Tente un bootstrap idempotent si ``True``.
+
+        Returns:
+            dict[str, Any] | None: Diagnostic d'autorisation ou ``None`` si ecriture refusee.
+        """
+
+        if evaluate_ohlc_write_request is None:
+            self._disable_writer("diagnostic TimeScaleDB indisponible")
+            return None
+        guard = evaluate_ohlc_write_request(timeframe_name, repair=repair)
+        status = str(guard.get("status") or "")
+        reason = str(guard.get("reason") or "")
+        if status == "timeframe_blocked":
+            logger.warning(
+                "Ecriture OHLC refusee pour [%s]: timeframe non autorise. Autorises=%s.",
+                timeframe_name,
+                ",".join(guard.get("allowed_timeframes", [])),
+            )
+            return None
+        if not bool(guard.get("allowed", False)):
+            message = f"garde-fou TimeScaleDB bloque ({status or 'unknown'} / {reason or 'unknown'})"
+            if status in {"blocked", "unavailable", "invalid_request"}:
+                self._disable_writer(message, details=str(guard.get("last_bootstrap_error") or ""))
+            else:
+                logger.warning("Ecriture OHLC refusee: %s.", message)
+            return None
+        if status == "degraded":
+            logger.warning(
+                "Ecriture OHLC en mode degrade pour [%s]: taille=%s octets, seuil soft=%s.",
+                timeframe_name,
+                guard.get("db_size_bytes"),
+                guard.get("soft_limit_bytes"),
+            )
+        return guard
 
 
 def parse_args() -> argparse.Namespace:

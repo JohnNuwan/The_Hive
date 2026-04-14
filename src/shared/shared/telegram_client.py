@@ -1,88 +1,222 @@
-import requests
+"""Client Telegram minimal pour les notifications THE HIVE."""
+
+from __future__ import annotations
+
+import asyncio
+import functools
 import logging
 import os
-import asyncio
 from typing import Optional
+
+import requests
+
 from shared.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+
 class TelegramClient:
+    """Envoie des messages Telegram vers un chat ou un topic configure.
+
+    Le mode de parse est desactive par defaut pour eviter les erreurs de
+    rendu sur les identifiants techniques contenant des underscores.
     """
-    Client for sending notifications to a Telegram Channel/Group.
-    Supports Topics (Threads) via message_thread_id.
-    """
-    def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None, topic_id: Optional[int] = None):
+
+    def __init__(
+        self,
+        token: Optional[str] = None,
+        chat_id: Optional[str] = None,
+        topic_id: Optional[int] = None,
+    ) -> None:
+        """Initialise le client Telegram.
+
+        Args:
+            token (Optional[str]): Token du bot a utiliser.
+            chat_id (Optional[str]): Identifiant du chat cible.
+            topic_id (Optional[int]): Identifiant du topic cible.
+        """
         self.settings = get_settings()
         self.token = token or self.settings.telegram_bot_token
         self.chat_id = chat_id or self.settings.telegram_chat_id
-        # Topic ID (Thread) support - Reading from .env directly as it might not be in Settings schema yet
-        # Or even better, let's stick to os.getenv for the NEW optional var
         env_topic = os.getenv("TELEGRAM_TOPIC_ID")
         self.topic_id = topic_id if topic_id else (int(env_topic) if env_topic else None)
-        
         self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        
+
         if not self.token or not self.chat_id:
-            logger.warning(f"⚠️ Telegram credentials missing. Token={bool(self.token)} Chat={bool(self.chat_id)}")
+            logger.warning(
+                "Identifiants Telegram absents. Token=%s Chat=%s",
+                bool(self.token),
+                bool(self.chat_id),
+            )
             self.enabled = False
         else:
             self.enabled = True
-            logger.info(f"📢 Telegram Bot initialized (Chat: {self.chat_id} | Topic: {self.topic_id})")
+            logger.info(
+                "Telegram initialise (chat=%s, topic=%s).",
+                self.chat_id,
+                self.topic_id,
+            )
 
-    def _send_sync_internal(self, message: str):
-        """Internal synchronous method to send a message."""
-        if not self.enabled: return
-        payload = {
+    def _build_message_payload(
+        self,
+        message: str,
+        *,
+        parse_mode: str | None = None,
+    ) -> dict[str, object]:
+        """Construit la charge utile d'un message texte.
+
+        Args:
+            message (str): Corps du message.
+            parse_mode (str | None): Mode de rendu Telegram explicite.
+
+        Returns:
+            dict[str, object]: Charge utile prete pour l'API Telegram.
+        """
+        payload: dict[str, object] = {
             "chat_id": self.chat_id,
             "text": message,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True
+            "disable_web_page_preview": True,
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         if self.topic_id:
             payload["message_thread_id"] = self.topic_id
+        return payload
 
+    def _send_sync_internal(
+        self,
+        message: str,
+        *,
+        parse_mode: str | None = None,
+    ) -> None:
+        """Envoie un message texte de facon synchrone.
+
+        Args:
+            message (str): Texte a transmettre.
+            parse_mode (str | None): Mode de rendu Telegram optionnel.
+        """
+        if not self.enabled:
+            return
+
+        payload = self._build_message_payload(message, parse_mode=parse_mode)
         try:
-            resp = requests.post(self.base_url, json=payload, timeout=10)
-            if resp.status_code != 200:
-                logger.error(f"Telegram Send Error: {resp.status_code} - {resp.text}")
-        except Exception as e:
-            logger.error(f"Telegram Connection Error: {e}")
+            response = requests.post(self.base_url, json=payload, timeout=10)
+            if response.status_code != 200:
+                logger.error(
+                    "Erreur Telegram sendMessage: %s - %s",
+                    response.status_code,
+                    response.text,
+                )
+        except Exception as exc:
+            logger.error("Erreur de connexion Telegram: %s", exc)
 
-    async def send_message(self, message: str):
-        """Sends a text message to the configured chat/topic."""
-        if not self.enabled: return
-        await asyncio.to_thread(self._send_sync_internal, message)
+    async def send_message(
+        self,
+        message: str,
+        *,
+        parse_mode: str | None = None,
+    ) -> None:
+        """Envoie un message texte asynchrone.
 
-    def _send_photo_sync_internal(self, photo: bytes, caption: str):
-        if not self.enabled: return
+        Args:
+            message (str): Texte a transmettre.
+            parse_mode (str | None): Mode de rendu Telegram optionnel.
+        """
+        if not self.enabled:
+            return
+        await asyncio.to_thread(
+            self._send_sync_internal,
+            message,
+            parse_mode=parse_mode,
+        )
+
+    def _send_photo_sync_internal(
+        self,
+        photo: bytes,
+        caption: str,
+        *,
+        parse_mode: str | None = None,
+    ) -> None:
+        """Envoie une photo de facon synchrone.
+
+        Args:
+            photo (bytes): Contenu binaire de l'image.
+            caption (str): Legende associee.
+            parse_mode (str | None): Mode de rendu Telegram optionnel.
+        """
+        if not self.enabled:
+            return
+
         url = f"https://api.telegram.org/bot{self.token}/sendPhoto"
-        
-        data = {"chat_id": self.chat_id, "caption": caption, "parse_mode": "Markdown"}
+        data: dict[str, object] = {
+            "chat_id": self.chat_id,
+            "caption": caption,
+        }
+        if parse_mode:
+            data["parse_mode"] = parse_mode
         if self.topic_id:
             data["message_thread_id"] = self.topic_id
-            
         files = {"photo": ("image.png", photo, "image/png")}
-        
+
         try:
-            resp = requests.post(url, data=data, files=files, timeout=30)
-            if resp.status_code != 200:
-                logger.error(f"Telegram SendPhoto Error: {resp.status_code} - {resp.text}")
-        except Exception as e:
-            logger.error(f"Telegram Connection Error: {e}")
+            response = requests.post(url, data=data, files=files, timeout=30)
+            if response.status_code != 200:
+                logger.error(
+                    "Erreur Telegram sendPhoto: %s - %s",
+                    response.status_code,
+                    response.text,
+                )
+        except Exception as exc:
+            logger.error("Erreur de connexion Telegram: %s", exc)
 
-    async def send_photo(self, photo: bytes, caption: str):
-        """Sends a photo to the configured chat/topic."""
-        if not self.enabled: return
-        await asyncio.to_thread(self._send_photo_sync_internal, photo, caption)
+    async def send_photo(
+        self,
+        photo: bytes,
+        caption: str,
+        *,
+        parse_mode: str | None = None,
+    ) -> None:
+        """Envoie une photo asynchrone.
 
-    def send_sync(self, message: str):
-        """Synchronous wrapper for sending messages (fire & forget)."""
-        if not self.enabled: return
+        Args:
+            photo (bytes): Contenu binaire de l'image.
+            caption (str): Legende associee.
+            parse_mode (str | None): Mode de rendu Telegram optionnel.
+        """
+        if not self.enabled:
+            return
+        await asyncio.to_thread(
+            self._send_photo_sync_internal,
+            photo,
+            caption,
+            parse_mode=parse_mode,
+        )
+
+    def send_sync(
+        self,
+        message: str,
+        *,
+        parse_mode: str | None = None,
+    ) -> None:
+        """Declenche un envoi synchrone tolérant a l'absence de boucle.
+
+        Args:
+            message (str): Texte a transmettre.
+            parse_mode (str | None): Mode de rendu Telegram optionnel.
+        """
+        if not self.enabled:
+            return
         try:
             loop = asyncio.get_running_loop()
-            loop.run_in_executor(None, self._send_sync_internal, message)
+            loop.run_in_executor(
+                None,
+                functools.partial(
+                    self._send_sync_internal,
+                    message,
+                    parse_mode=parse_mode,
+                ),
+            )
         except RuntimeError:
-            self._send_sync_internal(message)
-        except Exception as e:
-            logger.error(f"Telegram Sync Error: {e}")
+            self._send_sync_internal(message, parse_mode=parse_mode)
+        except Exception as exc:
+            logger.error("Erreur Telegram synchrone: %s", exc)

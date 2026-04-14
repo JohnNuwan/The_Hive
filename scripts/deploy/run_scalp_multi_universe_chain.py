@@ -34,25 +34,25 @@ GPU_USER = os.getenv("HIVE_SSH_USER", "aza")
 GPU_PASSWORD = os.getenv("HIVE_SSH_PASSWORD")
 
 SCALP_MULTI_UNIVERSE_SYMBOLS = [
-    "EURUSD",
     "XAUUSD",
-    "GBPUSD",
-    "USDJPY",
     "US30.cash",
     "GER40.cash",
+    "EURUSD",
+    "US100.cash",
     "US500.cash",
+    "BTCUSD",
 ]
 
 GNN_REFRESH_PAYLOAD = {
     "symbols": SCALP_MULTI_UNIVERSE_SYMBOLS,
     "focus_symbol": "XAUUSD",
     "context_symbols": [
-        "EURUSD",
-        "GBPUSD",
-        "USDJPY",
         "US30.cash",
         "GER40.cash",
+        "EURUSD",
+        "US100.cash",
         "US500.cash",
+        "BTCUSD",
     ],
     "deployment_class": "consultative",
     "epochs": 300,

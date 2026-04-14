@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import logging
 import os
-import pickle
 from datetime import datetime
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+from eva_lab.muzero.checkpoint_utils import (
+    MuZeroCheckpointCompatibilityError,
+    build_muzero_expected_context,
+    inspect_muzero_checkpoint,
+    save_muzero_checkpoint,
+)
+from eva_lab.muzero.environment import TradingEnvironment
 from eva_lab.muzero.jax_mcts import JAXMuZeroMCTS
 from eva_lab.muzero.jax_networks import make_muzero_networks
 from eva_lab.muzero.jax_trainer import MuZeroTrainerJAX
@@ -35,9 +41,14 @@ class JAXMuZeroAgent:
         self.replay_buffer = PrioritizedReplayBuffer(
             max_games=config.window_size // config.max_moves
         )
+        self.training_step_count = 0
 
         self._jit_init = jax.jit(self._initial_inference)
         self._jit_rec = jax.jit(self._recurrent_inference)
+        self._expected_checkpoint_context = build_muzero_expected_context(
+            config=config,
+            expected_params=self.params,
+        )
 
         logger.info(
             "[JAXMuZeroAgent] Agent operationnel. Etat latent=%s.",
@@ -62,10 +73,17 @@ class JAXMuZeroAgent:
         while not done and steps < self.config.max_moves:
             steps += 1
             obs_jax = jnp.array(obs).reshape(1, -1)
-            hidden_state, _, _ = self._jit_init(self.params, obs_jax)
+            hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
+            root_legal_actions = env.get_legal_root_actions()
 
             mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
-            root = mcts.run(hidden_state, add_exploration_noise=exploration)
+            root = mcts.run(
+                hidden_state,
+                root_logits,
+                root_value_logits,
+                root_legal_actions=root_legal_actions,
+                add_exploration_noise=exploration,
+            )
 
             action = self._select_action(root, exploration)
             policy = self._get_policy_distribution(root)
@@ -90,7 +108,17 @@ class JAXMuZeroAgent:
             self.opt_state,
             batch,
         )
-        return metrics
+        metrics_payload = dict(metrics)
+        priority_errors = np.asarray(
+            metrics_payload.pop("priority_errors", []),
+            dtype=np.float32,
+        ).reshape(-1)
+        if priority_errors.size > 0:
+            tree_indices = [sample[2] for sample in samples]
+            self.replay_buffer.update_priorities(tree_indices, priority_errors.tolist())
+
+        self.training_step_count += 1
+        return self._sanitize_metrics(metrics_payload)
 
     def reanalyze_game(self, game: GameHistory) -> None:
         """Recalcule politiques et valeurs d'une partie avec le reseau courant."""
@@ -99,23 +127,60 @@ class JAXMuZeroAgent:
 
         for obs in game.observations:
             obs_jax = jnp.array(obs).reshape(1, -1)
-            hidden_state, _, _ = self._jit_init(self.params, obs_jax)
+            hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
+            root_legal_actions = TradingEnvironment.infer_legal_root_actions_from_observation(obs)
             mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
-            root = mcts.run(hidden_state, add_exploration_noise=False)
+            root = mcts.run(
+                hidden_state,
+                root_logits,
+                root_value_logits,
+                root_legal_actions=root_legal_actions,
+                add_exploration_noise=False,
+            )
             new_policies.append(self._get_policy_distribution(root))
             new_values.append(float(root.value))
 
         game.policies = new_policies
         game.values = new_values
 
+    def reanalyze_recent_games(self, limit: int) -> int:
+        """Reanalyse les episodes les plus recents du replay buffer.
+
+        Args:
+            limit (int): Nombre maximal d'episodes a recalculer.
+
+        Returns:
+            int: Nombre d'episodes effectivement reanalyses.
+        """
+        reanalyzed = 0
+        for game in self.replay_buffer.recent_games(limit):
+            self.reanalyze_game(game)
+            reanalyzed += 1
+        return reanalyzed
+
     def _select_action(self, root, exploration: bool) -> int:
         """Choisit une action a partir des visites MCTS."""
         visit_counts = [(action, child.visit_count) for action, child in root.children.items()]
         actions = [item[0] for item in visit_counts]
-        counts = [item[1] for item in visit_counts]
+        counts = np.asarray([item[1] for item in visit_counts], dtype=np.float64)
+        if counts.size == 0:
+            return 0
+        if counts.sum() <= 0.0:
+            counts = np.asarray(
+                [root.children[action].prior for action in actions],
+                dtype=np.float64,
+            )
         if exploration:
-            probs = np.array(counts, dtype=float)
-            probs /= probs.sum()
+            temperature = max(
+                float(self.config.visit_softmax_temperature(self.training_step_count)),
+                1e-3,
+            )
+            probs = np.power(np.maximum(counts, 1e-8), 1.0 / temperature)
+            total = float(probs.sum())
+            if total <= 0.0 or not np.isfinite(total):
+                probs = np.full(len(actions), 1.0 / float(len(actions)), dtype=np.float64)
+            else:
+                probs = probs / total
             return int(np.random.choice(actions, p=probs))
         return actions[int(np.argmax(counts))]
 
@@ -127,7 +192,31 @@ class JAXMuZeroAgent:
         total = policy.sum()
         if total > 0:
             policy /= total
+        elif root.children:
+            for action, child in root.children.items():
+                policy[action] = child.prior
+            total = policy.sum()
+            if total > 0:
+                policy /= total
         return policy
+
+    def _sanitize_metrics(self, metrics: dict[str, object]) -> dict[str, object]:
+        """Convertit les sorties JAX en types Python simples.
+
+        Args:
+            metrics (dict[str, object]): Metriques brutes renvoyees par JAX.
+
+        Returns:
+            dict[str, object]: Metriques serialisables.
+        """
+        sanitized: dict[str, object] = {}
+        for key, value in dict(metrics or {}).items():
+            array = np.asarray(value)
+            if array.ndim == 0:
+                sanitized[str(key)] = float(array)
+            else:
+                sanitized[str(key)] = array.tolist()
+        return sanitized
 
     def process_observation(self, observation: dict) -> np.ndarray:
         """Convertit une observation live en vecteur compatible MuZero.
@@ -219,9 +308,16 @@ class JAXMuZeroAgent:
             obs_vec = np.asarray(observation, dtype=np.float32)
 
         obs_jax = jnp.array(obs_vec).reshape(1, -1)
-        hidden_state, _, _ = self._jit_init(self.params, obs_jax)
+        hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
+        root_legal_actions = TradingEnvironment.infer_legal_root_actions_from_observation(obs_vec)
         mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
-        root = mcts.run(hidden_state, add_exploration_noise=False)
+        root = mcts.run(
+            hidden_state,
+            root_logits,
+            root_value_logits,
+            root_legal_actions=root_legal_actions,
+            add_exploration_noise=False,
+        )
 
         action = self._select_action(root, exploration=False)
         policy = self._get_policy_distribution(root)
@@ -236,17 +332,75 @@ class JAXMuZeroAgent:
             "simulations": self.config.num_simulations,
         }
 
-    def save(self, path: str) -> None:
-        """Sauvegarde les poids et l'etat de l'optimiseur."""
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as file_obj:
-            pickle.dump({"params": self.params, "opt_state": self.opt_state}, file_obj)
-        logger.info("[JAXMuZeroAgent] Checkpoint sauvegarde: %s", path)
+    def save(
+        self,
+        path: str,
+        *,
+        artifact_kind: str = "checkpoint",
+        lineage: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Sauvegarde les poids MuZero dans le schema structure v2.
 
-    def load(self, path: str) -> None:
-        """Recharge les poids et l'etat de l'optimiseur depuis un checkpoint."""
-        with open(path, "rb") as file_obj:
-            data = pickle.load(file_obj)
-        self.params = data["params"]
-        self.opt_state = data["opt_state"]
+        Args:
+            path (str): Chemin cible du checkpoint.
+            artifact_kind (str): Nature de l'artefact (`checkpoint`, `latest`,
+                `challenger`, `champion`, etc.).
+            lineage (dict[str, object] | None): Metadonnees de filiation du
+                checkpoint.
+
+        Returns:
+            dict[str, object]: Payload structure serialise.
+        """
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = save_muzero_checkpoint(
+            path,
+            config=self.config,
+            params=self.params,
+            opt_state=self.opt_state,
+            artifact_kind=artifact_kind,
+            lineage=dict(lineage or {}),
+        )
+        logger.info("[JAXMuZeroAgent] Checkpoint sauvegarde: %s", path)
+        return payload
+
+    def inspect_checkpoint(self, path: str) -> dict[str, object]:
+        """Retourne le rapport de compatibilite d'un checkpoint MuZero.
+
+        Args:
+            path (str): Chemin du checkpoint a inspecter.
+
+        Returns:
+            dict[str, object]: Rapport detaille de compatibilite.
+        """
+        _payload, compatibility = inspect_muzero_checkpoint(
+            path,
+            expected_context=self._expected_checkpoint_context,
+        )
+        return compatibility
+
+    def load(self, path: str) -> dict[str, object]:
+        """Recharge les poids et l'etat de l'optimiseur depuis un checkpoint.
+
+        Args:
+            path (str): Chemin du checkpoint a charger.
+
+        Returns:
+            dict[str, object]: Rapport de compatibilite du checkpoint charge.
+
+        Raises:
+            MuZeroCheckpointCompatibilityError: Si le checkpoint ne respecte
+                pas l'architecture attendue.
+        """
+        payload, compatibility = inspect_muzero_checkpoint(
+            path,
+            expected_context=self._expected_checkpoint_context,
+        )
+        if not compatibility.get("allowed", False):
+            raise MuZeroCheckpointCompatibilityError(
+                str(compatibility.get("reason") or "Checkpoint MuZero incompatible.")
+            )
+        checkpoint_payload = dict(payload or {})
+        self.params = checkpoint_payload["params"]
+        self.opt_state = checkpoint_payload.get("opt_state", self.opt_state)
         logger.info("[JAXMuZeroAgent] Checkpoint charge: %s", path)
+        return compatibility

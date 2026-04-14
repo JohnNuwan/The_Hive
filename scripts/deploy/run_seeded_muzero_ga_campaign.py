@@ -35,13 +35,13 @@ GA_TRIAL_URL = f"{LAB_BASE_URL}/internal/ga-trial"
 GA_CAMPAIGN_URL = f"{LAB_BASE_URL}/internal/ga-seeded-campaign"
 
 SCALP_MULTI_UNIVERSE_SYMBOLS = [
-    "EURUSD",
     "XAUUSD",
-    "GBPUSD",
-    "USDJPY",
     "US30.cash",
     "GER40.cash",
+    "EURUSD",
+    "US100.cash",
     "US500.cash",
+    "BTCUSD",
 ]
 
 PROXY_TRIAL_COUNT = 24
@@ -360,23 +360,48 @@ def _publish_ga_trial(payload: dict[str, Any]) -> None:
     _post_json(GA_TRIAL_URL, payload, timeout=30)
 
 
-def _extract_seed_reference() -> dict[str, Any]:
-    """Charge la baseline live MuZero et ses metriques de reference."""
+def _build_seed_reference_from_status(muzero_status: dict[str, Any]) -> dict[str, Any]:
+    """Valide et extrait la reference seed depuis `/champions/status`."""
 
-    payload = _fetch_json(CHAMPIONS_STATUS_URL, timeout=30)
-    muzero_status = dict(((payload.get("engines") or {}).get("muzero") or {}).get("scalp") or {})
+    promotion_state = str(muzero_status.get("promotion_state") or "").strip().lower()
+    selection = str(muzero_status.get("selection") or "").strip().lower()
     live_champion_id = str(muzero_status.get("live_champion_id") or "").strip()
     checkpoint_info = dict(muzero_status.get("champion_checkpoint") or {})
     seed_checkpoint_path = str(checkpoint_info.get("path") or "").strip()
+    artifact_compatibility = dict(muzero_status.get("artifact_compatibility") or {})
+
+    if promotion_state != "promoted":
+        raise RuntimeError("Aucun champion MuZero scalp promu n'est disponible pour le seed GA.")
+    if selection != "champion":
+        raise RuntimeError("Le seed GA MuZero refuse les artefacts live non champions.")
+    if not artifact_compatibility.get("allowed", False):
+        reason = str(artifact_compatibility.get("reason") or "artifact_incompatible").strip()
+        raise RuntimeError(
+            f"Le champion MuZero scalp est incompatible et ne peut pas servir de seed: {reason}"
+        )
     if not live_champion_id or not seed_checkpoint_path:
         raise RuntimeError("Champion MuZero live introuvable pour initialiser la campagne seedee.")
+
     return {
         "champion_id": live_champion_id,
         "checkpoint_path": seed_checkpoint_path,
         "metrics": dict((muzero_status.get("promotion_gate") or {}).get("metrics") or {}),
         "mechanics_profile_version": str(muzero_status.get("mechanics_profile_version") or "").strip() or None,
         "feature_profile": str(muzero_status.get("feature_profile") or "").strip() or None,
+        "artifact_compatibility": artifact_compatibility,
+        "checkpoint_schema_version": muzero_status.get("checkpoint_schema_version"),
+        "resume_source": str(muzero_status.get("resume_source") or "").strip() or None,
+        "lineage": dict(muzero_status.get("lineage") or {}),
+        "seed_parent_champion_id": str(muzero_status.get("seed_parent_champion_id") or "").strip() or None,
     }
+
+
+def _extract_seed_reference() -> dict[str, Any]:
+    """Charge la baseline live MuZero et ses metriques de reference."""
+
+    payload = _fetch_json(CHAMPIONS_STATUS_URL, timeout=30)
+    muzero_status = dict(((payload.get("engines") or {}).get("muzero") or {}).get("scalp") or {})
+    return _build_seed_reference_from_status(muzero_status)
 
 
 def _build_seeded_overrides(
@@ -486,6 +511,15 @@ def _build_trial_record(
         "dataset_id": str(summary.get("dataset_id") or "").strip() or None,
         "finished_at": summary.get("terminal_at"),
         "campaign_id": campaign_id,
+        "resume_source": str(summary.get("resume_source") or "").strip() or None,
+        "artifact_compatibility": dict(summary.get("artifact_compatibility") or {}),
+        "checkpoint_schema_version": summary.get("checkpoint_schema_version"),
+        "lineage": dict(summary.get("lineage") or {}),
+        "seed_parent_champion_id": (
+            str(summary.get("seed_parent_champion_id") or "").strip()
+            or str((summary.get("lineage") or {}).get("parent_champion_id") or "").strip()
+            or None
+        ),
         "promotion_gate": promotion_gate,
         "live_comparison": dict(summary.get("live_comparison") or {}),
         "metrics": dict(summary.get("metrics") or {}),
@@ -510,6 +544,9 @@ def _select_campaign_winner(final_results: list[dict[str, Any]]) -> dict[str, An
         summary = dict(result.get("summary") or {})
         promotion_gate = dict(summary.get("promotion_gate") or {})
         live_comparison = dict(summary.get("live_comparison") or {})
+        artifact_compatibility = dict(summary.get("artifact_compatibility") or {})
+        if not artifact_compatibility.get("allowed", False):
+            continue
         if not promotion_gate.get("allowed", False):
             continue
         if not live_comparison.get("allowed", False):
@@ -546,6 +583,11 @@ def _promote_remote_winner(seed_reference: dict[str, Any], winner: dict[str, Any
 
     metadata = {
         "parent_champion_id": seed_reference.get("champion_id"),
+        "seed_checkpoint_path": seed_reference.get("checkpoint_path"),
+        "seed_checkpoint_schema_version": seed_reference.get("checkpoint_schema_version"),
+        "seed_artifact_compatibility": dict(seed_reference.get("artifact_compatibility") or {}),
+        "seed_resume_source": seed_reference.get("resume_source"),
+        "seed_lineage": dict(seed_reference.get("lineage") or {}),
         "ga_campaign_id": campaign_id,
         "ga_scope": "mechanics_only",
         "ga_generation": GENERATION_INDEX,
@@ -605,8 +647,29 @@ def main() -> int:
     _append_log("Debut de la campagne GA seedee MuZero.")
     _wait_for_dreamer_completion()
 
-    seed_reference = _extract_seed_reference()
     campaign_id = f"seeded_muzero_ga_{time.strftime('%Y%m%d_%H%M%S')}"
+    try:
+        seed_reference = _extract_seed_reference()
+    except RuntimeError as exc:
+        blocking_reason = str(exc).strip() or "seed_incompatible"
+        _append_log(f"Campagne seedee bloquee: {blocking_reason}")
+        _publish_campaign_state(
+            {
+                "campaign_id": campaign_id,
+                "status": "seed_blocked",
+                "scope": "mechanics_only",
+                "reason": blocking_reason,
+                "generation": GENERATION_INDEX,
+                "trial_count": 0,
+                "finalists": [],
+                "selected_challenger_id": None,
+                "selected_trial_id": None,
+                "promotion_state": "blocked",
+                "universe": SCALP_MULTI_UNIVERSE_SYMBOLS,
+            }
+        )
+        return 0
+
     base_genome = _build_base_genome()
     _publish_campaign_state(
         {
@@ -617,6 +680,12 @@ def main() -> int:
             "seed_checkpoint_path": seed_reference.get("checkpoint_path"),
             "seed_metrics": seed_reference.get("metrics"),
             "seed_mechanics_profile_version": seed_reference.get("mechanics_profile_version"),
+            "seed_feature_profile": seed_reference.get("feature_profile"),
+            "seed_checkpoint_schema_version": seed_reference.get("checkpoint_schema_version"),
+            "seed_artifact_compatibility": seed_reference.get("artifact_compatibility"),
+            "seed_resume_source": seed_reference.get("resume_source"),
+            "seed_lineage": seed_reference.get("lineage"),
+            "seed_parent_champion_id": seed_reference.get("seed_parent_champion_id"),
             "generation": GENERATION_INDEX,
             "trial_count": 0,
             "finalists": [],
@@ -686,9 +755,24 @@ def main() -> int:
                     "hard_reject_reason": rejection_reason,
                 },
             }
-        )
+    )
 
     finalists = _select_proxy_finalists(proxy_results)
+    if not finalists:
+        _append_log("Aucun proxy compatible n'a produit de finaliste admissible.")
+        _publish_campaign_state(
+            {
+                "campaign_id": campaign_id,
+                "status": "completed",
+                "promotion_state": "blocked",
+                "selected_challenger_id": None,
+                "selected_trial_id": None,
+                "reason": "no_proxy_finalist",
+                "trial_count": len(proxy_results),
+            }
+        )
+        return 0
+
     _append_log(f"{len(finalists)} finalistes retenus apres la phase proxy.")
     _publish_campaign_state(
         {

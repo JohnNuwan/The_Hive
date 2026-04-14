@@ -15,8 +15,27 @@ def support_to_scalar(logits: jnp.ndarray, support_size: int) -> jnp.ndarray:
 
 
 def scalar_to_support(scalar: jnp.ndarray, support_size: int) -> jnp.ndarray:
-    """Transforme un scalaire en distribution croisee sur le support [-support_size, support_size]."""
-    scalar = jnp.clip(jnp.squeeze(scalar, -1), -support_size, support_size)
+    """Transforme des cibles scalaires en distribution sur le support discret.
+
+    Args:
+        scalar (jnp.ndarray): Valeur scalaire par echantillon. Le tenseur peut
+            etre fourni sous la forme ``(batch,)`` ou ``(batch, 1)``.
+        support_size (int): Taille maximale du support discret positif.
+
+    Returns:
+        jnp.ndarray: Distribution cible sur ``2 * support_size + 1`` classes.
+
+    Raises:
+        ValueError: Si la derniere dimension n'est pas scalaire.
+    """
+    scalar = jnp.asarray(scalar)
+    if scalar.ndim > 1 and scalar.shape[-1] != 1:
+        raise ValueError(
+            "Les cibles MuZero doivent etre de forme (batch,) ou (batch, 1)."
+        )
+    if scalar.ndim > 0 and scalar.shape[-1] == 1:
+        scalar = scalar[..., 0]
+    scalar = jnp.clip(scalar, -support_size, support_size)
     b = scalar + support_size
     lower = jnp.floor(b).astype(jnp.int32)
     upper = jnp.ceil(b).astype(jnp.int32)

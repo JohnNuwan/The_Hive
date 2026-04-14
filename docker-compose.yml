@@ -76,7 +76,10 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - pg_isready -U eva -d thehive
+        - >-
+          PGPASSWORD=${TIMESCALE_PASSWORD:-devpassword} psql -h /tmp -U eva -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'thehive'" | grep -q 1
+          && PGPASSWORD=${TIMESCALE_PASSWORD:-devpassword} psql -h /tmp -U eva -d thehive -tAc "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'" | grep -q 1
+          && PGPASSWORD=${TIMESCALE_PASSWORD:-devpassword} psql -h /tmp -U eva -d thehive -tAc "SELECT 1" | grep -q 1
       interval: 10s
       timeout: 5s
       retries: 5
@@ -89,6 +92,7 @@ services:
     user: root
     volumes:
       - timescale_data:/var/lib/postgresql/data
+      - ./scripts/sql/timescaledb_v51.sql:/docker-entrypoint-initdb.d/20-timescaledb_v51.sql:ro
     deploy:
       placement:
         constraints:
@@ -129,11 +133,11 @@ services:
       - --port
       - "8000"
       - --model
-      - ${VLLM_MODEL_NAME:-Qwen/Qwen2.5-1.5B-Instruct}
+      - ${VLLM_MODEL_NAME:-google/gemma-2-9b-it}
       - --dtype
       - half
       - --gpu-memory-utilization
-      - "0.92"
+      - "0.98"
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
       - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
@@ -153,33 +157,6 @@ services:
           - node.labels.gpu == true
     volumes:
       - /mnt/data/ai_models/huggingface_cache:/root/.cache/huggingface
-    networks:
-      - hive-net
-
-  comfyui:
-    image: ghcr.io/ai-dock/comfyui:latest-cuda
-    ports:
-      - "8188:8188"
-    environment:
-      - CLI_ARGS=--listen 0.0.0.0 --port 8188
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [ gpu ]
-      replicas: 1
-      restart_policy:
-        condition: on-failure
-      placement:
-        constraints:
-          - node.labels.gpu == true
-    volumes:
-      - ./data/comfyui/output:/opt/ComfyUI/output
-      - ./data/comfyui/input:/opt/ComfyUI/input
-      - ./data/comfyui/models:/opt/ComfyUI/models
-      - ./data/comfyui/custom_nodes:/opt/ComfyUI/custom_nodes
     networks:
       - hive-net
 
@@ -562,33 +539,6 @@ services:
     networks:
       - hive-net
     restart: unless-stopped
-    deploy:
-      replicas: 2
-      restart_policy:
-        condition: any
-  muse:
-    build:
-      context: .
-      dockerfile: src/eva-muse/Dockerfile
-    ports:
-      - 9100:9100
-    environment:
-      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
-      - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
-      - COMFYUI_HOST=${HIVE_COMFYUI_HOST:-comfyui}
-      - COMFYUI_PORT=8188
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
-      - TELEGRAM_TOPIC_ID=${TELEGRAM_TOPIC_ID:-}
-      - CIVITAI_API_KEY=${CIVITAI_API_KEY:-}
-      - CORP_OWNER=${CORP_OWNER:-Azazel}
-      - ENVIRONMENT=production
-    extra_hosts:
-      - host.docker.internal:host-gateway
-    networks:
-      - hive-net
     deploy:
       replicas: 2
       restart_policy:

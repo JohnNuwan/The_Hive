@@ -29,17 +29,19 @@ REMOTE_V4_SEQUENCE_DIR = f"{REMOTE_DIR}/data/checkpoints/v4_ga"
 REMOTE_V4_SEQUENCE_RUNNER = f"{REMOTE_DIR}/scripts/deploy/v4_sequence_runner.py"
 LOCAL_ROOT = Path(__file__).resolve().parents[2]
 CANONICAL_SCALP_MULTI_UNIVERSE = [
-    "EURUSD",
     "XAUUSD",
-    "GBPUSD",
-    "USDJPY",
     "US30.cash",
     "GER40.cash",
+    "EURUSD",
+    "US100.cash",
     "US500.cash",
+    "BTCUSD",
 ]
 
 SYNC_FILES = [
     Path("docker-compose.yml"),
+    Path("scripts/fetch_history.py"),
+    Path("scripts/sql/timescaledb_v51.sql"),
     Path("src/eva-lab/eva_lab/training_utils.py"),
     Path("src/eva-lab/eva_lab/timescale_store.py"),
     Path("src/eva-lab/eva_lab/models/gnn_model.py"),
@@ -53,6 +55,7 @@ SYNC_FILES = [
     Path("src/eva-lab/eva_lab/muzero/dreamer_networks.py"),
     Path("src/eva-lab/eva_lab/muzero/dreamer_trainer.py"),
     Path("src/eva-lab/eva_lab/muzero/imagination.py"),
+    Path("src/eva-lab/eva_lab/muzero/checkpoint_utils.py"),
     Path("src/eva-lab/eva_lab/muzero/jax_agent.py"),
     Path("src/eva-lab/eva_lab/muzero/jax_mcts.py"),
     Path("src/eva-lab/eva_lab/muzero/jax_networks.py"),
@@ -75,6 +78,7 @@ SYNC_FILES = [
     Path("src/shared/shared/__init__.py"),
     Path("src/shared/shared/config.py"),
     Path("src/shared/shared/models.py"),
+    Path("scripts/auto_train_gnn.sh"),
     Path("scripts/deploy/v4_sequence_runner.py"),
     Path("scripts/prepare_gold_cpu_artifacts.py"),
 ]
@@ -218,6 +222,10 @@ PASSTHROUGH_VARS = [
     "TRAINING_TIMESCALE_GA_TABLE",
     "TRAINING_TIMESCALE_REPLAY_TABLE",
     "TRAINING_TIMESCALE_RUN_WINDOWS_TABLE",
+    "TIMESCALE_STORAGE_PROFILE",
+    "HISTORY_TIMESCALE_ALLOWED_TIMEFRAMES",
+    "TIMESCALE_DB_SOFT_LIMIT_GB",
+    "TIMESCALE_DB_HARD_LIMIT_GB",
     "TELEGRAM_NOTIFY_TRAINING",
     "TRAINING_RUN_TRIGGER",
     "TRAINING_RUN_LOCK_MAX_AGE_HOURS",
@@ -707,7 +715,13 @@ export TRAINING_TIMESCALE_BARS_TABLE=\"${TRAINING_TIMESCALE_BARS_TABLE:-market.m
 export TRAINING_TIMESCALE_FEATURES_TABLE=\"${TRAINING_TIMESCALE_FEATURES_TABLE:-market.market_features}\"
 export TRAINING_TIMESCALE_DATASETS_TABLE=\"${TRAINING_TIMESCALE_DATASETS_TABLE:-training.training_datasets}\"
 export TRAINING_TIMESCALE_ARENA_TABLE=\"${TRAINING_TIMESCALE_ARENA_TABLE:-training.arena_results}\"
+export TRAINING_TIMESCALE_GA_TABLE=\"${TRAINING_TIMESCALE_GA_TABLE:-training.ga_trials}\"
+export TRAINING_TIMESCALE_REPLAY_TABLE=\"${TRAINING_TIMESCALE_REPLAY_TABLE:-training.replay_metadata}\"
 export TRAINING_TIMESCALE_RUN_WINDOWS_TABLE=\"${TRAINING_TIMESCALE_RUN_WINDOWS_TABLE:-training.run_windows}\"
+export TIMESCALE_STORAGE_PROFILE=\"${TIMESCALE_STORAGE_PROFILE:-balanced}\"
+export HISTORY_TIMESCALE_ALLOWED_TIMEFRAMES=\"${HISTORY_TIMESCALE_ALLOWED_TIMEFRAMES:-M5,H1,D1}\"
+export TIMESCALE_DB_SOFT_LIMIT_GB=\"${TIMESCALE_DB_SOFT_LIMIT_GB:-120}\"
+export TIMESCALE_DB_HARD_LIMIT_GB=\"${TIMESCALE_DB_HARD_LIMIT_GB:-150}\"
 export TELEGRAM_NOTIFY_TRAINING=\"${TELEGRAM_NOTIFY_TRAINING:-1}\"
 export TRAINING_GA_STATUS=\"${TRAINING_GA_STATUS:-}\"
 export TRAINING_GA_GENERATION=\"${TRAINING_GA_GENERATION:-}\"
@@ -826,7 +840,13 @@ docker compose run --rm \
   -e TRAINING_TIMESCALE_FEATURES_TABLE=\"$TRAINING_TIMESCALE_FEATURES_TABLE\" \
   -e TRAINING_TIMESCALE_DATASETS_TABLE=\"$TRAINING_TIMESCALE_DATASETS_TABLE\" \
   -e TRAINING_TIMESCALE_ARENA_TABLE=\"$TRAINING_TIMESCALE_ARENA_TABLE\" \
+  -e TRAINING_TIMESCALE_GA_TABLE=\"$TRAINING_TIMESCALE_GA_TABLE\" \
+  -e TRAINING_TIMESCALE_REPLAY_TABLE=\"$TRAINING_TIMESCALE_REPLAY_TABLE\" \
   -e TRAINING_TIMESCALE_RUN_WINDOWS_TABLE=\"$TRAINING_TIMESCALE_RUN_WINDOWS_TABLE\" \
+  -e TIMESCALE_STORAGE_PROFILE=\"$TIMESCALE_STORAGE_PROFILE\" \
+  -e HISTORY_TIMESCALE_ALLOWED_TIMEFRAMES=\"$HISTORY_TIMESCALE_ALLOWED_TIMEFRAMES\" \
+  -e TIMESCALE_DB_SOFT_LIMIT_GB=\"$TIMESCALE_DB_SOFT_LIMIT_GB\" \
+  -e TIMESCALE_DB_HARD_LIMIT_GB=\"$TIMESCALE_DB_HARD_LIMIT_GB\" \
   -e TELEGRAM_NOTIFY_TRAINING=\"$TELEGRAM_NOTIFY_TRAINING\" \
   -e TRAINING_GA_STATUS=\"$TRAINING_GA_STATUS\" \
   -e TRAINING_GA_GENERATION=\"$TRAINING_GA_GENERATION\" \
@@ -1094,6 +1114,13 @@ def _build_v4_supervisor_overrides() -> dict[str, str]:
             "TRAINING_TIMESCALE_RUN_WINDOWS_TABLE",
             "training.run_windows",
         ),
+        "TIMESCALE_STORAGE_PROFILE": os.getenv("TIMESCALE_STORAGE_PROFILE", "balanced"),
+        "HISTORY_TIMESCALE_ALLOWED_TIMEFRAMES": os.getenv(
+            "HISTORY_TIMESCALE_ALLOWED_TIMEFRAMES",
+            "M5,H1,D1",
+        ),
+        "TIMESCALE_DB_SOFT_LIMIT_GB": os.getenv("TIMESCALE_DB_SOFT_LIMIT_GB", "120"),
+        "TIMESCALE_DB_HARD_LIMIT_GB": os.getenv("TIMESCALE_DB_HARD_LIMIT_GB", "150"),
     }
 
 
@@ -1128,15 +1155,13 @@ def _build_scalp_reduced_overrides(symbols: list[str] | None = None) -> dict[str
         dict[str, str]: Variables a forcer pour une relance `scalp` ciblee.
     """
     reduced_symbols = symbols or [
-        "EURUSD",
-        "GBPUSD",
-        "USDJPY",
         "XAUUSD",
-        "BTCUSD",
-        "ETHUSD",
         "US30.cash",
-        "US500.cash",
         "GER40.cash",
+        "EURUSD",
+        "US100.cash",
+        "US500.cash",
+        "BTCUSD",
     ]
     symbol_csv = ",".join(reduced_symbols)
     symbol_count = str(len(reduced_symbols))
@@ -1153,13 +1178,13 @@ def _build_scalp_reduced_overrides(symbols: list[str] | None = None) -> dict[str
         "ARENA_SYMBOLS_SCALP": symbol_csv,
         "MUZERO_MAX_SYMBOLS": symbol_count,
         "ARENA_MAX_SYMBOLS": symbol_count,
-        "MUZERO_GAMES_PER_SYMBOL": "10",
-        "ARENA_GAMES_PER_SYMBOL": "4",
-        "ARENA_MIN_GAMES": "18",
-        "ARENA_MIN_SYMBOLS": "5",
-        "MUZERO_TRAINING_STEPS": "12000",
-        "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": "5",
-        "MUZERO_LIVE_TOP_SYMBOLS": "5",
+        "MUZERO_GAMES_PER_SYMBOL": "18",
+        "ARENA_GAMES_PER_SYMBOL": "8",
+        "ARENA_MIN_GAMES": "24",
+        "ARENA_MIN_SYMBOLS": "7",
+        "MUZERO_TRAINING_STEPS": "22000",
+        "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": symbol_count,
+        "MUZERO_LIVE_TOP_SYMBOLS": symbol_count,
     }
 
 
@@ -1175,7 +1200,10 @@ def _normalize_scalp_multi_universe_symbols(symbols: list[str] | None = None) ->
     alias_map = {
         "US30.CASH": "US30.cash",
         "GER40.CASH": "GER40.cash",
+        "US100.CASH": "US100.cash",
         "US500.CASH": "US500.cash",
+        "USTEC": "US100.cash",
+        "NAS100": "US100.cash",
     }
     requested = symbols or CANONICAL_SCALP_MULTI_UNIVERSE
     normalized: list[str] = []
@@ -1221,10 +1249,10 @@ def _build_muzero_scalp_multi_universe_full_overrides(
         "ARENA_SYMBOLS_SCALP": symbol_csv,
         "MUZERO_MAX_SYMBOLS": symbol_count,
         "ARENA_MAX_SYMBOLS": symbol_count,
-        "MUZERO_TRAINING_STEPS": "18000",
-        "MUZERO_GAMES_PER_SYMBOL": "12",
-        "ARENA_GAMES_PER_SYMBOL": "6",
-        "ARENA_MIN_GAMES": "12",
+        "MUZERO_TRAINING_STEPS": "40000",
+        "MUZERO_GAMES_PER_SYMBOL": "28",
+        "ARENA_GAMES_PER_SYMBOL": "12",
+        "ARENA_MIN_GAMES": "28",
         "ARENA_MIN_SYMBOLS": "7",
         "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": symbol_count,
         "MUZERO_LIVE_TOP_SYMBOLS": symbol_count,
@@ -1287,13 +1315,13 @@ def _build_intraday_reduced_overrides(symbols: list[str] | None = None) -> dict[
         dict[str, str]: Variables a forcer pour une relance `intraday` ciblee.
     """
     reduced_symbols = symbols or [
-        "EURUSD",
-        "GBPUSD",
-        "USDJPY",
         "XAUUSD",
         "US30.cash",
-        "US500.cash",
         "GER40.cash",
+        "EURUSD",
+        "US100.cash",
+        "US500.cash",
+        "BTCUSD",
     ]
     symbol_csv = ",".join(reduced_symbols)
     symbol_count = str(len(reduced_symbols))
@@ -1331,13 +1359,13 @@ def _build_swing_reduced_overrides(symbols: list[str] | None = None) -> dict[str
         dict[str, str]: Variables a forcer pour une relance `swing` ciblee.
     """
     reduced_symbols = symbols or [
-        "EURUSD",
-        "GBPUSD",
-        "USDJPY",
         "XAUUSD",
         "US30.cash",
-        "US500.cash",
         "GER40.cash",
+        "EURUSD",
+        "US100.cash",
+        "US500.cash",
+        "BTCUSD",
     ]
     symbol_csv = ",".join(reduced_symbols)
     symbol_count = str(len(reduced_symbols))
@@ -1375,15 +1403,13 @@ def _build_all_reduced_overrides(symbols: list[str] | None = None) -> dict[str, 
         dict[str, str]: Variables a forcer pour une relance `scalp+intraday+swing`.
     """
     reduced_symbols = symbols or [
-        "EURUSD",
-        "GBPUSD",
-        "USDJPY",
         "XAUUSD",
-        "BTCUSD",
-        "ETHUSD",
         "US30.cash",
-        "US500.cash",
         "GER40.cash",
+        "EURUSD",
+        "US100.cash",
+        "US500.cash",
+        "BTCUSD",
     ]
     symbol_csv = ",".join(reduced_symbols)
     symbol_count = str(len(reduced_symbols))
@@ -1409,8 +1435,8 @@ def _build_all_reduced_overrides(symbols: list[str] | None = None) -> dict[str, 
         "ARENA_MIN_GAMES": "14",
         "ARENA_MIN_SYMBOLS": "4",
         "MUZERO_TRAINING_STEPS": "8000",
-        "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": "5",
-        "MUZERO_LIVE_TOP_SYMBOLS": "5",
+        "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": symbol_count,
+        "MUZERO_LIVE_TOP_SYMBOLS": symbol_count,
     }
 
 

@@ -48,6 +48,15 @@ DEFAULT_TABLES = TimescaleTableMap(
     run_windows="training.run_windows",
 )
 
+CANONICAL_TIMESCALE_DATABASE = "thehive"
+CANONICAL_TIMESCALE_USER = "eva"
+DEFAULT_STORAGE_PROFILE = "balanced"
+DEFAULT_ALLOWED_WRITE_TIMEFRAMES = ("M5", "H1", "D1")
+DEFAULT_SOFT_LIMIT_GB = 120.0
+DEFAULT_HARD_LIMIT_GB = 150.0
+TIMESCALE_EXTENSION_NAME = "timescaledb"
+_LAST_BOOTSTRAP_ERROR: str | None = None
+
 
 def _env_flag(name: str, default: bool = False) -> bool:
     """Interprete une variable booleenne d'environnement."""
@@ -58,10 +67,79 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_float(name: str, default: float) -> float:
+    """Lit un flottant simple depuis l'environnement."""
+
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _json_dumps(payload: Any) -> str:
     """Serialise un objet Python de maniere robuste pour JSONB."""
 
     return json.dumps(payload if payload is not None else {}, ensure_ascii=False, default=str)
+
+
+def _normalize_database_name(raw_value: str | None) -> str:
+    """Normalise les alias historiques de base PostgreSQL."""
+
+    value = str(raw_value or "").strip()
+    if not value:
+        return CANONICAL_TIMESCALE_DATABASE
+    if value.lower() in {"the_hive", "the-hive"}:
+        return CANONICAL_TIMESCALE_DATABASE
+    return value
+
+
+def _normalize_user_name(raw_value: str | None) -> str:
+    """Normalise les alias historiques d'utilisateur PostgreSQL."""
+
+    value = str(raw_value or "").strip()
+    if not value:
+        return CANONICAL_TIMESCALE_USER
+    if value.lower() in {"the_hive", "thehive"}:
+        return CANONICAL_TIMESCALE_USER
+    return value
+
+
+def _normalize_table_name(raw_value: str | None, default_value: str) -> str:
+    """Normalise un identifiant de table vers le schema canonique."""
+
+    value = str(raw_value or "").strip()
+    if not value:
+        return default_value
+    if "." in value:
+        return value
+    default_schema, _default_table = _split_identifier(default_value)
+    return f"{default_schema}.{value}"
+
+
+def _parse_allowed_timeframes(raw_value: str | None) -> tuple[str, ...]:
+    """Normalise la liste des timeframes autorises pour l'ecriture OHLC."""
+
+    raw_items = str(raw_value or "").split(",")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        label = str(item or "").strip().upper()
+        if not label or label in seen:
+            continue
+        normalized.append(label)
+        seen.add(label)
+    if not normalized:
+        return DEFAULT_ALLOWED_WRITE_TIMEFRAMES
+    return tuple(normalized)
+
+
+def _bytes_from_gb(value_gb: float) -> int:
+    """Convertit une taille en Go vers des octets entiers."""
+
+    return max(int(float(value_gb) * 1024 * 1024 * 1024), 0)
 
 
 def _split_identifier(identifier: str) -> tuple[str, str]:
@@ -89,26 +167,60 @@ def get_timescale_settings() -> dict[str, Any]:
     """Retourne la configuration courante de la source TimescaleDB."""
 
     table_map = TimescaleTableMap(
-        bars=os.getenv("TRAINING_TIMESCALE_BARS_TABLE", DEFAULT_TABLES.bars),
-        features=os.getenv("TRAINING_TIMESCALE_FEATURES_TABLE", DEFAULT_TABLES.features),
-        datasets=os.getenv("TRAINING_TIMESCALE_DATASETS_TABLE", DEFAULT_TABLES.datasets),
-        arena=os.getenv("TRAINING_TIMESCALE_ARENA_TABLE", DEFAULT_TABLES.arena),
-        ga_trials=os.getenv("TRAINING_TIMESCALE_GA_TABLE", DEFAULT_TABLES.ga_trials),
-        replay_metadata=os.getenv("TRAINING_TIMESCALE_REPLAY_TABLE", DEFAULT_TABLES.replay_metadata),
-        market_context=os.getenv("TRAINING_TIMESCALE_MARKET_CONTEXT_TABLE", DEFAULT_TABLES.market_context),
-        investment_theses=os.getenv("TRAINING_TIMESCALE_INVEST_TABLE", DEFAULT_TABLES.investment_theses),
-        gpu_metrics=os.getenv("TRAINING_TIMESCALE_GPU_TABLE", DEFAULT_TABLES.gpu_metrics),
-        cpu_jobs=os.getenv("TRAINING_TIMESCALE_CPU_JOBS_TABLE", DEFAULT_TABLES.cpu_jobs),
-        run_windows=os.getenv("TRAINING_TIMESCALE_RUN_WINDOWS_TABLE", DEFAULT_TABLES.run_windows),
+        bars=_normalize_table_name(os.getenv("TRAINING_TIMESCALE_BARS_TABLE"), DEFAULT_TABLES.bars),
+        features=_normalize_table_name(os.getenv("TRAINING_TIMESCALE_FEATURES_TABLE"), DEFAULT_TABLES.features),
+        datasets=_normalize_table_name(os.getenv("TRAINING_TIMESCALE_DATASETS_TABLE"), DEFAULT_TABLES.datasets),
+        arena=_normalize_table_name(os.getenv("TRAINING_TIMESCALE_ARENA_TABLE"), DEFAULT_TABLES.arena),
+        ga_trials=_normalize_table_name(os.getenv("TRAINING_TIMESCALE_GA_TABLE"), DEFAULT_TABLES.ga_trials),
+        replay_metadata=_normalize_table_name(
+            os.getenv("TRAINING_TIMESCALE_REPLAY_TABLE"),
+            DEFAULT_TABLES.replay_metadata,
+        ),
+        market_context=_normalize_table_name(
+            os.getenv("TRAINING_TIMESCALE_MARKET_CONTEXT_TABLE"),
+            DEFAULT_TABLES.market_context,
+        ),
+        investment_theses=_normalize_table_name(
+            os.getenv("TRAINING_TIMESCALE_INVEST_TABLE"),
+            DEFAULT_TABLES.investment_theses,
+        ),
+        gpu_metrics=_normalize_table_name(os.getenv("TRAINING_TIMESCALE_GPU_TABLE"), DEFAULT_TABLES.gpu_metrics),
+        cpu_jobs=_normalize_table_name(os.getenv("TRAINING_TIMESCALE_CPU_JOBS_TABLE"), DEFAULT_TABLES.cpu_jobs),
+        run_windows=_normalize_table_name(
+            os.getenv("TRAINING_TIMESCALE_RUN_WINDOWS_TABLE"),
+            DEFAULT_TABLES.run_windows,
+        ),
     )
+    storage_profile = str(os.getenv("TIMESCALE_STORAGE_PROFILE", DEFAULT_STORAGE_PROFILE) or "").strip().lower()
+    if not storage_profile:
+        storage_profile = DEFAULT_STORAGE_PROFILE
+    soft_limit_gb = _env_float("TIMESCALE_DB_SOFT_LIMIT_GB", DEFAULT_SOFT_LIMIT_GB)
+    hard_limit_gb = _env_float("TIMESCALE_DB_HARD_LIMIT_GB", DEFAULT_HARD_LIMIT_GB)
+    if hard_limit_gb < soft_limit_gb:
+        hard_limit_gb = soft_limit_gb
     return {
         "enabled": _env_flag("TRAINING_TIMESCALE_ENABLED", False),
         "host": os.getenv("TRAINING_TIMESCALE_HOST", os.getenv("TIMESCALE_HOST", "timescaledb")),
         "port": int(os.getenv("TRAINING_TIMESCALE_PORT", os.getenv("TIMESCALE_PORT", "5432"))),
-        "database": os.getenv("TRAINING_TIMESCALE_DB", os.getenv("TIMESCALE_DB", "thehive")),
-        "user": os.getenv("TRAINING_TIMESCALE_USER", os.getenv("TIMESCALE_USER", "eva")),
+        "database": _normalize_database_name(
+            os.getenv("TRAINING_TIMESCALE_DB", os.getenv("TIMESCALE_DB", CANONICAL_TIMESCALE_DATABASE))
+        ),
+        "user": _normalize_user_name(
+            os.getenv("TRAINING_TIMESCALE_USER", os.getenv("TIMESCALE_USER", CANONICAL_TIMESCALE_USER))
+        ),
         "password": os.getenv("TRAINING_TIMESCALE_PASSWORD", os.getenv("TIMESCALE_PASSWORD", "")),
         "sslmode": os.getenv("TRAINING_TIMESCALE_SSLMODE", "prefer"),
+        "storage_profile": storage_profile,
+        "allowed_write_timeframes": _parse_allowed_timeframes(
+            os.getenv(
+                "HISTORY_TIMESCALE_ALLOWED_TIMEFRAMES",
+                ",".join(DEFAULT_ALLOWED_WRITE_TIMEFRAMES),
+            )
+        ),
+        "soft_limit_gb": soft_limit_gb,
+        "hard_limit_gb": hard_limit_gb,
+        "soft_limit_bytes": _bytes_from_gb(soft_limit_gb),
+        "hard_limit_bytes": _bytes_from_gb(hard_limit_gb),
         "tables": table_map,
         "bars_table": table_map.bars,
         "features_table": table_map.features,
@@ -119,29 +231,7 @@ def get_timescale_settings() -> dict[str, Any]:
 
 def describe_timescale_source() -> dict[str, Any]:
     """Expose la source TimeDB pour les endpoints de supervision."""
-
-    settings = get_timescale_settings()
-    tables: TimescaleTableMap = settings["tables"]
-    return {
-        "enabled": bool(settings["enabled"]),
-        "kind": "timescaledb",
-        "source": "timescaledb" if bool(settings["enabled"]) else "csv",
-        "state": "enabled" if bool(settings["enabled"]) else "disabled",
-        "host": settings["host"],
-        "port": settings["port"],
-        "database": settings["database"],
-        "bars_table": tables.bars,
-        "features_table": tables.features,
-        "datasets_table": tables.datasets,
-        "arena_table": tables.arena,
-        "ga_table": tables.ga_trials,
-        "replay_table": tables.replay_metadata,
-        "market_context_table": tables.market_context,
-        "investment_table": tables.investment_theses,
-        "ops_gpu_table": tables.gpu_metrics,
-        "ops_cpu_jobs_table": tables.cpu_jobs,
-        "run_windows_table": tables.run_windows,
-    }
+    return get_timescale_runtime_status(repair=False)
 
 
 def _load_driver():
@@ -156,7 +246,12 @@ def _load_driver():
 
 
 @contextmanager
-def _connect() -> Iterator[Any]:
+def _connect(
+    database: str | None = None,
+    *,
+    log_errors: bool = True,
+    autocommit: bool = False,
+) -> Iterator[Any]:
     """Ouvre une connexion TimescaleDB si la source est active."""
 
     settings = get_timescale_settings()
@@ -175,14 +270,17 @@ def _connect() -> Iterator[Any]:
         connection = driver.connect(
             host=settings["host"],
             port=settings["port"],
-            dbname=settings["database"],
+            dbname=_normalize_database_name(database or settings["database"]),
             user=settings["user"],
             password=settings["password"],
             sslmode=settings["sslmode"],
         )
+        if autocommit:
+            connection.autocommit = True
         yield connection
     except Exception as exc:
-        logger.warning("Connexion TimeDB impossible: %s", exc)
+        if log_errors:
+            logger.warning("Connexion TimeDB impossible: %s", exc)
         yield None
     finally:
         if connection is not None:
@@ -245,6 +343,22 @@ def _drop_not_null_if_present(cursor: Any, table_name: str, column_name: str) ->
             f"ALTER TABLE IF EXISTS {_sql_identifier(table_name)} "
             f"ALTER COLUMN {_sql_identifier(column_name)} DROP NOT NULL"
         )
+
+
+def _table_exists(cursor: Any, table_name: str) -> bool:
+    """Indique si une table SQL existe deja."""
+
+    schema_name, raw_table_name = _split_identifier(table_name)
+    cursor.execute(
+        """
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = %s
+          AND table_name = %s
+        """,
+        (schema_name, raw_table_name),
+    )
+    return cursor.fetchone() is not None
 
 
 def _ensure_schema_objects(connection: Any, settings: dict[str, Any]) -> None:
@@ -531,21 +645,441 @@ def _ensure_schema_objects(connection: Any, settings: dict[str, Any]) -> None:
         connection.commit()
 
 
+def _set_last_bootstrap_error(message: str | None) -> None:
+    """Memorise la derniere erreur de bootstrap TimeDB."""
+
+    global _LAST_BOOTSTRAP_ERROR
+    _LAST_BOOTSTRAP_ERROR = str(message or "").strip() or None
+
+
+def _database_exists(connection: Any, database_name: str) -> bool:
+    """Indique si une base existe deja sur l'instance PostgreSQL."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT 1 FROM pg_database WHERE datname = %s",
+            (_normalize_database_name(database_name),),
+        )
+        return cursor.fetchone() is not None
+
+
+def _create_database(connection: Any, database_name: str, owner: str) -> None:
+    """Cree la base cible si elle n'existe pas encore."""
+
+    normalized_database = _normalize_database_name(database_name)
+    normalized_owner = _normalize_user_name(owner)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"CREATE DATABASE {_sql_identifier(normalized_database)} OWNER {_sql_identifier(normalized_owner)}"
+        )
+
+
+def _extension_exists(connection: Any, extension_name: str = TIMESCALE_EXTENSION_NAME) -> bool:
+    """Retourne ``True`` si l'extension cible est installee."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT 1 FROM pg_extension WHERE extname = %s",
+            (str(extension_name or "").strip(),),
+        )
+        return cursor.fetchone() is not None
+
+
+def _ensure_extension(connection: Any, extension_name: str = TIMESCALE_EXTENSION_NAME) -> None:
+    """Installe l'extension cible si necessaire."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(f"CREATE EXTENSION IF NOT EXISTS {_sql_identifier(extension_name)} CASCADE")
+    connection.commit()
+
+
+def _database_size_bytes(connection: Any) -> int:
+    """Retourne la taille de la base courante en octets."""
+
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT COALESCE(pg_database_size(current_database()), 0)")
+        row = cursor.fetchone()
+    return int((row or [0])[0] or 0)
+
+
+def _schema_objects_ready(connection: Any, settings: dict[str, Any]) -> bool:
+    """Verifie la presence des objets canoniques indispensables."""
+
+    tables: TimescaleTableMap = settings["tables"]
+    required_tables = [
+        tables.bars,
+        tables.features,
+        tables.datasets,
+        tables.arena,
+        tables.ga_trials,
+        tables.replay_metadata,
+        tables.market_context,
+        tables.investment_theses,
+        tables.gpu_metrics,
+        tables.cpu_jobs,
+        tables.run_windows,
+    ]
+    with connection.cursor() as cursor:
+        for table_name in required_tables:
+            if not _table_exists(cursor, table_name):
+                return False
+    return True
+
+
+def _table_is_hypertable(connection: Any, table_name: str) -> bool:
+    """Indique si une table est deja declaree comme hypertable."""
+
+    schema_name, raw_table_name = _split_identifier(table_name)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM timescaledb_information.hypertables
+                WHERE hypertable_schema = %s
+                  AND hypertable_name = %s
+                """,
+                (schema_name, raw_table_name),
+            )
+            return cursor.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _ensure_hypertable(connection: Any, table_name: str, time_column: str) -> None:
+    """Convertit une table en hypertable de maniere idempotente."""
+
+    if _table_is_hypertable(connection, table_name):
+        return
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT create_hypertable(%s, %s, if_not_exists => TRUE, migrate_data => TRUE)",
+            (table_name, str(time_column or "").strip()),
+        )
+    connection.commit()
+
+
+def _set_table_compression(connection: Any, table_name: str) -> None:
+    """Active la compression TimescaleDB pour une hypertable."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(f"ALTER TABLE {_sql_identifier(table_name)} SET (timescaledb.compress = true)")
+    connection.commit()
+
+
+def _ensure_compression_policy(connection: Any, table_name: str, older_than: str) -> None:
+    """Ajoute une politique de compression idempotente."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT add_compression_policy(%s, %s::interval, if_not_exists => TRUE)",
+            (table_name, older_than),
+        )
+    connection.commit()
+
+
+def _ensure_retention_policy(connection: Any, table_name: str, older_than: str) -> None:
+    """Ajoute une politique de retention idempotente."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT add_retention_policy(%s, %s::interval, if_not_exists => TRUE)",
+            (table_name, older_than),
+        )
+    connection.commit()
+
+
+def _purge_cpu_jobs_history(connection: Any, table_name: str, older_than: str) -> None:
+    """Purge les anciens jobs CPU sur une table classique."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            DELETE FROM {_sql_identifier(table_name)}
+            WHERE COALESCE(finished_at, started_at, created_at, NOW())
+                < NOW() - %s::interval
+            """,
+            (older_than,),
+        )
+    connection.commit()
+
+
+def _apply_balanced_storage_profile(connection: Any, settings: dict[str, Any]) -> None:
+    """Applique le profil `balanced` sans exploser le disque."""
+
+    tables: TimescaleTableMap = settings["tables"]
+    _ensure_hypertable(connection, tables.bars, "timestamp")
+    _set_table_compression(connection, tables.bars)
+    _ensure_compression_policy(connection, tables.bars, "7 days")
+    _ensure_retention_policy(connection, tables.bars, "400 days")
+
+    _ensure_hypertable(connection, tables.features, "timestamp")
+    _set_table_compression(connection, tables.features)
+    _ensure_compression_policy(connection, tables.features, "3 days")
+    _ensure_retention_policy(connection, tables.features, "90 days")
+
+    _ensure_hypertable(connection, tables.gpu_metrics, "timestamp")
+    _ensure_retention_policy(connection, tables.gpu_metrics, "30 days")
+    _purge_cpu_jobs_history(connection, tables.cpu_jobs, "30 days")
+
+
+def _apply_storage_profile(connection: Any, settings: dict[str, Any]) -> None:
+    """Applique les garde-fous de stockage associes au profil courant."""
+
+    profile = str(settings.get("storage_profile") or DEFAULT_STORAGE_PROFILE).strip().lower()
+    if profile == "balanced":
+        _apply_balanced_storage_profile(connection, settings)
+
+
+def _build_write_guard_status(
+    settings: dict[str, Any],
+    *,
+    database_ready: bool,
+    db_size_bytes: int | None,
+) -> dict[str, Any]:
+    """Construit un diagnostic stable de garde-fou disque."""
+
+    allowed_timeframes = list(settings.get("allowed_write_timeframes") or DEFAULT_ALLOWED_WRITE_TIMEFRAMES)
+    soft_limit_bytes = int(settings.get("soft_limit_bytes") or _bytes_from_gb(DEFAULT_SOFT_LIMIT_GB))
+    hard_limit_bytes = int(settings.get("hard_limit_bytes") or _bytes_from_gb(DEFAULT_HARD_LIMIT_GB))
+    if not settings.get("enabled", False):
+        return {
+            "allowed": False,
+            "status": "disabled",
+            "reason": "timescaledb_desactive",
+            "db_size_bytes": db_size_bytes,
+            "soft_limit_bytes": soft_limit_bytes,
+            "hard_limit_bytes": hard_limit_bytes,
+            "allowed_timeframes": allowed_timeframes,
+        }
+    if not database_ready:
+        return {
+            "allowed": False,
+            "status": "unavailable",
+            "reason": "bootstrap_incomplet",
+            "db_size_bytes": db_size_bytes,
+            "soft_limit_bytes": soft_limit_bytes,
+            "hard_limit_bytes": hard_limit_bytes,
+            "allowed_timeframes": allowed_timeframes,
+        }
+
+    current_size = int(db_size_bytes or 0)
+    if current_size >= hard_limit_bytes:
+        return {
+            "allowed": False,
+            "status": "blocked",
+            "reason": "hard_limit_reached",
+            "db_size_bytes": current_size,
+            "soft_limit_bytes": soft_limit_bytes,
+            "hard_limit_bytes": hard_limit_bytes,
+            "allowed_timeframes": allowed_timeframes,
+        }
+    if current_size >= soft_limit_bytes:
+        return {
+            "allowed": True,
+            "status": "degraded",
+            "reason": "soft_limit_reached",
+            "db_size_bytes": current_size,
+            "soft_limit_bytes": soft_limit_bytes,
+            "hard_limit_bytes": hard_limit_bytes,
+            "allowed_timeframes": allowed_timeframes,
+        }
+    return {
+        "allowed": True,
+        "status": "allowed",
+        "reason": "within_limits",
+        "db_size_bytes": current_size,
+        "soft_limit_bytes": soft_limit_bytes,
+        "hard_limit_bytes": hard_limit_bytes,
+        "allowed_timeframes": allowed_timeframes,
+    }
+
+
+def evaluate_ohlc_write_request(
+    timeframe: str,
+    *,
+    repair: bool = False,
+) -> dict[str, Any]:
+    """Valide une demande d'ecriture OHLC contre les garde-fous TimeScaleDB.
+
+    Args:
+        timeframe (str): Timeframe demande pour l'ecriture.
+        repair (bool): Tente un bootstrap idempotent si ``True``.
+
+    Returns:
+        dict[str, Any]: Diagnostic stable exploitable par les scripts CLI.
+    """
+
+    normalized_timeframe = str(timeframe or "").strip().upper()
+    runtime = get_timescale_runtime_status(repair=repair)
+    guard = dict(runtime.get("write_guard_status") or {})
+    allowed_timeframes = [
+        str(item or "").strip().upper()
+        for item in guard.get("allowed_timeframes", runtime.get("allowed_write_timeframes", []))
+        if str(item or "").strip()
+    ]
+    diagnostic = {
+        "allowed": bool(guard.get("allowed", False)),
+        "status": str(guard.get("status") or "unknown"),
+        "reason": str(guard.get("reason") or "unknown"),
+        "timeframe": normalized_timeframe,
+        "allowed_timeframes": allowed_timeframes,
+        "db_size_bytes": runtime.get("db_size_bytes"),
+        "soft_limit_bytes": guard.get("soft_limit_bytes"),
+        "hard_limit_bytes": guard.get("hard_limit_bytes"),
+        "storage_profile": runtime.get("storage_profile"),
+        "state": runtime.get("state"),
+        "database_exists": bool(runtime.get("database_exists", False)),
+        "extension_ready": bool(runtime.get("extension_ready", False)),
+        "schema_ready": bool(runtime.get("schema_ready", False)),
+        "last_bootstrap_error": runtime.get("last_bootstrap_error"),
+    }
+    if not normalized_timeframe:
+        diagnostic.update(
+            {
+                "allowed": False,
+                "status": "invalid_request",
+                "reason": "timeframe_absent",
+            }
+        )
+        return diagnostic
+    if normalized_timeframe not in allowed_timeframes:
+        diagnostic.update(
+            {
+                "allowed": False,
+                "status": "timeframe_blocked",
+                "reason": "timeframe_non_autorise",
+            }
+        )
+        return diagnostic
+    return diagnostic
+
+
+def get_timescale_runtime_status(*, repair: bool = False) -> dict[str, Any]:
+    """Retourne l'etat reel de TimeScaleDB et repare si demande."""
+
+    settings = get_timescale_settings()
+    tables: TimescaleTableMap = settings["tables"]
+    runtime = {
+        "enabled": bool(settings["enabled"]),
+        "kind": "timescaledb",
+        "source": "timescaledb" if bool(settings["enabled"]) else "csv",
+        "state": "disabled" if not bool(settings["enabled"]) else "offline",
+        "host": settings["host"],
+        "port": settings["port"],
+        "database": settings["database"],
+        "user": settings["user"],
+        "bars_table": tables.bars,
+        "features_table": tables.features,
+        "datasets_table": tables.datasets,
+        "arena_table": tables.arena,
+        "ga_table": tables.ga_trials,
+        "replay_table": tables.replay_metadata,
+        "market_context_table": tables.market_context,
+        "investment_table": tables.investment_theses,
+        "ops_gpu_table": tables.gpu_metrics,
+        "ops_cpu_jobs_table": tables.cpu_jobs,
+        "run_windows_table": tables.run_windows,
+        "storage_profile": settings["storage_profile"],
+        "allowed_write_timeframes": list(settings["allowed_write_timeframes"]),
+        "database_exists": False,
+        "extension_ready": False,
+        "schema_ready": False,
+        "db_size_bytes": None,
+        "reachable": False,
+        "ok": False,
+        "last_bootstrap_error": _LAST_BOOTSTRAP_ERROR,
+    }
+    runtime["write_guard_status"] = _build_write_guard_status(
+        settings,
+        database_ready=False,
+        db_size_bytes=None,
+    )
+    if not settings["enabled"]:
+        return runtime
+
+    try:
+        with _connect("postgres", log_errors=False, autocommit=True) as admin_connection:
+            if admin_connection is None:
+                _set_last_bootstrap_error("Connexion a la base postgres impossible.")
+                runtime["last_bootstrap_error"] = _LAST_BOOTSTRAP_ERROR
+                return runtime
+
+            runtime["reachable"] = True
+            runtime["database_exists"] = _database_exists(admin_connection, settings["database"])
+            if repair and not runtime["database_exists"]:
+                _create_database(admin_connection, settings["database"], settings["user"])
+                runtime["database_exists"] = True
+
+        if not runtime["database_exists"]:
+            runtime["state"] = "missing_database"
+            _set_last_bootstrap_error(f"Base {settings['database']} absente.")
+            runtime["last_bootstrap_error"] = _LAST_BOOTSTRAP_ERROR
+            return runtime
+
+        with _connect(settings["database"], log_errors=False) as connection:
+            if connection is None:
+                _set_last_bootstrap_error(f"Connexion a la base {settings['database']} impossible.")
+                runtime["last_bootstrap_error"] = _LAST_BOOTSTRAP_ERROR
+                return runtime
+
+            runtime["reachable"] = True
+            if repair:
+                _ensure_extension(connection)
+            runtime["extension_ready"] = _extension_exists(connection)
+            if repair and runtime["extension_ready"]:
+                _ensure_schema_objects(connection, settings)
+                _apply_storage_profile(connection, settings)
+            runtime["schema_ready"] = _schema_objects_ready(connection, settings)
+            runtime["db_size_bytes"] = _database_size_bytes(connection)
+
+    except Exception as exc:
+        _set_last_bootstrap_error(str(exc))
+        runtime["last_bootstrap_error"] = _LAST_BOOTSTRAP_ERROR
+        runtime["state"] = "offline"
+        return runtime
+
+    database_ready = bool(
+        runtime["database_exists"]
+        and runtime["extension_ready"]
+        and runtime["schema_ready"]
+    )
+    runtime["write_guard_status"] = _build_write_guard_status(
+        settings,
+        database_ready=database_ready,
+        db_size_bytes=runtime["db_size_bytes"],
+    )
+    if not runtime["extension_ready"]:
+        runtime["state"] = "missing_extension"
+        _set_last_bootstrap_error("Extension TimescaleDB absente.")
+    elif not runtime["schema_ready"]:
+        runtime["state"] = "schema_incomplete"
+        _set_last_bootstrap_error("Schema TimeScaleDB incomplet.")
+    elif runtime["write_guard_status"]["status"] == "blocked":
+        runtime["state"] = "write_guard_blocked"
+        _set_last_bootstrap_error("Ecriture OHLC bloquee par la limite disque.")
+    elif runtime["write_guard_status"]["status"] == "degraded":
+        runtime["state"] = "degraded"
+        _set_last_bootstrap_error(None)
+    else:
+        runtime["state"] = "ready"
+        _set_last_bootstrap_error(None)
+
+    runtime["last_bootstrap_error"] = _LAST_BOOTSTRAP_ERROR
+    runtime["ok"] = bool(database_ready)
+    return runtime
+
+
 def ensure_timescale_ready() -> bool:
     """Garantit l'existence des schemas et tables canoniques."""
 
-    settings = get_timescale_settings()
-    if not settings["enabled"]:
-        return False
-    with _connect() as connection:
-        if connection is None:
-            return False
-        try:
-            _ensure_schema_objects(connection, settings)
-            return True
-        except Exception as exc:
-            logger.warning("Initialisation du schema TimeDB impossible: %s", exc)
-            return False
+    runtime = get_timescale_runtime_status(repair=True)
+    if runtime.get("ok"):
+        return True
+    last_error = str(runtime.get("last_bootstrap_error") or "").strip()
+    if last_error:
+        logger.warning("Initialisation TimeDB impossible: %s", last_error)
+    return False
 
 
 def discover_timescale_inventory() -> dict[str, set[str]]:
@@ -554,6 +1088,8 @@ def discover_timescale_inventory() -> dict[str, set[str]]:
     settings = get_timescale_settings()
     if not settings["enabled"]:
         return {}
+    if not ensure_timescale_ready():
+        return {}
 
     query = f"SELECT symbol, timeframe FROM {_sql_identifier(settings['bars_table'])} GROUP BY symbol, timeframe"
     inventory: dict[str, set[str]] = {}
@@ -561,7 +1097,6 @@ def discover_timescale_inventory() -> dict[str, set[str]]:
         if connection is None:
             return inventory
         try:
-            _ensure_schema_objects(connection, settings)
             with connection.cursor() as cursor:
                 cursor.execute(query)
                 for symbol, timeframe in cursor.fetchall():
@@ -590,6 +1125,8 @@ def load_history_frame_from_timescale(
     settings = get_timescale_settings()
     if not settings["enabled"]:
         return None
+    if not ensure_timescale_ready():
+        return None
 
     query = (
         'SELECT "timestamp" AS time, open, high, low, close, '
@@ -609,7 +1146,6 @@ def load_history_frame_from_timescale(
         if connection is None:
             return None
         try:
-            _ensure_schema_objects(connection, settings)
             with connection.cursor() as cursor:
                 cursor.execute(query, tuple(params))
                 rows = cursor.fetchall()
@@ -646,12 +1182,13 @@ def _execute_upsert(query: str, params: Sequence[Any]) -> bool:
     settings = get_timescale_settings()
     if not settings["enabled"]:
         return False
+    if not ensure_timescale_ready():
+        return False
 
     with _connect() as connection:
         if connection is None:
             return False
         try:
-            _ensure_schema_objects(connection, settings)
             with connection.cursor() as cursor:
                 cursor.execute(query, tuple(params))
             connection.commit()

@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import jax
 
@@ -23,12 +23,14 @@ from eva_lab.arena import Arena
 from eva_lab.champion_promoter import ChampionPromoter
 from eva_lab.genetic_updater import GeneticUpdater
 from eva_lab.muzero.config import MuZeroConfigV3
+from eva_lab.muzero.checkpoint_utils import archive_muzero_artifacts
 from eva_lab.muzero.environment import TradingEnvironment
 from eva_lab.muzero.jax_agent import JAXMuZeroAgent
 from eva_lab.timescale_store import record_arena_result, record_training_dataset
 from eva_lab.training_notifier import send_horizon_summary, send_training_horizon_started
 from eva_lab.training_status import (
     append_training_log,
+    merge_training_status,
     write_arena_summary,
     load_training_status,
     mark_step_running,
@@ -179,6 +181,256 @@ def _evaluate_gold_precheck_verdict(
     }
 
 
+def _build_lineage(
+    *,
+    resume_source: str | None,
+    resume_checkpoint_path: str | None,
+    ga_parent_champion_id: str | None,
+    ga_campaign_id: str | None,
+    ga_trial: str | None,
+    ga_scope: str | None,
+    ga_generation: int | None,
+) -> dict[str, object]:
+    """Construit une lineage stable pour les checkpoints et manifestes MuZero."""
+
+    lineage = {
+        "resume_source": resume_source,
+        "resume_checkpoint_path": resume_checkpoint_path,
+        "parent_champion_id": ga_parent_champion_id,
+        "ga_campaign_id": ga_campaign_id,
+        "ga_trial": ga_trial,
+        "ga_scope": ga_scope,
+        "ga_generation": ga_generation,
+    }
+    return {
+        str(key): value
+        for key, value in lineage.items()
+        if value is not None
+    }
+
+
+def _build_resume_candidates(
+    *,
+    explicit_resume_path: str | None,
+    ga_seed_checkpoint_path: str | None,
+    latest_path: Path,
+) -> list[dict[str, str]]:
+    """Construit les sources de reprise MuZero dans l'ordre de priorite."""
+
+    candidates: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    for source_name, source_path in (
+        ("explicit_resume", explicit_resume_path),
+        ("ga_seed_checkpoint", ga_seed_checkpoint_path),
+        ("latest", str(latest_path)),
+    ):
+        normalized_path = str(source_path or "").strip()
+        if not normalized_path or normalized_path in seen_paths:
+            continue
+        seen_paths.add(normalized_path)
+        candidates.append({"source": source_name, "path": normalized_path})
+    return candidates
+
+
+def _build_terminal_failure_summary(
+    *,
+    run_id: str | None,
+    engine: str,
+    horizon: str,
+    family: str | None,
+    feature_profile_name: str | None,
+    ga_trial: str | None,
+    ga_campaign_id: str | None,
+    ga_scope: str | None,
+    ga_parent_champion_id: str | None,
+    trial_mode: str | None,
+    dataset_id: str | None,
+    dataset_source: str | None,
+    focus_symbols: list[str],
+    gate_profile: str,
+    latest_checkpoint: str | None,
+    resume_source: str | None,
+    artifact_compatibility: dict[str, Any],
+    reason: str,
+    failure_mode: str = "artifact_incompatible",
+    lineage: dict[str, object] | None = None,
+) -> dict[str, Any]:
+    """Construit un resume terminal de blocage avant le train MuZero."""
+
+    return {
+        "run_id": run_id,
+        "sequence_id": str(os.getenv("TRAINING_SEQUENCE_ID", "")).strip() or None,
+        "sequence_profile": str(os.getenv("TRAINING_SEQUENCE_PROFILE", "")).strip() or None,
+        "window_id": str(os.getenv("TRAINING_WINDOW_ID", "")).strip() or None,
+        "trial_id": str(os.getenv("TRAINING_TRIAL_ID", "")).strip() or ga_trial,
+        "engine": engine,
+        "horizon": horizon,
+        "family": family,
+        "feature_profile": feature_profile_name,
+        "ga_trial": ga_trial,
+        "ga_campaign_id": ga_campaign_id,
+        "ga_scope": ga_scope,
+        "ga_parent_champion_id": ga_parent_champion_id,
+        "seed_parent_champion_id": ga_parent_champion_id,
+        "trial_mode": trial_mode,
+        "dataset_id": dataset_id,
+        "dataset_source": dataset_source,
+        "focus_symbols": focus_symbols,
+        "gate_profile": gate_profile,
+        "terminal_status": "failed",
+        "failed_step": "checkpoint_resume",
+        "failure_mode": failure_mode,
+        "promotion_gate": {},
+        "metrics": {},
+        "metrics_by_symbol": {},
+        "metrics_by_position_mechanics": {},
+        "training_metrics": {},
+        "challenger_path": None,
+        "latest_checkpoint": latest_checkpoint,
+        "battle_report_path": None,
+        "live_comparison": {},
+        "resume_source": resume_source,
+        "artifact_compatibility": dict(artifact_compatibility or {}),
+        "checkpoint_schema_version": artifact_compatibility.get("schema_version"),
+        "lineage": dict(lineage or {}),
+        "artifact_state": {
+            "arena_report_present": False,
+            "battle_report_present": False,
+            "promotion_present": False,
+            "candidate_checkpoint_present": False,
+            "latest_checkpoint_present": bool(latest_checkpoint),
+        },
+        "latest_candidate": None,
+        "latest_verdict": {
+            "status": "failed",
+            "reason": reason,
+            "failure_mode": failure_mode,
+        },
+        "reason": reason,
+    }
+
+
+def _build_training_metrics_payload(
+    *,
+    base_metrics: dict[str, object] | None,
+    family: str | None,
+    dataset_id: str | None,
+    dataset_source: str | None,
+    feature_profile_name: str | None,
+    mechanics_profile_version: str | None,
+    dataset_coverage: dict[str, Any],
+    focus_symbols: list[str],
+    ga_campaign_id: str | None,
+    ga_trial: str | None,
+    ga_scope: str | None,
+    ga_parent_champion_id: str | None,
+    resume_source: str | None,
+    checkpoint_schema_version: int | None,
+    artifact_compatibility: dict[str, Any] | None,
+    lineage: dict[str, object] | None,
+) -> dict[str, object]:
+    """Construit un bloc de metriques stable pour la promotion MuZero."""
+
+    payload = {
+        **dict(base_metrics or {}),
+        "family": family,
+        "dataset_id": dataset_id,
+        "dataset_source": dataset_source,
+        "feature_profile": feature_profile_name,
+        "mechanics_profile_version": mechanics_profile_version,
+        "dataset_coverage": dict(dataset_coverage or {}),
+        "focus_symbols": list(focus_symbols),
+        "ga_campaign_id": ga_campaign_id,
+        "ga_trial": ga_trial,
+        "ga_scope": ga_scope,
+        "ga_parent_champion_id": ga_parent_champion_id,
+        "seed_parent_champion_id": ga_parent_champion_id,
+        "resume_source": resume_source,
+        "checkpoint_schema_version": checkpoint_schema_version,
+        "artifact_compatibility": dict(artifact_compatibility or {}),
+        "lineage": dict(lineage or {}),
+    }
+    return {
+        str(key): value
+        for key, value in payload.items()
+        if value is not None
+    }
+
+
+def _resolve_resume_checkpoint(
+    *,
+    agent: JAXMuZeroAgent,
+    explicit_resume_path: str | None,
+    ga_seed_checkpoint_path: str | None,
+    latest_path: Path,
+    mechanics_only_mode: bool,
+    archive_root: Path,
+) -> dict[str, Any]:
+    """Charge le meilleur checkpoint de reprise compatible pour MuZero."""
+
+    last_incompatible: dict[str, Any] | None = None
+    for candidate in _build_resume_candidates(
+        explicit_resume_path=explicit_resume_path,
+        ga_seed_checkpoint_path=ga_seed_checkpoint_path,
+        latest_path=latest_path,
+    ):
+        candidate_source = str(candidate["source"])
+        candidate_path = Path(candidate["path"])
+        if not candidate_path.exists():
+            continue
+
+        compatibility = agent.inspect_checkpoint(str(candidate_path))
+        if compatibility.get("allowed", False):
+            agent.load(str(candidate_path))
+            return {
+                "resume_path": str(candidate_path),
+                "resume_source": candidate_source,
+                "artifact_compatibility": compatibility,
+                "loaded": True,
+            }
+
+        last_incompatible = {
+            "resume_path": str(candidate_path),
+            "resume_source": candidate_source,
+            "artifact_compatibility": compatibility,
+            "loaded": False,
+        }
+        if candidate_source == "ga_seed_checkpoint" or (
+            mechanics_only_mode and candidate_source == "explicit_resume"
+        ):
+            return last_incompatible
+
+        if candidate_source == "latest":
+            archive_report = archive_muzero_artifacts(
+                archive_root=archive_root,
+                paths=[candidate_path],
+                reason="checkpoint_incompatible",
+                metadata={
+                    "source": candidate_source,
+                    "compatibility": compatibility,
+                },
+            )
+            logger.warning(
+                "Checkpoint latest MuZero archive apres incompatibilite: %s",
+                archive_report.get("archive_dir"),
+            )
+            append_training_log(
+                (
+                    "MuZero: checkpoint latest incompatible archive avant cold start: "
+                    f"{compatibility.get('reason')}"
+                ),
+                level="WARNING",
+                source="muzero",
+            )
+
+    return {
+        "resume_path": None,
+        "resume_source": "cold_start",
+        "artifact_compatibility": last_incompatible.get("artifact_compatibility") if last_incompatible else {},
+        "loaded": False,
+    }
+
+
 def main() -> dict[str, object]:
     """Orchestre l'entrainement MuZero d'un horizon strategique."""
     config = MuZeroConfigV3()
@@ -209,6 +461,7 @@ def main() -> dict[str, object]:
         "yes",
         "on",
     }
+    explicit_resume_path = str(os.getenv("TRAINING_RESUME_CHECKPOINT_PATH", "")).strip() or None
     ga_seed_checkpoint_path = str(os.getenv("TRAINING_GA_SEED_CHECKPOINT_PATH", "")).strip() or None
     ga_genome_raw = str(os.getenv("TRAINING_GA_GENOME_JSON", "")).strip()
     ga_genome: dict[str, object] = {}
@@ -295,20 +548,129 @@ def main() -> dict[str, object]:
     results_dir.mkdir(parents=True, exist_ok=True)
 
     latest_path = weights_dir / f"muzero_{horizon}_latest.pkl"
-    if mechanics_only_mode:
-        try:
-            agent.load(str(ga_seed_checkpoint_path))
-            logger.info("Mode GA seede mecanique: checkpoint fixe charge depuis %s", ga_seed_checkpoint_path)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Impossible de charger le checkpoint seed MuZero {ga_seed_checkpoint_path}: {exc}"
-            ) from exc
-    elif latest_path.exists():
-        try:
-            agent.load(str(latest_path))
-            logger.info("Reprise MuZero depuis %s", latest_path)
-        except Exception as exc:
-            logger.warning("Checkpoint MuZero ignore: %s", exc)
+    resume_resolution = _resolve_resume_checkpoint(
+        agent=agent,
+        explicit_resume_path=explicit_resume_path,
+        ga_seed_checkpoint_path=ga_seed_checkpoint_path,
+        latest_path=latest_path,
+        mechanics_only_mode=mechanics_only_mode,
+        archive_root=weights_dir / "archive" / "incompatible" / horizon,
+    )
+    resume_source = str(resume_resolution.get("resume_source") or "cold_start")
+    resume_checkpoint_path = (
+        str(resume_resolution.get("resume_path") or "").strip() or None
+    )
+    artifact_compatibility = dict(resume_resolution.get("artifact_compatibility") or {})
+    checkpoint_schema_version = artifact_compatibility.get("schema_version")
+    lineage = _build_lineage(
+        resume_source=resume_source,
+        resume_checkpoint_path=resume_checkpoint_path,
+        ga_parent_champion_id=ga_parent_champion_id,
+        ga_campaign_id=ga_campaign_id,
+        ga_trial=ga_trial,
+        ga_scope=ga_scope,
+        ga_generation=ga_generation,
+    )
+    if resume_checkpoint_path:
+        logger.info("Reprise MuZero depuis %s (%s).", resume_checkpoint_path, resume_source)
+    else:
+        logger.info("MuZero demarre a froid (%s).", resume_source)
+
+    if mechanics_only_mode and resume_source != "ga_seed_checkpoint":
+        failure_reason = (
+            "Campagne GA seedee bloquee: aucun champion MuZero seed compatible n'a ete charge."
+        )
+        append_training_log(failure_reason, level="ERROR", source="muzero")
+        active_run_id = str(load_training_status().get("run_id") or "").strip() or None
+        mark_step_running(
+            step_name,
+            engine=engine,
+            phase="initialisation",
+            horizon=horizon,
+            family=initial_family,
+            symbol_total=len(config.symbols),
+            dataset_id=dataset_id,
+            dataset_source=dataset_source,
+            feature_profile=feature_profile_name,
+            mechanics_profile_version=mechanics_profile_version,
+            ga_status=ga_status,
+            ga_generation=ga_generation,
+            ga_trial=ga_trial,
+            ga_campaign_id=ga_campaign_id,
+            ga_scope=ga_scope,
+            ga_parent_champion_id=ga_parent_champion_id,
+            seed_parent_champion_id=ga_parent_champion_id,
+            trial_mode=trial_mode,
+            trial_cost_profile=trial_cost_profile,
+            focus_symbols=focus_symbols,
+            gate_profile=gate_profile,
+            resume_source=resume_source,
+            checkpoint_schema_version=checkpoint_schema_version,
+            artifact_compatibility=artifact_compatibility,
+            lineage=lineage,
+            replay_cache_status="warming",
+            replay_cache_key=replay_cache_key,
+            replay_cache_entries=0,
+            replay_cache_source="memoire",
+            dataset_coverage=dataset_coverage,
+        )
+        terminal_summary = _build_terminal_failure_summary(
+            run_id=active_run_id,
+            engine=engine,
+            horizon=horizon,
+            family=initial_family,
+            feature_profile_name=feature_profile_name,
+            ga_trial=ga_trial,
+            ga_campaign_id=ga_campaign_id,
+            ga_scope=ga_scope,
+            ga_parent_champion_id=ga_parent_champion_id,
+            trial_mode=trial_mode,
+            dataset_id=dataset_id,
+            dataset_source=dataset_source,
+            focus_symbols=focus_symbols,
+            gate_profile=gate_profile,
+            latest_checkpoint=resume_checkpoint_path,
+            resume_source=resume_source,
+            artifact_compatibility=artifact_compatibility,
+            reason=failure_reason,
+            lineage=lineage,
+        )
+        terminal_summary_path = write_terminal_summary(terminal_summary)
+        logger.error("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
+        raise RuntimeError(failure_reason)
+
+    mark_step_running(
+        step_name,
+        engine=engine,
+        phase="initialisation",
+        horizon=horizon,
+        family=initial_family,
+        symbol_total=len(config.symbols),
+        dataset_id=dataset_id,
+        dataset_source=dataset_source,
+        feature_profile=feature_profile_name,
+        mechanics_profile_version=mechanics_profile_version,
+        ga_status=ga_status,
+        ga_generation=ga_generation,
+        ga_trial=ga_trial,
+        ga_campaign_id=ga_campaign_id,
+        ga_scope=ga_scope,
+        ga_parent_champion_id=ga_parent_champion_id,
+        seed_parent_champion_id=ga_parent_champion_id,
+        trial_mode=trial_mode,
+        trial_cost_profile=trial_cost_profile,
+        focus_symbols=focus_symbols,
+        gate_profile=gate_profile,
+        resume_source=resume_source,
+        checkpoint_schema_version=checkpoint_schema_version,
+        artifact_compatibility=artifact_compatibility,
+        lineage=lineage,
+        replay_cache_status="warming",
+        replay_cache_key=replay_cache_key,
+        replay_cache_entries=0,
+        replay_cache_source="memoire",
+        dataset_coverage=dataset_coverage,
+    )
 
     games_per_symbol = int(os.getenv("MUZERO_GAMES_PER_SYMBOL", "12"))
     valid_symbols: list[str] = []
@@ -321,6 +683,7 @@ def main() -> dict[str, object]:
     dataset_id = str(dataset_descriptor.get("dataset_id") or "")
     start_time = datetime.now()
     last_metrics: dict[str, object] | None = None
+    reanalyze_games_total = 0
     gold_precheck_payload: dict[str, object] | None = None
     gold_precheck_executed = False
     killed_after_precheck = False
@@ -333,6 +696,11 @@ def main() -> dict[str, object]:
             "seed_checkpoint_path": ga_seed_checkpoint_path,
             "feature_profile": str(feature_profile.get("profile_name") or "").strip() or None,
             "mechanics_profile_version": mechanics_profile_version,
+            "resume_source": resume_source,
+            "checkpoint_schema_version": checkpoint_schema_version,
+            "artifact_compatibility": artifact_compatibility,
+            "lineage": lineage,
+            "seed_parent_champion_id": ga_parent_champion_id,
         }
         append_training_log(
             (
@@ -446,7 +814,25 @@ def main() -> dict[str, object]:
                     source="muzero",
                 )
                 break
+            reanalyzed_this_step = 0
+            if (
+                int(getattr(config, "reanalyze_every_steps", 0) or 0) > 0
+                and step % int(getattr(config, "reanalyze_every_steps", 0) or 1) == 0
+            ):
+                reanalyzed_this_step = agent.reanalyze_recent_games(
+                    int(getattr(config, "reanalyze_max_games", 0) or 0)
+                )
+                reanalyze_games_total += reanalyzed_this_step
+                if reanalyzed_this_step > 0:
+                    logger.info(
+                        "[%s] reanalyse de %s parties a l'etape %s.",
+                        horizon,
+                        reanalyzed_this_step,
+                        step,
+                    )
+            metrics["reanalyze_games_count"] = float(reanalyze_games_total)
             last_metrics = metrics
+            merge_training_status({"latest_metrics": dict(last_metrics)})
 
             if (
                 gold_precheck_enabled
@@ -454,7 +840,11 @@ def main() -> dict[str, object]:
                 and step >= gold_precheck_step
             ):
                 checkpoint_path = weights_dir / f"muzero_{horizon}_gold_precheck_{step}.pkl"
-                agent.save(str(checkpoint_path))
+                agent.save(
+                    str(checkpoint_path),
+                    artifact_kind="gold_precheck",
+                    lineage=lineage,
+                )
                 append_training_log(
                     (
                         f"MuZero {horizon}: lancement du precheck Gold a l'etape "
@@ -530,7 +920,11 @@ def main() -> dict[str, object]:
             if step % 50 == 0:
                 elapsed = max((datetime.now() - start_time).total_seconds(), 1.0)
                 logger.info(
-                    "[%s] step %05d/%05d | loss=%.4f | val=%.4f | rew=%.4f | pol=%.4f | %.2f steps/s",
+                    (
+                        "[%s] step %05d/%05d | loss=%.4f | val=%.4f | rew=%.4f | "
+                        "pol=%.4f | ent=%.4f | top1=%.4f | legal=%.2f | masked=%.2f | "
+                        "reanalyze=%.0f | %.2f steps/s"
+                    ),
                     horizon,
                     step,
                     config.training_steps,
@@ -538,34 +932,77 @@ def main() -> dict[str, object]:
                     float(metrics["loss_val"]),
                     float(metrics["loss_rew"]),
                     float(metrics["loss_pol"]),
+                    float(metrics.get("policy_entropy", 0.0)),
+                    float(metrics.get("policy_top1_share", 0.0)),
+                    float(metrics.get("root_legal_action_count", 0.0)),
+                    float(metrics.get("invalid_root_action_masked_rate", 0.0)),
+                    float(metrics.get("reanalyze_games_count", 0.0)),
                     step / elapsed,
                 )
                 append_training_log(
                     "MuZero "
                     f"{horizon}: step {step}/{config.training_steps} | "
-                    f"loss={float(metrics['loss_total']):.4f}",
+                    f"loss={float(metrics['loss_total']):.4f} | "
+                    f"pol={float(metrics['loss_pol']):.4f} | "
+                    f"ent={float(metrics.get('policy_entropy', 0.0)):.4f}",
                     source="muzero",
                 )
 
             if step % config.checkpoint_interval == 0:
                 checkpoint_path = weights_dir / f"muzero_{horizon}_ckpt_{step}.pkl"
-                agent.save(str(checkpoint_path))
+                agent.save(
+                    str(checkpoint_path),
+                    artifact_kind="intermediate_checkpoint",
+                    lineage=lineage,
+                )
                 logger.info("Checkpoint MuZero sauvegarde: %s", checkpoint_path)
 
-        agent.save(str(latest_path))
+        agent.save(
+            str(latest_path),
+            artifact_kind="latest",
+            lineage=lineage,
+        )
         logger.info("Checkpoint latest mis a jour: %s", latest_path)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     challenger_id = f"gen_{horizon}_{timestamp}"
     challenger_path = weights_dir / f"{challenger_id}.pkl"
-    if mechanics_only_mode:
-        shutil.copy2(Path(ga_seed_checkpoint_path), challenger_path)
-    else:
-        agent.save(str(challenger_path))
+    challenger_lineage = {
+        **lineage,
+        "challenger_id": challenger_id,
+    }
+    agent.save(
+        str(challenger_path),
+        artifact_kind="challenger",
+        lineage=challenger_lineage,
+    )
+    challenger_compatibility = agent.inspect_checkpoint(str(challenger_path))
+    challenger_checkpoint_schema_version = challenger_compatibility.get("schema_version")
+    training_metrics_payload = _build_training_metrics_payload(
+        base_metrics=last_metrics,
+        family=family,
+        dataset_id=dataset_id,
+        dataset_source=dataset_source,
+        feature_profile_name=str(feature_profile.get("profile_name") or "").strip() or None,
+        mechanics_profile_version=mechanics_profile_version,
+        dataset_coverage=dataset_coverage,
+        focus_symbols=focus_symbols,
+        ga_campaign_id=ga_campaign_id,
+        ga_trial=ga_trial,
+        ga_scope=ga_scope,
+        ga_parent_champion_id=ga_parent_champion_id,
+        resume_source=resume_source,
+        checkpoint_schema_version=challenger_checkpoint_schema_version,
+        artifact_compatibility=challenger_compatibility,
+        lineage=challenger_lineage,
+    )
     latest_checkpoint_reference = (
         str(ga_seed_checkpoint_path)
         if mechanics_only_mode and ga_seed_checkpoint_path
         else str(latest_path)
+    )
+    latest_checkpoint_present = bool(
+        latest_checkpoint_reference and Path(latest_checkpoint_reference).exists()
     )
     active_run_id = str(load_training_status().get("run_id") or "").strip() or None
 
@@ -575,6 +1012,10 @@ def main() -> dict[str, object]:
         promotion_result = {
             "status": "skipped",
             "reason": "gold_precheck_fail",
+            "engine": engine,
+            "horizon": horizon,
+            "source_path": str(challenger_path),
+            "champion_paths": [],
             "promotion_gate": {
                 "allowed": False,
                 "status": "blocked",
@@ -582,7 +1023,31 @@ def main() -> dict[str, object]:
                 "gate_profile": gate_profile,
                 "failure_mode": (gold_precheck_payload or {}).get("failure_mode"),
             },
+            "artifact_compatibility": challenger_compatibility,
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "resume_source": resume_source,
+            "lineage": challenger_lineage,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_trial": ga_trial,
+            "ga_scope": ga_scope,
         }
+        promoter.persist_challenger_manifest(
+            engine=engine,
+            horizon=horizon,
+            status="blocked",
+            challenger_id=challenger_id,
+            challenger_path=str(challenger_path),
+            latest_checkpoint=str(latest_path),
+            battle_report=None,
+            training_metrics=training_metrics_payload,
+            promotion_gate=dict(promotion_result.get("promotion_gate") or {}),
+            promotion_result=promotion_result,
+            artifact_compatibility=dict(promotion_result.get("artifact_compatibility") or {}),
+            checkpoint_schema_version=challenger_checkpoint_schema_version,
+            resume_source=resume_source,
+            lineage=challenger_lineage,
+        )
         terminal_summary = {
             "run_id": active_run_id,
             "sequence_id": str(os.getenv("TRAINING_SEQUENCE_ID", "")).strip() or None,
@@ -595,6 +1060,10 @@ def main() -> dict[str, object]:
             "feature_profile": feature_profile.get("profile_name"),
             "mechanics_profile_version": mechanics_profile_version,
             "ga_trial": ga_trial,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_scope": ga_scope,
+            "ga_parent_champion_id": ga_parent_champion_id,
+            "seed_parent_champion_id": ga_parent_champion_id,
             "trial_mode": trial_mode,
             "trial_cost_profile": trial_cost_profile,
             "dataset_id": dataset_id,
@@ -609,13 +1078,21 @@ def main() -> dict[str, object]:
             "metrics": precheck_metrics,
             "metrics_by_symbol": dict(precheck_metrics.get("metrics_by_symbol") or {}),
             "metrics_by_position_mechanics": precheck_mechanics,
+            "training_metrics": training_metrics_payload,
+            "resume_source": resume_source,
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "lineage": challenger_lineage,
             "artifact_state": {
                 "precheck_report_present": bool((gold_precheck_payload or {}).get("path")),
                 "arena_report_present": False,
                 "battle_report_present": False,
                 "promotion_present": True,
                 "candidate_checkpoint_present": challenger_path.exists(),
+                "latest_checkpoint_present": latest_checkpoint_present,
             },
+            "challenger_path": str(challenger_path),
+            "latest_checkpoint": str(latest_path),
             "latest_candidate": challenger_id,
             "latest_verdict": {
                 "status": "killed_after_precheck",
@@ -651,14 +1128,22 @@ def main() -> dict[str, object]:
             "dataset_coverage": dict(getattr(config, "dataset_coverage", {}) or {}),
             "games_per_symbol": games_per_symbol,
             "total_games": total_games,
-            "latest_checkpoint": str(latest_path),
+            "latest_checkpoint": latest_checkpoint_reference,
             "challenger_path": str(challenger_path),
-            "training_metrics": last_metrics,
+            "training_metrics": training_metrics_payload,
             "ga_status": ga_status,
             "ga_generation": ga_generation,
             "ga_trial": ga_trial,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_scope": ga_scope,
+            "ga_parent_champion_id": ga_parent_champion_id,
+            "seed_parent_champion_id": ga_parent_champion_id,
             "trial_mode": trial_mode,
             "trial_cost_profile": trial_cost_profile,
+            "resume_source": resume_source,
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "lineage": challenger_lineage,
             "precheck": dict(gold_precheck_payload or {}),
             "promotion": promotion_result,
             "terminal_summary_path": str(terminal_summary_path),
@@ -744,23 +1229,37 @@ def main() -> dict[str, object]:
             "source_path": str(challenger_path),
             "champion_paths": [],
             "promotion_gate": promotion_gate,
+            "artifact_compatibility": challenger_compatibility,
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
             "requested_gate_profile": promoter.normalize_gate_profile(gate_profile or "standard"),
             "live_gate_profile": "standard",
             "live_comparison": live_comparison,
             "promotion_state": "candidate_only",
             "deferred_promotion": True,
             "ga_campaign_id": ga_campaign_id,
+            "ga_trial": ga_trial,
             "ga_scope": ga_scope,
+            "resume_source": resume_source,
+            "lineage": challenger_lineage,
+            "seed_parent_champion_id": ga_parent_champion_id,
         }
     else:
         promotion_result = promoter.promote_muzero_challenger(
             challenger_path=challenger_path,
             horizon=horizon,
             battle_report=battle_report,
-            training_metrics=last_metrics,
+            training_metrics=training_metrics_payload,
             latest_checkpoint=(Path(ga_seed_checkpoint_path) if mechanics_only_mode and ga_seed_checkpoint_path else latest_path),
             challenger_id=challenger_id,
             gate_profile=gate_profile,
+            promotion_metadata={
+                "resume_source": resume_source,
+                "lineage": challenger_lineage,
+                "seed_parent_champion_id": ga_parent_champion_id,
+                "ga_campaign_id": ga_campaign_id,
+                "ga_trial": ga_trial,
+                "ga_scope": ga_scope,
+            },
         )
     logger.info("Promotion live %s: %s", horizon, promotion_result.get("status"))
     append_training_log(
@@ -776,10 +1275,39 @@ def main() -> dict[str, object]:
         is_champion=promotion_result.get("status") == "promoted",
         horizon=horizon,
     )
+    if promotion_result.get("status") != "promoted":
+        promoter.persist_challenger_manifest(
+            engine=engine,
+            horizon=horizon,
+            status=(
+                "candidate_only"
+                if promotion_result.get("status") == "candidate_only"
+                else "blocked"
+            ),
+            challenger_id=challenger_id,
+            challenger_path=str(challenger_path),
+            latest_checkpoint=latest_checkpoint_reference,
+            battle_report=battle_report,
+            training_metrics=training_metrics_payload,
+            promotion_gate=dict(promotion_result.get("promotion_gate") or {}),
+            promotion_result=promotion_result,
+            artifact_compatibility=dict(promotion_result.get("artifact_compatibility") or {}),
+            checkpoint_schema_version=(
+                promotion_result.get("checkpoint_schema_version")
+                or challenger_checkpoint_schema_version
+            ),
+            resume_source=resume_source,
+            lineage=challenger_lineage,
+        )
     champion_paths = promotion_result.get("champion_paths", [])
 
     report_path = results_dir / f"arena_{horizon}_latest.json"
     report_payload = {
+        "run_id": active_run_id,
+        "sequence_id": str(os.getenv("TRAINING_SEQUENCE_ID", "")).strip() or None,
+        "sequence_profile": str(os.getenv("TRAINING_SEQUENCE_PROFILE", "")).strip() or None,
+        "window_id": str(os.getenv("TRAINING_WINDOW_ID", "")).strip() or None,
+        "trial_id": str(os.getenv("TRAINING_TRIAL_ID", "")).strip() or ga_trial,
         "engine": engine,
         "horizon": horizon,
         "timeframe": config.primary_timeframe,
@@ -800,7 +1328,7 @@ def main() -> dict[str, object]:
         "live_champion_reference": champion_reference,
         "live_champion_id": live_champion_id or None,
         "champion_paths": champion_paths,
-        "training_metrics": last_metrics,
+        "training_metrics": training_metrics_payload,
         "ga_status": str(os.getenv("TRAINING_GA_STATUS", "")).strip() or None,
         "ga_generation": (
             int(os.getenv("TRAINING_GA_GENERATION", "0"))
@@ -811,10 +1339,18 @@ def main() -> dict[str, object]:
         "ga_campaign_id": ga_campaign_id,
         "ga_scope": ga_scope,
         "ga_parent_champion_id": ga_parent_champion_id,
+        "seed_parent_champion_id": ga_parent_champion_id,
         "ga_defer_promotion": ga_defer_promotion,
         "ga_genome": ga_genome,
         "trial_mode": trial_mode,
         "trial_cost_profile": trial_cost_profile,
+        "resume_source": resume_source,
+        "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or challenger_compatibility),
+        "checkpoint_schema_version": (
+            promotion_result.get("checkpoint_schema_version")
+            or challenger_checkpoint_schema_version
+        ),
+        "lineage": challenger_lineage,
         "gold_precheck": dict(gold_precheck_payload or {}),
         "battle_report": battle_report,
         "promotion": promotion_result,
@@ -836,12 +1372,15 @@ def main() -> dict[str, object]:
         "horizon": horizon,
         "family": family,
         "feature_profile": feature_profile.get("profile_name"),
+        "mechanics_profile_version": mechanics_profile_version,
         "ga_trial": ga_trial,
         "ga_campaign_id": ga_campaign_id,
         "ga_scope": ga_scope,
         "ga_parent_champion_id": ga_parent_champion_id,
+        "seed_parent_champion_id": ga_parent_champion_id,
         "ga_genome": ga_genome,
         "trial_mode": trial_mode,
+        "trial_cost_profile": trial_cost_profile,
         "dataset_id": dataset_id,
         "dataset_source": dataset_source,
         "focus_symbols": focus_symbols,
@@ -859,16 +1398,24 @@ def main() -> dict[str, object]:
         "metrics_by_position_mechanics": dict(
             challenger_metrics_full.get("metrics_by_position_mechanics") or {}
         ),
-        "training_metrics": dict(last_metrics or {}),
+        "training_metrics": training_metrics_payload,
         "challenger_path": str(challenger_path),
         "latest_checkpoint": latest_checkpoint_reference,
         "battle_report_path": str(unique_report_path),
         "live_comparison": dict(promotion_result.get("live_comparison") or {}),
+        "resume_source": resume_source,
+        "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or challenger_compatibility),
+        "checkpoint_schema_version": (
+            promotion_result.get("checkpoint_schema_version")
+            or challenger_checkpoint_schema_version
+        ),
+        "lineage": challenger_lineage,
         "artifact_state": {
             "arena_report_present": True,
             "battle_report_present": True,
             "promotion_present": bool(promotion_result),
             "candidate_checkpoint_present": challenger_path.exists(),
+            "latest_checkpoint_present": latest_checkpoint_present,
         },
         "latest_candidate": challenger_id,
         "latest_verdict": {

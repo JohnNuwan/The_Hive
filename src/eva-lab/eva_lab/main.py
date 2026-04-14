@@ -56,11 +56,11 @@ from eva_lab.training_status import (
     load_cpu_scheduler_state,
     load_seeded_muzero_campaign_state,
     load_sequence_state,
+    merge_seeded_muzero_campaign_state,
     select_effective_training_step,
     tail_log_file,
     load_training_status,
     tail_training_log,
-    persist_seeded_muzero_campaign_state,
     write_terminal_summary,
 )
 from eva_lab.training_utils import get_gnn_model_kwargs
@@ -195,16 +195,26 @@ async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str
     dependencies["redis"] = await _probe_tcp_dependency("redis", redis_host, 6379)
     dependencies["neo4j"] = await _probe_tcp_dependency("neo4j", neo4j_host, 7687)
     dependencies["mosquitto"] = await _probe_tcp_dependency("mosquitto", mqtt_host, 1883)
-    dependencies["timescaledb"] = await _probe_tcp_dependency(
-        "timescaledb",
-        str(timescale_info.get("host") or "timescaledb"),
-        int(timescale_info.get("port") or 5432),
-    )
-    dependencies["timescaledb"]["enabled"] = bool(timescale_info.get("enabled", False))
-    dependencies["timescaledb"]["source"] = str(timescale_info.get("source") or "csv")
-    dependencies["timescaledb"]["state"] = str(timescale_info.get("state") or "disabled")
-    dependencies["timescaledb"]["bars_table"] = str(timescale_info.get("bars_table") or "")
-    dependencies["timescaledb"]["features_table"] = str(timescale_info.get("features_table") or "")
+    dependencies["timescaledb"] = {
+        "name": "timescaledb",
+        "ok": bool(timescale_info.get("ok", False)),
+        "reachable": bool(timescale_info.get("reachable", False)),
+        "state": str(timescale_info.get("state") or "disabled"),
+        "host": str(timescale_info.get("host") or "timescaledb"),
+        "port": int(timescale_info.get("port") or 5432),
+        "enabled": bool(timescale_info.get("enabled", False)),
+        "source": str(timescale_info.get("source") or "csv"),
+        "database": str(timescale_info.get("database") or ""),
+        "bars_table": str(timescale_info.get("bars_table") or ""),
+        "features_table": str(timescale_info.get("features_table") or ""),
+        "database_exists": bool(timescale_info.get("database_exists", False)),
+        "extension_ready": bool(timescale_info.get("extension_ready", False)),
+        "schema_ready": bool(timescale_info.get("schema_ready", False)),
+        "db_size_bytes": timescale_info.get("db_size_bytes"),
+        "storage_profile": timescale_info.get("storage_profile"),
+        "write_guard_status": dict(timescale_info.get("write_guard_status") or {}),
+        "last_bootstrap_error": timescale_info.get("last_bootstrap_error"),
+    }
 
     trainer_container = launcher.get("trainer_container")
     trainer_running = bool(run_status.get("active")) or bool(trainer_container)
@@ -1602,6 +1612,7 @@ async def champion_status():
         "selection_policy": promoter.get_live_selection_policy(),
         "dreamer_gate": gate.get_status(),
         "data_source": timescale_source.get("source"),
+        "timescaledb": timescale_source,
         "research_context_version": "v1_consultatif",
         "consultative_blockers": {},
         "champions": registry_champions,
@@ -1650,7 +1661,7 @@ async def persist_seeded_ga_campaign(payload: dict[str, Any]):
         dict[str, Any]: Etat persiste et identifiant de campagne.
     """
 
-    persisted = persist_seeded_muzero_campaign_state(payload)
+    persisted = merge_seeded_muzero_campaign_state(payload)
     return {
         "status": "ok",
         "campaign_id": str(persisted.get("campaign_id") or "") or None,
@@ -1702,6 +1713,7 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         "runtime_profile": runtime_profile,
         "run": run_view,
         "dependencies": dependencies,
+        "timescaledb": dependencies.get("timescaledb", {}),
         "universe": universe_summary,
         "logs": logs,
         "nightly_summary": nightly_summary,
@@ -1726,12 +1738,20 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         "ga_status": run_view.get("ga_status"),
         "ga_generation": run_view.get("ga_generation"),
         "ga_trial": run_view.get("ga_trial"),
+        "ga_campaign_id": run_view.get("ga_campaign_id"),
+        "ga_scope": run_view.get("ga_scope"),
+        "ga_parent_champion_id": run_view.get("ga_parent_champion_id"),
+        "seed_parent_champion_id": run_view.get("seed_parent_champion_id"),
         "sequence_id": run_view.get("sequence_id"),
         "sequence_profile": run_view.get("sequence_profile"),
         "window_id": run_view.get("window_id"),
         "trial_id": run_view.get("trial_id"),
         "trial_mode": run_view.get("trial_mode"),
         "trial_cost_profile": run_view.get("trial_cost_profile"),
+        "resume_source": run_view.get("resume_source"),
+        "checkpoint_schema_version": run_view.get("checkpoint_schema_version"),
+        "artifact_compatibility": run_view.get("artifact_compatibility", {}),
+        "lineage": run_view.get("lineage", {}),
         "terminal_summary_path": run_view.get("terminal_summary_path"),
         "last_successful_step": run_view.get("last_successful_step"),
         "last_successful_step_at": run_view.get("last_successful_step_at"),
@@ -1946,6 +1966,13 @@ async def live_universe(
         "engine_label": status.get("engine_label"),
         "selection": status.get("selection"),
         "live_champion_id": status.get("live_champion_id"),
+        "artifact_compatibility": status.get("artifact_compatibility", {}),
+        "checkpoint_schema_version": status.get("checkpoint_schema_version"),
+        "resume_source": status.get("resume_source"),
+        "lineage": status.get("lineage", {}),
+        "seed_parent_champion_id": status.get("seed_parent_champion_id"),
+        "ga_campaign_id": status.get("ga_campaign_id"),
+        "ga_trial": status.get("ga_trial"),
         "live_champion_id_muzero": live_champions_by_engine.get("muzero", {}).get(normalized_horizon),
         "live_champion_id_dreamer": live_champions_by_engine.get("dreamer", {}).get(normalized_horizon),
         "top_live_symbols_by_engine": top_live_symbols_by_engine,

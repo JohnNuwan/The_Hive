@@ -10,6 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from eva_lab.muzero.checkpoint_utils import (
+    archive_muzero_artifacts,
+    inspect_muzero_checkpoint,
+)
 from eva_lab.training_utils import (
     get_horizon_timeframe,
     get_scalp_multi_universe_symbols,
@@ -46,6 +50,7 @@ class ChampionPromoter:
         self.results_dir = Path(results_dir)
         self.weights_dir.mkdir(parents=True, exist_ok=True)
         self.results_dir.mkdir(parents=True, exist_ok=True)
+        self._muzero_expected_contexts: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def normalize_live_selection_policy(
@@ -692,6 +697,271 @@ class ChampionPromoter:
         if checkpoint_candidates:
             return checkpoint_candidates[0]
         return None
+
+    def _get_muzero_expected_context(self, horizon: str) -> dict[str, Any]:
+        """Construit et met en cache le contexte attendu pour MuZero."""
+
+        normalized_horizon = str(horizon or "intraday").strip().lower() or "intraday"
+        cached_context = self._muzero_expected_contexts.get(normalized_horizon)
+        if cached_context is not None:
+            return cached_context
+
+        from eva_lab.muzero.config import MuZeroConfigV3
+        from eva_lab.muzero.jax_agent import JAXMuZeroAgent
+
+        agent = JAXMuZeroAgent(MuZeroConfigV3(horizon=normalized_horizon))
+        context = dict(agent._expected_checkpoint_context)
+        self._muzero_expected_contexts[normalized_horizon] = context
+        return context
+
+    def inspect_checkpoint_compatibility(
+        self,
+        checkpoint_path: str | Path | None,
+        *,
+        horizon: str,
+        engine: str = "muzero",
+    ) -> dict[str, Any]:
+        """Retourne le verdict de compatibilite d'un checkpoint.
+
+        Args:
+            checkpoint_path (str | Path | None): Chemin du checkpoint cible.
+            horizon (str): Horizon attendu.
+            engine (str): Moteur cible.
+
+        Returns:
+            dict[str, Any]: Bloc ``artifact_compatibility`` stable.
+        """
+
+        normalized_engine = self.normalize_engine_name(engine)
+        path = Path(str(checkpoint_path)) if str(checkpoint_path or "").strip() else None
+        if path is None or not path.exists():
+            return {
+                "allowed": False,
+                "status": "missing",
+                "reason": "Checkpoint introuvable.",
+                "schema_version": None,
+                "expected_fingerprint": None,
+                "artifact_fingerprint": None,
+                "source_path": str(path) if path is not None else None,
+            }
+
+        if normalized_engine != "muzero":
+            return {
+                "allowed": True,
+                "status": "not_checked",
+                "reason": "Compatibilite structuree non appliquee a ce moteur.",
+                "schema_version": None,
+                "expected_fingerprint": None,
+                "artifact_fingerprint": None,
+                "source_path": str(path),
+            }
+
+        expected_context = self._get_muzero_expected_context(horizon)
+        _payload, compatibility = inspect_muzero_checkpoint(
+            path,
+            expected_context=expected_context,
+        )
+        return compatibility
+
+    @staticmethod
+    def _normalize_lineage(lineage: dict[str, Any] | None) -> dict[str, Any]:
+        """Nettoie une lineage partielle pour serialisation."""
+
+        payload = {
+            str(key): value
+            for key, value in dict(lineage or {}).items()
+            if value is not None
+        }
+        return payload
+
+    def persist_challenger_manifest(
+        self,
+        *,
+        engine: str,
+        horizon: str,
+        status: str,
+        challenger_id: str | None,
+        challenger_path: str | Path | None,
+        latest_checkpoint: str | Path | None,
+        battle_report: dict[str, Any] | None,
+        training_metrics: dict[str, Any] | None,
+        promotion_gate: dict[str, Any] | None,
+        promotion_result: dict[str, Any] | None = None,
+        artifact_compatibility: dict[str, Any] | None = None,
+        checkpoint_schema_version: int | None = None,
+        resume_source: str | None = None,
+        lineage: dict[str, Any] | None = None,
+        promotion_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Ecrit un manifeste stable pour un challenger promu, bloque ou candidat.
+
+        Args:
+            engine (str): Moteur du challenger.
+            horizon (str): Horizon strategique cible.
+            status (str): Etat du manifeste (`promoted`, `candidate_only`, `blocked`).
+            challenger_id (str | None): Identifiant du challenger.
+            challenger_path (str | Path | None): Checkpoint challenger.
+            latest_checkpoint (str | Path | None): Dernier checkpoint du run.
+            battle_report (dict[str, Any] | None): Rapport Arena courant.
+            training_metrics (dict[str, Any] | None): Metriques de train.
+            promotion_gate (dict[str, Any] | None): Verdict de gate live.
+            promotion_result (dict[str, Any] | None): Resultat detaille de promotion.
+            artifact_compatibility (dict[str, Any] | None): Bloc de compatibilite.
+            checkpoint_schema_version (int | None): Version de schema detectee.
+            resume_source (str | None): Source effective de reprise.
+            lineage (dict[str, Any] | None): Fililiation du challenger.
+            promotion_metadata (dict[str, Any] | None): Metadonnees additionnelles.
+
+        Returns:
+            dict[str, Any]: Manifeste ecrit sur disque.
+        """
+
+        normalized_engine = self.normalize_engine_name(engine)
+        normalized_horizon = str(horizon or "intraday").strip().lower() or "intraday"
+        result_payload = dict(promotion_result or {})
+        candidate_metrics = dict(((battle_report or {}).get("challenger") or {}).get("metrics") or {})
+        training_payload = dict(training_metrics or {})
+        family = str(
+            candidate_metrics.get("family")
+            or training_payload.get("family")
+            or infer_family_from_symbols(list((candidate_metrics.get("metrics_by_symbol") or {}).keys()))
+            or "mixed"
+        )
+        feature_profile = str(
+            candidate_metrics.get("feature_profile")
+            or training_payload.get("feature_profile")
+            or resolve_feature_profile(normalized_horizon, family).get("profile_name")
+            or "default"
+        )
+        gate_payload = dict(promotion_gate or {})
+        lineage_payload = self._normalize_lineage(lineage or result_payload.get("lineage"))
+        champion_paths = list(result_payload.get("champion_paths") or [])
+        variant = "champion" if str(status).strip().lower() == "promoted" else "blocked"
+        manifest = {
+            "status": status,
+            "promoted_at": datetime.now().isoformat() if str(status).strip().lower() == "promoted" else None,
+            "engine": normalized_engine,
+            "horizon": normalized_horizon,
+            "family": family,
+            "feature_profile": feature_profile,
+            "dataset_id": (
+                candidate_metrics.get("dataset_id")
+                or training_payload.get("dataset_id")
+            ),
+            "dataset_source": (
+                candidate_metrics.get("dataset_source")
+                or training_payload.get("dataset_source")
+            ),
+            "mechanics_profile_version": (
+                candidate_metrics.get("mechanics_profile_version")
+                or training_payload.get("mechanics_profile_version")
+            ),
+            "dataset_coverage": (
+                candidate_metrics.get("dataset_coverage")
+                or training_payload.get("dataset_coverage")
+                or {}
+            ),
+            "focus_symbols": normalize_training_symbols(list(training_payload.get("focus_symbols") or [])),
+            "gate_profile": (
+                str(gate_payload.get("gate_profile") or training_payload.get("gate_profile") or "standard").strip()
+                or "standard"
+            ),
+            "selection_policy": "champion_only",
+            "engine_label": self.get_engine_label(normalized_engine, variant=variant),
+            "challenger_id": str(challenger_id or "").strip() or None,
+            "source_path": str(challenger_path) if challenger_path else None,
+            "latest_checkpoint": str(latest_checkpoint) if latest_checkpoint else None,
+            "champion_path": champion_paths[0] if champion_paths else None,
+            "battle_report": battle_report,
+            "training_metrics": training_payload,
+            "promotion_gate": gate_payload,
+            "live_comparison": result_payload.get("live_comparison"),
+            "cross_engine_live_comparison": result_payload.get("cross_engine_live_comparison"),
+            "artifact_compatibility": dict(artifact_compatibility or {}),
+            "checkpoint_schema_version": checkpoint_schema_version,
+            "resume_source": resume_source,
+            "lineage": lineage_payload,
+            "seed_parent_champion_id": (
+                lineage_payload.get("parent_champion_id")
+                or training_payload.get("seed_parent_champion_id")
+                or training_payload.get("ga_parent_champion_id")
+            ),
+            "ga_campaign_id": (
+                training_payload.get("ga_campaign_id")
+                or result_payload.get("ga_campaign_id")
+            ),
+            "ga_trial": (
+                training_payload.get("ga_trial")
+                or result_payload.get("ga_trial")
+            ),
+            "ga_scope": (
+                training_payload.get("ga_scope")
+                or result_payload.get("ga_scope")
+            ),
+        }
+        for key, value in dict(promotion_metadata or {}).items():
+            if value is not None:
+                manifest[key] = value
+
+        manifest_path = self.get_manifest_path(normalized_horizon, engine=normalized_engine)
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False, default=float),
+            encoding="utf-8",
+        )
+        return manifest
+
+    def _archive_incompatible_live_artifacts(
+        self,
+        *,
+        horizon: str,
+        engine: str,
+        checkpoint_path: Path,
+        manifest: dict[str, Any] | None,
+        arena_report: dict[str, Any] | None,
+        compatibility: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Archive un champion live incompatible et remplace son manifeste."""
+
+        normalized_engine = self.normalize_engine_name(engine)
+        manifest_path = self.get_manifest_path(horizon, engine=normalized_engine)
+        archive_report = archive_muzero_artifacts(
+            archive_root=self.results_dir / "archive" / normalized_engine / horizon,
+            paths=[manifest_path, checkpoint_path],
+            reason="artifact_incompatible",
+            metadata={
+                "engine": normalized_engine,
+                "horizon": horizon,
+                "compatibility": compatibility,
+            },
+        )
+        replacement_manifest = self.persist_challenger_manifest(
+            engine=normalized_engine,
+            horizon=horizon,
+            status="blocked",
+            challenger_id=str((manifest or {}).get("challenger_id") or "").strip() or None,
+            challenger_path=str(checkpoint_path),
+            latest_checkpoint=(manifest or {}).get("latest_checkpoint"),
+            battle_report=dict(
+                (manifest or {}).get("battle_report")
+                or (arena_report or {}).get("battle_report")
+                or {}
+            )
+            or None,
+            training_metrics=dict((manifest or {}).get("training_metrics") or {}),
+            promotion_gate=dict((manifest or {}).get("promotion_gate") or {}),
+            promotion_result=dict(manifest or {}),
+            artifact_compatibility=compatibility,
+            checkpoint_schema_version=compatibility.get("schema_version"),
+            resume_source=(manifest or {}).get("resume_source"),
+            lineage=dict((manifest or {}).get("lineage") or {}),
+            promotion_metadata={"archive_report": archive_report},
+        )
+        logger.warning(
+            "Champion %s/%s archive pour incompatibilite de checkpoint.",
+            normalized_engine,
+            horizon,
+        )
+        return replacement_manifest
 
     def _compare_with_live_champion(
         self,
@@ -1423,6 +1693,35 @@ class ChampionPromoter:
             "selection_policy": live_meta.get("policy"),
             "engine_label": live_meta.get("engine_label"),
             "selection": live_meta.get("selection"),
+            "artifact_compatibility": dict(live_meta.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": live_meta.get("checkpoint_schema_version"),
+            "resume_source": (
+                live_meta.get("resume_source")
+                or (manifest or {}).get("resume_source")
+                or terminal_summary.get("resume_source")
+            ),
+            "lineage": dict(
+                live_meta.get("lineage")
+                or (manifest or {}).get("lineage")
+                or terminal_summary.get("lineage")
+                or {}
+            ),
+            "seed_parent_champion_id": (
+                live_meta.get("seed_parent_champion_id")
+                or (manifest or {}).get("seed_parent_champion_id")
+                or terminal_summary.get("seed_parent_champion_id")
+                or (terminal_summary.get("lineage") or {}).get("parent_champion_id")
+            ),
+            "ga_campaign_id": (
+                live_meta.get("ga_campaign_id")
+                or (manifest or {}).get("ga_campaign_id")
+                or terminal_summary.get("ga_campaign_id")
+            ),
+            "ga_trial": (
+                live_meta.get("ga_trial")
+                or (manifest or {}).get("ga_trial")
+                or terminal_summary.get("ga_trial")
+            ),
             "gate_allowed": promotion_gate.get("allowed"),
             "gate_profile": promotion_gate.get("gate_profile"),
             "gate_reason": promotion_gate.get("reason"),
@@ -1542,6 +1841,33 @@ class ChampionPromoter:
         if not source_path.exists():
             raise FileNotFoundError(f"Checkpoint challenger introuvable: {source_path}")
 
+        artifact_compatibility = self.inspect_checkpoint_compatibility(
+            source_path,
+            horizon=horizon,
+            engine=normalized_engine,
+        )
+        checkpoint_schema_version = artifact_compatibility.get("schema_version")
+        if normalized_engine == "muzero" and not artifact_compatibility.get("allowed", False):
+            logger.warning(
+                "Promotion live refusee pour %s/%s: checkpoint incompatible (%s).",
+                normalized_engine,
+                horizon,
+                artifact_compatibility.get("reason"),
+            )
+            return {
+                "status": "skipped",
+                "reason": "artifact_incompatible",
+                "engine": normalized_engine,
+                "horizon": horizon,
+                "source_path": str(source_path),
+                "champion_paths": [],
+                "promotion_gate": {},
+                "artifact_compatibility": artifact_compatibility,
+                "checkpoint_schema_version": checkpoint_schema_version,
+                "requested_gate_profile": self.normalize_gate_profile(gate_profile or "standard"),
+                "live_gate_profile": "standard",
+            }
+
         requested_gate_profile = self.normalize_gate_profile(gate_profile or "standard")
         live_gate_profile = "standard"
         if requested_gate_profile != live_gate_profile:
@@ -1567,6 +1893,8 @@ class ChampionPromoter:
                     battle_report,
                     gate_profile=live_gate_profile,
                 ),
+                "artifact_compatibility": artifact_compatibility,
+                "checkpoint_schema_version": checkpoint_schema_version,
                 "requested_gate_profile": requested_gate_profile,
                 "live_gate_profile": live_gate_profile,
             }
@@ -1590,6 +1918,8 @@ class ChampionPromoter:
                 "source_path": str(source_path),
                 "champion_paths": [],
                 "promotion_gate": promotion_gate,
+                "artifact_compatibility": artifact_compatibility,
+                "checkpoint_schema_version": checkpoint_schema_version,
                 "requested_gate_profile": requested_gate_profile,
                 "live_gate_profile": live_gate_profile,
             }
@@ -1616,6 +1946,8 @@ class ChampionPromoter:
                 "source_path": str(source_path),
                 "champion_paths": [],
                 "promotion_gate": promotion_gate,
+                "artifact_compatibility": artifact_compatibility,
+                "checkpoint_schema_version": checkpoint_schema_version,
                 "requested_gate_profile": requested_gate_profile,
                 "live_gate_profile": live_gate_profile,
                 "live_comparison": live_comparison,
@@ -1659,10 +1991,16 @@ class ChampionPromoter:
             "training_metrics": training_metrics or {},
             "promotion_gate": promotion_gate,
             "live_comparison": live_comparison,
+            "artifact_compatibility": artifact_compatibility,
+            "checkpoint_schema_version": checkpoint_schema_version,
         }
         for key, value in dict(promotion_metadata or {}).items():
             if value is not None:
                 manifest[key] = value
+        manifest["lineage"] = self._normalize_lineage(
+            dict(manifest.get("lineage") or {})
+            or dict(promotion_metadata or {})
+        )
         manifest.setdefault(
             "symbol_wins_vs_live",
             dict(live_comparison.get("symbol_wins_vs_live") or {}),
@@ -1793,7 +2131,82 @@ class ChampionPromoter:
         if checkpoint_candidates:
             latest_checkpoint = checkpoint_candidates[0]
 
+        champion_compatibility = self.inspect_checkpoint_compatibility(
+            champion_path,
+            horizon=horizon,
+            engine=normalized_engine,
+        ) if champion_path.exists() else None
+        legacy_compatibility = self.inspect_checkpoint_compatibility(
+            legacy_champion,
+            horizon=horizon,
+            engine=normalized_engine,
+        ) if normalized_engine == "muzero" and legacy_champion.exists() else None
+        latest_model_compatibility = self.inspect_checkpoint_compatibility(
+            latest_path,
+            horizon=horizon,
+            engine=normalized_engine,
+        ) if latest_path.exists() else None
+        latest_checkpoint_compatibility = self.inspect_checkpoint_compatibility(
+            latest_checkpoint,
+            horizon=horizon,
+            engine=normalized_engine,
+        ) if latest_checkpoint is not None else None
+
+        def _build_selection_meta(
+            *,
+            selection: str,
+            engine_label: str,
+            live_champion_id: str | None,
+            artifact_compatibility: dict[str, Any] | None,
+            source_path: Path | None = None,
+            extra_reason: str | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "selection": selection,
+                "engine": normalized_engine,
+                "policy": policy,
+                "engine_label": engine_label,
+                "live_champion_id": live_champion_id,
+                "family": manifest.get("family"),
+                "feature_profile": manifest.get("feature_profile"),
+                "manifest": manifest,
+                "promotion_gate": promotion_gate,
+                "artifact_compatibility": dict(artifact_compatibility or {}),
+                "checkpoint_schema_version": (
+                    artifact_compatibility.get("schema_version")
+                    if isinstance(artifact_compatibility, dict)
+                    else None
+                ),
+                "resume_source": manifest.get("resume_source"),
+                "lineage": dict(manifest.get("lineage") or {}),
+                "seed_parent_champion_id": (
+                    manifest.get("seed_parent_champion_id")
+                    or (manifest.get("lineage") or {}).get("parent_champion_id")
+                ),
+                "ga_campaign_id": manifest.get("ga_campaign_id"),
+                "ga_trial": manifest.get("ga_trial"),
+                "source_path": str(source_path) if source_path is not None else None,
+                "reason": extra_reason,
+            }
+
         if champion_path.exists():
+            if normalized_engine == "muzero" and champion_compatibility and not champion_compatibility.get("allowed", False):
+                manifest = self._archive_incompatible_live_artifacts(
+                    horizon=horizon,
+                    engine=normalized_engine,
+                    checkpoint_path=champion_path,
+                    manifest=manifest,
+                    arena_report=arena_report,
+                    compatibility=champion_compatibility,
+                )
+                return None, _build_selection_meta(
+                    selection="blocked_champion",
+                    engine_label=self.get_engine_label(normalized_engine, variant="blocked"),
+                    live_champion_id=None,
+                    artifact_compatibility=champion_compatibility,
+                    source_path=champion_path,
+                    extra_reason=str(champion_compatibility.get("reason") or "artifact_incompatible"),
+                )
             if not promotion_gate.get("allowed", False):
                 logger.warning(
                     "Champion %s bloque pour le live: %s.",
@@ -1801,103 +2214,135 @@ class ChampionPromoter:
                     promotion_gate.get("reason"),
                 )
             else:
-                return champion_path, {
-                    "selection": "champion",
-                    "engine": normalized_engine,
-                    "policy": policy,
-                    "engine_label": manifest.get(
+                return champion_path, _build_selection_meta(
+                    selection="champion",
+                    engine_label=manifest.get(
                         "engine_label",
                         self.get_engine_label(normalized_engine, variant="champion"),
                     ),
-                    "live_champion_id": manifest.get("challenger_id"),
-                    "family": manifest.get("family"),
-                    "feature_profile": manifest.get("feature_profile"),
-                    "manifest": manifest,
-                    "promotion_gate": promotion_gate,
-                }
-            return None, {
-                "selection": "blocked_champion",
-                "engine": normalized_engine,
-                "policy": policy,
-                "engine_label": self.get_engine_label(normalized_engine, variant="blocked"),
-                "live_champion_id": None,
-                "family": manifest.get("family"),
-                "feature_profile": manifest.get("feature_profile"),
-                "manifest": manifest,
-                "promotion_gate": promotion_gate,
-            }
+                    live_champion_id=manifest.get("challenger_id"),
+                    artifact_compatibility=champion_compatibility,
+                    source_path=champion_path,
+                )
+            return None, _build_selection_meta(
+                selection="blocked_champion",
+                engine_label=self.get_engine_label(normalized_engine, variant="blocked"),
+                live_champion_id=None,
+                artifact_compatibility=champion_compatibility,
+                source_path=champion_path,
+                extra_reason=str(promotion_gate.get("reason") or "promotion_gate_blocked"),
+            )
 
         if normalized_engine == "muzero" and horizon == "intraday" and legacy_champion.exists():
+            if legacy_compatibility and not legacy_compatibility.get("allowed", False):
+                return None, _build_selection_meta(
+                    selection="blocked_legacy_champion",
+                    engine_label=self.get_engine_label(normalized_engine, variant="blocked"),
+                    live_champion_id=None,
+                    artifact_compatibility=legacy_compatibility,
+                    source_path=legacy_champion,
+                    extra_reason=str(legacy_compatibility.get("reason") or "artifact_incompatible"),
+                )
             if promotion_gate.get("allowed", False):
-                return legacy_champion, {
-                    "selection": "legacy_champion",
-                    "engine": normalized_engine,
-                    "policy": policy,
-                    "engine_label": self.get_engine_label(normalized_engine, variant="champion"),
-                    "live_champion_id": self._extract_registered_live_champion_id(
+                return legacy_champion, _build_selection_meta(
+                    selection="legacy_champion",
+                    engine_label=self.get_engine_label(normalized_engine, variant="champion"),
+                    live_champion_id=self._extract_registered_live_champion_id(
                         manifest,
                         promotion_gate,
                     ),
-                    "family": manifest.get("family"),
-                    "feature_profile": manifest.get("feature_profile"),
-                    "manifest": manifest,
-                    "promotion_gate": promotion_gate,
+                    artifact_compatibility=legacy_compatibility,
+                    source_path=legacy_champion,
+                )
+            return None, _build_selection_meta(
+                selection="blocked_legacy_champion",
+                engine_label=self.get_engine_label(normalized_engine, variant="blocked"),
+                live_champion_id=None,
+                artifact_compatibility=legacy_compatibility,
+                source_path=legacy_champion,
+                extra_reason=str(promotion_gate.get("reason") or "promotion_gate_blocked"),
+            )
+
+        if normalized_engine == "muzero":
+            blocking_compatibility = (
+                latest_model_compatibility
+                or latest_checkpoint_compatibility
+                or {
+                    "allowed": False,
+                    "status": "missing",
+                    "reason": "Aucun champion MuZero promu compatible n'est disponible.",
+                    "schema_version": None,
+                    "expected_fingerprint": None,
+                    "artifact_fingerprint": None,
+                    "source_path": None,
                 }
-            return None, {
-                "selection": "blocked_legacy_champion",
-                "engine": normalized_engine,
-                "policy": policy,
-                "engine_label": self.get_engine_label(normalized_engine, variant="blocked"),
-                "live_champion_id": None,
-                "family": manifest.get("family"),
-                "feature_profile": manifest.get("feature_profile"),
-                "manifest": manifest,
-                "promotion_gate": promotion_gate,
-            }
+            )
+            if latest_model_compatibility and latest_model_compatibility.get("allowed", False):
+                blocking_compatibility = {
+                    **latest_model_compatibility,
+                    "allowed": False,
+                    "status": "blocked",
+                    "reason": "Aucun champion MuZero promu compatible n'est disponible.",
+                }
+            return None, _build_selection_meta(
+                selection="none",
+                engine_label=self.get_engine_label(normalized_engine, variant="blocked"),
+                live_champion_id=None,
+                artifact_compatibility=blocking_compatibility,
+                source_path=latest_path if latest_path.exists() else latest_checkpoint,
+                extra_reason=str(blocking_compatibility.get("reason") or "no_promoted_champion"),
+            )
 
         if policy == "champion_then_latest" and latest_path.exists():
+            if latest_model_compatibility and not latest_model_compatibility.get("allowed", False):
+                return None, _build_selection_meta(
+                    selection="blocked_latest",
+                    engine_label=self.get_engine_label(normalized_engine, variant="blocked"),
+                    live_champion_id=None,
+                    artifact_compatibility=latest_model_compatibility,
+                    source_path=latest_path,
+                    extra_reason=str(latest_model_compatibility.get("reason") or "artifact_incompatible"),
+                )
             logger.warning(
                 "Aucun champion promu pour %s. Utilisation du latest autorisee par la politique live.",
                 horizon,
             )
-            return latest_path, {
-                "selection": "latest",
-                "engine": normalized_engine,
-                "policy": policy,
-                "engine_label": self.get_engine_label(normalized_engine, variant="latest"),
-                "family": manifest.get("family"),
-                "feature_profile": manifest.get("feature_profile"),
-                "manifest": manifest,
-                "promotion_gate": promotion_gate,
-            }
+            return latest_path, _build_selection_meta(
+                selection="latest",
+                engine_label=self.get_engine_label(normalized_engine, variant="latest"),
+                live_champion_id=None,
+                artifact_compatibility=latest_model_compatibility,
+                source_path=latest_path,
+            )
 
         if policy == "checkpoint_preview" and latest_checkpoint is not None:
+            if latest_checkpoint_compatibility and not latest_checkpoint_compatibility.get("allowed", False):
+                return None, _build_selection_meta(
+                    selection="blocked_checkpoint_preview",
+                    engine_label=self.get_engine_label(normalized_engine, variant="blocked"),
+                    live_champion_id=None,
+                    artifact_compatibility=latest_checkpoint_compatibility,
+                    source_path=latest_checkpoint,
+                    extra_reason=str(latest_checkpoint_compatibility.get("reason") or "artifact_incompatible"),
+                )
             logger.warning(
                 "Aucun champion promu pour %s. Utilisation du dernier checkpoint preview.",
                 horizon,
             )
-            return latest_checkpoint, {
-                "selection": "checkpoint_preview",
-                "engine": normalized_engine,
-                "policy": policy,
-                "engine_label": self.get_engine_label(normalized_engine, variant="preview"),
-                "family": manifest.get("family"),
-                "feature_profile": manifest.get("feature_profile"),
-                "manifest": manifest,
-                "promotion_gate": promotion_gate,
-            }
+            return latest_checkpoint, _build_selection_meta(
+                selection="checkpoint_preview",
+                engine_label=self.get_engine_label(normalized_engine, variant="preview"),
+                live_champion_id=None,
+                artifact_compatibility=latest_checkpoint_compatibility,
+                source_path=latest_checkpoint,
+            )
 
-        return None, {
-            "selection": "none",
-            "engine": normalized_engine,
-            "policy": policy,
-            "engine_label": self.get_engine_label(normalized_engine, variant="blocked"),
-            "live_champion_id": None,
-            "family": manifest.get("family"),
-            "feature_profile": manifest.get("feature_profile"),
-            "manifest": manifest,
-            "promotion_gate": promotion_gate,
-        }
+        return None, _build_selection_meta(
+            selection="none",
+            engine_label=self.get_engine_label(normalized_engine, variant="blocked"),
+            live_champion_id=None,
+            artifact_compatibility=champion_compatibility or latest_model_compatibility,
+        )
 
     def garbage_collect_checkpoints(self, horizon: str, engine: str = "muzero") -> dict[str, Any]:
         """Supprime tous les checkpoints intermediaires devenus inutiles pour liberer le disque.

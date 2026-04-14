@@ -17,18 +17,21 @@ from shared.indicators import IndicatorFactory
 logger = logging.getLogger(__name__)
 
 SCALP_MULTI_UNIVERSE_SYMBOLS = [
-    "EURUSD",
     "XAUUSD",
-    "GBPUSD",
-    "USDJPY",
     "US30.cash",
     "GER40.cash",
+    "EURUSD",
+    "US100.cash",
     "US500.cash",
+    "BTCUSD",
 ]
 CANONICAL_SYMBOL_ALIASES = {
     "US30.CASH": "US30.cash",
     "GER40.CASH": "GER40.cash",
+    "US100.CASH": "US100.cash",
     "US500.CASH": "US500.cash",
+    "USTEC": "US100.cash",
+    "NAS100": "US100.cash",
 }
 
 
@@ -1426,6 +1429,8 @@ def build_dataset_coverage(
 
         timescale_info = describe_timescale_source()
         timescale_ready = ensure_timescale_ready() if bool(timescale_info.get("enabled", False)) else False
+        if bool(timescale_info.get("enabled", False)):
+            timescale_info = describe_timescale_source()
         timescale_inventory = discover_timescale_inventory()
         timescale_available = [
             symbol
@@ -1473,6 +1478,13 @@ def build_dataset_coverage(
             "database": timescale_info.get("database"),
             "bars_table": timescale_info.get("bars_table"),
             "features_table": timescale_info.get("features_table"),
+            "database_exists": bool(timescale_info.get("database_exists", False)),
+            "extension_ready": bool(timescale_info.get("extension_ready", False)),
+            "schema_ready": bool(timescale_info.get("schema_ready", False)),
+            "db_size_bytes": timescale_info.get("db_size_bytes"),
+            "storage_profile": timescale_info.get("storage_profile"),
+            "write_guard_status": dict(timescale_info.get("write_guard_status") or {}),
+            "last_bootstrap_error": timescale_info.get("last_bootstrap_error"),
             "available_symbols": timescale_available,
             "missing_symbols": timescale_missing,
             "coverage_ratio": len(timescale_available) / max(len(normalized_symbols), 1),

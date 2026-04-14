@@ -48,3 +48,12 @@ Ce document récapitule l'état actuel du système EVA et les étapes futures.
 - [x] **Shadow Learning** : Collecte passive (buffer circulaire 10k, flush JSONL, trade/signal/probe).
 - [x] **DreamerGate** : Gating conditionnel (inference-only RTX 2060 / training RTX 3090).
 - [x] **API Lab** : 6 endpoints (/shadow/record, /shadow/flush, /shadow/stats, /dreamer/status, /dreamer/predict, /dreamer/train).
+
+### Sprint 6 : Stabilisation Banker & Pipeline Training - EN COURS
+- [x] **Monitoring Telegram** : Nettoyage complet de `brain.py`. Résolution des problèmes de *mojibake* et formatage cassé (f-strings) en utilisant des échappements Unicode propres, des séparateurs dynamiques stricts et des emojis normalisés.
+- [x] **Fix Pipeline de Données (auto_train_gnn.sh)** :
+  - Correction des chemins de montage de volumes Docker (`$PROJECT_DIR/data` au lieu du sous-dossier non pertinent) permettant de voir les 462 fichiers CSV.
+  - Isolation du script face au `git pull` sauvage écrasant le fix en cours d'exécution.
+- [x] **Fix Cache CPU (gold_cpu_prep.py)** : Résolution de l'erreur fatale `OSError [Errno 36] File name too long` (crash en 4s). Le script tentait de créer un fichier `.pkl` concaténant 80+ symboles dans son nom. Tronquage dynamique de la signature implémenté.
+- [x] **Lancement Entraînement Initial** : Les endpoints de `live-inference` sont connectés au Banker. L'entraînement GNN est *actuellement en cours de traitement* sur le GPU RTX 3090, générant les modèles MuZero/GNN pour tous les actifs restants (D1, H1, M5).
+- [ ] **Validation Live des Trades** : En attente de la production du "Champion" GNN/MuZero pour valider la prise de position autonome complète par le Banker sur le broker MT5.

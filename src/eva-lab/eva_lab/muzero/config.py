@@ -118,9 +118,13 @@ class MuZeroConfigV3:
         self.num_simulations = int(os.getenv("MUZERO_NUM_SIMULATIONS", "100"))
         self.discount = 0.99
         self.root_dirichlet_alpha = 0.3
-        self.root_exploration_fraction = 0.50
+        self.root_exploration_fraction = float(
+            os.getenv("MUZERO_ROOT_EXPLORATION_FRACTION", "0.25")
+        )
         self.pb_c_base = 19_652
         self.pb_c_init = 1.25
+        self.reanalyze_every_steps = int(os.getenv("MUZERO_REANALYZE_EVERY_STEPS", "250"))
+        self.reanalyze_max_games = int(os.getenv("MUZERO_REANALYZE_MAX_GAMES", "64"))
 
         self.window_size = int(os.getenv("MUZERO_WINDOW_SIZE", "200000"))
 

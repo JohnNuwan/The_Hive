@@ -127,8 +127,13 @@ def _default_status() -> dict[str, Any]:
         "ga_campaign_id": None,
         "ga_scope": None,
         "ga_parent_champion_id": None,
+        "seed_parent_champion_id": None,
         "trial_mode": None,
         "trial_cost_profile": None,
+        "resume_source": None,
+        "checkpoint_schema_version": None,
+        "artifact_compatibility": {},
+        "lineage": {},
         "replay_cache_status": None,
         "replay_cache_key": None,
         "replay_cache_entries": None,
@@ -139,6 +144,7 @@ def _default_status() -> dict[str, Any]:
         "world_model_steps": None,
         "dataset_coverage": {},
         "metrics_by_position_mechanics": {},
+        "latest_metrics": {},
         "arena_progress": None,
         "last_successful_step": None,
         "last_successful_step_at": None,
@@ -1140,6 +1146,7 @@ def reset_training_status(
     status["ga_parent_champion_id"] = (
         str(os.getenv("TRAINING_GA_PARENT_CHAMPION_ID", "")).strip() or None
     )
+    status["seed_parent_champion_id"] = status["ga_parent_champion_id"]
     status["terminal_summary_path"] = None
     status["last_successful_step"] = None
     status["last_successful_step_at"] = None
@@ -1196,8 +1203,13 @@ def mark_step_running(
     ga_campaign_id: str | None = None,
     ga_scope: str | None = None,
     ga_parent_champion_id: str | None = None,
+    seed_parent_champion_id: str | None = None,
     trial_mode: str | None = None,
     trial_cost_profile: str | None = None,
+    resume_source: str | None = None,
+    checkpoint_schema_version: int | None = None,
+    artifact_compatibility: dict[str, Any] | None = None,
+    lineage: dict[str, Any] | None = None,
     replay_cache_status: str | None = None,
     replay_cache_key: str | None = None,
     replay_cache_entries: int | None = None,
@@ -1268,10 +1280,20 @@ def mark_step_running(
         status["ga_scope"] = ga_scope
     if ga_parent_champion_id is not None:
         status["ga_parent_champion_id"] = ga_parent_champion_id
+    if seed_parent_champion_id is not None:
+        status["seed_parent_champion_id"] = seed_parent_champion_id
     if trial_mode is not None:
         status["trial_mode"] = trial_mode
     if trial_cost_profile is not None:
         status["trial_cost_profile"] = trial_cost_profile
+    if resume_source is not None:
+        status["resume_source"] = resume_source
+    if checkpoint_schema_version is not None:
+        status["checkpoint_schema_version"] = checkpoint_schema_version
+    if artifact_compatibility is not None:
+        status["artifact_compatibility"] = dict(artifact_compatibility)
+    if lineage is not None:
+        status["lineage"] = dict(lineage)
     if replay_cache_status is not None:
         status["replay_cache_status"] = replay_cache_status
     if replay_cache_key is not None:

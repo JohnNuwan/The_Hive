@@ -24,12 +24,16 @@ print("=== DOCKER PROCESSES ===")
 out, _ = run(client, "docker ps --format '{{.Names}}\t{{.Status}}'")
 print(out)
 
-print("\n=== TRAINING LOGS (/var/log/hive_gnn_training.log) ===")
-out, _ = run(client, "tail -n 100 /var/log/hive_gnn_training.log")
+print("\n=== TRAINING LOGS (/home/aza/The_Hive/hive_nightly_training.log) ===")
+out, _ = run(client, "tail -n 100 /home/aza/The_Hive/hive_nightly_training.log")
 print(out or "Log is empty")
 
-print("\n=== SCRIPT CONTENT (scripts/auto_train_gnn.sh) ===")
-out, _ = run(client, "cat /home/aza/The_Hive/scripts/auto_train_gnn.sh")
+print("\n=== TRAINING STATUS (data/checkpoints/training_status.json) ===")
+out, _ = run(client, "cat /home/aza/The_Hive/data/checkpoints/training_status.json")
+print(out or "Status file is empty")
+
+print("\n=== SCRIPT CONTENT (scripts/run_nightly_training_remote.sh) ===")
+out, _ = run(client, "cat /home/aza/The_Hive/scripts/run_nightly_training_remote.sh")
 print(out)
 
 client.close()

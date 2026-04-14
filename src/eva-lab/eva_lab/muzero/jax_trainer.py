@@ -47,15 +47,17 @@ class MuZeroTrainerJAX:
 
     def loss_fn(self, params, batch: TrainingBatch):
         """Calcule la loss hybride MuZero sur un lot."""
-        from eva_lab.muzero.jax_networks import scalar_to_support
-        
+        from eva_lab.muzero.jax_networks import scalar_to_support, support_to_scalar
+
         hidden_state, logits, value_logits = self.initial_apply(params, None, batch.observations)
-        
-        target_value_support = scalar_to_support(batch.target_values[:, 0], self.config.support_size)
+        root_target_policy = batch.target_policies[:, 0]
+        root_target_value = batch.target_values[:, 0]
+        predicted_root_value = support_to_scalar(value_logits, self.config.support_size)
+        target_value_support = scalar_to_support(root_target_value, self.config.support_size)
         loss_val = jnp.mean(optax.softmax_cross_entropy(value_logits, target_value_support))
-        
-        loss_pol = jnp.mean(optax.softmax_cross_entropy(logits, batch.target_policies[:, 0]))
-        loss_rew = 0.0
+
+        loss_pol = jnp.mean(optax.softmax_cross_entropy(logits, root_target_policy))
+        loss_rew = jnp.array(0.0, dtype=value_logits.dtype)
 
         for step_idx in range(self.config.num_unroll_steps):
             action_onehot = jax.nn.one_hot(
@@ -80,11 +82,28 @@ class MuZeroTrainerJAX:
             )
 
         total_loss = loss_val + loss_rew + loss_pol
+        clipped_policy = jnp.clip(root_target_policy, 1e-8, 1.0)
+        policy_entropy = -jnp.mean(jnp.sum(root_target_policy * jnp.log(clipped_policy), axis=-1))
+        policy_top1_share = jnp.mean(jnp.max(root_target_policy, axis=-1))
+        root_has_position = jnp.abs(batch.observations[:, -6]) > 1e-6
+        root_legal_action_count = jnp.mean(jnp.where(root_has_position, 5.0, 3.0))
+        invalid_root_action_masked_rate = jnp.mean(
+            (self.config.action_space_size - jnp.where(root_has_position, 5.0, 3.0))
+            / float(self.config.action_space_size)
+        )
+        priority_errors = jnp.abs(
+            jnp.squeeze(predicted_root_value, axis=-1) - root_target_value
+        )
         return total_loss, {
             "loss_total": total_loss,
             "loss_val": loss_val,
             "loss_rew": loss_rew,
             "loss_pol": loss_pol,
+            "policy_entropy": policy_entropy,
+            "policy_top1_share": policy_top1_share,
+            "root_legal_action_count": root_legal_action_count,
+            "invalid_root_action_masked_rate": invalid_root_action_masked_rate,
+            "priority_errors": priority_errors,
         }
 
     @property

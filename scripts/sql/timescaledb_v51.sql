@@ -1,6 +1,8 @@
 -- Migration canonique V5.1 pour TimescaleDB / PostgreSQL.
 -- Cette migration unifie les schemas market, training, research et ops.
 
+CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+
 CREATE SCHEMA IF NOT EXISTS market;
 CREATE SCHEMA IF NOT EXISTS training;
 CREATE SCHEMA IF NOT EXISTS research;
@@ -287,8 +289,12 @@ CREATE TABLE IF NOT EXISTS ops.cpu_jobs_history (
     host TEXT NULL,
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     started_at TIMESTAMPTZ NULL,
-    finished_at TIMESTAMPTZ NULL
+    finished_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE IF EXISTS ops.cpu_jobs_history
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 DROP VIEW IF EXISTS public.market_ohlc;
 
@@ -307,3 +313,63 @@ SELECT
     source,
     ingested_at
 FROM market.market_bars;
+
+SELECT create_hypertable(
+    'market.market_bars',
+    'timestamp',
+    if_not_exists => TRUE,
+    migrate_data => TRUE
+);
+
+ALTER TABLE market.market_bars
+    SET (timescaledb.compress = true);
+
+SELECT add_compression_policy(
+    'market.market_bars',
+    INTERVAL '7 days',
+    if_not_exists => TRUE
+);
+
+SELECT add_retention_policy(
+    'market.market_bars',
+    INTERVAL '400 days',
+    if_not_exists => TRUE
+);
+
+SELECT create_hypertable(
+    'market.market_features',
+    'timestamp',
+    if_not_exists => TRUE,
+    migrate_data => TRUE
+);
+
+ALTER TABLE market.market_features
+    SET (timescaledb.compress = true);
+
+SELECT add_compression_policy(
+    'market.market_features',
+    INTERVAL '3 days',
+    if_not_exists => TRUE
+);
+
+SELECT add_retention_policy(
+    'market.market_features',
+    INTERVAL '90 days',
+    if_not_exists => TRUE
+);
+
+SELECT create_hypertable(
+    'ops.gpu_metrics',
+    'timestamp',
+    if_not_exists => TRUE,
+    migrate_data => TRUE
+);
+
+SELECT add_retention_policy(
+    'ops.gpu_metrics',
+    INTERVAL '30 days',
+    if_not_exists => TRUE
+);
+
+DELETE FROM ops.cpu_jobs_history
+WHERE COALESCE(finished_at, started_at, created_at, NOW()) < NOW() - INTERVAL '30 days';

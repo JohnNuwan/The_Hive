@@ -31,6 +31,8 @@ MARKET_COL_MOMENTUM = 10
 MARKET_COL_ADX = 15
 MARKET_COL_ATR = 22
 MARKET_COL_BB_PCT = 23
+OBS_EXTRA_FEATURE_COUNT = 6
+OBS_POSITION_STATE_INDEX = -OBS_EXTRA_FEATURE_COUNT
 
 
 @dataclass
@@ -528,6 +530,41 @@ class TradingEnvironment:
         extra = np.array([pos_state, pnl_pct, slbe_state, hour_feat, day_feat, vol], dtype=np.float32)
         return np.concatenate([base, extra])
 
+    def get_legal_root_actions(self) -> list[int]:
+        """Retourne les actions legales a la racine pour l'etat courant.
+
+        Returns:
+            list[int]: Actions structurellement possibles a la racine.
+        """
+        legal_actions = [HOLD, BUY, SELL]
+        if self.position_size != 0:
+            legal_actions.extend([SPLIT, CLOSE])
+        return legal_actions
+
+    @staticmethod
+    def infer_legal_root_actions_from_observation(observation: np.ndarray) -> list[int]:
+        """Reconstruit les actions legales racine a partir d'une observation.
+
+        Args:
+            observation (np.ndarray): Observation MuZero complete.
+
+        Returns:
+            list[int]: Actions autorisees au noeud racine.
+
+        Raises:
+            ValueError: Si l'observation ne contient pas l'etat de position.
+        """
+        observation_array = np.asarray(observation, dtype=np.float32).reshape(-1)
+        if observation_array.size < OBS_EXTRA_FEATURE_COUNT:
+            raise ValueError(
+                "Observation MuZero invalide: etat de position indisponible."
+            )
+
+        legal_actions = [HOLD, BUY, SELL]
+        if abs(float(observation_array[OBS_POSITION_STATE_INDEX])) > 1e-6:
+            legal_actions.extend([SPLIT, CLOSE])
+        return legal_actions
+
     def step(self, action: int):
         """Exécute un pas de trading.
 
@@ -538,7 +575,8 @@ class TradingEnvironment:
             tuple[np.ndarray, float, bool, bool, dict]: Sortie Gymnasium.
         """
         context = self._get_market_context()
-        # Lookahead bias correction: Orders fire at the OPEN price of the next bar.
+        # Les ordres partent sur l'ouverture de la barre suivante pour eviter
+        # un biais d'anticipation dans la simulation offline.
         next_step = min(self.current_step + 1, len(self.data) - 1)
         price = float(self.data[next_step, 0])
         reward = 0.0
@@ -601,7 +639,9 @@ class TradingEnvironment:
 
         action, veto_reason = self._apply_entry_filter(action, context)
         if veto_reason:
-            reward -= 5.0  # Massive penalty for ignoring rules, but we STILL EXECUTE to preserve MDP.
+            # On conserve la transition dans le MDP, mais on penalise
+            # fortement l'action vetoee pour eviter un faux signal policy.
+            reward -= 5.0
 
         final_action_name = ACTION_NAMES[action] if 0 <= action < len(ACTION_NAMES) else f"ACT_{action}"
         self.action_counts[final_action_name] = self.action_counts.get(final_action_name, 0) + 1
