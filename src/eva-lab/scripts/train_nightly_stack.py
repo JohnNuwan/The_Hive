@@ -31,6 +31,52 @@ LOCK_PATH = WORKDIR / "data" / "checkpoints" / "nightly_training.lock"
 SHADOW_DIR = WORKDIR / "data" / "shadow_learning"
 
 
+def _enforce_parent_runtime_env() -> None:
+    """Impose un profil CPU-only au parent nightly.
+
+    Le parent ne doit pas initialiser JAX sur GPU pendant la detection de
+    strategie, la lecture des manifestes ou la supervision. Le vrai trainer
+    MuZero rebasculera explicitement en mode GPU dans `run_step`.
+    """
+
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.05")
+
+
+def _targets_muzero_trainer(command: list[str]) -> bool:
+    """Retourne `True` si la commande cible le trainer MuZero global."""
+
+    return any("scripts/train_global_models.py" in str(token) for token in command)
+
+
+def _build_muzero_child_runtime_env(base_env: dict[str, str]) -> dict[str, str]:
+    """Construit l'environnement GPU-only du sous-processus MuZero.
+
+    Args:
+        base_env (dict[str, str]): Environnement parent deja resolu.
+
+    Returns:
+        dict[str, str]: Environnement complet du trainer MuZero.
+    """
+
+    child_env = dict(base_env)
+    child_env["CUDA_VISIBLE_DEVICES"] = str(
+        base_env.get("TRAINING_CHILD_CUDA_VISIBLE_DEVICES", "0")
+    ).strip()
+    child_env["JAX_PLATFORMS"] = str(
+        base_env.get("TRAINING_CHILD_JAX_PLATFORMS", "cuda")
+    ).strip() or "cuda"
+    child_env["XLA_PYTHON_CLIENT_PREALLOCATE"] = str(
+        base_env.get("TRAINING_CHILD_XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    ).strip() or "false"
+    child_env["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(
+        base_env.get("TRAINING_CHILD_XLA_PYTHON_CLIENT_MEM_FRACTION", "0.85")
+    ).strip() or "0.85"
+    return child_env
+
+
 def _env_flag(name: str, default: bool) -> bool:
     """Interprete une variable d'environnement booleenne.
 
@@ -517,6 +563,14 @@ def run_step(name: str, command: list[str], extra_env: dict[str, str] | None = N
     env["PYTHONPATH"] = os.pathsep.join([entry for entry in pythonpath_entries if entry])
     if extra_env:
         env.update(extra_env)
+    if _targets_muzero_trainer(command):
+        env = _build_muzero_child_runtime_env(env)
+        logger.info(
+            "Etape %s executee en mode GPU cible (CUDA_VISIBLE_DEVICES=%s, JAX_PLATFORMS=%s).",
+            name,
+            env.get("CUDA_VISIBLE_DEVICES"),
+            env.get("JAX_PLATFORMS"),
+        )
 
     logger.info("Debut etape %s: %s", name, command)
     mark_step_running(name, phase="demarrage")
@@ -536,6 +590,7 @@ def main() -> dict[str, object]:
     Returns:
         dict[str, object]: Resume complet de la sequence nightly.
     """
+    _enforce_parent_runtime_env()
     decision = decide_training_strategy()
     trigger = os.getenv("TRAINING_RUN_TRIGGER", "manual")
     summary: dict[str, object] = {

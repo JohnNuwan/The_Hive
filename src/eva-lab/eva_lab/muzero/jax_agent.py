@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
+from time import perf_counter
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -19,10 +21,19 @@ from eva_lab.muzero.checkpoint_utils import (
 from eva_lab.muzero.environment import TradingEnvironment
 from eva_lab.muzero.jax_mcts import JAXMuZeroMCTS
 from eva_lab.muzero.jax_networks import make_muzero_networks
-from eva_lab.muzero.jax_trainer import MuZeroTrainerJAX
+from eva_lab.muzero.jax_trainer import MuZeroTrainerJAX, TrainingBatch
 from eva_lab.muzero.replay_buffer import GameHistory, PrioritizedReplayBuffer
 
 logger = logging.getLogger(__name__)
+
+
+class PreparedTrainingStep(NamedTuple):
+    """Lot d'entrainement deja prepare et transfere vers le device cible."""
+
+    batch: TrainingBatch
+    tree_indices: tuple[int, ...]
+    batch_prepare_ms: float
+    device_put_ms: float
 
 
 class JAXMuZeroAgent:
@@ -42,6 +53,10 @@ class JAXMuZeroAgent:
             max_games=config.window_size // config.max_moves
         )
         self.training_step_count = 0
+        self.last_reanalyze_positions_count = 0
+        self.last_reanalyze_num_simulations = int(
+            getattr(config, "reanalyze_num_simulations", config.num_simulations) or config.num_simulations
+        )
 
         self._jit_init = jax.jit(self._initial_inference)
         self._jit_rec = jax.jit(self._recurrent_inference)
@@ -96,36 +111,156 @@ class JAXMuZeroAgent:
         self.replay_buffer.save_game(game)
         return game
 
-    def train_step(self):
-        """Execute une mise a jour MuZero a partir du replay buffer."""
+    def prepare_training_step(self) -> PreparedTrainingStep | None:
+        """Prepare un lot d'entrainement complet sans mettre a jour les poids.
+
+        Returns:
+            PreparedTrainingStep | None: Lot transfere sur device ou
+                ``None`` si le replay buffer est encore trop petit.
+        """
         if self.replay_buffer.size < self.config.batch_size // 10:
             return None
 
         samples = self.replay_buffer.sample(self.config.batch_size)
-        batch = self.trainer.prepare_batch(samples)
+        host_batch, batch_prepare_ms = self.trainer.prepare_batch_host(samples)
+        batch, device_put_ms = self.trainer.device_put_batch(host_batch)
+        tree_indices = tuple(
+            int(sample[2])
+            for sample in samples
+            if len(sample) >= 3
+        )
+        return PreparedTrainingStep(
+            batch=batch,
+            tree_indices=tree_indices,
+            batch_prepare_ms=batch_prepare_ms,
+            device_put_ms=device_put_ms,
+        )
+
+    def train_step(
+        self,
+        prepared_step: PreparedTrainingStep | None = None,
+    ):
+        """Execute une mise a jour MuZero a partir du replay buffer."""
+        if prepared_step is None:
+            prepared_step = self.prepare_training_step()
+        if prepared_step is None:
+            return None
+
+        update_started_at = perf_counter()
         self.params, self.opt_state, metrics = self.trainer.update_fn(
             self.params,
             self.opt_state,
-            batch,
+            prepared_step.batch,
         )
+        jax.block_until_ready(metrics["loss_total"])
+        update_ms = (perf_counter() - update_started_at) * 1000.0
         metrics_payload = dict(metrics)
+        metrics_payload["batch_prepare_ms"] = prepared_step.batch_prepare_ms
+        metrics_payload["device_put_ms"] = prepared_step.device_put_ms
+        metrics_payload["update_ms"] = update_ms
+        platform_token = str(os.getenv("JAX_PLATFORMS", "auto")).strip() or "auto"
+        cuda_token = str(os.getenv("CUDA_VISIBLE_DEVICES", "")).strip() or "none"
+        metrics_payload["gpu_target_mode"] = f"{platform_token}:{cuda_token}"
         priority_errors = np.asarray(
             metrics_payload.pop("priority_errors", []),
             dtype=np.float32,
         ).reshape(-1)
         if priority_errors.size > 0:
-            tree_indices = [sample[2] for sample in samples]
-            self.replay_buffer.update_priorities(tree_indices, priority_errors.tolist())
+            self.replay_buffer.update_priorities(
+                list(prepared_step.tree_indices),
+                priority_errors.tolist(),
+            )
 
         self.training_step_count += 1
         return self._sanitize_metrics(metrics_payload)
 
-    def reanalyze_game(self, game: GameHistory) -> None:
-        """Recalcule politiques et valeurs d'une partie avec le reseau courant."""
-        new_policies = []
-        new_values = []
+    @staticmethod
+    def _select_reanalyze_indices(total_observations: int, max_positions: int) -> list[int]:
+        """Selectionne un sous-ensemble stable d'observations a reanalyser.
 
-        for obs in game.observations:
+        Args:
+            total_observations (int): Nombre d'observations disponibles.
+            max_positions (int): Budget maximal de positions a revisiter.
+
+        Returns:
+            list[int]: Indices tries sans doublon.
+        """
+        if total_observations <= 0:
+            return []
+        if max_positions <= 0 or total_observations <= max_positions:
+            return list(range(total_observations))
+
+        even_count = max(1, max_positions // 2)
+        tail_count = max(1, max_positions - even_count)
+        indices: list[int] = []
+        seen: set[int] = set()
+
+        for raw_index in np.linspace(0, total_observations - 1, num=even_count):
+            index = int(round(float(raw_index)))
+            if index not in seen:
+                seen.add(index)
+                indices.append(index)
+
+        tail_start = max(0, total_observations - tail_count)
+        for index in range(tail_start, total_observations):
+            if index not in seen:
+                seen.add(index)
+                indices.append(index)
+
+        indices.sort()
+        if len(indices) > max_positions:
+            indices = indices[-max_positions:]
+        return indices
+
+    def reanalyze_game(
+        self,
+        game: GameHistory,
+        *,
+        max_positions: int | None = None,
+        num_simulations: int | None = None,
+    ) -> int:
+        """Recalcule une partie sans retraiter toutes les positions.
+
+        Args:
+            game (GameHistory): Episode a revisiter.
+            max_positions (int | None): Nombre maximal de positions a
+                reevaluer dans l'episode.
+            num_simulations (int | None): Budget MCTS dedie a la reanalyse.
+
+        Returns:
+            int: Nombre de positions effectivement reanalysees.
+        """
+        total_observations = len(game.observations)
+        selected_indices = self._select_reanalyze_indices(
+            total_observations,
+            total_observations if max_positions is None else int(max_positions),
+        )
+        if not selected_indices:
+            return 0
+
+        target_simulations = max(
+            0,
+            int(
+                getattr(self.config, "reanalyze_num_simulations", self.config.num_simulations)
+                if num_simulations is None
+                else num_simulations
+            ),
+        )
+        new_policies = list(game.policies[:total_observations])
+        while len(new_policies) < total_observations:
+            new_policies.append(
+                np.full(
+                    self.config.action_space_size,
+                    1.0 / float(self.config.action_space_size),
+                    dtype=np.float32,
+                )
+            )
+        new_values = list(game.values[:total_observations])
+        while len(new_values) < total_observations:
+            new_values.append(0.0)
+
+        for observation_index in selected_indices:
+            obs = game.observations[observation_index]
             obs_jax = jnp.array(obs).reshape(1, -1)
             hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
             root_legal_actions = TradingEnvironment.infer_legal_root_actions_from_observation(obs)
@@ -136,12 +271,15 @@ class JAXMuZeroAgent:
                 root_value_logits,
                 root_legal_actions=root_legal_actions,
                 add_exploration_noise=False,
+                num_simulations=target_simulations,
             )
-            new_policies.append(self._get_policy_distribution(root))
-            new_values.append(float(root.value))
+            new_policies[observation_index] = self._get_policy_distribution(root)
+            new_values[observation_index] = float(root.value)
 
         game.policies = new_policies
         game.values = new_values
+        self.last_reanalyze_num_simulations = target_simulations
+        return len(selected_indices)
 
     def reanalyze_recent_games(self, limit: int) -> int:
         """Reanalyse les episodes les plus recents du replay buffer.
@@ -152,10 +290,24 @@ class JAXMuZeroAgent:
         Returns:
             int: Nombre d'episodes effectivement reanalyses.
         """
+        self.last_reanalyze_positions_count = 0
         reanalyzed = 0
+        max_positions = int(
+            getattr(self.config, "reanalyze_max_positions_per_game", 0) or 0
+        )
+        num_simulations = int(
+            getattr(self.config, "reanalyze_num_simulations", self.config.num_simulations)
+            or self.config.num_simulations
+        )
         for game in self.replay_buffer.recent_games(limit):
-            self.reanalyze_game(game)
-            reanalyzed += 1
+            reanalyzed_positions = self.reanalyze_game(
+                game,
+                max_positions=max_positions,
+                num_simulations=num_simulations,
+            )
+            if reanalyzed_positions > 0:
+                self.last_reanalyze_positions_count += reanalyzed_positions
+                reanalyzed += 1
         return reanalyzed
 
     def _select_action(self, root, exploration: bool) -> int:

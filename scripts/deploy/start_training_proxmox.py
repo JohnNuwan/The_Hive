@@ -5,13 +5,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
 import sys
+import textwrap
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 import paramiko
@@ -21,6 +24,8 @@ USER = os.getenv("HIVE_SSH_USER", "aza")
 PASS = os.getenv("HIVE_SSH_PASSWORD")
 SUDO_PASS = os.getenv("HIVE_SUDO_PASSWORD", PASS)
 REMOTE_DIR = "/home/aza/The_Hive"
+REMOTE_LAB_CONTAINER_NAME = "the_hive-lab-1"
+REMOTE_LAB_DIR = "/app/eva-lab"
 REMOTE_LOG = f"{REMOTE_DIR}/hive_nightly_training.log"
 REMOTE_SCRIPT = f"{REMOTE_DIR}/scripts/run_nightly_training_remote.sh"
 REMOTE_SEQUENCE_SCRIPT = f"{REMOTE_DIR}/scripts/run_wave1_sequence_remote.sh"
@@ -37,6 +42,20 @@ CANONICAL_SCALP_MULTI_UNIVERSE = [
     "US500.cash",
     "BTCUSD",
 ]
+MANUAL_ARENA_CUTOVER_STEP = 9000
+MANUAL_ARENA_SCREEN_STEPS = (7000, 7500, 8000, 9000)
+MANUAL_ARENA_RESULTS_DIR = f"{REMOTE_DIR}/data/checkpoints/manual_checkpoint_selection"
+MANUAL_ARENA_RESULTS_DIR_LAB = f"{REMOTE_LAB_DIR}/data/checkpoints/manual_checkpoint_selection"
+MANUAL_ARENA_SCREEN_BUDGET = {
+    "ARENA_GAMES_PER_SYMBOL": "4",
+    "ARENA_MIN_GAMES": "14",
+    "ARENA_MIN_SYMBOLS": "7",
+}
+MANUAL_ARENA_FULL_BUDGET = {
+    "ARENA_GAMES_PER_SYMBOL": "12",
+    "ARENA_MIN_GAMES": "28",
+    "ARENA_MIN_SYMBOLS": "7",
+}
 
 SYNC_FILES = [
     Path("docker-compose.yml"),
@@ -156,8 +175,14 @@ PASSTHROUGH_VARS = [
     "DREAMER_NETWORK_HIDDEN_DIMS",
     "DREAMER_NUM_UNROLL_STEPS",
     "DREAMER_REPLAY_MAX_GAMES",
+    "CUDA_VISIBLE_DEVICES",
+    "JAX_PLATFORMS",
     "XLA_PYTHON_CLIENT_PREALLOCATE",
     "XLA_PYTHON_CLIENT_MEM_FRACTION",
+    "TRAINING_CHILD_CUDA_VISIBLE_DEVICES",
+    "TRAINING_CHILD_JAX_PLATFORMS",
+    "TRAINING_CHILD_XLA_PYTHON_CLIENT_PREALLOCATE",
+    "TRAINING_CHILD_XLA_PYTHON_CLIENT_MEM_FRACTION",
     "MUZERO_PROMOTION_MIN_TOTAL_TRADES",
     "MUZERO_PROMOTION_MIN_EVAL_GAMES",
     "MUZERO_PROMOTION_MIN_EVAL_SYMBOLS",
@@ -642,6 +667,10 @@ export MUZERO_TRAINING_STEPS=\"${MUZERO_TRAINING_STEPS:-24000}\"
 export MUZERO_GAMES_PER_SYMBOL=\"${MUZERO_GAMES_PER_SYMBOL:-12}\"
 export MUZERO_BATCH_SIZE=\"${MUZERO_BATCH_SIZE:-32}\"
 export MUZERO_NUM_SIMULATIONS=\"${MUZERO_NUM_SIMULATIONS:-100}\"
+export MUZERO_REANALYZE_EVERY_STEPS=\"${MUZERO_REANALYZE_EVERY_STEPS:-500}\"
+export MUZERO_REANALYZE_MAX_GAMES=\"${MUZERO_REANALYZE_MAX_GAMES:-16}\"
+export MUZERO_REANALYZE_MAX_POSITIONS_PER_GAME=\"${MUZERO_REANALYZE_MAX_POSITIONS_PER_GAME:-24}\"
+export MUZERO_REANALYZE_NUM_SIMULATIONS=\"${MUZERO_REANALYZE_NUM_SIMULATIONS:-16}\"
 export MUZERO_MAX_MOVES=\"${MUZERO_MAX_MOVES:-300}\"
 export MUZERO_MAX_SYMBOLS=\"${MUZERO_MAX_SYMBOLS:-12}\"
 export MUZERO_MODEL_FAMILY=\"${MUZERO_MODEL_FAMILY:-}\"
@@ -679,16 +708,18 @@ export DREAMER_HIDDEN_STATE_SIZE=\"${DREAMER_HIDDEN_STATE_SIZE:-128}\"
 export DREAMER_NETWORK_HIDDEN_DIMS=\"${DREAMER_NETWORK_HIDDEN_DIMS:-256,256}\"
 export DREAMER_NUM_UNROLL_STEPS=\"${DREAMER_NUM_UNROLL_STEPS:-3}\"
 export DREAMER_REPLAY_MAX_GAMES=\"${DREAMER_REPLAY_MAX_GAMES:-2500}\"
+export CUDA_VISIBLE_DEVICES=\"${CUDA_VISIBLE_DEVICES:-}\"
+export JAX_PLATFORMS=\"${JAX_PLATFORMS:-cpu}\"
 export XLA_PYTHON_CLIENT_PREALLOCATE=\"${XLA_PYTHON_CLIENT_PREALLOCATE:-false}\"
 if [ -z \"${XLA_PYTHON_CLIENT_MEM_FRACTION:-}\" ]; then
-  if [ \"$NIGHTLY_KEEP_VLLM\" = \"1\" ]; then
-    export XLA_PYTHON_CLIENT_MEM_FRACTION=\"0.55\"
-  else
-    export XLA_PYTHON_CLIENT_MEM_FRACTION=\"0.70\"
-  fi
+  export XLA_PYTHON_CLIENT_MEM_FRACTION=\"0.05\"
 else
   export XLA_PYTHON_CLIENT_MEM_FRACTION
 fi
+export TRAINING_CHILD_CUDA_VISIBLE_DEVICES=\"${TRAINING_CHILD_CUDA_VISIBLE_DEVICES:-0}\"
+export TRAINING_CHILD_JAX_PLATFORMS=\"${TRAINING_CHILD_JAX_PLATFORMS:-cuda}\"
+export TRAINING_CHILD_XLA_PYTHON_CLIENT_PREALLOCATE=\"${TRAINING_CHILD_XLA_PYTHON_CLIENT_PREALLOCATE:-false}\"
+export TRAINING_CHILD_XLA_PYTHON_CLIENT_MEM_FRACTION=\"${TRAINING_CHILD_XLA_PYTHON_CLIENT_MEM_FRACTION:-0.85}\"
 export MUZERO_PROMOTION_MIN_TOTAL_TRADES=\"${MUZERO_PROMOTION_MIN_TOTAL_TRADES:-24}\"
 export MUZERO_PROMOTION_MIN_EVAL_GAMES=\"${MUZERO_PROMOTION_MIN_EVAL_GAMES:-12}\"
 export MUZERO_PROMOTION_MIN_EVAL_SYMBOLS=\"${MUZERO_PROMOTION_MIN_EVAL_SYMBOLS:-3}\"
@@ -726,8 +757,16 @@ export TELEGRAM_NOTIFY_TRAINING=\"${TELEGRAM_NOTIFY_TRAINING:-1}\"
 export TRAINING_GA_STATUS=\"${TRAINING_GA_STATUS:-}\"
 export TRAINING_GA_GENERATION=\"${TRAINING_GA_GENERATION:-}\"
 export TRAINING_GA_TRIAL=\"${TRAINING_GA_TRIAL:-}\"
+export TRAINING_GA_CAMPAIGN_ID=\"${TRAINING_GA_CAMPAIGN_ID:-}\"
+export TRAINING_GA_SCOPE=\"${TRAINING_GA_SCOPE:-}\"
+export TRAINING_GA_PARENT_CHAMPION_ID=\"${TRAINING_GA_PARENT_CHAMPION_ID:-}\"
+export TRAINING_GA_DEFER_PROMOTION=\"${TRAINING_GA_DEFER_PROMOTION:-}\"
+export TRAINING_GA_GENOME_JSON=\"${TRAINING_GA_GENOME_JSON:-}\"
+export TRAINING_GA_SEED_CHECKPOINT_PATH=\"${TRAINING_GA_SEED_CHECKPOINT_PATH:-}\"
 export TRAINING_GATE_PROFILE=\"${TRAINING_GATE_PROFILE:-}\"
 export TRAINING_FOCUS_SYMBOLS=\"${TRAINING_FOCUS_SYMBOLS:-}\"
+export TRAINING_RESUME_CHECKPOINT_PATH=\"${TRAINING_RESUME_CHECKPOINT_PATH:-}\"
+export TRAINING_RESUME_STEP=\"${TRAINING_RESUME_STEP:-}\"
 export TRAINING_SEQUENCE_ID=\"${TRAINING_SEQUENCE_ID:-}\"
 export TRAINING_SEQUENCE_PROFILE=\"${TRAINING_SEQUENCE_PROFILE:-}\"
 export TRAINING_WINDOW_ID=\"${TRAINING_WINDOW_ID:-}\"
@@ -753,8 +792,14 @@ docker compose run --rm \
   -e TRAINING_REFRESH_AFTER_HOURS=\"${TRAINING_REFRESH_AFTER_HOURS:-24}\" \
   -e TRAINING_MAX_CHAMPION_AGE_HOURS=\"${TRAINING_MAX_CHAMPION_AGE_HOURS:-72}\" \
   -e TRAINING_MIN_SHADOW_RECORDS=\"${TRAINING_MIN_SHADOW_RECORDS:-25}\" \
+  -e CUDA_VISIBLE_DEVICES=\"$CUDA_VISIBLE_DEVICES\" \
+  -e JAX_PLATFORMS=\"$JAX_PLATFORMS\" \
   -e XLA_PYTHON_CLIENT_PREALLOCATE=\"$XLA_PYTHON_CLIENT_PREALLOCATE\" \
   -e XLA_PYTHON_CLIENT_MEM_FRACTION=\"$XLA_PYTHON_CLIENT_MEM_FRACTION\" \
+  -e TRAINING_CHILD_CUDA_VISIBLE_DEVICES=\"$TRAINING_CHILD_CUDA_VISIBLE_DEVICES\" \
+  -e TRAINING_CHILD_JAX_PLATFORMS=\"$TRAINING_CHILD_JAX_PLATFORMS\" \
+  -e TRAINING_CHILD_XLA_PYTHON_CLIENT_PREALLOCATE=\"$TRAINING_CHILD_XLA_PYTHON_CLIENT_PREALLOCATE\" \
+  -e TRAINING_CHILD_XLA_PYTHON_CLIENT_MEM_FRACTION=\"$TRAINING_CHILD_XLA_PYTHON_CLIENT_MEM_FRACTION\" \
   -e REBUILD_TRAINER_IMAGE=\"$REBUILD_TRAINER_IMAGE\" \
   -e RUN_TRAIN_GNN=\"$RUN_TRAIN_GNN\" \
   -e RUN_TRAIN_MUZERO=\"$RUN_TRAIN_MUZERO\" \
@@ -777,6 +822,10 @@ docker compose run --rm \
   -e MUZERO_GAMES_PER_SYMBOL=\"$MUZERO_GAMES_PER_SYMBOL\" \
   -e MUZERO_BATCH_SIZE=\"$MUZERO_BATCH_SIZE\" \
   -e MUZERO_NUM_SIMULATIONS=\"$MUZERO_NUM_SIMULATIONS\" \
+  -e MUZERO_REANALYZE_EVERY_STEPS=\"$MUZERO_REANALYZE_EVERY_STEPS\" \
+  -e MUZERO_REANALYZE_MAX_GAMES=\"$MUZERO_REANALYZE_MAX_GAMES\" \
+  -e MUZERO_REANALYZE_MAX_POSITIONS_PER_GAME=\"$MUZERO_REANALYZE_MAX_POSITIONS_PER_GAME\" \
+  -e MUZERO_REANALYZE_NUM_SIMULATIONS=\"$MUZERO_REANALYZE_NUM_SIMULATIONS\" \
   -e MUZERO_MAX_MOVES=\"$MUZERO_MAX_MOVES\" \
   -e MUZERO_MAX_SYMBOLS=\"$MUZERO_MAX_SYMBOLS\" \
   -e MUZERO_MODEL_FAMILY=\"$MUZERO_MODEL_FAMILY\" \
@@ -851,8 +900,16 @@ docker compose run --rm \
   -e TRAINING_GA_STATUS=\"$TRAINING_GA_STATUS\" \
   -e TRAINING_GA_GENERATION=\"$TRAINING_GA_GENERATION\" \
   -e TRAINING_GA_TRIAL=\"$TRAINING_GA_TRIAL\" \
+  -e TRAINING_GA_CAMPAIGN_ID=\"$TRAINING_GA_CAMPAIGN_ID\" \
+  -e TRAINING_GA_SCOPE=\"$TRAINING_GA_SCOPE\" \
+  -e TRAINING_GA_PARENT_CHAMPION_ID=\"$TRAINING_GA_PARENT_CHAMPION_ID\" \
+  -e TRAINING_GA_DEFER_PROMOTION=\"$TRAINING_GA_DEFER_PROMOTION\" \
+  -e TRAINING_GA_GENOME_JSON=\"$TRAINING_GA_GENOME_JSON\" \
+  -e TRAINING_GA_SEED_CHECKPOINT_PATH=\"$TRAINING_GA_SEED_CHECKPOINT_PATH\" \
   -e TRAINING_GATE_PROFILE=\"$TRAINING_GATE_PROFILE\" \
   -e TRAINING_FOCUS_SYMBOLS=\"$TRAINING_FOCUS_SYMBOLS\" \
+  -e TRAINING_RESUME_CHECKPOINT_PATH=\"$TRAINING_RESUME_CHECKPOINT_PATH\" \
+  -e TRAINING_RESUME_STEP=\"$TRAINING_RESUME_STEP\" \
   -e TRAINING_SEQUENCE_ID=\"$TRAINING_SEQUENCE_ID\" \
   -e TRAINING_SEQUENCE_PROFILE=\"$TRAINING_SEQUENCE_PROFILE\" \
   -e TRAINING_WINDOW_ID=\"$TRAINING_WINDOW_ID\" \
@@ -1068,6 +1125,135 @@ def build_runtime_exports(overrides: dict[str, str] | None = None) -> str:
     return "; ".join(exports)
 
 
+def _extract_last_json_line(output: str) -> dict[str, Any]:
+    """Extrait la derniere ligne JSON valide d'une sortie distante.
+
+    Args:
+        output (str): Sortie standard brute a analyser.
+
+    Returns:
+        dict[str, Any]: Charge utile JSON decodée.
+
+    Raises:
+        RuntimeError: Si aucune ligne JSON valide n'est trouvee.
+    """
+    for line in reversed([entry.strip() for entry in output.splitlines() if entry.strip()]):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise RuntimeError("Aucune charge JSON valide n'a ete retournee par le serveur.")
+
+
+def _run_remote_python_json(
+    client: paramiko.SSHClient,
+    python_code: str,
+    *,
+    timeout: int = 600,
+    use_sudo: bool = False,
+) -> dict[str, Any]:
+    """Execute un bloc Python distant et retourne son JSON final.
+
+    Args:
+        client (paramiko.SSHClient): Session SSH distante.
+        python_code (str): Code Python a executer.
+        timeout (int): Delai maximal cote SSH.
+        use_sudo (bool): Execute le bloc via `sudo` si necessaire.
+
+    Returns:
+        dict[str, Any]: Charge utile JSON finale.
+
+    Raises:
+        RuntimeError: Si l'execution distante ou le decodage echoue.
+    """
+    remote_body = (
+        f"cd {REMOTE_DIR}\n"
+        f"{REMOTE_ENV_LOADER}\n"
+        f'PYTHONPATH="{REMOTE_DIR}/src/eva-lab:{REMOTE_DIR}/src/shared" python3 - <<\'PY\'\n'
+        f"{python_code.rstrip()}\n"
+        "PY\n"
+    )
+    if use_sudo:
+        _ssh_password, sudo_password = _require_remote_credentials()
+        command = f"echo {shlex.quote(sudo_password)} | sudo -S bash -lc {shlex.quote(remote_body)}"
+    else:
+        command = f"bash -lc {shlex.quote(remote_body)}"
+    output, error, code = run_command(client, command, timeout=timeout)
+    if code != 0:
+        raise RuntimeError(error or output or f"Code {code}")
+    return _extract_last_json_line(output)
+
+
+def _run_remote_lab_container_python_json(
+    client: paramiko.SSHClient,
+    python_code: str,
+    *,
+    timeout: int = 600,
+) -> dict[str, Any]:
+    """Execute un bloc Python dans le conteneur Lab et retourne son JSON final.
+
+    Args:
+        client (paramiko.SSHClient): Session SSH distante.
+        python_code (str): Code Python a executer dans `the_hive-lab-1`.
+        timeout (int): Delai maximal cote SSH.
+
+    Returns:
+        dict[str, Any]: Charge utile JSON finale.
+
+    Raises:
+        RuntimeError: Si l'execution distante ou le decodage echoue.
+    """
+    remote_body = (
+        f"cd {REMOTE_LAB_DIR}\n"
+        f"{REMOTE_ENV_LOADER}\n"
+        f'PYTHONPATH="{REMOTE_LAB_DIR}" python - <<\'PY\'\n'
+        f"{python_code.rstrip()}\n"
+        "PY\n"
+    )
+    command = (
+        f"docker exec -i {shlex.quote(REMOTE_LAB_CONTAINER_NAME)} "
+        f"bash -lc {shlex.quote(remote_body)}"
+    )
+    output, error, code = run_command(client, command, timeout=timeout)
+    if code != 0:
+        raise RuntimeError(error or output or f"Code {code}")
+    return _extract_last_json_line(output)
+
+
+def _launch_training_with_client(
+    client: paramiko.SSHClient,
+    *,
+    runtime_overrides: dict[str, str],
+    sync_profile_hint: str | None = None,
+    show_logs: bool = True,
+) -> str:
+    """Synchronise le payload distant puis lance un run avec surcharges.
+
+    Args:
+        client (paramiko.SSHClient): Session SSH deja ouverte.
+        runtime_overrides (dict[str, str]): Variables d'environnement a injecter.
+        sync_profile_hint (str | None): Profil eventuel pour filtrer l'historique.
+        show_logs (bool): Affiche un tail initial du log si True.
+
+    Returns:
+        str: PID shell distant renvoye par le lanceur.
+    """
+    _sync_remote_training_payload(client, profile_hint=sync_profile_hint)
+    print("Script distant mis a jour.")
+    pid = _launch_remote_training_process(client, runtime_overrides)
+    print(f"Entrainement nocturne lance. PID={pid}")
+    if show_logs:
+        time.sleep(8)
+        tail_out, tail_err, _ = run_command(client, f"tail -n 40 {REMOTE_LOG}", timeout=30)
+        print("\n--- Derniers logs ---")
+        print(tail_out)
+        if tail_err:
+            print(tail_err)
+    return pid
+
+
 def _build_v4_supervisor_overrides() -> dict[str, str]:
     """Construit les variables minimales requises par le superviseur V4.
 
@@ -1215,6 +1401,150 @@ def _normalize_scalp_multi_universe_symbols(symbols: list[str] | None = None) ->
         normalized.append(label)
         seen.add(label)
     return normalized
+
+
+def _sanitize_manual_token(value: str | None, default: str) -> str:
+    """Nettoie un fragment de nom pour les artefacts manuels.
+
+    Args:
+        value (str | None): Valeur brute a normaliser.
+        default (str): Valeur de repli si la chaine devient vide.
+
+    Returns:
+        str: Fragment compact compatible fichiers et identifiants.
+    """
+    token = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(value or "").strip())
+    return token.strip("._-") or default
+
+
+def _build_manual_checkpoint_alias_id(
+    run_id: str | None,
+    *,
+    horizon: str,
+    checkpoint_step: int,
+) -> str:
+    """Construit l'identifiant stable d'un alias de checkpoint manuel.
+
+    Args:
+        run_id (str | None): Identifiant du run source.
+        horizon (str): Horizon du checkpoint retenu.
+        checkpoint_step (int): Step du checkpoint retenu.
+
+    Returns:
+        str: Identifiant stable de type `gen_<horizon>_<run>_ckpt<step>_manual`.
+    """
+    run_token = _sanitize_manual_token(run_id, "unknown_run")
+    if run_token.startswith("nightly_"):
+        run_token = run_token[len("nightly_") :] or "unknown_run"
+    normalized_horizon = _sanitize_manual_token(horizon, "scalp").lower()
+    return f"gen_{normalized_horizon}_{run_token}_ckpt{int(checkpoint_step)}_manual"
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    """Convertit une valeur quelconque en flottant robuste.
+
+    Args:
+        value (Any): Valeur brute.
+        default (float): Valeur de repli si la conversion echoue.
+
+    Returns:
+        float: Valeur numerique exploitable.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_manual_screen_candidate_sort_key(candidate: dict[str, Any]) -> tuple[float, ...]:
+    """Construit la cle de tri deterministe d'un screen Arena manuel.
+
+    Args:
+        candidate (dict[str, Any]): Resultat brut d'un checkpoint evalue.
+
+    Returns:
+        tuple[float, ...]: Cle ordonnee selon les priorites retenues.
+    """
+    battle_report = dict(candidate.get("battle_report") or {})
+    challenger = dict(battle_report.get("challenger") or {})
+    metrics = dict(challenger.get("metrics") or {})
+    outcome = 1.0 if str(battle_report.get("outcome") or "").upper() == "VICTORY" else 0.0
+    return (
+        outcome,
+        _to_float(challenger.get("score")),
+        _to_float(metrics.get("return_pct")),
+        _to_float(metrics.get("profit_factor")),
+        -_to_float(metrics.get("max_drawdown_pct"), default=100.0),
+        float(int(candidate.get("checkpoint_step") or 0)),
+    )
+
+
+def _select_best_manual_screen_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Retourne le meilleur checkpoint d'un screen Arena selon la regle fixee.
+
+    Args:
+        candidates (list[dict[str, Any]]): Candidats evalues pendant le screen.
+
+    Returns:
+        dict[str, Any]: Candidat gagnant du pre-classement.
+
+    Raises:
+        ValueError: Si aucun candidat n'est fourni.
+    """
+    if not candidates:
+        raise ValueError("Impossible de selectionner un checkpoint sans candidat Arena.")
+    ranked = sorted(candidates, key=_build_manual_screen_candidate_sort_key, reverse=True)
+    return dict(ranked[0])
+
+
+def _filter_remote_training_process_lines(process_lines: list[str]) -> list[str]:
+    """Retire les faux positifs issus des commandes de verification distantes.
+
+    Args:
+        process_lines (list[str]): Lignes brutes renvoyees par `pgrep -af`.
+
+    Returns:
+        list[str]: Lignes correspondant encore a un trainer plausible.
+    """
+    ignored_fragments = (
+        "pgrep -af",
+        "grep -E",
+        "python3 - <<'PY'",
+        "echo Kumara-42/600 | sudo -S",
+        "bash -lc",
+    )
+    filtered: list[str] = []
+    for raw_line in process_lines:
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        if "scripts/train_global_models.py" not in line:
+            continue
+        if any(fragment in line for fragment in ignored_fragments):
+            continue
+        filtered.append(line)
+    return filtered
+
+
+def _build_manual_resume_after_arena_overrides(
+    *,
+    symbols: list[str] | None,
+    resume_checkpoint_path: str,
+) -> dict[str, str]:
+    """Construit les surcharges d'une reprise MuZero apres coupure Arena.
+
+    Args:
+        symbols (list[str] | None): Univers `scalp` a reutiliser.
+        resume_checkpoint_path (str): Checkpoint a recharger comme point de depart.
+
+    Returns:
+        dict[str, str]: Variables d'environnement completes pour la relance.
+    """
+    overrides = _build_muzero_scalp_multi_universe_full_overrides(symbols)
+    overrides["TRAINING_RUN_TRIGGER"] = "manual_muzero_scalp_resume_after_arena"
+    overrides["TRAINING_RESUME_CHECKPOINT_PATH"] = str(resume_checkpoint_path)
+    overrides["TRAINING_RESUME_STEP"] = "0"
+    return overrides
 
 
 def _build_muzero_scalp_multi_universe_full_overrides(
@@ -3769,6 +4099,547 @@ def _wait_for_remote_run_completion(run_id: str, poll_interval_seconds: int = 60
         time.sleep(max(10, poll_interval_seconds))
 
 
+def _wait_for_remote_checkpoint_cutover(
+    client: paramiko.SSHClient,
+    *,
+    checkpoint_step: int,
+    horizon: str = "scalp",
+    total_steps: int = 40000,
+    timeout_seconds: int = 14_400,
+    poll_interval_seconds: int = 30,
+) -> dict[str, Any]:
+    """Attend qu'un checkpoint cible soit ecrit et logge cote serveur.
+
+    Args:
+        client (paramiko.SSHClient): Session SSH distante deja ouverte.
+        checkpoint_step (int): Step du checkpoint attendu.
+        horizon (str): Horizon cible.
+        total_steps (int): Budget total du run pour le motif de log.
+        timeout_seconds (int): Delai maximal avant echec.
+        poll_interval_seconds (int): Frequence de verification.
+
+    Returns:
+        dict[str, Any]: Instantane de verification quand les deux conditions sont vraies.
+
+    Raises:
+        RuntimeError: Si le checkpoint ou la ligne de log n'apparaissent pas dans le delai.
+    """
+    deadline = time.time() + timeout_seconds
+    last_status: tuple[bool, bool] | None = None
+    horizon_token = _sanitize_manual_token(horizon, "scalp").lower()
+    while time.time() < deadline:
+        python_code = textwrap.dedent(
+            """
+            from __future__ import annotations
+
+            import json
+            import re
+            from pathlib import Path
+
+            checkpoint_step = %(checkpoint_step)s
+            total_steps = %(total_steps)s
+            horizon = %(horizon)s
+            remote_dir = Path(%(remote_dir)s)
+            checkpoint_path = remote_dir / "data" / "muzero" / "weights" / f"muzero_{horizon}_ckpt_{checkpoint_step}.pkl"
+            log_path = remote_dir / "hive_nightly_training.log"
+            pattern = re.compile(r"step\\s+0*%%d/%%d" %% (checkpoint_step, total_steps), re.IGNORECASE)
+            matched_line = None
+            latest_step_line = None
+            if log_path.exists():
+                for raw_line in log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if "step" in raw_line.lower() and "/%%d" %% total_steps in raw_line:
+                        latest_step_line = raw_line.strip()
+                    if matched_line is None and pattern.search(raw_line):
+                        matched_line = raw_line.strip()
+            payload = {
+                "checkpoint_exists": checkpoint_path.exists(),
+                "checkpoint_path": str(checkpoint_path),
+                "log_ready": matched_line is not None,
+                "log_line": matched_line,
+                "latest_step_line": latest_step_line,
+            }
+            print(json.dumps(payload, ensure_ascii=True))
+            """
+        ) % {
+            "checkpoint_step": int(checkpoint_step),
+            "total_steps": int(total_steps),
+            "horizon": repr(horizon_token),
+            "remote_dir": repr(REMOTE_DIR),
+        }
+        snapshot = _run_remote_python_json(client, python_code, timeout=90, use_sudo=True)
+        status_key = (bool(snapshot.get("checkpoint_exists")), bool(snapshot.get("log_ready")))
+        if status_key != last_status:
+            print(
+                "Attente checkpoint %s %s: checkpoint=%s | log=%s"
+                % (
+                    horizon_token,
+                    checkpoint_step,
+                    "oui" if status_key[0] else "non",
+                    "oui" if status_key[1] else "non",
+                )
+            )
+            if snapshot.get("latest_step_line"):
+                print(f"Derniere ligne step vue: {snapshot.get('latest_step_line')}")
+            last_status = status_key
+        if status_key == (True, True):
+            print(f"Checkpoint {checkpoint_step} pret pour le cutover Arena.")
+            return snapshot
+        time.sleep(max(5, poll_interval_seconds))
+    raise RuntimeError(
+        f"Le checkpoint {checkpoint_step} pour {horizon_token} n'a pas ete observe dans le delai imparti."
+    )
+
+
+def _verify_remote_training_stopped(client: paramiko.SSHClient) -> dict[str, Any]:
+    """Verifie qu'aucun run trainer ne reste actif apres la coupure.
+
+    Args:
+        client (paramiko.SSHClient): Session SSH distante deja ouverte.
+
+    Returns:
+        dict[str, Any]: Etat de verification compact.
+
+    Raises:
+        RuntimeError: Si un process, un conteneur ou un lock subsiste.
+    """
+    python_code = textwrap.dedent(
+        """
+        from __future__ import annotations
+
+        import json
+        import subprocess
+        from pathlib import Path
+
+        remote_dir = Path(%(remote_dir)s)
+        lock_file = remote_dir / "data" / "checkpoints" / "nightly_training.lock"
+        lock_dir = remote_dir / "data" / "checkpoints" / "nightly_training.lock.d"
+        raw_processes = [
+            line.strip()
+            for line in subprocess.run(
+                "pgrep -af 'scripts/train_global_models.py' || true",
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.splitlines()
+            if line.strip()
+        ]
+        containers = [
+            line.strip()
+            for line in subprocess.run(
+                "docker ps --format '{{.Names}}' | grep '^the_hive-eva-trainer-run-' || true",
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.splitlines()
+            if line.strip()
+        ]
+        payload = {
+            "lock_exists": lock_file.exists() or lock_dir.exists(),
+            "processes": raw_processes,
+            "containers": containers,
+        }
+        print(json.dumps(payload, ensure_ascii=True))
+        """
+    ) % {"remote_dir": repr(REMOTE_DIR)}
+    snapshot = _run_remote_python_json(client, python_code, timeout=90, use_sudo=True)
+    snapshot["processes"] = _filter_remote_training_process_lines(
+        list(snapshot.get("processes") or [])
+    )
+    if snapshot.get("lock_exists") or snapshot.get("processes") or snapshot.get("containers"):
+        raise RuntimeError(
+            "Le run distant n'est pas completement arrete: "
+            f"lock={snapshot.get('lock_exists')} | "
+            f"processes={snapshot.get('processes')} | "
+            f"containers={snapshot.get('containers')}"
+        )
+    print("Verification post-coupure validee: plus aucun trainer actif.")
+    return snapshot
+
+
+def _run_remote_manual_screen_arena(
+    client: paramiko.SSHClient,
+    *,
+    source_run_id: str,
+    symbols: list[str],
+) -> dict[str, Any]:
+    """Execute a distance le screen Arena `7000/7500/8000/9000`.
+
+    Args:
+        client (paramiko.SSHClient): Session SSH distante deja ouverte.
+        source_run_id (str): Identifiant du run fige au checkpoint de bascule.
+        symbols (list[str]): Panier canonique `scalp`.
+
+    Returns:
+        dict[str, Any]: Resultats de screen et reference champion resolue.
+    """
+    symbol_csv = ",".join(symbols)
+    python_code = textwrap.dedent(
+        """
+        from __future__ import annotations
+
+        import json
+        import os
+        from datetime import datetime
+        from pathlib import Path
+
+        from eva_lab.arena import Arena
+        from eva_lab.champion_promoter import ChampionPromoter
+        from eva_lab.genetic_updater import GeneticUpdater
+
+        remote_dir = Path(%(remote_dir)s)
+        manual_dir = Path(%(manual_dir)s)
+        screen_steps = %(screen_steps)s
+        source_run_id = %(source_run_id)s
+        symbols = %(symbols)s
+        symbol_csv = %(symbol_csv)s
+        horizon = "scalp"
+        weights_dir = remote_dir / "data" / "muzero" / "weights"
+        results_dir = remote_dir / "data" / "muzero" / "results"
+        manual_dir.mkdir(parents=True, exist_ok=True)
+
+        arena = Arena(weights_dir=str(weights_dir))
+        promoter = ChampionPromoter(weights_dir=str(weights_dir), results_dir=str(results_dir))
+        genetic = GeneticUpdater()
+
+        live_path, live_meta = promoter.resolve_live_checkpoint(horizon)
+        live_champion_id = str(live_meta.get("live_champion_id") or "").strip()
+        if live_path is not None:
+            champion_reference = str(live_path)
+        elif live_champion_id:
+            champion_reference = live_champion_id
+        else:
+            champion_reference = genetic.get_champion(horizon=horizon) or "gen_000_baseline"
+
+        os.environ["ARENA_SYMBOLS_SCALP"] = symbol_csv
+        os.environ["ARENA_MAX_SYMBOLS"] = "7"
+        os.environ["ARENA_GAMES_PER_SYMBOL"] = %(screen_games)s
+        os.environ["ARENA_MIN_GAMES"] = %(screen_min_games)s
+        os.environ["ARENA_MIN_SYMBOLS"] = %(screen_min_symbols)s
+
+        screen_results: list[dict[str, object]] = []
+        for step in screen_steps:
+            checkpoint_path = weights_dir / f"muzero_{horizon}_ckpt_{step}.pkl"
+            if not checkpoint_path.exists():
+                raise FileNotFoundError(f"Checkpoint introuvable pour le screen: {checkpoint_path}")
+            battle_report = arena.battle(str(checkpoint_path), champion_reference, horizon=horizon)
+            report_payload = {
+                "kind": "screen",
+                "generated_at": datetime.now().isoformat(),
+                "source_run_id": source_run_id,
+                "engine": "muzero",
+                "horizon": horizon,
+                "checkpoint_step": step,
+                "checkpoint_path": str(checkpoint_path),
+                "champion_reference": champion_reference,
+                "symbols": symbols,
+                "budget": {
+                    "games_per_symbol": int(os.environ["ARENA_GAMES_PER_SYMBOL"]),
+                    "min_games": int(os.environ["ARENA_MIN_GAMES"]),
+                    "min_symbols": int(os.environ["ARENA_MIN_SYMBOLS"]),
+                },
+                "battle_report": battle_report,
+            }
+            report_path = manual_dir / f"screen_{source_run_id}_ckpt{step}.json"
+            report_path.write_text(json.dumps(report_payload, indent=2, default=float), encoding="utf-8")
+            screen_results.append(
+                {
+                    "checkpoint_step": step,
+                    "checkpoint_path": str(checkpoint_path),
+                    "report_path": str(report_path),
+                    "battle_report": battle_report,
+                }
+            )
+
+        payload = {
+            "source_run_id": source_run_id,
+            "engine": "muzero",
+            "horizon": horizon,
+            "champion_reference": champion_reference,
+            "live_champion_id": live_champion_id or None,
+            "symbols": symbols,
+            "screen_results": screen_results,
+        }
+        print(json.dumps(payload, default=float, ensure_ascii=True))
+        """
+    ) % {
+        "remote_dir": repr(REMOTE_LAB_DIR),
+        "manual_dir": repr(MANUAL_ARENA_RESULTS_DIR_LAB),
+        "screen_steps": json.dumps(list(MANUAL_ARENA_SCREEN_STEPS)),
+        "source_run_id": repr(_sanitize_manual_token(source_run_id, "unknown_run")),
+        "symbols": json.dumps(symbols),
+        "symbol_csv": repr(symbol_csv),
+        "screen_games": repr(MANUAL_ARENA_SCREEN_BUDGET["ARENA_GAMES_PER_SYMBOL"]),
+        "screen_min_games": repr(MANUAL_ARENA_SCREEN_BUDGET["ARENA_MIN_GAMES"]),
+        "screen_min_symbols": repr(MANUAL_ARENA_SCREEN_BUDGET["ARENA_MIN_SYMBOLS"]),
+    }
+    return _run_remote_lab_container_python_json(client, python_code, timeout=21_600)
+
+
+def _run_remote_manual_full_arena(
+    client: paramiko.SSHClient,
+    *,
+    source_run_id: str,
+    selected_candidate: dict[str, Any],
+    champion_reference: str,
+    symbols: list[str],
+) -> dict[str, Any]:
+    """Execute la full Arena officielle puis la promotion sur le meilleur screen.
+
+    Args:
+        client (paramiko.SSHClient): Session SSH distante deja ouverte.
+        source_run_id (str): Identifiant du run source fige.
+        selected_candidate (dict[str, Any]): Checkpoint gagnant du screen.
+        champion_reference (str): Reference champion reutilisee telle quelle.
+        symbols (list[str]): Panier canonique `scalp`.
+
+    Returns:
+        dict[str, Any]: Resultat complet de la full Arena et de la promotion.
+    """
+    selected_step = int(selected_candidate.get("checkpoint_step") or 0)
+    checkpoint_path = str(selected_candidate.get("checkpoint_path") or "").strip()
+    if not checkpoint_path:
+        raise RuntimeError("Le checkpoint gagnant du screen est vide.")
+    alias_id = _build_manual_checkpoint_alias_id(
+        source_run_id,
+        horizon="scalp",
+        checkpoint_step=selected_step,
+    )
+    symbol_csv = ",".join(symbols)
+    python_code = textwrap.dedent(
+        """
+        from __future__ import annotations
+
+        import json
+        import os
+        import shutil
+        from datetime import datetime
+        from pathlib import Path
+
+        from eva_lab.arena import Arena
+        from eva_lab.champion_promoter import ChampionPromoter
+        from eva_lab.genetic_updater import GeneticUpdater
+        from eva_lab.training_status import write_arena_summary, write_terminal_summary
+        from eva_lab.training_utils import infer_family_from_symbols
+
+        remote_dir = Path(%(remote_dir)s)
+        source_run_id = %(source_run_id)s
+        selected_step = %(selected_step)s
+        checkpoint_path = Path(%(checkpoint_path)s)
+        alias_id = %(alias_id)s
+        alias_name = alias_id + ".pkl"
+        champion_reference = %(champion_reference)s
+        symbols = %(symbols)s
+        symbol_csv = %(symbol_csv)s
+        horizon = "scalp"
+        engine = "muzero"
+        family = infer_family_from_symbols(symbols)
+        weights_dir = remote_dir / "data" / "muzero" / "weights"
+        results_dir = remote_dir / "data" / "muzero" / "results"
+        alias_path = weights_dir / alias_name
+        arena_latest_path = results_dir / f"arena_{horizon}_latest.json"
+        arena = Arena(weights_dir=str(weights_dir))
+        promoter = ChampionPromoter(weights_dir=str(weights_dir), results_dir=str(results_dir))
+        genetic = GeneticUpdater()
+
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint gagnant introuvable: {checkpoint_path}")
+
+        shutil.copy2(checkpoint_path, alias_path)
+
+        os.environ["ARENA_SYMBOLS_SCALP"] = symbol_csv
+        os.environ["ARENA_MAX_SYMBOLS"] = "7"
+        os.environ["ARENA_GAMES_PER_SYMBOL"] = %(full_games)s
+        os.environ["ARENA_MIN_GAMES"] = %(full_min_games)s
+        os.environ["ARENA_MIN_SYMBOLS"] = %(full_min_symbols)s
+
+        battle_report = arena.battle(str(alias_path), champion_reference, horizon=horizon)
+        challenger_metrics = dict((battle_report.get("challenger") or {}).get("metrics") or {})
+        lineage = {
+            "run_id": source_run_id,
+            "selected_checkpoint_step": selected_step,
+            "selection_method": "arena_screen_then_full",
+        }
+        training_metrics = {
+            "family": family,
+            "dataset_id": challenger_metrics.get("dataset_id"),
+            "dataset_source": challenger_metrics.get("dataset_source"),
+            "feature_profile": challenger_metrics.get("feature_profile"),
+            "mechanics_profile_version": challenger_metrics.get("mechanics_profile_version"),
+            "dataset_coverage": dict(challenger_metrics.get("dataset_coverage") or {}),
+            "focus_symbols": list(symbols),
+            "gate_profile": "standard",
+            "resume_source": "manual_checkpoint_selection",
+            "trial_mode": "manual_checkpoint_selection",
+            "trial_cost_profile": "manual_checkpoint_selection",
+            "lineage": lineage,
+        }
+        promotion_metadata = {
+            "resume_source": "manual_checkpoint_selection",
+            "lineage": lineage,
+            "selection_method": "arena_screen_then_full",
+        }
+        promotion_result = promoter.promote_muzero_challenger(
+            challenger_path=alias_path,
+            horizon=horizon,
+            battle_report=battle_report,
+            training_metrics=training_metrics,
+            latest_checkpoint=checkpoint_path,
+            challenger_id=alias_id,
+            gate_profile="standard",
+            promotion_metadata=promotion_metadata,
+        )
+        if promotion_result.get("status") != "promoted":
+            promoter.persist_challenger_manifest(
+                engine=engine,
+                horizon=horizon,
+                status=(
+                    "candidate_only"
+                    if promotion_result.get("status") == "candidate_only"
+                    else "blocked"
+                ),
+                challenger_id=alias_id,
+                challenger_path=str(alias_path),
+                latest_checkpoint=str(checkpoint_path),
+                battle_report=battle_report,
+                training_metrics=training_metrics,
+                promotion_gate=dict(promotion_result.get("promotion_gate") or {}),
+                promotion_result=promotion_result,
+                artifact_compatibility=dict(promotion_result.get("artifact_compatibility") or {}),
+                checkpoint_schema_version=promotion_result.get("checkpoint_schema_version"),
+                resume_source="manual_checkpoint_selection",
+                lineage=lineage,
+                promotion_metadata=promotion_metadata,
+            )
+
+        registry_metrics = {
+            "win_rate": {horizon: challenger_metrics.get("win_rate", 0.0)},
+            "return_pct": {horizon: challenger_metrics.get("return_pct", 0.0)},
+            "battles_won": {horizon: 1 if str(battle_report.get("outcome") or "").upper() == "VICTORY" else 0},
+            "horizon_accuracy": {horizon: challenger_metrics.get("win_rate", 0.0) / 100.0},
+        }
+        genetic.register_new_generation(
+            gen_id=alias_id,
+            metrics=registry_metrics,
+            is_champion=promotion_result.get("status") == "promoted",
+            horizon=horizon,
+        )
+
+        arena_run_id = f"{source_run_id}_manual_arena_ckpt{selected_step}"
+        report_payload = {
+            "run_id": arena_run_id,
+            "trial_id": f"manual_full_arena_ckpt{selected_step}",
+            "engine": engine,
+            "horizon": horizon,
+            "symbols": list(symbols),
+            "family": family,
+            "feature_profile": challenger_metrics.get("feature_profile"),
+            "mechanics_profile_version": challenger_metrics.get("mechanics_profile_version"),
+            "dataset_id": challenger_metrics.get("dataset_id"),
+            "dataset_source": challenger_metrics.get("dataset_source"),
+            "focus_symbols": list(symbols),
+            "gate_profile": "standard",
+            "latest_checkpoint": str(checkpoint_path),
+            "challenger_path": str(alias_path),
+            "live_champion_reference": champion_reference,
+            "live_champion_id": alias_id if promotion_result.get("status") == "promoted" else None,
+            "champion_paths": promotion_result.get("champion_paths", []),
+            "training_metrics": training_metrics,
+            "resume_source": "manual_checkpoint_selection",
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": promotion_result.get("checkpoint_schema_version"),
+            "lineage": lineage,
+            "battle_report": battle_report,
+            "promotion": promotion_result,
+        }
+        unique_report_path = write_arena_summary(report_payload)
+        report_payload["battle_report_path"] = str(unique_report_path)
+        arena_latest_path.write_text(json.dumps(report_payload, indent=2, default=float), encoding="utf-8")
+
+        terminal_summary = {
+            "run_id": arena_run_id,
+            "trial_id": f"manual_full_arena_ckpt{selected_step}",
+            "engine": engine,
+            "horizon": horizon,
+            "family": family,
+            "feature_profile": challenger_metrics.get("feature_profile"),
+            "mechanics_profile_version": challenger_metrics.get("mechanics_profile_version"),
+            "dataset_id": challenger_metrics.get("dataset_id"),
+            "dataset_source": challenger_metrics.get("dataset_source"),
+            "focus_symbols": list(symbols),
+            "gate_profile": "standard",
+            "terminal_status": "completed",
+            "failed_step": None,
+            "failure_mode": (
+                str((promotion_result.get("promotion_gate") or {}).get("failure_mode") or "").strip()
+                or ("arena_defeat" if str(battle_report.get("outcome") or "").upper() != "VICTORY" else None)
+            ),
+            "arena_outcome": battle_report.get("outcome"),
+            "promotion_gate": dict(promotion_result.get("promotion_gate") or {}),
+            "metrics": challenger_metrics,
+            "metrics_by_symbol": dict(challenger_metrics.get("metrics_by_symbol") or {}),
+            "metrics_by_position_mechanics": dict(
+                challenger_metrics.get("metrics_by_position_mechanics") or {}
+            ),
+            "training_metrics": training_metrics,
+            "challenger_path": str(alias_path),
+            "latest_checkpoint": str(checkpoint_path),
+            "battle_report_path": str(unique_report_path),
+            "live_comparison": dict(promotion_result.get("live_comparison") or {}),
+            "resume_source": "manual_checkpoint_selection",
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": promotion_result.get("checkpoint_schema_version"),
+            "lineage": lineage,
+            "artifact_state": {
+                "arena_report_present": True,
+                "battle_report_present": True,
+                "promotion_present": True,
+                "candidate_checkpoint_present": alias_path.exists(),
+                "latest_checkpoint_present": checkpoint_path.exists(),
+            },
+            "latest_candidate": alias_id,
+            "latest_verdict": {
+                "status": promotion_result.get("status"),
+                "reason": promotion_result.get("reason") or (promotion_result.get("promotion_gate") or {}).get("reason"),
+                "failure_mode": (promotion_result.get("promotion_gate") or {}).get("failure_mode"),
+            },
+        }
+        terminal_summary_path = write_terminal_summary(terminal_summary)
+
+        payload = {
+            "source_run_id": source_run_id,
+            "arena_run_id": arena_run_id,
+            "selected_checkpoint_step": selected_step,
+            "selected_checkpoint_path": str(checkpoint_path),
+            "alias_id": alias_id,
+            "alias_path": str(alias_path),
+            "full_report_path": str(unique_report_path),
+            "arena_latest_path": str(arena_latest_path),
+            "terminal_summary_path": str(terminal_summary_path),
+            "battle_report": battle_report,
+            "promotion_result": promotion_result,
+            "resume_required": promotion_result.get("status") != "promoted",
+            "resume_checkpoint_path": str(checkpoint_path),
+        }
+        print(json.dumps(payload, default=float, ensure_ascii=True))
+        """
+    ) % {
+        "remote_dir": repr(REMOTE_LAB_DIR),
+        "source_run_id": repr(_sanitize_manual_token(source_run_id, "unknown_run")),
+        "selected_step": int(selected_step),
+        "checkpoint_path": repr(checkpoint_path),
+        "alias_id": repr(alias_id),
+        "champion_reference": repr(champion_reference),
+        "symbols": json.dumps(symbols),
+        "symbol_csv": repr(symbol_csv),
+        "full_games": repr(MANUAL_ARENA_FULL_BUDGET["ARENA_GAMES_PER_SYMBOL"]),
+        "full_min_games": repr(MANUAL_ARENA_FULL_BUDGET["ARENA_MIN_GAMES"]),
+        "full_min_symbols": repr(MANUAL_ARENA_FULL_BUDGET["ARENA_MIN_SYMBOLS"]),
+    }
+    return _run_remote_lab_container_python_json(client, python_code, timeout=43_200)
+
+
 def _build_remote_sequence_script(sequence_name: str) -> str:
     """Construit un script shell distant pour une sequence ordonnee.
 
@@ -3943,6 +4814,124 @@ PY
     print("Run distant stoppe proprement.")
 
 
+def launch_muzero_scalp_arena_cutover_8000(
+    *,
+    stop_reason: str = "manual_checkpoint_selection_cutover",
+    symbols: list[str] | None = None,
+) -> None:
+    """Fige le run `scalp` au checkpoint de bascule puis declenche `screen -> full Arena -> reprise`.
+
+    Args:
+        stop_reason (str): Motif explicite de la coupure du run courant.
+        symbols (list[str] | None): Univers `scalp` a imposer si necessaire.
+    """
+    normalized_symbols = _normalize_scalp_multi_universe_symbols(symbols)
+    source_run_snapshot: dict[str, Any] = {}
+    try:
+        source_run_snapshot = _read_active_remote_run()
+    except RuntimeError as exc:
+        print(f"Lecture HTTP du run source indisponible. Repli sur un identifiant local: {exc}")
+    source_run_id = str(source_run_snapshot.get("run_id") or "").strip() or f"manual_{datetime.now():%Y%m%d_%H%M%S}"
+
+    print(f"Connexion a Proxmox {HOST}...")
+    ssh_password, _sudo_password = _require_remote_credentials()
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+        client.connect(HOST, username=USER, password=ssh_password, timeout=15)
+        print("Connexion SSH etablie.")
+
+        _sync_remote_training_payload(client, profile_hint=None)
+        print("Payload distant synchronise pour le cutover Arena.")
+        _wait_for_remote_checkpoint_cutover(
+            client,
+            checkpoint_step=MANUAL_ARENA_CUTOVER_STEP,
+            horizon="scalp",
+        )
+        stop_remote_training(client, reason=stop_reason)
+        _verify_remote_training_stopped(client)
+
+        screen_payload = _run_remote_manual_screen_arena(
+            client,
+            source_run_id=source_run_id,
+            symbols=normalized_symbols,
+        )
+        screen_results = [
+            dict(item)
+            for item in list(screen_payload.get("screen_results") or [])
+            if isinstance(item, dict)
+        ]
+        if len(screen_results) != len(MANUAL_ARENA_SCREEN_STEPS):
+            raise RuntimeError(
+                "Le screen Arena distant n'a pas retourne les trois checkpoints attendus "
+                f"({len(screen_results)} au lieu de {len(MANUAL_ARENA_SCREEN_STEPS)})."
+            )
+        winner = _select_best_manual_screen_candidate(screen_results)
+        print(
+            "Screen Arena termine. Gagnant provisoire: "
+            f"ckpt{winner.get('checkpoint_step')} | "
+            f"outcome={((winner.get('battle_report') or {}).get('outcome'))} | "
+            f"score={(((winner.get('battle_report') or {}).get('challenger') or {}).get('score'))}"
+        )
+
+        full_payload = _run_remote_manual_full_arena(
+            client,
+            source_run_id=str(screen_payload.get("source_run_id") or source_run_id),
+            selected_candidate=winner,
+            champion_reference=str(screen_payload.get("champion_reference") or "gen_000_baseline"),
+            symbols=normalized_symbols,
+        )
+        promotion_result = dict(full_payload.get("promotion_result") or {})
+        print(
+            "Full Arena terminee: "
+            f"arena={((full_payload.get('battle_report') or {}).get('outcome'))} | "
+            f"promotion={promotion_result.get('status')}"
+        )
+        if not bool(full_payload.get("resume_required")):
+            print(
+                "Champion produit sans reprise automatique. "
+                f"Alias={full_payload.get('alias_id')} | "
+                f"rapport={full_payload.get('full_report_path')}"
+            )
+            return
+
+        resume_checkpoint_path = str(full_payload.get("resume_checkpoint_path") or "").strip()
+        if not resume_checkpoint_path:
+            raise RuntimeError("La reprise automatique a ete demandee sans checkpoint de reprise.")
+        resume_overrides = _build_manual_resume_after_arena_overrides(
+            symbols=normalized_symbols,
+            resume_checkpoint_path=resume_checkpoint_path,
+        )
+        previous_run_id = None
+        try:
+            previous_run_id = str((_read_active_remote_run().get("run_id") or "")).strip() or None
+        except RuntimeError:
+            previous_run_id = None
+        _launch_training_with_client(
+            client,
+            runtime_overrides=resume_overrides,
+            sync_profile_hint=None,
+            show_logs=True,
+        )
+        try:
+            resumed_run_id = _wait_for_remote_run_start(
+                previous_run_id,
+                expected_trigger=resume_overrides["TRAINING_RUN_TRIGGER"],
+            )
+            print(
+                "Reprise automatique lancee depuis le meilleur checkpoint: "
+                f"{resume_checkpoint_path} | run_id={resumed_run_id}"
+            )
+        except RuntimeError as exc:
+            print(
+                "La relance a ete demarree mais le run n'est pas encore visible via l'API: "
+                f"{exc}"
+            )
+    finally:
+        client.close()
+
+
 def start_training(
     manual_massive: bool = False,
     *,
@@ -3979,7 +4968,7 @@ def start_training(
         symbols (list[str] | None): Univers reduit optionnel pour `scalp`.
     """
     print(f"Connexion a Proxmox {HOST}...")
-    ssh_password, sudo_password = _require_remote_credentials()
+    ssh_password, _sudo_password = _require_remote_credentials()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
@@ -3995,9 +4984,6 @@ def start_training(
             or str(wave1_profile or "").strip()
             or None
         )
-        _sync_remote_training_payload(client, profile_hint=sync_profile_hint)
-        print("Script distant mis a jour.")
-
         runtime_overrides: dict[str, str] = {}
         if manual_massive:
             runtime_overrides = _build_manual_massive_overrides()
@@ -4022,26 +5008,12 @@ def start_training(
                 trial={"trial_id": "baseline", "overrides": {}},
                 finalist_rank=1 if str(v3_mode or "full").strip().lower() == "full" else None,
             )
-        runtime_exports = build_runtime_exports(runtime_overrides)
-        runtime_prefix = f"{runtime_exports}; " if runtime_exports else ""
-        launch_cmd = (
-            f"echo '{sudo_password}' | sudo -S bash -lc 'cd {REMOTE_DIR} && "
-            f"{runtime_prefix}nohup {REMOTE_SCRIPT} > {REMOTE_LOG} 2>&1 < /dev/null & echo $!'"
+        _launch_training_with_client(
+            client,
+            runtime_overrides=runtime_overrides,
+            sync_profile_hint=sync_profile_hint,
+            show_logs=True,
         )
-        output, error, code = run_command(client, launch_cmd, timeout=30)
-        if code != 0:
-            raise RuntimeError(error or output or f"Code {code}")
-
-        pid_lines = [line.strip() for line in output.splitlines() if line.strip()]
-        pid = pid_lines[-1] if pid_lines else "inconnu"
-        print(f"Entrainement nocturne lance. PID={pid}")
-
-        time.sleep(8)
-        tail_out, tail_err, _ = run_command(client, f"tail -n 40 {REMOTE_LOG}", timeout=30)
-        print("\n--- Derniers logs ---")
-        print(tail_out)
-        if tail_err:
-            print(tail_err)
 
     except Exception as exc:
         print(f"Erreur: {exc}")
@@ -4076,6 +5048,14 @@ def parse_args() -> argparse.Namespace:
         "--dreamer-scalp-full-7",
         action="store_true",
         help="Lance un `full` Dreamer `scalp` force sur l'univers canonique a 7 symboles.",
+    )
+    parser.add_argument(
+        "--muzero-scalp-arena-cutover-8000",
+        action="store_true",
+        help=(
+            "Attend `ckpt_9000`, stoppe le run MuZero `scalp`, evalue `7000/7500/8000/9000` "
+            "en Arena puis promeut ou relance automatiquement."
+        ),
     )
     parser.add_argument(
         "--intraday-reduced",
@@ -4191,6 +5171,7 @@ if __name__ == "__main__":
             args.scalp_reduced,
             args.muzero_scalp_full_7,
             args.dreamer_scalp_full_7,
+            args.muzero_scalp_arena_cutover_8000,
             args.intraday_reduced,
             args.swing_reduced,
             args.all_reduced,
@@ -4205,7 +5186,7 @@ if __name__ == "__main__":
     )
     if selected_profiles > 1:
         raise SystemExit(
-            "Choisissez un seul profil parmi --manual-massive, --scalp-reduced, --muzero-scalp-full-7, --dreamer-scalp-full-7, --intraday-reduced, --swing-reduced, --all-reduced, --wave1-profile, --wave1-sequence, --v3-sequence, --v3-profile, --v4-sequence, --v4-profile."
+            "Choisissez un seul profil parmi --manual-massive, --scalp-reduced, --muzero-scalp-full-7, --dreamer-scalp-full-7, --muzero-scalp-arena-cutover-8000, --intraday-reduced, --swing-reduced, --all-reduced, --wave1-profile, --wave1-sequence, --v3-sequence, --v3-profile, --v4-sequence, --v4-profile."
         )
     requested_symbols = [
         item.strip()
@@ -4222,6 +5203,11 @@ if __name__ == "__main__":
             wave1_sequence,
             stop_existing=args.stop_existing,
             stop_reason=str(args.stop_reason or "manual_factory_cutover"),
+        )
+    elif args.muzero_scalp_arena_cutover_8000:
+        launch_muzero_scalp_arena_cutover_8000(
+            stop_reason=str(args.stop_reason or "manual_checkpoint_selection_cutover"),
+            symbols=requested_symbols or None,
         )
     elif v3_sequence:
         launch_v3_sequence_remote(

@@ -16,6 +16,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_SCHEMA_VERSION = 2
+DEFAULT_PARAM_DTYPE = "float32"
 
 
 class MuZeroCheckpointCompatibilityError(RuntimeError):
@@ -177,6 +178,177 @@ def build_muzero_config_fingerprint(config_snapshot: dict[str, Any]) -> dict[str
     return {
         **normalized,
         "sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+    }
+
+
+def _build_signature_leaf(path: str, shape: list[int], dtype: str = DEFAULT_PARAM_DTYPE) -> dict[str, Any]:
+    """Construit une feuille de signature de parametre stable.
+
+    Args:
+        path (str): Chemin complet du parametre.
+        shape (list[int]): Forme numerique attendue.
+        dtype (str): Type de donnees attendu.
+
+    Returns:
+        dict[str, Any]: Feuille de signature serialisable.
+    """
+
+    return {
+        "path": str(path),
+        "shape": [int(value) for value in list(shape)],
+        "dtype": str(dtype or DEFAULT_PARAM_DTYPE),
+    }
+
+
+def _build_linear_signature(
+    module_prefix: str,
+    input_dim: int,
+    output_dim: int,
+    *,
+    dtype: str = DEFAULT_PARAM_DTYPE,
+) -> list[dict[str, Any]]:
+    """Construit la signature attendue d'une couche lineaire Haiku.
+
+    Args:
+        module_prefix (str): Prefixe de module Haiku.
+        input_dim (int): Dimension d'entree.
+        output_dim (int): Dimension de sortie.
+        dtype (str): Type des poids et biais attendus.
+
+    Returns:
+        list[dict[str, Any]]: Signature stable des poids et biais.
+    """
+
+    return [
+        _build_signature_leaf(f"{module_prefix}/w", [int(input_dim), int(output_dim)], dtype=dtype),
+        _build_signature_leaf(f"{module_prefix}/b", [int(output_dim)], dtype=dtype),
+    ]
+
+
+def build_muzero_param_signature_from_snapshot(
+    config_snapshot: dict[str, Any],
+    *,
+    dtype: str = DEFAULT_PARAM_DTYPE,
+) -> list[dict[str, Any]]:
+    """Construit la signature attendue des poids MuZero sans instancier JAX.
+
+    Args:
+        config_snapshot (dict[str, Any]): Sous-ensemble stable de configuration.
+        dtype (str): Type de poids attendu pour les feuilles.
+
+    Returns:
+        list[dict[str, Any]]: Signature complete des poids MuZero.
+    """
+
+    observation_shape = [
+        int(value)
+        for value in list(config_snapshot.get("observation_shape") or [])
+    ]
+    input_dim = int(np.prod(observation_shape, dtype=np.int64)) if observation_shape else 0
+    hidden_dims = [
+        int(value)
+        for value in list(config_snapshot.get("network_hidden_dims") or [])
+    ]
+    hidden_state_size = int(config_snapshot.get("hidden_state_size") or 0)
+    action_space_size = int(config_snapshot.get("action_space_size") or 0)
+    support_size = int(config_snapshot.get("support_size") or 0)
+    support_bins = 2 * support_size + 1
+
+    signature: list[dict[str, Any]] = []
+
+    representation_dims = [input_dim, *hidden_dims, hidden_state_size]
+    for index, (source_dim, target_dim) in enumerate(zip(representation_dims, representation_dims[1:])):
+        suffix = "" if index == 0 else f"_{index}"
+        signature.extend(
+            _build_linear_signature(
+                f"representation_network/linear{suffix}",
+                source_dim,
+                target_dim,
+                dtype=dtype,
+            )
+        )
+
+    dynamics_input_dim = hidden_state_size + action_space_size
+    dynamics_hidden_dims = [dynamics_input_dim, *hidden_dims]
+    for index, (source_dim, target_dim) in enumerate(zip(dynamics_hidden_dims, dynamics_hidden_dims[1:])):
+        suffix = "" if index == 0 else f"_{index}"
+        signature.extend(
+            _build_linear_signature(
+                f"dynamics_network/linear{suffix}",
+                source_dim,
+                target_dim,
+                dtype=dtype,
+            )
+        )
+    dynamics_output_index = len(hidden_dims)
+    dynamics_source_dim = hidden_dims[-1] if hidden_dims else dynamics_input_dim
+    signature.extend(
+        _build_linear_signature(
+            f"dynamics_network/linear_{dynamics_output_index}",
+            dynamics_source_dim,
+            hidden_state_size,
+            dtype=dtype,
+        )
+    )
+    signature.extend(
+        _build_linear_signature(
+            f"dynamics_network/linear_{dynamics_output_index + 1}",
+            dynamics_source_dim,
+            support_bins,
+            dtype=dtype,
+        )
+    )
+
+    prediction_input_dim = hidden_state_size
+    prediction_hidden_dims = [prediction_input_dim, *hidden_dims]
+    for index, (source_dim, target_dim) in enumerate(zip(prediction_hidden_dims, prediction_hidden_dims[1:])):
+        suffix = "" if index == 0 else f"_{index}"
+        signature.extend(
+            _build_linear_signature(
+                f"prediction_network/linear{suffix}",
+                source_dim,
+                target_dim,
+                dtype=dtype,
+            )
+        )
+    prediction_output_index = len(hidden_dims)
+    prediction_source_dim = hidden_dims[-1] if hidden_dims else prediction_input_dim
+    signature.extend(
+        _build_linear_signature(
+            f"prediction_network/linear_{prediction_output_index}",
+            prediction_source_dim,
+            action_space_size,
+            dtype=dtype,
+        )
+    )
+    signature.extend(
+        _build_linear_signature(
+            f"prediction_network/linear_{prediction_output_index + 1}",
+            prediction_source_dim,
+            support_bins,
+            dtype=dtype,
+        )
+    )
+    return signature
+
+
+def build_muzero_expected_context_from_config(config: Any) -> dict[str, Any]:
+    """Construit le contexte attendu MuZero a partir de la seule configuration.
+
+    Args:
+        config (Any): Configuration MuZero resolue.
+
+    Returns:
+        dict[str, Any]: Contexte de compatibilite sans initialiser JAX.
+    """
+
+    config_snapshot = build_muzero_config_snapshot(config)
+    return {
+        "engine": "muzero",
+        "horizon": str(getattr(config, "horizon", "intraday") or "intraday").lower(),
+        "config_snapshot": config_snapshot,
+        "config_fingerprint": build_muzero_config_fingerprint(config_snapshot),
+        "param_signature": build_muzero_param_signature_from_snapshot(config_snapshot),
     }
 
 

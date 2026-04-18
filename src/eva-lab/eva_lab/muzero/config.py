@@ -123,8 +123,14 @@ class MuZeroConfigV3:
         )
         self.pb_c_base = 19_652
         self.pb_c_init = 1.25
-        self.reanalyze_every_steps = int(os.getenv("MUZERO_REANALYZE_EVERY_STEPS", "250"))
-        self.reanalyze_max_games = int(os.getenv("MUZERO_REANALYZE_MAX_GAMES", "64"))
+        self.reanalyze_every_steps = int(os.getenv("MUZERO_REANALYZE_EVERY_STEPS", "500"))
+        self.reanalyze_max_games = int(os.getenv("MUZERO_REANALYZE_MAX_GAMES", "16"))
+        self.reanalyze_max_positions_per_game = int(
+            os.getenv("MUZERO_REANALYZE_MAX_POSITIONS_PER_GAME", "24")
+        )
+        self.reanalyze_num_simulations = int(
+            os.getenv("MUZERO_REANALYZE_NUM_SIMULATIONS", "16")
+        )
 
         self.window_size = int(os.getenv("MUZERO_WINDOW_SIZE", "200000"))
 
@@ -140,6 +146,15 @@ class MuZeroConfigV3:
         self.drawdown_time_penalty_rate = 0.2
         self.max_drawdown_penalty = 10.0
         self.loss_penalty_multiplier = 2.0
+        self.daily_stretch_target_pct = float(
+            os.getenv("MUZERO_DAILY_STRETCH_TARGET_PCT", "10.0")
+        )
+        self.daily_stretch_max_drawdown_pct = float(
+            os.getenv("MUZERO_DAILY_STRETCH_MAX_DRAWDOWN_PCT", "3.5")
+        )
+        self.daily_stretch_reward_bonus = float(
+            os.getenv("MUZERO_DAILY_STRETCH_REWARD_BONUS", "4.0")
+        )
 
         for key, value in overrides.items():
             if key in handled_override_keys:

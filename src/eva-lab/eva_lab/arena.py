@@ -15,7 +15,7 @@ from eva_lab.muzero.environment import TradingEnvironment
 from eva_lab.muzero.dreamer_agent import JAXDreamerAgent
 from eva_lab.muzero.jax_agent import JAXMuZeroAgent
 from eva_lab.training_utils import (
-    build_muzero_market_data,
+    build_muzero_market_context,
     infer_family_from_symbols,
     get_horizon_history_bars,
     get_horizon_timeframe,
@@ -135,6 +135,23 @@ class Arena:
             return default
 
     @staticmethod
+    def _read_best_day_metric(value: Any) -> float:
+        """Lit une metrique de meilleur jour sans perdre les zeros valides.
+
+        Args:
+            value (Any): Valeur brute a normaliser.
+
+        Returns:
+            float: Valeur flottante exploitable, ou ``-inf`` si absente.
+        """
+        if value is None:
+            return float("-inf")
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float("-inf")
+
+    @staticmethod
     def _empty_metrics() -> dict[str, Any]:
         """Retourne un jeu de metriques neutres si l'evaluation echoue.
 
@@ -145,6 +162,11 @@ class Arena:
             "profit_factor": 0.0,
             "return_pct": 0.0,
             "net_realized_pct": 0.0,
+            "daily_net_return_pct_by_day": {},
+            "best_day_net_return_pct": 0.0,
+            "days_above_10pct": 0,
+            "positive_day_rate": 0.0,
+            "daily_max_drawdown_pct": 100.0,
             "gross_profit_pct": 0.0,
             "gross_loss_pct": 0.0,
             "win_rate": 0.0,
@@ -215,6 +237,14 @@ class Arena:
             float: Score comparatif utilise pour le duel champion/challenger.
         """
         profit_factor = min(max(float(metrics.get("profit_factor", 0.0)), 0.0), 5.0)
+        stretch_target_pct = Arena._read_float_env("MUZERO_DAILY_STRETCH_TARGET_PCT", 10.0)
+        stretch_score_bonus = Arena._read_float_env("ARENA_DAILY_STRETCH_SCORE_BONUS", 4.0)
+        best_day_net_return_pct = float(metrics.get("best_day_net_return_pct", 0.0) or 0.0)
+        days_above_10pct = max(float(metrics.get("days_above_10pct", 0.0) or 0.0), 0.0)
+        stretch_bonus = 0.0
+        if best_day_net_return_pct >= stretch_target_pct and days_above_10pct > 0.0:
+            stretch_bonus += stretch_score_bonus
+            stretch_bonus += min(days_above_10pct, 3.0) * (stretch_score_bonus * 0.25)
         return (
             float(metrics.get("return_pct", 0.0)) * 8.0
             + max(0.0, profit_factor - 1.0) * 18.0
@@ -222,6 +252,7 @@ class Arena:
             + float(metrics.get("win_rate", 0.0)) * 0.08
             + float(metrics.get("positive_episode_rate", 0.0)) * 0.06
             - float(metrics.get("max_drawdown_pct", 0.0)) * 1.5
+            + stretch_bonus
         )
 
     @staticmethod
@@ -254,6 +285,12 @@ class Arena:
             "evaluation_games": 0,
             "return_sum": 0.0,
             "net_realized_pct": 0.0,
+            "daily_net_return_pct_by_day": {},
+            "best_day_net_return_pct": float("-inf"),
+            "days_above_10pct": 0,
+            "positive_days": 0,
+            "total_days": 0,
+            "daily_max_drawdown_pct": 0.0,
             "gross_profit_pct": 0.0,
             "gross_loss_pct": 0.0,
             "total_trades": 0,
@@ -364,6 +401,12 @@ class Arena:
         total_return = float(state.get("total_return", 0.0) or 0.0)
         gross_profit = float(state.get("gross_profit", 0.0) or 0.0)
         gross_loss = float(state.get("gross_loss", 0.0) or 0.0)
+        daily_net_return_pct_by_day = dict(state.get("daily_net_return_pct_by_day") or {})
+        best_day_net_return_pct = self._read_best_day_metric(state.get("best_day_net_return_pct"))
+        days_above_10pct = int(state.get("days_above_10pct", 0) or 0)
+        positive_days = int(state.get("positive_days", 0) or 0)
+        total_days = int(state.get("total_days", 0) or 0)
+        daily_max_drawdown_pct = float(state.get("daily_max_drawdown_pct", 0.0) or 0.0)
         total_trades = int(state.get("total_trades", 0) or 0)
         total_profitable = int(state.get("total_profitable", 0) or 0)
         evaluated_symbols = int(state.get("evaluated_symbols", 0) or 0)
@@ -437,6 +480,18 @@ class Arena:
                 "evaluation_games": symbol_games,
                 "return_pct": symbol_return_pct,
                 "net_realized_pct": symbol_net_realized_pct,
+                "daily_net_return_pct_by_day": dict(raw_metrics.get("daily_net_return_pct_by_day") or {}),
+                "best_day_net_return_pct": (
+                    self._read_best_day_metric(raw_metrics.get("best_day_net_return_pct"))
+                    if int(raw_metrics.get("total_days", 0) or 0) > 0
+                    else 0.0
+                ),
+                "days_above_10pct": int(raw_metrics.get("days_above_10pct", 0) or 0),
+                "positive_day_rate": (
+                    int(raw_metrics.get("positive_days", 0) or 0)
+                    / max(int(raw_metrics.get("total_days", 0) or 0), 1)
+                ) * 100.0,
+                "daily_max_drawdown_pct": float(raw_metrics.get("daily_max_drawdown_pct", 0.0) or 0.0),
                 "gross_profit_pct": symbol_gross_profit,
                 "gross_loss_pct": symbol_gross_loss,
                 "profit_factor": symbol_profit_factor,
@@ -499,6 +554,11 @@ class Arena:
             "profit_factor": profit_factor,
             "return_pct": average_return,
             "net_realized_pct": total_net_realized_pct,
+            "daily_net_return_pct_by_day": daily_net_return_pct_by_day,
+            "best_day_net_return_pct": best_day_net_return_pct if total_days > 0 else 0.0,
+            "days_above_10pct": days_above_10pct,
+            "positive_day_rate": (positive_days / max(total_days, 1)) * 100.0,
+            "daily_max_drawdown_pct": daily_max_drawdown_pct,
             "gross_profit_pct": gross_profit,
             "gross_loss_pct": gross_loss,
             "win_rate": win_rate,
@@ -592,15 +652,16 @@ class Arena:
                 return candidate
         return None
 
-    def _load_market_data(self, symbol: str, horizon: str) -> np.ndarray | None:
-        """Charge la matrice de marche necessaire a l'evaluation historique.
+    def _load_market_data(self, symbol: str, horizon: str) -> tuple[np.ndarray, np.ndarray] | None:
+        """Charge la matrice de marche et ses jours reels pour l'evaluation.
 
         Args:
             symbol (str): Symbole a evaluer.
             horizon (str): Horizon strategique cible.
 
         Returns:
-            np.ndarray | None: Matrice de marche MuZero ou ``None`` si absente.
+            tuple[np.ndarray, np.ndarray] | None: Matrice MuZero et etiquettes
+                journalieres alignees, ou ``None`` si absentes.
         """
         timeframe = get_horizon_timeframe(horizon)
         frame = load_history_frame(symbol, timeframe, self.data_dir)
@@ -612,18 +673,18 @@ class Arena:
             "ARENA_HISTORY_BARS",
             get_horizon_history_bars(horizon, env_prefix="ARENA_HISTORY", fallback=6000),
         )
-        market_data = build_muzero_market_data(frame.tail(history_bars))
+        market_data, day_labels = build_muzero_market_context(frame.tail(history_bars))
         if market_data.shape[0] < 240:
             logger.warning("Arena: historique insuffisant pour %s sur %s.", symbol, timeframe)
             return None
-        return market_data
+        return market_data, day_labels
 
     def _build_eval_segments(
         self,
         market_data: np.ndarray,
         config: MuZeroConfigV3,
         games_per_symbol: int,
-    ) -> list[np.ndarray]:
+    ) -> list[tuple[int, int, np.ndarray]]:
         """Decoupe un historique en plusieurs fenetres d'evaluation.
 
         Args:
@@ -632,7 +693,8 @@ class Arena:
             games_per_symbol (int): Nombre de fenetres a evaluer par symbole.
 
         Returns:
-            list[np.ndarray]: Liste de segments chronologiques exploitables.
+            list[tuple[int, int, np.ndarray]]: Liste de segments chronologiques
+                avec bornes ``start/end`` explicites.
         """
         min_segment_bars = max(240, config.max_moves + 120)
         target_segment_bars = max(
@@ -643,7 +705,8 @@ class Arena:
             return []
 
         if market_data.shape[0] <= target_segment_bars:
-            return [market_data[-target_segment_bars:]]
+            start_index = max(0, market_data.shape[0] - target_segment_bars)
+            return [(start_index, market_data.shape[0], market_data[-target_segment_bars:])]
 
         endpoint_values = np.linspace(
             min_segment_bars,
@@ -651,12 +714,12 @@ class Arena:
             num=max(1, games_per_symbol),
             dtype=int,
         )
-        segments: list[np.ndarray] = []
+        segments: list[tuple[int, int, np.ndarray]] = []
         for end_index in sorted({int(value) for value in endpoint_values if int(value) >= min_segment_bars}):
             start_index = max(0, end_index - target_segment_bars)
             segment = market_data[start_index:end_index]
             if segment.shape[0] >= min_segment_bars:
-                segments.append(segment)
+                segments.append((start_index, end_index, segment))
         return segments
 
     def _load_agent(
@@ -754,6 +817,12 @@ class Arena:
             "total_return": 0.0,
             "gross_profit": 0.0,
             "gross_loss": 0.0,
+            "daily_net_return_pct_by_day": {},
+            "best_day_net_return_pct": float("-inf"),
+            "days_above_10pct": 0,
+            "positive_days": 0,
+            "total_days": 0,
+            "daily_max_drawdown_pct": 0.0,
             "total_trades": 0,
             "total_profitable": 0,
             "evaluated_symbols": 0,
@@ -784,19 +853,23 @@ class Arena:
             state[key] = 0
 
         for symbol_index, symbol in enumerate(symbols, start=1):
-            market_data = self._load_market_data(symbol, horizon)
-            if market_data is None:
+            market_payload = self._load_market_data(symbol, horizon)
+            if market_payload is None:
                 continue
+            market_data, day_labels = market_payload
 
             segments = self._build_eval_segments(market_data, config, effective_games_per_symbol)
             if not segments:
                 continue
 
             state["evaluated_symbols"] += 1
-            for segment in segments:
+            for segment_index, (segment_start, _segment_end, segment) in enumerate(segments, start=1):
+                # Le segment doit conserver ses jours reels pour calculer le stress journalier.
+                segment_day_labels = day_labels[segment_start : segment_start + segment.shape[0]]
                 max_steps = min(config.max_moves, segment.shape[0] - 101)
                 env = TradingEnvironment(
                     data=segment,
+                    day_labels=segment_day_labels,
                     symbol=symbol,
                     config=config,
                     max_steps=max_steps,
@@ -821,6 +894,24 @@ class Arena:
 
                 state["gross_profit"] += max(0.0, episode_gross_profit)
                 state["gross_loss"] += max(0.0, episode_gross_loss)
+                episode_daily_returns = dict(summary.get("daily_net_return_pct_by_day") or {})
+                state["best_day_net_return_pct"] = max(
+                    self._read_best_day_metric(state.get("best_day_net_return_pct")),
+                    self._read_best_day_metric(summary.get("best_day_net_return_pct")),
+                )
+                state["days_above_10pct"] += int(summary.get("days_above_10pct", 0) or 0)
+                state["positive_days"] += sum(
+                    1 for value in episode_daily_returns.values() if float(value) > 0.0
+                )
+                state["total_days"] += len(episode_daily_returns)
+                state["daily_max_drawdown_pct"] = max(
+                    float(state.get("daily_max_drawdown_pct", 0.0) or 0.0),
+                    float(summary.get("daily_max_drawdown_pct", 0.0) or 0.0),
+                )
+                for day_label, day_return_pct in episode_daily_returns.items():
+                    state["daily_net_return_pct_by_day"][
+                        f"{symbol}::g{segment_index:02d}::{day_label}"
+                    ] = float(day_return_pct)
 
                 episode_buy_actions = int(summary.get("buy_actions", 0) or 0)
                 episode_sell_actions = int(summary.get("sell_actions", 0) or 0)
@@ -850,6 +941,23 @@ class Arena:
                 symbol_metrics["evaluation_games"] += 1
                 symbol_metrics["return_sum"] += episode_return
                 symbol_metrics["net_realized_pct"] += episode_net_realized
+                symbol_metrics["best_day_net_return_pct"] = max(
+                    self._read_best_day_metric(symbol_metrics.get("best_day_net_return_pct")),
+                    self._read_best_day_metric(summary.get("best_day_net_return_pct")),
+                )
+                symbol_metrics["days_above_10pct"] += int(summary.get("days_above_10pct", 0) or 0)
+                symbol_metrics["positive_days"] += sum(
+                    1 for value in episode_daily_returns.values() if float(value) > 0.0
+                )
+                symbol_metrics["total_days"] += len(episode_daily_returns)
+                symbol_metrics["daily_max_drawdown_pct"] = max(
+                    float(symbol_metrics.get("daily_max_drawdown_pct", 0.0) or 0.0),
+                    float(summary.get("daily_max_drawdown_pct", 0.0) or 0.0),
+                )
+                for day_label, day_return_pct in episode_daily_returns.items():
+                    symbol_metrics["daily_net_return_pct_by_day"][
+                        f"g{segment_index:02d}::{day_label}"
+                    ] = float(day_return_pct)
                 symbol_metrics["gross_profit_pct"] += max(0.0, episode_gross_profit)
                 symbol_metrics["gross_loss_pct"] += max(0.0, episode_gross_loss)
                 symbol_metrics["total_trades"] += episode_trades

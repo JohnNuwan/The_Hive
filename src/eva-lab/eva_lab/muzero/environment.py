@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional
 
@@ -118,6 +119,7 @@ class TradingEnvironment:
     def __init__(
         self,
         data: Optional[np.ndarray] = None,
+        day_labels: Optional[np.ndarray | list[str]] = None,
         symbol: str = "XAUUSD",
         config=None,
         max_steps: int = 1000,
@@ -145,6 +147,15 @@ class TradingEnvironment:
             self.max_dd_penalty = config.max_drawdown_penalty
             self.loss_mult = config.loss_penalty_multiplier
             self.slbe_bonus = config.slbe_activation_bonus
+            self.daily_stretch_target_pct = float(
+                getattr(config, "daily_stretch_target_pct", 10.0) or 10.0
+            )
+            self.daily_stretch_max_drawdown_pct = float(
+                getattr(config, "daily_stretch_max_drawdown_pct", 3.5) or 3.5
+            )
+            configured_daily_bonus = float(
+                getattr(config, "daily_stretch_reward_bonus", 4.0) or 0.0
+            )
         else:
             self.quality_mult = 10.0
             self.final_growth_bonus = 50.0
@@ -153,8 +164,16 @@ class TradingEnvironment:
             self.max_dd_penalty = 10.0
             self.loss_mult = 2.0
             self.slbe_bonus = 6.0
+            self.daily_stretch_target_pct = 10.0
+            self.daily_stretch_max_drawdown_pct = 3.5
+            configured_daily_bonus = 4.0
+        self.daily_stretch_reward_bonus = max(
+            0.0,
+            min(configured_daily_bonus, max(1.0, self.final_growth_bonus * 0.10)),
+        )
 
         self.horizon = str(getattr(config, "horizon", "intraday") or "intraday").lower()
+        self.primary_timeframe = str(getattr(config, "primary_timeframe", "H1") or "H1").upper()
         configured_family = getattr(config, "model_family", None)
         self.family = resolve_model_family(symbol=symbol, family=configured_family)
         self.feature_profile = resolve_feature_profile(self.horizon, self.family)
@@ -166,6 +185,7 @@ class TradingEnvironment:
             self.position_mechanics_profile.get("profile_version") or "v1"
         )
         self.data = data if data is not None else self._generate_synthetic_data()
+        self.day_labels = self._normalize_day_labels(day_labels, len(self.data))
         self.base_feature_count = self.data.shape[1]
         self.observation_dim = self.base_feature_count + 6
         self._reset_state()
@@ -193,6 +213,175 @@ class TradingEnvironment:
             rows.append([open_price, high_price, low_price, close_price, volume, ema_200])
             price = close_price
         return np.array(rows, dtype=np.float32)
+
+    def _build_default_day_labels(self, length: int) -> np.ndarray:
+        """Construit des jours synthetiques si aucune etiquette n'est fournie.
+
+        Args:
+            length (int): Nombre total de barres a couvrir.
+
+        Returns:
+            np.ndarray: Tableau d'etiquettes journalieres synthetiques.
+        """
+        bars_per_day_by_timeframe = {
+            "M1": 1440,
+            "M5": 288,
+            "M15": 96,
+            "H1": 24,
+            "D1": 1,
+            "W1": 1,
+        }
+        bars_per_day = max(1, int(bars_per_day_by_timeframe.get(self.primary_timeframe, 24)))
+        return np.asarray(
+            [f"synthetic_day_{index // bars_per_day:04d}" for index in range(length)],
+            dtype=object,
+        )
+
+    def _normalize_day_labels(
+        self,
+        day_labels: Optional[np.ndarray | list[str]],
+        expected_length: int,
+    ) -> np.ndarray:
+        """Normalise les jours pour rester aligns sur la matrice MuZero.
+
+        Args:
+            day_labels (Optional[np.ndarray | list[str]]): Etiquettes brutes.
+            expected_length (int): Longueur attendue pour la matrice.
+
+        Returns:
+            np.ndarray: Etiquettes journalieres normalisees.
+
+        Raises:
+            ValueError: Si la longueur des jours ne correspond pas aux donnees.
+        """
+        if expected_length <= 0:
+            return np.asarray([], dtype=object)
+        if day_labels is None:
+            return self._build_default_day_labels(expected_length)
+
+        normalized = np.asarray(day_labels, dtype=object).reshape(-1)
+        if normalized.size != expected_length:
+            raise ValueError(
+                "Etiquettes journalieres MuZero incompatibles avec la matrice de marche."
+            )
+        return np.asarray(
+            [str(label or f"day_{index:04d}") for index, label in enumerate(normalized)],
+            dtype=object,
+        )
+
+    def _get_temporal_features(self, step_index: int) -> tuple[float, float]:
+        """Construit des features temporelles a partir des jours reels.
+
+        Args:
+            step_index (int): Index de barre courant.
+
+        Returns:
+            tuple[float, float]: Progression intra-jour et cycle hebdomadaire
+                normalises dans ``[0, 1]``.
+        """
+        if len(self.day_labels) <= 0:
+            fallback_hour = (step_index % 24) / 23.0
+            fallback_day = ((step_index // 24) % 5) / 4.0
+            return float(fallback_hour), float(fallback_day)
+
+        index = max(0, min(step_index, len(self.day_labels) - 1))
+        current_label = str(self.day_labels[index])
+
+        start_index = index
+        while start_index > 0 and str(self.day_labels[start_index - 1]) == current_label:
+            start_index -= 1
+
+        end_index = index
+        last_index = len(self.day_labels) - 1
+        while end_index < last_index and str(self.day_labels[end_index + 1]) == current_label:
+            end_index += 1
+
+        intraday_progress = (index - start_index) / max(end_index - start_index, 1)
+        try:
+            weekday_feature = datetime.fromisoformat(current_label).weekday() / 6.0
+        except ValueError:
+            day_ordinal = 0
+            previous_label = str(self.day_labels[0])
+            for raw_label in self.day_labels[1 : index + 1]:
+                normalized_label = str(raw_label)
+                if normalized_label != previous_label:
+                    day_ordinal += 1
+                    previous_label = normalized_label
+            weekday_feature = (day_ordinal % 5) / 4.0
+
+        return float(intraday_progress), float(weekday_feature)
+
+    def _finalize_active_day(self) -> float:
+        """Consolide la journee active et renvoie le bonus stretch eventuel.
+
+        Returns:
+            float: Bonus journalier a ajouter au reward.
+        """
+        start_equity = max(self._active_day_start_equity, 1e-8)
+        day_return_pct = ((self._active_day_last_equity - start_equity) / start_equity) * 100.0
+        day_drawdown_pct = float(self._active_day_max_drawdown_pct)
+
+        self.daily_net_return_pct_by_day[self._active_day_label] = float(day_return_pct)
+        self.daily_drawdown_pct_by_day[self._active_day_label] = float(day_drawdown_pct)
+        self.best_day_net_return_pct = max(self.best_day_net_return_pct, float(day_return_pct))
+        self.daily_max_drawdown_pct = max(self.daily_max_drawdown_pct, float(day_drawdown_pct))
+        if day_return_pct > 0.0:
+            self.positive_days += 1
+
+        stretch_eligible = (
+            day_return_pct >= self.daily_stretch_target_pct
+            and day_drawdown_pct <= self.daily_stretch_max_drawdown_pct
+        )
+        if stretch_eligible:
+            self.days_above_10pct += 1
+            logger.info(
+                "Bonus stretch journalier active sur %s: retour=%.2f%% | drawdown=%.2f%% | bonus=%.2f",
+                self._active_day_label,
+                day_return_pct,
+                day_drawdown_pct,
+                self.daily_stretch_reward_bonus,
+            )
+            return self.daily_stretch_reward_bonus
+        return 0.0
+
+    def _update_daily_tracking(self, day_label: str, equity: float, *, finalize: bool) -> float:
+        """Met a jour le suivi journalier a partir de l'equite courante.
+
+        Args:
+            day_label (str): Jour reel du pas courant.
+            equity (float): Equite courante apres execution.
+            finalize (bool): Finalise la journee active si l'episode se termine.
+
+        Returns:
+            float: Bonus stretch journalier a ajouter au reward.
+        """
+        reward_bonus = 0.0
+        normalized_label = str(day_label or self._active_day_label)
+        if normalized_label != self._active_day_label:
+            reward_bonus += self._finalize_active_day()
+            carry_equity = self._active_day_last_equity
+            self._active_day_label = normalized_label
+            self._active_day_start_equity = carry_equity
+            self._active_day_peak_equity = carry_equity
+            self._active_day_trough_equity = carry_equity
+            self._active_day_max_drawdown_pct = 0.0
+            self._active_day_last_equity = carry_equity
+
+        self._active_day_peak_equity = max(self._active_day_peak_equity, equity)
+        self._active_day_trough_equity = min(self._active_day_trough_equity, equity)
+        if self._active_day_peak_equity > 0.0:
+            current_drawdown_pct = (
+                (self._active_day_peak_equity - equity) / self._active_day_peak_equity
+            ) * 100.0
+            self._active_day_max_drawdown_pct = max(
+                self._active_day_max_drawdown_pct,
+                current_drawdown_pct,
+            )
+        self._active_day_last_equity = equity
+
+        if finalize:
+            reward_bonus += self._finalize_active_day()
+        return reward_bonus
 
     def _reset_state(self) -> None:
         """Réinitialise l'état interne de l'épisode."""
@@ -254,6 +443,19 @@ class TradingEnvironment:
         self.realized_close_bonus_count = 0
         self.realized_split_bonus_count = 0
         self.slbe_exit_bonus_count = 0
+        active_index = min(self.current_step, max(len(self.day_labels) - 1, 0))
+        self.daily_net_return_pct_by_day: dict[str, float] = {}
+        self.daily_drawdown_pct_by_day: dict[str, float] = {}
+        self.best_day_net_return_pct = float("-inf")
+        self.days_above_10pct = 0
+        self.positive_days = 0
+        self.daily_max_drawdown_pct = 0.0
+        self._active_day_label = str(self.day_labels[active_index]) if len(self.day_labels) else "day_0000"
+        self._active_day_start_equity = self.spec.initial_balance
+        self._active_day_peak_equity = self.spec.initial_balance
+        self._active_day_trough_equity = self.spec.initial_balance
+        self._active_day_max_drawdown_pct = 0.0
+        self._active_day_last_equity = self.spec.initial_balance
 
     def _record_closed_trade(self, realized_pnl: float) -> float:
         """Enregistre un trade clôturé dans les métriques d'épisode.
@@ -520,8 +722,7 @@ class TradingEnvironment:
             pnl_pct = self._price_return(self.avg_entry_price, price, self.position_size)
 
         slbe_state = 1.0 if self.slbe_active else 0.0
-        hour_feat = (self.current_step % 24) / 23.0
-        day_feat = ((self.current_step // 24) % 5) / 4.0
+        hour_feat, day_feat = self._get_temporal_features(self.current_step)
         high_price = self.data[self.current_step, 1]
         low_price = self.data[self.current_step, 2]
         close_price = self.data[self.current_step, 3]
@@ -565,6 +766,119 @@ class TradingEnvironment:
             legal_actions.extend([SPLIT, CLOSE])
         return legal_actions
 
+    @staticmethod
+    def _resolve_reward_policy_terms(reward_policy: dict[str, float]) -> dict[str, float]:
+        """Normalise les cles V1 et V2 de la politique de recompense.
+
+        Args:
+            reward_policy (dict[str, float]): Politique brute issue du
+                profil de mecanique.
+
+        Returns:
+            dict[str, float]: Parametres de recompense resolves.
+        """
+        realized_reward_multiplier = float(
+            reward_policy.get(
+                "realized_reward_multiplier",
+                reward_policy.get("realized_pnl_multiplier", 1.0),
+            )
+            or 1.0
+        )
+        return {
+            "realized_reward_multiplier": realized_reward_multiplier,
+            "close_realized_multiplier": float(
+                reward_policy.get(
+                    "close_realized_bonus_multiplier",
+                    reward_policy.get("close_realized_multiplier", realized_reward_multiplier),
+                )
+                or realized_reward_multiplier
+            ),
+            "split_realized_multiplier": float(
+                reward_policy.get(
+                    "split_realized_bonus_multiplier",
+                    reward_policy.get("split_realized_multiplier", realized_reward_multiplier),
+                )
+                or realized_reward_multiplier
+            ),
+            "hold_drag_multiplier": float(
+                reward_policy.get(
+                    "hold_drag_penalty_multiplier",
+                    reward_policy.get("hold_drag_multiplier", 0.0),
+                )
+                or 0.0
+            ),
+            "pyramid_reject_penalty": float(
+                reward_policy.get("pyramid_failure_penalty", 0.1) or 0.1
+            ),
+            "pyramid_negative_exit_penalty": float(
+                reward_policy.get("pyramid_negative_exit_penalty", 0.0) or 0.0
+            ),
+        }
+
+    @staticmethod
+    def _resolve_directional_policy_terms(directional_policy: dict[str, float]) -> dict[str, float]:
+        """Normalise les cles de pilotage directionnel.
+
+        Args:
+            directional_policy (dict[str, float]): Politique brute issue du
+                profil de mecanique.
+
+        Returns:
+            dict[str, float]: Parametres directionnels resolves.
+        """
+        return {
+            "min_entry_share": float(directional_policy.get("min_entry_share", 0.0) or 0.0),
+            "max_directional_imbalance": float(
+                directional_policy.get(
+                    "max_directional_imbalance",
+                    directional_policy.get("max_imbalance", 1.0),
+                )
+                or 1.0
+            ),
+            "imbalance_penalty": float(directional_policy.get("imbalance_penalty", 0.0) or 0.0),
+            "entry_penalty_scale": float(directional_policy.get("entry_penalty_scale", 0.35) or 0.35),
+        }
+
+    def _compute_directional_entry_feedback(self, directional_policy: dict[str, float]) -> float:
+        """Applique une penalite precoce quand l'episode derive trop d'un cote.
+
+        Args:
+            directional_policy (dict[str, float]): Politique directionnelle.
+
+        Returns:
+            float: Ajustement de reward negatif si le desequilibre devient
+                excessif.
+        """
+        resolved_policy = self._resolve_directional_policy_terms(directional_policy)
+        total_entries = self.long_entries + self.short_entries
+        min_entry_share = resolved_policy["min_entry_share"]
+        if total_entries < 4 or min_entry_share <= 0.0:
+            return 0.0
+
+        long_share = self.long_entries / total_entries
+        short_share = self.short_entries / total_entries
+        imbalance = abs(long_share - short_share)
+        max_imbalance = resolved_policy["max_directional_imbalance"]
+        if (
+            long_share >= min_entry_share
+            and short_share >= min_entry_share
+            and imbalance <= max_imbalance
+        ):
+            return 0.0
+
+        severity = max(
+            0.0,
+            min_entry_share - min(long_share, short_share),
+            imbalance - max_imbalance,
+        )
+        penalty = (
+            resolved_policy["imbalance_penalty"]
+            * resolved_policy["entry_penalty_scale"]
+            * (1.0 + min(1.0, severity * 5.0))
+        )
+        self.directional_imbalance_penalties += 1
+        return -penalty
+
     def step(self, action: int):
         """Exécute un pas de trading.
 
@@ -592,20 +906,13 @@ class TradingEnvironment:
         activity_policy = dict(self.position_mechanics_profile.get("activity_policy") or {})
         directional_policy = dict(self.position_mechanics_profile.get("directional_policy") or {})
         reward_policy = dict(self.position_mechanics_profile.get("reward_policy") or {})
-        realized_reward_multiplier = float(
-            reward_policy.get("realized_pnl_multiplier", 1.0) or 1.0
-        )
-        close_realized_multiplier = float(
-            reward_policy.get("close_realized_multiplier", realized_reward_multiplier) or realized_reward_multiplier
-        )
-        split_realized_multiplier = float(
-            reward_policy.get("split_realized_multiplier", realized_reward_multiplier) or realized_reward_multiplier
-        )
-        hold_drag_multiplier = float(reward_policy.get("hold_drag_multiplier", 0.0) or 0.0)
-        pyramid_reject_penalty = float(reward_policy.get("pyramid_failure_penalty", 0.1) or 0.1)
-        pyramid_negative_exit_penalty = float(
-            reward_policy.get("pyramid_negative_exit_penalty", 0.0) or 0.0
-        )
+        reward_terms = self._resolve_reward_policy_terms(reward_policy)
+        realized_reward_multiplier = reward_terms["realized_reward_multiplier"]
+        close_realized_multiplier = reward_terms["close_realized_multiplier"]
+        split_realized_multiplier = reward_terms["split_realized_multiplier"]
+        hold_drag_multiplier = reward_terms["hold_drag_multiplier"]
+        pyramid_reject_penalty = reward_terms["pyramid_reject_penalty"]
+        pyramid_negative_exit_penalty = reward_terms["pyramid_negative_exit_penalty"]
         max_position = (1 + int(pyramiding_policy.get("max_additions", 1))) * trade_notional
 
         if self.slbe_active and self.position_size != 0:
@@ -664,6 +971,7 @@ class TradingEnvironment:
                 self.position_pyramids = 0
                 self.position_had_slbe = False
                 self.long_entries += 1
+                reward += self._compute_directional_entry_feedback(directional_policy)
             elif self.position_size < max_position:
                 curr_pnl = self._price_return(self.avg_entry_price, price, 1.0)
                 min_profit_to_add = float(pyramiding_policy.get("min_profit_to_add", 0.001) or 0.001)
@@ -697,6 +1005,7 @@ class TradingEnvironment:
                 self.position_pyramids = 0
                 self.position_had_slbe = False
                 self.short_entries += 1
+                reward += self._compute_directional_entry_feedback(directional_policy)
             elif self.position_size > -max_position:
                 curr_pnl = self._price_return(self.avg_entry_price, price, -1.0)
                 min_profit_to_add = float(pyramiding_policy.get("min_profit_to_add", 0.001) or 0.001)
@@ -874,9 +1183,10 @@ class TradingEnvironment:
                 reward -= float(activity_policy.get("insufficient_entries_penalty", 0.0) or 0.0)
                 self.insufficient_entry_penalties += 1
 
-            min_entry_share = float(directional_policy.get("min_entry_share", 0.0) or 0.0)
-            max_imbalance = float(directional_policy.get("max_imbalance", 1.0) or 1.0)
-            imbalance_penalty = float(directional_policy.get("imbalance_penalty", 0.0) or 0.0)
+            resolved_directional_policy = self._resolve_directional_policy_terms(directional_policy)
+            min_entry_share = resolved_directional_policy["min_entry_share"]
+            max_imbalance = resolved_directional_policy["max_directional_imbalance"]
+            imbalance_penalty = resolved_directional_policy["imbalance_penalty"]
             if total_entries > 0:
                 long_share = self.long_entries / total_entries
                 short_share = self.short_entries / total_entries
@@ -885,6 +1195,12 @@ class TradingEnvironment:
                     reward -= imbalance_penalty
                     self.directional_imbalance_penalties += 1
 
+        executed_day_index = min(next_step, max(len(self.day_labels) - 1, 0))
+        reward += self._update_daily_tracking(
+            str(self.day_labels[executed_day_index]) if len(self.day_labels) else self._active_day_label,
+            equity,
+            finalize=done,
+        )
         self.equity_curve.append(equity)
         info = {
             "balance": self.balance,
@@ -892,6 +1208,10 @@ class TradingEnvironment:
             "step": self.current_step,
             "realized_pnl": realized_pnl,
             "drawdown": drawdown,
+            "daily_best_return_pct": (
+                self.best_day_net_return_pct if self.best_day_net_return_pct != float("-inf") else 0.0
+            ),
+            "days_above_10pct": self.days_above_10pct,
             "slbe_active": self.slbe_active,
             "total_trades": self.total_trades,
             "win_rate": self.total_profitable / max(self.total_trades, 1),
@@ -976,6 +1296,9 @@ class TradingEnvironment:
             "hold_in_trend_count": self.hold_in_trend_count,
             "hold_in_range_count": self.hold_in_range_count,
         }
+        positive_day_rate = (
+            self.positive_days / max(len(self.daily_net_return_pct_by_day), 1)
+        ) * 100.0
         return {
             "symbol": self.symbol,
             "horizon": self.horizon,
@@ -988,6 +1311,13 @@ class TradingEnvironment:
             "win_rate": self.total_profitable / max(self.total_trades, 1),
             "final_equity": equity,
             "return_pct": (equity - self.spec.initial_balance) / self.spec.initial_balance * 100.0,
+            "daily_net_return_pct_by_day": dict(self.daily_net_return_pct_by_day),
+            "best_day_net_return_pct": (
+                self.best_day_net_return_pct if self.best_day_net_return_pct != float("-inf") else 0.0
+            ),
+            "days_above_10pct": self.days_above_10pct,
+            "positive_day_rate": positive_day_rate,
+            "daily_max_drawdown_pct": self.daily_max_drawdown_pct,
             "gross_profit_pct": self.gross_profit_pct,
             "gross_loss_pct": self.gross_loss_pct,
             "net_realized_pct": self.net_realized_pnl_pct,

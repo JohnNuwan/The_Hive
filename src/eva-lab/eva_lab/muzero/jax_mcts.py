@@ -75,6 +75,7 @@ class JAXMuZeroMCTS:
         root_value_logits: jnp.ndarray,
         root_legal_actions: list[int] | None = None,
         add_exploration_noise: bool = False,
+        num_simulations: int | None = None,
     ) -> Node:
         """Lance la recherche MCTS depuis un etat latent racine.
 
@@ -87,6 +88,8 @@ class JAXMuZeroMCTS:
             root_legal_actions (list[int] | None): Masque des actions legales
                 pour la racine uniquement.
             add_exploration_noise (bool): Active le bruit de Dirichlet.
+            num_simulations (int | None): Nombre de simulations a utiliser
+                pour cet appel. Repli sur la configuration globale si absent.
 
         Returns:
             Node: Racine de l'arbre MCTS.
@@ -106,8 +109,12 @@ class JAXMuZeroMCTS:
 
         min_max_stats = MinMaxStats()
         min_max_stats.update(root.value)
+        simulation_budget = max(
+            0,
+            int(self.config.num_simulations if num_simulations is None else num_simulations),
+        )
 
-        for _ in range(self.config.num_simulations):
+        for _ in range(simulation_budget):
             node = root
             search_path = [node]
             actions_path = []

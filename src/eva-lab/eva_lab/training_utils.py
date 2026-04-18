@@ -2217,6 +2217,42 @@ def build_muzero_market_data(frame: pd.DataFrame) -> np.ndarray:
     return matrix
 
 
+def build_muzero_day_labels(frame: pd.DataFrame) -> np.ndarray:
+    """Construit les etiquettes journalieres alignees sur un historique MuZero.
+
+    Args:
+        frame (pd.DataFrame): Historique OHLCV indexe par date.
+
+    Returns:
+        np.ndarray: Tableau ``[pas_de_temps]`` d'etiquettes ISO ``YYYY-MM-DD``.
+    """
+    if isinstance(frame.index, pd.DatetimeIndex):
+        time_index = frame.index
+    elif "time" in frame.columns:
+        time_index = pd.to_datetime(frame["time"], utc=False)
+    else:
+        time_index = pd.date_range("2000-01-01", periods=len(frame), freq="H")
+
+    if getattr(time_index, "tz", None) is not None:
+        time_index = time_index.tz_localize(None)
+
+    normalized_days = pd.Index(time_index).normalize()
+    return normalized_days.strftime("%Y-%m-%d").to_numpy(dtype=object)
+
+
+def build_muzero_market_context(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Construit la matrice MuZero et les jours reels associes.
+
+    Args:
+        frame (pd.DataFrame): Historique OHLCV indexe par date.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: Matrice d'observation MuZero et
+            etiquettes journalieres alignees.
+    """
+    return build_muzero_market_data(frame), build_muzero_day_labels(frame)
+
+
 def get_gnn_model_kwargs() -> dict[str, int]:
     """Retourne la configuration unique du modele GNN.
 

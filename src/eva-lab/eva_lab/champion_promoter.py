@@ -12,6 +12,7 @@ from typing import Any
 
 from eva_lab.muzero.checkpoint_utils import (
     archive_muzero_artifacts,
+    build_muzero_expected_context_from_config,
     inspect_muzero_checkpoint,
 )
 from eva_lab.training_utils import (
@@ -707,10 +708,10 @@ class ChampionPromoter:
             return cached_context
 
         from eva_lab.muzero.config import MuZeroConfigV3
-        from eva_lab.muzero.jax_agent import JAXMuZeroAgent
 
-        agent = JAXMuZeroAgent(MuZeroConfigV3(horizon=normalized_horizon))
-        context = dict(agent._expected_checkpoint_context)
+        context = build_muzero_expected_context_from_config(
+            MuZeroConfigV3(horizon=normalized_horizon)
+        )
         self._muzero_expected_contexts[normalized_horizon] = context
         return context
 

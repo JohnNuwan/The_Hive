@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import jax
@@ -40,7 +42,7 @@ from eva_lab.training_status import (
 )
 from eva_lab.training_utils import (
     build_inventory_report,
-    build_muzero_market_data,
+    build_muzero_market_context,
     get_horizon_history_bars,
     infer_family_from_symbols,
     load_history_frame,
@@ -60,13 +62,19 @@ def build_environment(symbol: str, config: MuZeroConfigV3) -> TradingEnvironment
         return None
 
     history_bars = get_horizon_history_bars(config.horizon, env_prefix="MUZERO_HISTORY", fallback=4000)
-    market_data = build_muzero_market_data(frame.tail(history_bars))
+    market_data, day_labels = build_muzero_market_context(frame.tail(history_bars))
     if market_data.shape[0] < 240:
         logger.warning("Historique insuffisant pour %s sur %s.", symbol, config.primary_timeframe)
         return None
 
     max_steps = min(config.max_moves, market_data.shape[0] - 101)
-    env = TradingEnvironment(data=market_data, symbol=symbol, config=config, max_steps=max_steps)
+    env = TradingEnvironment(
+        data=market_data,
+        day_labels=day_labels,
+        symbol=symbol,
+        config=config,
+        max_steps=max_steps,
+    )
     setattr(env, "dataset_source", str(frame.attrs.get("dataset_source") or getattr(config, "dataset_source", "csv")))
     return env
 
@@ -684,6 +692,7 @@ def main() -> dict[str, object]:
     start_time = datetime.now()
     last_metrics: dict[str, object] | None = None
     reanalyze_games_total = 0
+    reanalyze_positions_total = 0
     gold_precheck_payload: dict[str, object] | None = None
     gold_precheck_executed = False
     killed_after_precheck = False
@@ -774,188 +783,241 @@ def main() -> dict[str, object]:
             f"MuZero {horizon}: optimisation profonde sur {config.training_steps} steps.",
             source="muzero",
         )
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="muzero-batch-prefetch") as prefetch_pool:
+            current_prepared_step = agent.prepare_training_step()
 
-        for step in range(1, config.training_steps + 1):
-            mark_step_running(
-                step_name,
-                engine=engine,
-                phase="optimisation",
-                horizon=horizon,
-                family=family,
-                symbol_total=len(valid_symbols),
-                training_step_current=step,
-                training_step_total=config.training_steps,
-                dataset_id=dataset_id,
-                dataset_source=dataset_source,
-                feature_profile=(str(feature_profile.get("profile_name") or "").strip() or None),
-                mechanics_profile_version=mechanics_profile_version,
-                ga_status=ga_status,
-                ga_generation=ga_generation,
-                ga_trial=ga_trial,
-                ga_campaign_id=ga_campaign_id,
-                ga_scope=ga_scope,
-                ga_parent_champion_id=ga_parent_champion_id,
-                trial_mode=trial_mode,
-                trial_cost_profile=trial_cost_profile,
-                focus_symbols=focus_symbols,
-                gate_profile=gate_profile,
-                replay_cache_status="memoire",
-                replay_cache_key=f"{engine}:{horizon}:{family}:{mechanics_profile_version or 'default'}",
-                replay_cache_entries=agent.replay_buffer.size,
-                replay_cache_source="memoire",
-                dataset_coverage=dataset_coverage,
-            )
-            metrics = agent.train_step()
-            if metrics is None:
-                logger.warning("MuZero sans batch suffisant, arret a l'etape %s.", step)
-                append_training_log(
-                    f"MuZero {horizon}: arret anticipe a l'etape {step} faute de batch suffisant.",
-                    level="WARNING",
-                    source="muzero",
-                )
-                break
-            reanalyzed_this_step = 0
-            if (
-                int(getattr(config, "reanalyze_every_steps", 0) or 0) > 0
-                and step % int(getattr(config, "reanalyze_every_steps", 0) or 1) == 0
-            ):
-                reanalyzed_this_step = agent.reanalyze_recent_games(
-                    int(getattr(config, "reanalyze_max_games", 0) or 0)
-                )
-                reanalyze_games_total += reanalyzed_this_step
-                if reanalyzed_this_step > 0:
-                    logger.info(
-                        "[%s] reanalyse de %s parties a l'etape %s.",
-                        horizon,
-                        reanalyzed_this_step,
-                        step,
-                    )
-            metrics["reanalyze_games_count"] = float(reanalyze_games_total)
-            last_metrics = metrics
-            merge_training_status({"latest_metrics": dict(last_metrics)})
-
-            if (
-                gold_precheck_enabled
-                and not gold_precheck_executed
-                and step >= gold_precheck_step
-            ):
-                checkpoint_path = weights_dir / f"muzero_{horizon}_gold_precheck_{step}.pkl"
-                agent.save(
-                    str(checkpoint_path),
-                    artifact_kind="gold_precheck",
-                    lineage=lineage,
-                )
-                append_training_log(
-                    (
-                        f"MuZero {horizon}: lancement du precheck Gold a l'etape "
-                        f"{step} sur {gold_precheck_games} segments."
-                    ),
-                    source="muzero",
-                )
-                running_precheck = {
-                    "status": "running",
-                    "run_id": str(load_training_status().get("run_id") or "").strip() or None,
-                    "trial_id": ga_trial,
-                    "engine": engine,
-                    "horizon": horizon,
-                    "family": family,
-                    "feature_profile": str(feature_profile.get("profile_name") or "").strip() or None,
-                    "step": step,
-                    "eval_symbols": list(focus_symbols),
-                    "games": gold_precheck_games,
-                    "reason": "precheck_en_cours",
-                }
-                set_gold_precheck(running_precheck)
-                arena = Arena(weights_dir=config.weights_path)
-                precheck_report = arena.evaluate_candidate(
-                    checkpoint_path.stem,
+            for step in range(1, config.training_steps + 1):
+                mark_step_running(
+                    step_name,
+                    engine=engine,
+                    phase="optimisation",
                     horizon=horizon,
-                    eval_symbols=list(focus_symbols),
-                    games_per_symbol=gold_precheck_games,
+                    family=family,
+                    symbol_total=len(valid_symbols),
+                    training_step_current=step,
+                    training_step_total=config.training_steps,
+                    dataset_id=dataset_id,
+                    dataset_source=dataset_source,
+                    feature_profile=(str(feature_profile.get("profile_name") or "").strip() or None),
+                    mechanics_profile_version=mechanics_profile_version,
+                    ga_status=ga_status,
+                    ga_generation=ga_generation,
+                    ga_trial=ga_trial,
+                    ga_campaign_id=ga_campaign_id,
+                    ga_scope=ga_scope,
+                    ga_parent_champion_id=ga_parent_champion_id,
+                    trial_mode=trial_mode,
+                    trial_cost_profile=trial_cost_profile,
+                    focus_symbols=focus_symbols,
+                    gate_profile=gate_profile,
+                    replay_cache_status="memoire",
+                    replay_cache_key=f"{engine}:{horizon}:{family}:{mechanics_profile_version or 'default'}",
+                    replay_cache_entries=agent.replay_buffer.size,
+                    replay_cache_source="memoire",
+                    dataset_coverage=dataset_coverage,
                 )
-                precheck_metrics = dict(((precheck_report.get("challenger") or {}).get("metrics")) or {})
-                precheck_mechanics = dict(precheck_metrics.get("metrics_by_position_mechanics") or {})
-                verdict = _evaluate_gold_precheck_verdict(
-                    metrics=precheck_metrics,
-                    mechanics=precheck_mechanics,
-                )
-                gold_precheck_payload = {
-                    "status": verdict.get("status"),
-                    "run_id": str(load_training_status().get("run_id") or "").strip() or None,
-                    "trial_id": ga_trial,
-                    "engine": engine,
-                    "horizon": horizon,
-                    "family": family,
-                    "feature_profile": str(feature_profile.get("profile_name") or "").strip() or None,
-                    "step": step,
-                    "eval_symbols": list(precheck_report.get("eval_symbols") or focus_symbols),
-                    "games": int(precheck_report.get("games_per_symbol") or gold_precheck_games),
-                    "metrics": precheck_metrics,
-                    "metrics_by_position_mechanics": precheck_mechanics,
-                    "reason": verdict.get("reason"),
-                    "failure_mode": verdict.get("failure_mode"),
-                }
-                precheck_path = write_precheck_summary(gold_precheck_payload)
-                gold_precheck_payload["path"] = str(precheck_path)
-                set_gold_precheck(gold_precheck_payload)
-                gold_precheck_executed = True
-                append_training_log(
-                    (
-                        f"MuZero {horizon}: precheck Gold {gold_precheck_payload.get('status')} "
-                        f"({gold_precheck_payload.get('reason')})."
-                    ),
-                    level="WARNING" if gold_precheck_payload.get("status") == "fail" else "INFO",
-                    source="muzero",
-                )
-                if gold_precheck_payload.get("status") == "fail":
-                    logger.warning(
-                        "MuZero %s coupe apres precheck Gold a l'etape %s: %s",
-                        horizon,
-                        step,
-                        gold_precheck_payload.get("reason"),
+                if current_prepared_step is None:
+                    logger.warning("MuZero sans batch suffisant, arret a l'etape %s.", step)
+                    append_training_log(
+                        f"MuZero {horizon}: arret anticipe a l'etape {step} faute de batch suffisant.",
+                        level="WARNING",
+                        source="muzero",
                     )
-                    killed_after_precheck = True
                     break
 
-            if step % 50 == 0:
-                elapsed = max((datetime.now() - start_time).total_seconds(), 1.0)
-                logger.info(
-                    (
-                        "[%s] step %05d/%05d | loss=%.4f | val=%.4f | rew=%.4f | "
-                        "pol=%.4f | ent=%.4f | top1=%.4f | legal=%.2f | masked=%.2f | "
-                        "reanalyze=%.0f | %.2f steps/s"
-                    ),
-                    horizon,
-                    step,
-                    config.training_steps,
-                    float(metrics["loss_total"]),
-                    float(metrics["loss_val"]),
-                    float(metrics["loss_rew"]),
-                    float(metrics["loss_pol"]),
-                    float(metrics.get("policy_entropy", 0.0)),
-                    float(metrics.get("policy_top1_share", 0.0)),
-                    float(metrics.get("root_legal_action_count", 0.0)),
-                    float(metrics.get("invalid_root_action_masked_rate", 0.0)),
-                    float(metrics.get("reanalyze_games_count", 0.0)),
-                    step / elapsed,
+                should_reanalyze = (
+                    int(getattr(config, "reanalyze_every_steps", 0) or 0) > 0
+                    and step % int(getattr(config, "reanalyze_every_steps", 0) or 1) == 0
                 )
-                append_training_log(
-                    "MuZero "
-                    f"{horizon}: step {step}/{config.training_steps} | "
-                    f"loss={float(metrics['loss_total']):.4f} | "
-                    f"pol={float(metrics['loss_pol']):.4f} | "
-                    f"ent={float(metrics.get('policy_entropy', 0.0)):.4f}",
-                    source="muzero",
+                if should_reanalyze:
+                    metrics = agent.train_step(current_prepared_step)
+                    current_prepared_step = None
+                else:
+                    next_prepared_future = prefetch_pool.submit(agent.prepare_training_step)
+                    metrics = agent.train_step(current_prepared_step)
+                    current_prepared_step = next_prepared_future.result()
+
+                if metrics is None:
+                    logger.warning("MuZero sans batch suffisant, arret a l'etape %s.", step)
+                    append_training_log(
+                        f"MuZero {horizon}: arret anticipe a l'etape {step} faute de batch suffisant.",
+                        level="WARNING",
+                        source="muzero",
+                    )
+                    break
+
+                reanalyzed_this_step = 0
+                reanalyze_started_at = perf_counter()
+                if should_reanalyze:
+                    reanalyzed_this_step = agent.reanalyze_recent_games(
+                        int(getattr(config, "reanalyze_max_games", 0) or 0)
+                    )
+                    reanalyze_games_total += reanalyzed_this_step
+                    reanalyze_positions_total += int(
+                        getattr(agent, "last_reanalyze_positions_count", 0) or 0
+                    )
+                    if reanalyzed_this_step > 0:
+                        logger.info(
+                            "[%s] reanalyse de %s parties, %s positions, %s simulations a l'etape %s.",
+                            horizon,
+                            reanalyzed_this_step,
+                            int(getattr(agent, "last_reanalyze_positions_count", 0) or 0),
+                            int(getattr(agent, "last_reanalyze_num_simulations", 0) or 0),
+                            step,
+                        )
+                    current_prepared_step = agent.prepare_training_step()
+                reanalyze_ms = (perf_counter() - reanalyze_started_at) * 1000.0 if should_reanalyze else 0.0
+
+                metrics["reanalyze_ms"] = reanalyze_ms
+                metrics["reanalyze_games_count"] = float(reanalyze_games_total)
+                metrics["reanalyze_positions_count"] = float(reanalyze_positions_total)
+                metrics["reanalyze_num_simulations"] = float(
+                    int(getattr(agent, "last_reanalyze_num_simulations", 0) or 0)
+                )
+                phase_durations_ms = {
+                    "batch_prepare_ms": float(metrics.get("batch_prepare_ms", 0.0) or 0.0),
+                    "device_put_ms": float(metrics.get("device_put_ms", 0.0) or 0.0),
+                    "update_ms": float(metrics.get("update_ms", 0.0) or 0.0),
+                    "reanalyze_ms": float(reanalyze_ms),
+                }
+                last_metrics = metrics
+                merge_training_status(
+                    {
+                        "latest_metrics": dict(last_metrics),
+                        "train_step_phase": "optimisation",
+                        "phase_durations_ms": phase_durations_ms,
+                    }
                 )
 
-            if step % config.checkpoint_interval == 0:
-                checkpoint_path = weights_dir / f"muzero_{horizon}_ckpt_{step}.pkl"
-                agent.save(
-                    str(checkpoint_path),
-                    artifact_kind="intermediate_checkpoint",
-                    lineage=lineage,
-                )
-                logger.info("Checkpoint MuZero sauvegarde: %s", checkpoint_path)
+                if (
+                    gold_precheck_enabled
+                    and not gold_precheck_executed
+                    and step >= gold_precheck_step
+                ):
+                    checkpoint_path = weights_dir / f"muzero_{horizon}_gold_precheck_{step}.pkl"
+                    agent.save(
+                        str(checkpoint_path),
+                        artifact_kind="gold_precheck",
+                        lineage=lineage,
+                    )
+                    append_training_log(
+                        (
+                            f"MuZero {horizon}: lancement du precheck Gold a l'etape "
+                            f"{step} sur {gold_precheck_games} segments."
+                        ),
+                        source="muzero",
+                    )
+                    running_precheck = {
+                        "status": "running",
+                        "run_id": str(load_training_status().get("run_id") or "").strip() or None,
+                        "trial_id": ga_trial,
+                        "engine": engine,
+                        "horizon": horizon,
+                        "family": family,
+                        "feature_profile": str(feature_profile.get("profile_name") or "").strip() or None,
+                        "step": step,
+                        "eval_symbols": list(focus_symbols),
+                        "games": gold_precheck_games,
+                        "reason": "precheck_en_cours",
+                    }
+                    set_gold_precheck(running_precheck)
+                    arena = Arena(weights_dir=config.weights_path)
+                    precheck_report = arena.evaluate_candidate(
+                        checkpoint_path.stem,
+                        horizon=horizon,
+                        eval_symbols=list(focus_symbols),
+                        games_per_symbol=gold_precheck_games,
+                    )
+                    precheck_metrics = dict(((precheck_report.get("challenger") or {}).get("metrics")) or {})
+                    precheck_mechanics = dict(precheck_metrics.get("metrics_by_position_mechanics") or {})
+                    verdict = _evaluate_gold_precheck_verdict(
+                        metrics=precheck_metrics,
+                        mechanics=precheck_mechanics,
+                    )
+                    gold_precheck_payload = {
+                        "status": verdict.get("status"),
+                        "run_id": str(load_training_status().get("run_id") or "").strip() or None,
+                        "trial_id": ga_trial,
+                        "engine": engine,
+                        "horizon": horizon,
+                        "family": family,
+                        "feature_profile": str(feature_profile.get("profile_name") or "").strip() or None,
+                        "step": step,
+                        "eval_symbols": list(precheck_report.get("eval_symbols") or focus_symbols),
+                        "games": int(precheck_report.get("games_per_symbol") or gold_precheck_games),
+                        "metrics": precheck_metrics,
+                        "metrics_by_position_mechanics": precheck_mechanics,
+                        "reason": verdict.get("reason"),
+                        "failure_mode": verdict.get("failure_mode"),
+                    }
+                    precheck_path = write_precheck_summary(gold_precheck_payload)
+                    gold_precheck_payload["path"] = str(precheck_path)
+                    set_gold_precheck(gold_precheck_payload)
+                    gold_precheck_executed = True
+                    append_training_log(
+                        (
+                            f"MuZero {horizon}: precheck Gold {gold_precheck_payload.get('status')} "
+                            f"({gold_precheck_payload.get('reason')})."
+                        ),
+                        level="WARNING" if gold_precheck_payload.get("status") == "fail" else "INFO",
+                        source="muzero",
+                    )
+                    if gold_precheck_payload.get("status") == "fail":
+                        logger.warning(
+                            "MuZero %s coupe apres precheck Gold a l'etape %s: %s",
+                            horizon,
+                            step,
+                            gold_precheck_payload.get("reason"),
+                        )
+                        killed_after_precheck = True
+                        break
+
+                if step % 50 == 0:
+                    elapsed = max((datetime.now() - start_time).total_seconds(), 1.0)
+                    logger.info(
+                        (
+                            "[%s] step %05d/%05d | loss=%.4f | val=%.4f | rew=%.4f | "
+                            "pol=%.4f | ent=%.4f | top1=%.4f | legal=%.2f | masked=%.2f | "
+                            "prep=%.1fms | put=%.1fms | upd=%.1fms | reanalyze=%.1fms | "
+                            "mode=%s | %.2f steps/s"
+                        ),
+                        horizon,
+                        step,
+                        config.training_steps,
+                        float(metrics["loss_total"]),
+                        float(metrics["loss_val"]),
+                        float(metrics["loss_rew"]),
+                        float(metrics["loss_pol"]),
+                        float(metrics.get("policy_entropy", 0.0)),
+                        float(metrics.get("policy_top1_share", 0.0)),
+                        float(metrics.get("root_legal_action_count", 0.0)),
+                        float(metrics.get("invalid_root_action_masked_rate", 0.0)),
+                        float(metrics.get("batch_prepare_ms", 0.0)),
+                        float(metrics.get("device_put_ms", 0.0)),
+                        float(metrics.get("update_ms", 0.0)),
+                        float(metrics.get("reanalyze_ms", 0.0)),
+                        str(metrics.get("gpu_target_mode") or "auto"),
+                        step / elapsed,
+                    )
+                    append_training_log(
+                        "MuZero "
+                        f"{horizon}: step {step}/{config.training_steps} | "
+                        f"loss={float(metrics['loss_total']):.4f} | "
+                        f"pol={float(metrics['loss_pol']):.4f} | "
+                        f"ent={float(metrics.get('policy_entropy', 0.0)):.4f} | "
+                        f"prep_ms={float(metrics.get('batch_prepare_ms', 0.0)):.1f} | "
+                        f"upd_ms={float(metrics.get('update_ms', 0.0)):.1f}",
+                        source="muzero",
+                    )
+
+                if step % config.checkpoint_interval == 0:
+                    checkpoint_path = weights_dir / f"muzero_{horizon}_ckpt_{step}.pkl"
+                    agent.save(
+                        str(checkpoint_path),
+                        artifact_kind="intermediate_checkpoint",
+                        lineage=lineage,
+                    )
+                    logger.info("Checkpoint MuZero sauvegarde: %s", checkpoint_path)
 
         agent.save(
             str(latest_path),

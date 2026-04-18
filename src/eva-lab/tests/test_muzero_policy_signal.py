@@ -55,6 +55,56 @@ class MuZeroPolicySignalTests(unittest.TestCase):
             [HOLD, BUY, SELL, SPLIT, CLOSE],
         )
 
+    def test_reward_policy_aliases_support_v2_keys(self) -> None:
+        """Resolve correctement les cles V2 de recompense."""
+
+        resolved = TradingEnvironment._resolve_reward_policy_terms(
+            {
+                "realized_reward_multiplier": 1.3,
+                "close_realized_bonus_multiplier": 1.7,
+                "split_realized_bonus_multiplier": 1.2,
+                "hold_drag_penalty_multiplier": 0.4,
+            }
+        )
+
+        self.assertAlmostEqual(resolved["realized_reward_multiplier"], 1.3)
+        self.assertAlmostEqual(resolved["close_realized_multiplier"], 1.7)
+        self.assertAlmostEqual(resolved["split_realized_multiplier"], 1.2)
+        self.assertAlmostEqual(resolved["hold_drag_multiplier"], 0.4)
+
+    def test_directional_policy_aliases_support_v2_keys(self) -> None:
+        """Lit bien `max_directional_imbalance` depuis les profils V2."""
+
+        resolved = TradingEnvironment._resolve_directional_policy_terms(
+            {
+                "min_entry_share": 0.2,
+                "max_directional_imbalance": 0.6,
+                "imbalance_penalty": 8.0,
+            }
+        )
+
+        self.assertAlmostEqual(resolved["min_entry_share"], 0.2)
+        self.assertAlmostEqual(resolved["max_directional_imbalance"], 0.6)
+        self.assertAlmostEqual(resolved["imbalance_penalty"], 8.0)
+
+    def test_directional_entry_feedback_penalizes_extreme_one_sided_flow(self) -> None:
+        """Penalise un flux d'entrees trop unilateral avant la fin d'episode."""
+
+        env = TradingEnvironment(symbol="XAUUSD")
+        env.long_entries = 0
+        env.short_entries = 4
+
+        penalty = env._compute_directional_entry_feedback(
+            {
+                "min_entry_share": 0.2,
+                "max_directional_imbalance": 0.6,
+                "imbalance_penalty": 8.0,
+                "entry_penalty_scale": 0.5,
+            }
+        )
+
+        self.assertLess(penalty, 0.0)
+
     def test_priority_update_changes_tree_weight(self) -> None:
         """Met a jour la priorite stockee dans la SumTree."""
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from typing import List, NamedTuple
 
 import haiku as hk
@@ -22,6 +23,16 @@ class TrainingBatch(NamedTuple):
     target_values: jnp.ndarray
     target_rewards: jnp.ndarray
     target_policies: jnp.ndarray
+
+
+class HostTrainingBatch(NamedTuple):
+    """Lot de donnees prepare sur l'hote avant transfert JAX."""
+
+    observations: np.ndarray
+    actions: np.ndarray
+    target_values: np.ndarray
+    target_rewards: np.ndarray
+    target_policies: np.ndarray
 
 
 class MuZeroTrainerJAX:
@@ -125,50 +136,95 @@ class MuZeroTrainerJAX:
         ``(game, start_idx, tree_idx)``. Le trainer ne consomme que
         ``game`` et ``start_idx``.
         """
-        obs_list = []
-        action_list = []
-        target_v_list = []
-        target_r_list = []
-        target_p_list = []
-        num_unroll = self.config.num_unroll_steps
+        host_batch, _prepare_ms = self.prepare_batch_host(batch_list)
+        batch, _device_put_ms = self.device_put_batch(host_batch)
+        return batch
 
-        for sample in batch_list:
+    def prepare_batch_host(self, batch_list: List[tuple]) -> tuple[HostTrainingBatch, float]:
+        """Construit un lot contigu sur CPU avant envoi vers JAX.
+
+        Args:
+            batch_list (List[tuple]): Echantillons issus du replay buffer.
+
+        Returns:
+            tuple[HostTrainingBatch, float]: Lot hote contigu et duree de
+                preparation en millisecondes.
+        """
+        batch_size = len(batch_list)
+        num_unroll = self.config.num_unroll_steps
+        action_dim = self.config.action_space_size
+        observation_shape = tuple(self.config.observation_shape)
+        uniform_policy = np.full(
+            (action_dim,),
+            1.0 / float(action_dim),
+            dtype=np.float32,
+        )
+        started_at = perf_counter()
+
+        observations = np.empty((batch_size, *observation_shape), dtype=np.float32)
+        actions = np.empty((batch_size, num_unroll), dtype=np.int32)
+        target_values = np.zeros((batch_size, num_unroll + 1), dtype=np.float32)
+        target_rewards = np.zeros((batch_size, num_unroll), dtype=np.float32)
+        target_policies = np.empty(
+            (batch_size, num_unroll + 1, action_dim),
+            dtype=np.float32,
+        )
+
+        for batch_index, sample in enumerate(batch_list):
             if len(sample) < 2:
                 raise ValueError("Echantillon MuZero invalide: start_idx manquant.")
             game = sample[0]
             start_idx = sample[1]
-            obs_list.append(game.observations[start_idx])
-            actions = []
-            values = []
-            rewards = []
-            policies = []
+            observations[batch_index] = np.asarray(
+                game.observations[start_idx],
+                dtype=np.float32,
+            ).reshape(observation_shape)
 
             for step_idx in range(num_unroll + 1):
                 sample_idx = start_idx + step_idx
                 if sample_idx < len(game):
-                    values.append(game.values[sample_idx])
-                    policies.append(game.policies[sample_idx])
-                    if step_idx < num_unroll:
-                        actions.append(game.actions[sample_idx])
-                        rewards.append(game.rewards[sample_idx])
-                else:
-                    values.append(0.0)
-                    policies.append(
-                        np.ones(self.config.action_space_size) / self.config.action_space_size,
+                    target_values[batch_index, step_idx] = float(game.values[sample_idx])
+                    target_policies[batch_index, step_idx] = np.asarray(
+                        game.policies[sample_idx],
+                        dtype=np.float32,
                     )
                     if step_idx < num_unroll:
-                        actions.append(0)
-                        rewards.append(0.0)
+                        actions[batch_index, step_idx] = int(game.actions[sample_idx])
+                        target_rewards[batch_index, step_idx] = float(game.rewards[sample_idx])
+                else:
+                    target_policies[batch_index, step_idx] = uniform_policy
+                    if step_idx < num_unroll:
+                        actions[batch_index, step_idx] = 0
 
-            action_list.append(actions)
-            target_v_list.append(values)
-            target_r_list.append(rewards)
-            target_p_list.append(policies)
-
-        return TrainingBatch(
-            observations=jnp.array(obs_list),
-            actions=jnp.array(action_list),
-            target_values=jnp.array(target_v_list),
-            target_rewards=jnp.array(target_r_list),
-            target_policies=jnp.array(target_p_list),
+        elapsed_ms = (perf_counter() - started_at) * 1000.0
+        return (
+            HostTrainingBatch(
+                observations=np.ascontiguousarray(observations),
+                actions=np.ascontiguousarray(actions),
+                target_values=np.ascontiguousarray(target_values),
+                target_rewards=np.ascontiguousarray(target_rewards),
+                target_policies=np.ascontiguousarray(target_policies),
+            ),
+            elapsed_ms,
         )
+
+    def device_put_batch(self, host_batch: HostTrainingBatch) -> tuple[TrainingBatch, float]:
+        """Transfere un lot hote vers le device JAX cible.
+
+        Args:
+            host_batch (HostTrainingBatch): Lot contigu prepare sur CPU.
+
+        Returns:
+            tuple[TrainingBatch, float]: Lot JAX et duree de transfert
+                vers le device en millisecondes.
+        """
+        started_at = perf_counter()
+        batch = TrainingBatch(
+            observations=jax.device_put(host_batch.observations),
+            actions=jax.device_put(host_batch.actions),
+            target_values=jax.device_put(host_batch.target_values),
+            target_rewards=jax.device_put(host_batch.target_rewards),
+            target_policies=jax.device_put(host_batch.target_policies),
+        )
+        elapsed_ms = (perf_counter() - started_at) * 1000.0
+        return batch, elapsed_ms
