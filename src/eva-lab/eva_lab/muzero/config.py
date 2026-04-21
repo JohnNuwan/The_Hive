@@ -114,8 +114,44 @@ class MuZeroConfigV3:
         self.num_unroll_steps = int(os.getenv("MUZERO_NUM_UNROLL_STEPS", "5"))
         self.td_steps = int(os.getenv("MUZERO_TD_STEPS", "10"))
         self.max_moves = int(os.getenv("MUZERO_MAX_MOVES", "300"))
+        self.randomize_episode_start = str(
+            os.getenv("MUZERO_RANDOMIZE_EPISODE_START", "1")
+        ).strip().lower() not in {"0", "false", "no", "off"}
+        self.episode_warmup_bars = int(os.getenv("MUZERO_EPISODE_WARMUP_BARS", "100"))
+        self.collection_heartbeat_every_steps = int(
+            os.getenv("MUZERO_COLLECTION_HEARTBEAT_EVERY_STEPS", "25")
+        )
+        self.collection_heartbeat_every_seconds = float(
+            os.getenv("MUZERO_COLLECTION_HEARTBEAT_EVERY_SECONDS", "30")
+        )
+        self.collection_max_episode_seconds = float(
+            os.getenv("MUZERO_COLLECTION_MAX_EPISODE_SECONDS", "300")
+        )
+        self.collection_max_step_seconds = float(
+            os.getenv("MUZERO_COLLECTION_MAX_STEP_SECONDS", "20")
+        )
+        self.directional_curriculum_end_step = int(
+            os.getenv("MUZERO_DIRECTIONAL_CURRICULUM_END_STEP", "4000")
+        )
+        self.directional_collapse_check_step = int(
+            os.getenv("MUZERO_DIRECTIONAL_COLLAPSE_CHECK_STEP", "4000")
+        )
+        self.directional_collapse_stop_step = int(
+            os.getenv("MUZERO_DIRECTIONAL_COLLAPSE_STOP_STEP", "8000")
+        )
+        self.directional_collapse_max_imbalance = float(
+            os.getenv("MUZERO_DIRECTIONAL_COLLAPSE_MAX_IMBALANCE", "0.80")
+        )
 
         self.num_simulations = int(os.getenv("MUZERO_NUM_SIMULATIONS", "100"))
+        raw_collection_num_simulations = str(
+            os.getenv("MUZERO_COLLECTION_NUM_SIMULATIONS", "")
+        ).strip()
+        if raw_collection_num_simulations:
+            self.collection_num_simulations = max(1, int(raw_collection_num_simulations))
+        else:
+            # La collecte supporte un budget MCTS plus leger que l'optimisation.
+            self.collection_num_simulations = max(1, min(self.num_simulations, 32))
         self.discount = 0.99
         self.root_dirichlet_alpha = 0.3
         self.root_exploration_fraction = float(

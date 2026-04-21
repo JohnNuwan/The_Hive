@@ -74,6 +74,8 @@ def build_environment(symbol: str, config: MuZeroConfigV3) -> TradingEnvironment
         symbol=symbol,
         config=config,
         max_steps=max_steps,
+        training_mode=True,
+        training_progress_step=0,
     )
     setattr(env, "dataset_source", str(frame.attrs.get("dataset_source") or getattr(config, "dataset_source", "csv")))
     return env
@@ -132,6 +134,12 @@ def _evaluate_gold_precheck_verdict(
     close_quality_score = float(mechanics.get("close_quality_score", 0.0) or 0.0)
     hold_drag_score = float(mechanics.get("hold_drag_score", 0.0) or 0.0)
     directional_bias = str(metrics.get("directional_bias") or "inactive").strip().lower()
+    long_entries = int(metrics.get("long_entries", 0) or 0)
+    short_entries = int(metrics.get("short_entries", 0) or 0)
+    try:
+        directional_imbalance = float(metrics.get("directional_imbalance", 1.0))
+    except (TypeError, ValueError):
+        directional_imbalance = 1.0
 
     if evaluation_games <= 0 or total_trades <= 0:
         return {
@@ -140,7 +148,21 @@ def _evaluate_gold_precheck_verdict(
             "failure_mode": "inactive",
         }
 
-    if directional_bias in {"buy_heavy", "sell_heavy"} and return_pct <= 0.0 and profit_factor < 0.95:
+    if long_entries <= 0 or short_entries <= 0:
+        return {
+            "status": "fail",
+            "reason": "direction_absente",
+            "failure_mode": directional_bias or "inactive",
+        }
+
+    if directional_imbalance > 0.75:
+        return {
+            "status": "fail",
+            "reason": "desequilibre_directionnel_extreme",
+            "failure_mode": directional_bias or "inactive",
+        }
+
+    if directional_bias in {"buy_heavy", "sell_heavy"} and profit_factor < 1.0:
         return {
             "status": "fail",
             "reason": "biais_directionnel_extreme",
@@ -696,6 +718,8 @@ def main() -> dict[str, object]:
     gold_precheck_payload: dict[str, object] | None = None
     gold_precheck_executed = False
     killed_after_precheck = False
+    directional_collapse_payload: dict[str, object] | None = None
+    killed_after_directional_collapse = False
 
     if mechanics_only_mode:
         valid_symbols = [str(symbol).strip() for symbol in config.symbols if str(symbol).strip()]
@@ -730,6 +754,48 @@ def main() -> dict[str, object]:
                 source="muzero",
             )
             for game_index in range(games_per_symbol):
+                def _report_collection_heartbeat(heartbeat: dict[str, object]) -> None:
+                    """Diffuse un heartbeat de collecte pour la supervision.
+
+                    Args:
+                        heartbeat (dict[str, object]): Metriques intra-partie
+                            publiees par l'agent MuZero.
+                    """
+                    mark_step_running(
+                        step_name,
+                        engine=engine,
+                        phase="collecte",
+                        horizon=horizon,
+                        family=initial_family,
+                        symbol=symbol,
+                        symbol_index=symbol_index,
+                        symbol_total=len(config.symbols),
+                        part_index=game_index + 1,
+                        part_total=games_per_symbol,
+                        episode_step_current=int(heartbeat.get("steps", 0) or 0),
+                        episode_step_total=int(heartbeat.get("max_moves", config.max_moves) or config.max_moves),
+                        episode_elapsed_seconds=float(heartbeat.get("elapsed_seconds", 0.0) or 0.0),
+                        dataset_id=dataset_id,
+                        dataset_source=dataset_source,
+                        feature_profile=feature_profile_name,
+                        mechanics_profile_version=mechanics_profile_version,
+                        ga_status=ga_status,
+                        ga_generation=ga_generation,
+                        ga_trial=ga_trial,
+                        ga_campaign_id=ga_campaign_id,
+                        ga_scope=ga_scope,
+                        ga_parent_champion_id=ga_parent_champion_id,
+                        trial_mode=trial_mode,
+                        trial_cost_profile=trial_cost_profile,
+                        focus_symbols=focus_symbols,
+                        gate_profile=gate_profile,
+                        replay_cache_status="warming",
+                        replay_cache_key=replay_cache_key,
+                        replay_cache_entries=agent.replay_buffer.size,
+                        replay_cache_source="memoire",
+                        dataset_coverage=dataset_coverage,
+                    )
+
                 mark_step_running(
                     step_name,
                     engine=engine,
@@ -761,9 +827,28 @@ def main() -> dict[str, object]:
                     replay_cache_source="memoire",
                     dataset_coverage=dataset_coverage,
                 )
-                agent.play_game(env, exploration=True)
+                game = agent.play_game(
+                    env,
+                    exploration=True,
+                    progress_callback=_report_collection_heartbeat,
+                )
                 summary = env.get_summary()
                 total_games += 1
+                stopped_reason = str(game.metadata.get("stopped_reason") or "").strip()
+                if stopped_reason:
+                    logger.warning(
+                        "[%s] %s partie %s/%s interrompue (%s).",
+                        horizon,
+                        symbol,
+                        game_index + 1,
+                        games_per_symbol,
+                        stopped_reason,
+                    )
+                    append_training_log(
+                        f"MuZero {horizon}: {symbol} partie {game_index + 1}/{games_per_symbol} interrompue ({stopped_reason}).",
+                        level="WARNING",
+                        source="muzero",
+                    )
                 logger.info(
                     "[%s] %s partie %s/%s | return=%.2f%% | trades=%s | buffer=%s",
                     horizon,
@@ -888,6 +973,79 @@ def main() -> dict[str, object]:
                         "phase_durations_ms": phase_durations_ms,
                     }
                 )
+
+                collapse_check_step = int(
+                    getattr(config, "directional_collapse_check_step", 4000) or 4000
+                )
+                collapse_stop_step = int(
+                    getattr(config, "directional_collapse_stop_step", 8000) or 8000
+                )
+                collapse_max_imbalance = float(
+                    getattr(config, "directional_collapse_max_imbalance", 0.80) or 0.80
+                )
+                long_entry_share = float(metrics.get("long_entry_share", 0.0) or 0.0)
+                short_entry_share = float(metrics.get("short_entry_share", 0.0) or 0.0)
+                try:
+                    directional_imbalance = float(metrics.get("directional_imbalance", 1.0))
+                except (TypeError, ValueError):
+                    directional_imbalance = 1.0
+                directional_bias = str(metrics.get("directional_bias") or "inactive").strip().lower()
+
+                if step >= collapse_check_step and (long_entry_share <= 0.0 or short_entry_share <= 0.0):
+                    directional_collapse_payload = {
+                        "status": "directional_collapse",
+                        "step": step,
+                        "reason": "direction_absente_apres_phase_apprentissage",
+                        "failure_mode": directional_bias or "inactive",
+                        "metrics": dict(metrics),
+                    }
+                    merge_training_status(
+                        {
+                            "status": "directional_collapse",
+                            "latest_metrics": {
+                                **dict(last_metrics),
+                                "directional_collapse": True,
+                            },
+                        }
+                    )
+                    append_training_log(
+                        (
+                            f"MuZero {horizon}: arret anticipe a l'etape {step} "
+                            "car une direction reste absente."
+                        ),
+                        level="WARNING",
+                        source="muzero",
+                    )
+                    killed_after_directional_collapse = True
+                    break
+
+                if step >= collapse_stop_step and directional_imbalance > collapse_max_imbalance:
+                    directional_collapse_payload = {
+                        "status": "directional_collapse",
+                        "step": step,
+                        "reason": "desequilibre_directionnel_extreme",
+                        "failure_mode": directional_bias or "inactive",
+                        "metrics": dict(metrics),
+                    }
+                    merge_training_status(
+                        {
+                            "status": "directional_collapse",
+                            "latest_metrics": {
+                                **dict(last_metrics),
+                                "directional_collapse": True,
+                            },
+                        }
+                    )
+                    append_training_log(
+                        (
+                            f"MuZero {horizon}: arret anticipe a l'etape {step} "
+                            "pour collapse directionnel."
+                        ),
+                        level="WARNING",
+                        source="muzero",
+                    )
+                    killed_after_directional_collapse = True
+                    break
 
                 if (
                     gold_precheck_enabled
@@ -1067,6 +1225,145 @@ def main() -> dict[str, object]:
         latest_checkpoint_reference and Path(latest_checkpoint_reference).exists()
     )
     active_run_id = str(load_training_status().get("run_id") or "").strip() or None
+
+    if killed_after_directional_collapse:
+        promotion_gate = {
+            "allowed": False,
+            "status": "blocked",
+            "reason": str((directional_collapse_payload or {}).get("reason") or "directional_collapse"),
+            "gate_profile": gate_profile,
+            "failure_mode": str((directional_collapse_payload or {}).get("failure_mode") or "inactive"),
+            "checks": {
+                "directional_collapse": False,
+            },
+            "metrics": dict((directional_collapse_payload or {}).get("metrics") or {}),
+        }
+        promotion_result = {
+            "status": "skipped",
+            "reason": "directional_collapse",
+            "engine": engine,
+            "horizon": horizon,
+            "source_path": str(challenger_path),
+            "champion_paths": [],
+            "promotion_gate": promotion_gate,
+            "artifact_compatibility": challenger_compatibility,
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "resume_source": resume_source,
+            "lineage": challenger_lineage,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_trial": ga_trial,
+            "ga_scope": ga_scope,
+        }
+        promoter = ChampionPromoter(weights_dir=config.weights_path, results_dir=config.results_path)
+        promoter.persist_challenger_manifest(
+            engine=engine,
+            horizon=horizon,
+            status="blocked",
+            challenger_id=challenger_id,
+            challenger_path=str(challenger_path),
+            latest_checkpoint=str(latest_path),
+            battle_report=None,
+            training_metrics=training_metrics_payload,
+            promotion_gate=promotion_gate,
+            promotion_result=promotion_result,
+            artifact_compatibility=dict(promotion_result.get("artifact_compatibility") or {}),
+            checkpoint_schema_version=challenger_checkpoint_schema_version,
+            resume_source=resume_source,
+            lineage=challenger_lineage,
+        )
+        terminal_summary = {
+            "run_id": active_run_id,
+            "sequence_id": str(os.getenv("TRAINING_SEQUENCE_ID", "")).strip() or None,
+            "sequence_profile": str(os.getenv("TRAINING_SEQUENCE_PROFILE", "")).strip() or None,
+            "window_id": str(os.getenv("TRAINING_WINDOW_ID", "")).strip() or None,
+            "trial_id": str(os.getenv("TRAINING_TRIAL_ID", "")).strip() or ga_trial,
+            "engine": engine,
+            "horizon": horizon,
+            "family": family,
+            "feature_profile": feature_profile.get("profile_name"),
+            "mechanics_profile_version": mechanics_profile_version,
+            "ga_trial": ga_trial,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_scope": ga_scope,
+            "ga_parent_champion_id": ga_parent_champion_id,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "trial_mode": trial_mode,
+            "trial_cost_profile": trial_cost_profile,
+            "dataset_id": dataset_id,
+            "dataset_source": dataset_source,
+            "focus_symbols": focus_symbols,
+            "gate_profile": gate_profile,
+            "terminal_status": "completed",
+            "failed_step": (directional_collapse_payload or {}).get("step"),
+            "failure_mode": promotion_gate.get("failure_mode"),
+            "arena_outcome": None,
+            "promotion_gate": promotion_gate,
+            "metrics": dict((directional_collapse_payload or {}).get("metrics") or {}),
+            "metrics_by_symbol": {},
+            "metrics_by_position_mechanics": {},
+            "training_metrics": training_metrics_payload,
+            "resume_source": resume_source,
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "lineage": challenger_lineage,
+            "artifact_state": {
+                "precheck_report_present": False,
+                "arena_report_present": False,
+                "battle_report_present": False,
+                "promotion_present": True,
+                "candidate_checkpoint_present": challenger_path.exists(),
+                "latest_checkpoint_present": latest_checkpoint_present,
+            },
+            "challenger_path": str(challenger_path),
+            "latest_checkpoint": str(latest_path),
+            "latest_candidate": challenger_id,
+            "latest_verdict": {
+                "status": "directional_collapse",
+                "reason": promotion_gate.get("reason"),
+                "failure_mode": promotion_gate.get("failure_mode"),
+            },
+            "gold_precheck": dict(gold_precheck_payload or {}),
+            "precheck_status": (gold_precheck_payload or {}).get("status"),
+        }
+        terminal_summary_path = write_terminal_summary(terminal_summary)
+        logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
+        return {
+            "engine": engine,
+            "horizon": horizon,
+            "timeframe": config.primary_timeframe,
+            "symbols": valid_symbols,
+            "family": family,
+            "feature_profile": feature_profile.get("profile_name"),
+            "mechanics_profile_version": mechanics_profile_version,
+            "dataset_id": dataset_id,
+            "dataset_source": dataset_source,
+            "focus_symbols": focus_symbols,
+            "gate_profile": gate_profile,
+            "dataset_descriptor": dataset_descriptor,
+            "dataset_coverage": dict(getattr(config, "dataset_coverage", {}) or {}),
+            "games_per_symbol": games_per_symbol,
+            "total_games": total_games,
+            "latest_checkpoint": latest_checkpoint_reference,
+            "challenger_path": str(challenger_path),
+            "training_metrics": training_metrics_payload,
+            "ga_status": ga_status,
+            "ga_generation": ga_generation,
+            "ga_trial": ga_trial,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_scope": ga_scope,
+            "ga_parent_champion_id": ga_parent_champion_id,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "trial_mode": trial_mode,
+            "trial_cost_profile": trial_cost_profile,
+            "resume_source": resume_source,
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "lineage": challenger_lineage,
+            "precheck": dict(gold_precheck_payload or {}),
+            "promotion": promotion_result,
+            "terminal_summary_path": str(terminal_summary_path),
+        }
 
     if killed_after_precheck:
         precheck_metrics = dict((gold_precheck_payload or {}).get("metrics") or {})

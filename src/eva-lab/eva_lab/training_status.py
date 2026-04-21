@@ -1187,6 +1187,9 @@ def mark_step_running(
     symbol_total: int | None = None,
     part_index: int | None = None,
     part_total: int | None = None,
+    episode_step_current: int | None = None,
+    episode_step_total: int | None = None,
+    episode_elapsed_seconds: float | None = None,
     epoch_current: int | None = None,
     epoch_total: int | None = None,
     training_step_current: int | None = None,
@@ -1221,7 +1224,60 @@ def mark_step_running(
     dataset_coverage: dict[str, Any] | None = None,
     metrics_by_position_mechanics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Met a jour l'etape courante d'un run."""
+    """Met a jour l'etape courante d'un run.
+
+    Args:
+        step_name (str): Nom logique de l'etape courante.
+        engine (str | None): Moteur actif associe a l'etape.
+        phase (str | None): Sous-phase fonctionnelle courante.
+        horizon (str | None): Horizon strategique vise.
+        family (str | None): Famille de symboles ou de modele active.
+        symbol (str | None): Symbole actuellement traite.
+        symbol_index (int | None): Position du symbole courant dans la boucle.
+        symbol_total (int | None): Nombre total de symboles planifies.
+        part_index (int | None): Position de la sous-tache courante.
+        part_total (int | None): Nombre total de sous-taches.
+        episode_step_current (int | None): Pas courant dans l'episode actif.
+        episode_step_total (int | None): Budget maximum de pas pour l'episode.
+        episode_elapsed_seconds (float | None): Temps ecoule sur l'episode actif.
+        epoch_current (int | None): Epoch courante pour les moteurs supervises.
+        epoch_total (int | None): Nombre total d'epochs planifiees.
+        training_step_current (int | None): Step d'optimisation courant.
+        training_step_total (int | None): Nombre total de steps d'optimisation.
+        dataset_id (str | None): Identifiant stable du dataset courant.
+        dataset_source (str | None): Source effective du dataset.
+        feature_profile (str | None): Profil de features utilise.
+        mechanics_profile_version (str | None): Version du profil de mecanique.
+        focus_symbols (list[str] | None): Univers restreint explicite du run.
+        gate_profile (str | None): Profil de gate applique au run.
+        ga_status (str | None): Statut GA courant.
+        ga_generation (int | None): Generation GA courante.
+        ga_trial (str | None): Trial GA courant.
+        ga_campaign_id (str | None): Identifiant de campagne GA.
+        ga_scope (str | None): Portee du trial GA.
+        ga_parent_champion_id (str | None): Champion parent du trial GA.
+        seed_parent_champion_id (str | None): Champion parent du seed.
+        trial_mode (str | None): Mode de trial actif.
+        trial_cost_profile (str | None): Profil de cout du trial.
+        resume_source (str | None): Source de reprise explicite.
+        checkpoint_schema_version (int | None): Version de schema du checkpoint.
+        artifact_compatibility (dict[str, Any] | None): Verdict de compatibilite.
+        lineage (dict[str, Any] | None): Information de filiation du run.
+        replay_cache_status (str | None): Etat du cache replay.
+        replay_cache_key (str | None): Cle logique du cache replay.
+        replay_cache_entries (int | None): Nombre d'entrees dans le cache.
+        replay_cache_source (str | None): Source actuelle du cache replay.
+        shadow_buffer_size (int | None): Taille du buffer shadow.
+        sequence_length (int | None): Longueur de sequence utilisee.
+        sequence_stride (int | None): Stride de sequence utilise.
+        world_model_steps (int | None): Nombre de steps world-model.
+        dataset_coverage (dict[str, Any] | None): Couverture courante du dataset.
+        metrics_by_position_mechanics (dict[str, Any] | None): Metriques
+            consolidees par mecanique de position.
+
+    Returns:
+        dict[str, Any]: Etat complet persiste apres mise a jour.
+    """
 
     step = {
         "name": step_name,
@@ -1234,6 +1290,9 @@ def mark_step_running(
         "symbol_total": symbol_total,
         "part_index": part_index,
         "part_total": part_total,
+        "episode_step_current": episode_step_current,
+        "episode_step_total": episode_step_total,
+        "episode_elapsed_seconds": episode_elapsed_seconds,
         "epoch_current": epoch_current,
         "epoch_total": epoch_total,
         "training_step_current": training_step_current,

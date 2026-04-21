@@ -123,6 +123,7 @@ class Settings(BaseSettings):
     # Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
     banker_api_host: str = "localhost"
     banker_api_port: int = 8100
+    banker_follower_mode: bool = False
     banker_symbols: list[str] = [
         "XAUUSD", "EURUSD", "GBPUSD", "USDJPY",  # Major FX & Gold (Low Spread/High Liquidity)
         "US30.cash", "US100.cash", "GER40.cash", # Indices (High Volatility/Profit)
@@ -134,12 +135,17 @@ class Settings(BaseSettings):
     mt5_login: int = 0
     mt5_password: SecretStr = Field(default=SecretStr(""))
     mt5_server: str = ""
+    mt5_terminal_path: str = ""
+    mt5_terminal_portable: bool = False
+    mt5_terminal_timeout_ms: int = 60000
     mt5_duplicate_order_cooldown_seconds: int = 20
     mt5_reconnect_cooldown_seconds: int = 15
     mt5_warning_cooldown_seconds: int = 30
     banker_heartbeat_interval_seconds: float = 3.0
     banker_ghost_fragmentation_enabled: bool = False
     banker_ghost_fragmentation_min_volume: float = 0.20
+    banker_copy_targets_json: str = ""
+    banker_copy_request_timeout_seconds: float = 10.0
 
     # Constitution Loi 2 - Limites de risque
     risk_max_daily_drawdown_percent: float = 4.0

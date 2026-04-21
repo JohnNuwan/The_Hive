@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from eva_banker.nemesis import NemesisSystem, get_nemesis_system
 from eva_banker.services.binance_service import BinanceService
+from eva_banker.services.copy_trading import CopyTradingRouter
 from eva_banker.services.traderepublic_client import TradeRepublicService
 from eva_banker.services.mt5 import MT5Service, get_mt5_service
 from eva_banker.services.news_filter import NewsFilterService
@@ -45,7 +46,8 @@ from shared import (
     TradingDecisionEnvelope,
     get_settings,
     BaseHealthResponse,
-)
+    OrderSource,
+    )
 from shared.auth_middleware import InternalAuthMiddleware
 from shared.probes import check_cognitive_sincerity
 from shared.redis_client import get_redis_client, init_redis
@@ -124,6 +126,9 @@ class OrderRequest(BaseModel):
         volume (Decimal): La taille du lot.
         stop_loss (Decimal | None): Prix du Stop Loss (Obligatoire).
         take_profit (Decimal | None): Prix du Take Profit (Optionnel).
+        account_id (UUID | None): Identifiant d'une cible distante optionnelle.
+        comment (str): Commentaire libre associe a l'ordre.
+        source (OrderSource): Origine metier de l'ordre.
     """
     symbol: str = Field(..., description="Symbole (ex: XAUUSD)")
     action: TradeAction
@@ -131,6 +136,8 @@ class OrderRequest(BaseModel):
     stop_loss: Decimal | None = Field(None, description="Prix Stop Loss (obligatoire)")
     take_profit: Decimal | None = None
     account_id: UUID | None = None
+    comment: str = Field(default="", description="Commentaire libre pour l'ordre")
+    source: OrderSource = Field(default=OrderSource.CHAT, description="Origine de l'ordre")
 
 
 class OrderResponse(BaseModel):
@@ -142,12 +149,14 @@ class OrderResponse(BaseModel):
         ticket (int | None): Le ticket MT5 gÃ©nÃ©rÃ©.
         message (str): Message descriptif du rÃ©sultat.
         risk_check (dict): DÃ©tails de la validation des risques.
+        copy_results (list[dict[str, Any]]): Resultats des copies distantes.
     """
     success: bool
     ticket: int | None = None
     order_id: UUID | None = None
     message: str
     risk_check: dict[str, Any] = {}
+    copy_results: list[dict[str, Any]] = []
 
 
 class RiskCheckRequest(BaseModel):
@@ -165,6 +174,19 @@ class RiskCheckRequest(BaseModel):
     volume: Decimal
     stop_loss: Decimal
     account_id: UUID | None = None
+
+
+class PositionModifyRequest(BaseModel):
+    """
+    Parametres de modification d'une position existante.
+
+    Attributes:
+        stop_loss (Decimal | None): Nouveau niveau de stop loss.
+        take_profit (Decimal | None): Nouveau niveau de take profit.
+    """
+
+    stop_loss: Decimal | None = None
+    take_profit: Decimal | None = None
 
 
 class RiskCheckResponse(BaseModel):
@@ -421,6 +443,152 @@ async def _close_optional_service(service_name: str, service: Any) -> None:
         logger.warning("Fermeture partielle du service %s: %s", service_name, exc)
 
 
+class FollowerAutoEngineStub:
+    """
+    Fournit un moteur minimal lorsque le banker tourne en mode follower.
+
+    Ce stub preserve les endpoints transverses sans lancer la pile complete
+    d'auto-trading, inutile pour une instance de copy trading.
+    """
+
+    def __init__(self) -> None:
+        self.is_active = False
+        self._cpu_live_mode = False
+        self.symbols: list[str] = []
+        self.latest_decisions: list[dict[str, Any]] = []
+
+    async def start(self) -> None:
+        """N'effectue aucune action en mode follower."""
+
+    async def stop(self) -> None:
+        """N'effectue aucune action en mode follower."""
+
+    async def refresh_symbol_universe(self, force: bool = False) -> None:
+        """
+        Ignore tout recalcul d'univers en mode follower.
+
+        Args:
+            force (bool): Parametre conserve pour compatibilite.
+        """
+
+    def get_symbol_batch(self, advance: bool = False) -> list[str]:
+        """
+        Retourne une liste vide en mode follower.
+
+        Args:
+            advance (bool): Parametre conserve pour compatibilite.
+
+        Returns:
+            list[str]: Liste vide.
+        """
+        return []
+
+    def get_runtime_mode_status(self) -> dict[str, Any]:
+        """
+        Retourne un statut runtime minimal pour les endpoints de supervision.
+
+        Returns:
+            dict[str, Any]: Statut de maintenance pour une instance follower.
+        """
+        return {
+            "runtime_mode": RuntimeMode.MAINTENANCE.value,
+            "runtime_profile": "follower",
+            "shadow_learning_mode": "disabled",
+            "force_maintenance": False,
+        }
+
+    def get_execution_mechanics_status(self) -> dict[str, Any]:
+        """
+        Retourne un statut d'execution minimal.
+
+        Returns:
+            dict[str, Any]: Vue minimale des mecanismes d'execution.
+        """
+        return {
+            "live_family": "follower",
+            "selection_policy_required": "copy_only",
+            "ensemble_ready": False,
+            "ensemble_active": False,
+            "muzero_can_activate_live": False,
+            "dreamer_can_activate_live": False,
+            "active_live_engine": None,
+        }
+
+    def get_decision_audit_snapshot(self) -> dict[str, Any]:
+        """
+        Retourne un audit vide des decisions.
+
+        Returns:
+            dict[str, Any]: Snapshot vide.
+        """
+        return {
+            "recent": [],
+            "ensemble_decision_stats": {},
+        }
+
+    def get_live_universe_status(self) -> dict[str, Any]:
+        """
+        Retourne un etat d'univers live neutre.
+
+        Returns:
+            dict[str, Any]: Statut minimal de l'univers live.
+        """
+        return {
+            "source": "follower",
+            "horizon": "copy",
+            "symbols": [],
+        }
+
+    def get_latest_trading_review_metadata(self) -> dict[str, Any]:
+        """
+        Retourne l'absence de revue live.
+
+        Returns:
+            dict[str, Any]: Metadonnees vides.
+        """
+        return {}
+
+    def get_latest_trading_review(self) -> dict[str, Any]:
+        """
+        Retourne une reponse neutre pour les endpoints de revue.
+
+        Returns:
+            dict[str, Any]: Reponse de mode follower.
+        """
+        return {
+            "status": "disabled",
+            "reason": "follower_mode",
+        }
+
+    async def generate_trading_review(
+        self,
+        period_start: datetime,
+        period_end: datetime,
+        period_name: str,
+        report_kind: str,
+    ) -> dict[str, Any]:
+        """
+        Retourne une reponse neutre pour une revue demandee en mode follower.
+
+        Args:
+            period_start (datetime): Debut demande.
+            period_end (datetime): Fin demandee.
+            period_name (str): Libelle demande.
+            report_kind (str): Type de rapport demande.
+
+        Returns:
+            dict[str, Any]: Reponse de neutralisation.
+        """
+        return {
+            "status": "disabled",
+            "reason": "follower_mode",
+            "period_start": period_start.isoformat(),
+            "period_end": period_end.isoformat(),
+            "period_name": period_name,
+            "report_kind": report_kind,
+        }
+
+
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # LIFECYCLE
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -439,6 +607,7 @@ async def lifespan(app: FastAPI):
     """
     logger.info("ðŸ¦ DÃ©marrage The Banker (Architecture HiÃ©rarchique)...")
     settings = get_settings()
+    follower_mode = bool(getattr(settings, "banker_follower_mode", False))
 
     # Redis
     try:
@@ -449,16 +618,22 @@ async def lifespan(app: FastAPI):
 
     # Services
     app.state.settings = settings
-    app.state.mt5_service = get_mt5_service()
+    app.state.primary_mt5_service = get_mt5_service()
+    app.state.mt5_service = CopyTradingRouter(app.state.primary_mt5_service)
+    await app.state.mt5_service.initialize()
     app.state.risk_validator = get_risk_validator()
     app.state.binance_service = BinanceService()
     app.state.tr_service = TradeRepublicService()
     app.state.background_tasks = []
+    app.state.follower_mode = follower_mode
     
-    # CCXT Init
-    await app.state.binance_service.initialize()
-    # TR Init
-    await app.state.tr_service.initialize()
+    if not follower_mode:
+        # CCXT Init
+        await app.state.binance_service.initialize()
+        # TR Init
+        await app.state.tr_service.initialize()
+    else:
+        logger.info("Mode follower actif: connecteurs secondaires non initialises.")
 
     # HiÃ©rarchie
     app.state.skill_library = SkillLibrary()
@@ -467,13 +642,16 @@ async def lifespan(app: FastAPI):
     app.state.ghost_shield = GhostShield(app.state.mt5_service)
     app.state.worker = BankerWorker(app.state.mt5_service, app.state.ghost_shield)
 
-    # Auto-Trading Engine (Weekend Drift -> DÃ©rive de Week-end)
-    app.state.auto_engine = AutoTradingEngine(
-        manager=app.state.manager,
-        worker=app.state.worker,
-        mt5=app.state.mt5_service,
-        risk=app.state.risk_validator
-    )
+    if follower_mode:
+        app.state.auto_engine = FollowerAutoEngineStub()
+    else:
+        # Auto-Trading Engine (Weekend Drift -> DÃ©rive de Week-end)
+        app.state.auto_engine = AutoTradingEngine(
+            manager=app.state.manager,
+            worker=app.state.worker,
+            mt5=app.state.mt5_service,
+            risk=app.state.risk_validator
+        )
 
     # SystÃ¨me Nemesis
     app.state.nemesis = get_nemesis_system()
@@ -489,34 +667,46 @@ async def lifespan(app: FastAPI):
     app.state.request_count = 0
     app.state.error_count = 0
 
-    # IntÃ©gration SWARM (Essaim)
-    app.state.swarm = BankerSwarm()
-    await app.state.swarm.init_mqtt()
+    if follower_mode:
+        app.state.swarm = None
+    else:
+        # IntÃ©gration SWARM (Essaim)
+        app.state.swarm = BankerSwarm()
+        await app.state.swarm.init_mqtt()
 
     # Connexion MT5
-    mt5_service: MT5Service = app.state.mt5_service
+    mt5_service = app.state.mt5_service
     if await mt5_service.connect():
         logger.info("âœ… MT5 connectÃ©")
-        # Detecter l'univers reel puis preparer le premier lot de scan.
-        await app.state.auto_engine.refresh_symbol_universe(force=True)
-        await mt5_service.initialize_symbols(app.state.auto_engine.get_symbol_batch(advance=False))
-        
-        # DÃ‰MARRAGE AU LANCEMENT (Seulement aprÃ¨s connexion rÃ©ussie)
-        await app.state.auto_engine.start()
-        logger.info("ðŸš€ Auto-Trading Engine Started")
+        if not follower_mode:
+            # Detecter l'univers reel puis preparer le premier lot de scan.
+            await app.state.auto_engine.refresh_symbol_universe(force=True)
+            await mt5_service.initialize_symbols(app.state.auto_engine.get_symbol_batch(advance=False))
+            
+            # DÃ‰MARRAGE AU LANCEMENT (Seulement aprÃ¨s connexion rÃ©ussie)
+            await app.state.auto_engine.start()
+            logger.info("ðŸš€ Auto-Trading Engine Started")
+        else:
+            logger.info("Mode follower actif: auto-trading et univers live desactives.")
     else:
         logger.error(
             "MT5 indisponible: auto-trading non demarre et aucun repli mock n'est autorise en mode reel."
         )
 
     app.state.background_tasks = [
-        asyncio.create_task(swarm_listener(), name="banker_swarm_listener"),
         asyncio.create_task(hard_heartbeat(), name="banker_hard_heartbeat"),
-        asyncio.create_task(
-            app.state.news_filter.start_monitoring(),
-            name="banker_news_filter",
-        ),
     ]
+    if not follower_mode:
+        app.state.background_tasks.insert(
+            0,
+            asyncio.create_task(swarm_listener(), name="banker_swarm_listener"),
+        )
+        app.state.background_tasks.append(
+            asyncio.create_task(
+                app.state.news_filter.start_monitoring(),
+                name="banker_news_filter",
+            ),
+        )
 
     logger.info("âœ… The Banker (SWARM MODE) READY")
 
@@ -756,29 +946,33 @@ async def create_order(request: OrderRequest) -> OrderResponse:
             detail="Stop Loss obligatoire (ROE Trading: aucun trade sans SL)",
         )
 
-    # 2. Le Manager dÃ©finit la stratÃ©gie (Skill)
-    manager: BankerManager = app.state.manager
-    # Simulation de donnÃ©es de marchÃ© pour le manager (incluant VaR)
-    market_data = {"price": 2034.50, "returns": [0.001, -0.002, 0.005]}
-    skill = manager.plan_strategy(market_data)
+    if request.source == OrderSource.COPY:
+        skill = "COPY_ROUTER"
+    else:
+        # 2. Le Manager definit la strategie (Skill)
+        manager: BankerManager = app.state.manager
+        # Simulation de donnees de marche pour le manager (incluant VaR)
+        market_data = {"price": 2034.50, "returns": [0.001, -0.002, 0.005]}
+        skill = manager.plan_strategy(market_data)
 
-    # 3. VÃ©rification de la "SincÃ©ritÃ© Cognitive"
-    # On simule l'obtention des activations du LLM
-    import torch
-    mock_activations = torch.randn(1, 4096)
-    is_sincere, sincerity_msg = check_cognitive_sincerity(
-        mock_activations,
-        "The market shows a strong bullish trend on H4.",
-        request.action
-    )
+        # 3. Verification de la sincerite cognitive
+        # Le filtre reste reserve aux ordres decides localement.
+        import torch
 
-    if not is_sincere:
-        logger.warning(f"ðŸš« BLOCKING ORDER: {sincerity_msg}")
-        return OrderResponse(
-            success=False,
-            message=sincerity_msg,
-            risk_check={"allowed": False, "reason": "COGNITIVE_SINCERITY_FAILURE"}
+        mock_activations = torch.randn(1, 4096)
+        is_sincere, sincerity_msg = check_cognitive_sincerity(
+            mock_activations,
+            "The market shows a strong bullish trend on H4.",
+            request.action
         )
+
+        if not is_sincere:
+            logger.warning("Ordre bloque par sincerite cognitive: %s", sincerity_msg)
+            return OrderResponse(
+                success=False,
+                message=sincerity_msg,
+                risk_check={"allowed": False, "reason": "COGNITIVE_SINCERITY_FAILURE"},
+            )
 
     # 4. Conversion en TradeOrder
     order = TradeOrder(
@@ -788,7 +982,8 @@ async def create_order(request: OrderRequest) -> OrderResponse:
         stop_loss_price=request.stop_loss,
         take_profit_price=request.take_profit,
         account_id=request.account_id,
-        comment=f"Skill: {skill}"
+        comment=request.comment or f"Skill: {skill}",
+        source=request.source,
     )
 
     # 5. VÃ©rification des risques (Loi 2)
@@ -810,8 +1005,9 @@ async def create_order(request: OrderRequest) -> OrderResponse:
         success=result["success"],
         ticket=result.get("ticket"),
         order_id=order.id,
-        message=f"ExÃ©cutÃ© avec succÃ¨s via {skill}",
+        message=result.get("message", f"Execution traitee via {skill}"),
         risk_check=risk_result,
+        copy_results=result.get("copy_results", []),
     )
 
 
@@ -868,6 +1064,24 @@ async def close_position(ticket: int) -> dict[str, Any]:
         logger.error(f"Erreur notification trade: {e}")
 
     return result
+
+
+@app.post("/positions/{ticket}/modify", tags=["Trading"])
+async def modify_position(ticket: int, request: PositionModifyRequest) -> dict[str, Any]:
+    """
+    Modifie les niveaux de protection d'une position ouverte.
+
+    Args:
+        ticket (int): Ticket MT5 de la position a modifier.
+        request (PositionModifyRequest): Nouveaux niveaux SL/TP demandes.
+
+    Returns:
+        dict[str, Any]: Resultat local et, si actif, details de propagation.
+    """
+    mt5_service = app.state.mt5_service
+    stop_loss = float(request.stop_loss) if request.stop_loss is not None else 0.0
+    take_profit = float(request.take_profit) if request.take_profit is not None else 0.0
+    return await mt5_service.modify_position(ticket, sl=stop_loss, tp=take_profit)
 
 
 @app.get("/account", response_model=AccountBalance, tags=["Compte"])
@@ -1120,6 +1334,9 @@ async def get_trading_status():
             "mt5_connected": mt5_service.is_connected,
             "mock_mode": mt5_service.mock_mode,
         },
+        "copy_trading": {
+            "targets": getattr(app.state.mt5_service, "get_targets_status", lambda: [])(),
+        },
         "topology": {
             "execution_authority": "banker_local_mt5",
             "server_role": "modeles_supervision_memoire",
@@ -1340,22 +1557,63 @@ async def get_propfirm_accounts():
     Returns:
         list[dict]: Liste des comptes financÃ©s.
     """
-    mt5_service: MT5Service = app.state.mt5_service
+    mt5_service = app.state.mt5_service
     account = await mt5_service.get_account_info()
-    if account is None:
-        return []
+    local_accounts = []
+    if account is not None:
+        local_accounts.append(
+            {
+                "id": str(account.login),
+                "name": f"Account {account.login}",
+                "server": account.server,
+                "balance": float(account.balance),
+                "equity": float(account.equity),
+                "phase": "CHALLENGE",
+                "status": "active",
+                "max_drawdown": 4.0,
+                "daily_drawdown": 0.0,
+                "copy_role": "master",
+            }
+        )
 
-    # En mode lite, on retourne le compte principal comme un "prop firm account"
-    return [
-        {
-            "id": str(account.login),
-            "name": f"Account {account.login}",
-            "server": account.server,
-            "balance": float(account.balance),
-            "equity": float(account.equity),
-            "phase": "CHALLENGE",
-            "status": "active",
-            "max_drawdown": 4.0,
-            "daily_drawdown": 0.0,
-        }
-    ]
+    remote_accounts = []
+    target_status_getter = getattr(mt5_service, "get_targets_status", None)
+    if callable(target_status_getter):
+        for target in target_status_getter():
+            remote_accounts.append(
+                {
+                    "id": target["id"],
+                    "name": target["name"],
+                    "server": target.get("server"),
+                    "balance": None,
+                    "equity": None,
+                    "phase": target.get("phase", "funded"),
+                    "status": "active" if target.get("enabled", False) else "disabled",
+                    "max_drawdown": None,
+                    "daily_drawdown": None,
+                    "copy_role": "follower",
+                    "banker_base_url": target.get("banker_base_url"),
+                    "allocation_ratio": target.get("allocation_ratio"),
+                    "broker": target.get("broker"),
+                    "terminal_label": target.get("terminal_label"),
+                }
+            )
+
+    return local_accounts + remote_accounts
+
+
+@app.get("/copy-trading/status", tags=["Trading"])
+async def get_copy_trading_status() -> dict[str, Any]:
+    """
+    Retourne l'etat du routage de copy trading multi-instances.
+
+    Returns:
+        dict[str, Any]: Liste des cibles configurees et activation du module.
+    """
+    mt5_service = app.state.mt5_service
+    target_status_getter = getattr(mt5_service, "get_targets_status", None)
+    targets = target_status_getter() if callable(target_status_getter) else []
+    return {
+        "enabled": bool(targets),
+        "targets": targets,
+    }

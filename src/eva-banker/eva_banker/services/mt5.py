@@ -92,7 +92,28 @@ class MT5Service:
     - Mode mock (dÃ©veloppement / paper trading)
     """
 
-    def __init__(self, mock_mode: bool = True, login: int = 0, password: str = "", server: str = ""):
+    def __init__(
+        self,
+        mock_mode: bool = True,
+        login: int = 0,
+        password: str = "",
+        server: str = "",
+        terminal_path: str = "",
+        terminal_portable: bool = False,
+        terminal_timeout_ms: int = 60000,
+    ):
+        """
+        Initialise le service MT5 avec les identifiants et le terminal cible.
+
+        Args:
+            mock_mode (bool): Active le mode mock si True.
+            login (int): Login MT5 a utiliser en mode reel.
+            password (str): Mot de passe du compte MT5.
+            server (str): Serveur MT5 associe au compte.
+            terminal_path (str): Chemin du terminal MT5 a piloter.
+            terminal_portable (bool): Active le mode portable du terminal si True.
+            terminal_timeout_ms (int): Timeout d'initialisation du terminal en millisecondes.
+        """
         settings = get_settings()
         self._explicit_mock_mode = bool(mock_mode)
         self.mock_mode = self._explicit_mock_mode
@@ -120,13 +141,34 @@ class MT5Service:
         self._login = login
         self._password = password
         self._server = server
+        self._terminal_path = str(terminal_path or "").strip()
+        self._terminal_portable = bool(terminal_portable)
+        self._terminal_timeout_ms = max(1000, int(terminal_timeout_ms or 60000))
         logger.info(
-            "MT5Service initialise (mock_explicite=%s, mock_actif=%s, login=%s, server=%s)",
+            "MT5Service initialise (mock_explicite=%s, mock_actif=%s, login=%s, server=%s, terminal=%s, portable=%s)",
             self._explicit_mock_mode,
             self.mock_mode,
             login,
             server,
+            self._terminal_path or "<terminal-auto>",
+            self._terminal_portable,
         )
+
+    def _build_initialize_kwargs(self) -> dict[str, Any]:
+        """
+        Construit les parametres d'initialisation du terminal MT5.
+
+        Returns:
+            dict[str, Any]: Parametres compatibles avec `MetaTrader5.initialize`.
+        """
+        init_kwargs: dict[str, Any] = {
+            "timeout": self._terminal_timeout_ms,
+        }
+        if self._terminal_path:
+            init_kwargs["path"] = self._terminal_path
+        if self._terminal_portable:
+            init_kwargs["portable"] = True
+        return init_kwargs
 
     def _live_mode_requested(self) -> bool:
         """
@@ -331,7 +373,8 @@ class MT5Service:
 
         try:
             # Initialisation MT5
-            if not await asyncio.to_thread(mt5.initialize):
+            init_kwargs = self._build_initialize_kwargs()
+            if not await asyncio.to_thread(mt5.initialize, **init_kwargs):
                 self._mark_live_disconnected(f"Echec d'initialisation MT5: {mt5.last_error()}")
                 return False
 
@@ -1681,4 +1724,7 @@ def get_mt5_service() -> MT5Service:
         login=settings.mt5_login,
         password=settings.mt5_password.get_secret_value(),
         server=settings.mt5_server,
+        terminal_path=settings.mt5_terminal_path,
+        terminal_portable=settings.mt5_terminal_portable,
+        terminal_timeout_ms=settings.mt5_terminal_timeout_ms,
     )

@@ -403,6 +403,10 @@ class ChampionPromoter:
         directional_bias = str(metrics.get("directional_bias") or "").lower()
         if not checks.get("directional_entries", True):
             return "inactive"
+        if not checks.get("long_entries_present", True):
+            return "sell_heavy"
+        if not checks.get("short_entries_present", True):
+            return "buy_heavy"
         if directional_bias == "sell_heavy":
             return "sell_heavy"
         if directional_bias == "buy_heavy":
@@ -503,6 +507,8 @@ class ChampionPromoter:
             "total_trades": total_trades >= thresholds["min_total_trades"],
             "max_drawdown_pct": max_drawdown_pct <= thresholds["max_drawdown_pct"],
             "directional_entries": (long_entries + short_entries) > 0,
+            "long_entries_present": long_entries > 0,
+            "short_entries_present": short_entries > 0,
         }
 
         if thresholds["require_positive_metrics"]:

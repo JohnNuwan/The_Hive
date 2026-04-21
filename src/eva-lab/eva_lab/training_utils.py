@@ -882,6 +882,10 @@ def _upgrade_scalp_position_mechanics_profile_v2(
                 "min_entry_share": 0.20,
                 "max_directional_imbalance": 0.60,
                 "imbalance_penalty": 8.0,
+                "hard_veto_after_entries": 4,
+                "hard_veto_max_share": 0.80,
+                "final_max_directional_imbalance": 0.40,
+                "rebalance_bonus": 0.35,
             },
             "reward_policy": {
                 "realized_reward_multiplier": 1.35,
@@ -939,6 +943,10 @@ def _upgrade_scalp_position_mechanics_profile_v2(
                 "min_entry_share": 0.18,
                 "max_directional_imbalance": 0.65,
                 "imbalance_penalty": 7.0,
+                "hard_veto_after_entries": 4,
+                "hard_veto_max_share": 0.80,
+                "final_max_directional_imbalance": 0.40,
+                "rebalance_bonus": 0.35,
             },
             "reward_policy": {
                 "realized_reward_multiplier": 1.30,
@@ -996,6 +1004,10 @@ def _upgrade_scalp_position_mechanics_profile_v2(
                 "min_entry_share": 0.18,
                 "max_directional_imbalance": 0.65,
                 "imbalance_penalty": 7.0,
+                "hard_veto_after_entries": 4,
+                "hard_veto_max_share": 0.80,
+                "final_max_directional_imbalance": 0.40,
+                "rebalance_bonus": 0.35,
             },
             "reward_policy": {
                 "realized_reward_multiplier": 1.40,
@@ -1053,6 +1065,10 @@ def _upgrade_scalp_position_mechanics_profile_v2(
                 "min_entry_share": 0.18,
                 "max_directional_imbalance": 0.68,
                 "imbalance_penalty": 7.0,
+                "hard_veto_after_entries": 4,
+                "hard_veto_max_share": 0.80,
+                "final_max_directional_imbalance": 0.40,
+                "rebalance_bonus": 0.35,
             },
             "reward_policy": {
                 "realized_reward_multiplier": 1.35,
@@ -1307,6 +1323,30 @@ def _apply_position_mechanics_env_overrides(profile: dict[str, Any]) -> dict[str
         "directional_policy",
         "imbalance_penalty",
         "MUZERO_DIRECTIONAL_IMBALANCE_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "directional_policy",
+        "hard_veto_after_entries",
+        "MUZERO_DIRECTIONAL_HARD_VETO_AFTER_ENTRIES",
+        lambda env_name, current: _env_int(env_name, int(current or 0)),
+    )
+    apply_value(
+        "directional_policy",
+        "hard_veto_max_share",
+        "MUZERO_DIRECTIONAL_HARD_VETO_MAX_SHARE",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "directional_policy",
+        "final_max_directional_imbalance",
+        "MUZERO_DIRECTIONAL_FINAL_MAX_IMBALANCE",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "directional_policy",
+        "rebalance_bonus",
+        "MUZERO_DIRECTIONAL_REBALANCE_BONUS",
         lambda env_name, current: _env_float(env_name, float(current or 0.0)),
     )
     apply_value(

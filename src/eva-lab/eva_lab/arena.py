@@ -60,6 +60,19 @@ POSITION_MECHANICS_KEYS = (
     "realized_close_bonus_count",
     "realized_split_bonus_count",
     "slbe_exit_bonus_count",
+    "requested_buy_actions",
+    "requested_sell_actions",
+    "blocked_buy_entries",
+    "blocked_sell_entries",
+    "blocked_buy_vwap",
+    "blocked_sell_vwap",
+    "blocked_buy_adx",
+    "blocked_sell_adx",
+    "blocked_buy_obv",
+    "blocked_sell_obv",
+    "blocked_buy_directional",
+    "blocked_sell_directional",
+    "entry_veto_to_hold",
 )
 
 POSITION_MECHANICS_RATIO_KEYS = {
@@ -190,8 +203,19 @@ class Arena:
             "sell_share": 0.0,
             "long_entry_share": 0.0,
             "short_entry_share": 0.0,
+            "executed_long_entry_share": 0.0,
+            "executed_short_entry_share": 0.0,
             "directional_imbalance": 1.0,
             "directional_bias": "inactive",
+            "balanced_episode_rate": 0.0,
+            "episodes_long_present_rate": 0.0,
+            "episodes_short_present_rate": 0.0,
+            "veto_to_hold_rate": 0.0,
+            "net_return_long_pct": 0.0,
+            "net_return_short_pct": 0.0,
+            "blocked_buy_total": 0.0,
+            "blocked_sell_total": 0.0,
+            "directional_collapse": True,
             "directional_by_symbol": {},
             "metrics_by_symbol": {},
             "metrics_by_position_mechanics": {},
@@ -245,6 +269,26 @@ class Arena:
         if best_day_net_return_pct >= stretch_target_pct and days_above_10pct > 0.0:
             stretch_bonus += stretch_score_bonus
             stretch_bonus += min(days_above_10pct, 3.0) * (stretch_score_bonus * 0.25)
+        directional_bias = str(metrics.get("directional_bias") or "inactive").strip().lower()
+        directional_penalty = 0.0
+        if directional_bias != "balanced":
+            directional_penalty -= 8.0
+        raw_directional_imbalance = metrics.get("directional_imbalance", 1.0)
+        try:
+            directional_imbalance = float(raw_directional_imbalance)
+        except (TypeError, ValueError):
+            directional_imbalance = 1.0
+        directional_penalty -= 12.0 * max(0.0, directional_imbalance - 0.25)
+        if int(metrics.get("long_entries", 0) or 0) <= 0 or int(metrics.get("short_entries", 0) or 0) <= 0:
+            directional_penalty -= 6.0
+        directional_by_symbol = dict(metrics.get("directional_by_symbol") or {})
+        heavy_symbols = sum(
+            1
+            for symbol_metrics in directional_by_symbol.values()
+            if str((symbol_metrics or {}).get("directional_bias") or "inactive").strip().lower()
+            in {"buy_heavy", "sell_heavy"}
+        )
+        directional_penalty -= min(12.0, heavy_symbols * 3.0)
         return (
             float(metrics.get("return_pct", 0.0)) * 8.0
             + max(0.0, profit_factor - 1.0) * 18.0
@@ -253,6 +297,7 @@ class Arena:
             + float(metrics.get("positive_episode_rate", 0.0)) * 0.06
             - float(metrics.get("max_drawdown_pct", 0.0)) * 1.5
             + stretch_bonus
+            + directional_penalty
         )
 
     @staticmethod
@@ -304,6 +349,24 @@ class Arena:
             "close_actions": 0,
             "long_entries": 0,
             "short_entries": 0,
+            "long_present_games": 0,
+            "short_present_games": 0,
+            "balanced_games": 0,
+            "entry_veto_to_hold": 0,
+            "requested_buy_actions": 0,
+            "requested_sell_actions": 0,
+            "blocked_buy_entries": 0,
+            "blocked_sell_entries": 0,
+            "blocked_buy_vwap": 0,
+            "blocked_sell_vwap": 0,
+            "blocked_buy_adx": 0,
+            "blocked_sell_adx": 0,
+            "blocked_buy_obv": 0,
+            "blocked_sell_obv": 0,
+            "blocked_buy_directional": 0,
+            "blocked_sell_directional": 0,
+            "net_return_long_pct": 0.0,
+            "net_return_short_pct": 0.0,
             "ema200_blocked_buy": 0,
             "ema200_blocked_sell": 0,
             "metrics_by_position_mechanics": {},
@@ -382,6 +445,19 @@ class Arena:
             "realized_close_bonus_count": int(state.get("realized_close_bonus_count", 0) or 0),
             "realized_split_bonus_count": int(state.get("realized_split_bonus_count", 0) or 0),
             "slbe_exit_bonus_count": int(state.get("slbe_exit_bonus_count", 0) or 0),
+            "requested_buy_actions": int(state.get("requested_buy_actions", 0) or 0),
+            "requested_sell_actions": int(state.get("requested_sell_actions", 0) or 0),
+            "blocked_buy_entries": int(state.get("blocked_buy_entries", 0) or 0),
+            "blocked_sell_entries": int(state.get("blocked_sell_entries", 0) or 0),
+            "blocked_buy_vwap": int(state.get("blocked_buy_vwap", 0) or 0),
+            "blocked_sell_vwap": int(state.get("blocked_sell_vwap", 0) or 0),
+            "blocked_buy_adx": int(state.get("blocked_buy_adx", 0) or 0),
+            "blocked_sell_adx": int(state.get("blocked_sell_adx", 0) or 0),
+            "blocked_buy_obv": int(state.get("blocked_buy_obv", 0) or 0),
+            "blocked_sell_obv": int(state.get("blocked_sell_obv", 0) or 0),
+            "blocked_buy_directional": int(state.get("blocked_buy_directional", 0) or 0),
+            "blocked_sell_directional": int(state.get("blocked_sell_directional", 0) or 0),
+            "entry_veto_to_hold": int(state.get("entry_veto_to_hold", 0) or 0),
             "mechanics_profile_version": str(state.get("mechanics_profile_version") or "") or None,
         }
 
@@ -420,6 +496,15 @@ class Arena:
         close_actions = int(state.get("close_actions", 0) or 0)
         long_entries = int(state.get("long_entries", 0) or 0)
         short_entries = int(state.get("short_entries", 0) or 0)
+        balanced_games = int(state.get("balanced_games", 0) or 0)
+        long_present_games = int(state.get("long_present_games", 0) or 0)
+        short_present_games = int(state.get("short_present_games", 0) or 0)
+        requested_buy_actions = int(state.get("requested_buy_actions", 0) or 0)
+        requested_sell_actions = int(state.get("requested_sell_actions", 0) or 0)
+        blocked_buy_entries = int(state.get("blocked_buy_entries", 0) or 0)
+        blocked_sell_entries = int(state.get("blocked_sell_entries", 0) or 0)
+        net_return_long_pct = float(state.get("net_return_long_pct", 0.0) or 0.0)
+        net_return_short_pct = float(state.get("net_return_short_pct", 0.0) or 0.0)
         ema200_blocked_buy = int(state.get("ema200_blocked_buy", 0) or 0)
         ema200_blocked_sell = int(state.get("ema200_blocked_sell", 0) or 0)
         metrics_by_symbol = dict(state.get("metrics_by_symbol") or {})
@@ -447,12 +532,18 @@ class Arena:
         sell_share = sell_actions / max(directional_actions, 1)
         long_entry_share = long_entries / max(directional_entries, 1)
         short_entry_share = short_entries / max(directional_entries, 1)
+        executed_long_entry_share = long_entry_share
+        executed_short_entry_share = short_entry_share
         directional_imbalance = (
             abs(long_entries - short_entries) / directional_entries
             if directional_entries > 0
             else 1.0
         )
         directional_bias = self._classify_directional_bias(long_entries, short_entries)
+        veto_to_hold_rate = float(state.get("entry_veto_to_hold", 0.0) or 0.0) / max(
+            requested_buy_actions + requested_sell_actions,
+            1,
+        )
         finalized_symbol_metrics: dict[str, dict[str, float]] = {}
         directional_by_symbol: dict[str, dict[str, float]] = {}
         global_position_mechanics = self._compute_position_mechanics_metrics(state)
@@ -467,6 +558,13 @@ class Arena:
             symbol_sell_actions = int(raw_metrics.get("sell_actions", 0) or 0)
             symbol_long_entries = int(raw_metrics.get("long_entries", 0) or 0)
             symbol_short_entries = int(raw_metrics.get("short_entries", 0) or 0)
+            symbol_balanced_games = int(raw_metrics.get("balanced_games", 0) or 0)
+            symbol_long_present_games = int(raw_metrics.get("long_present_games", 0) or 0)
+            symbol_short_present_games = int(raw_metrics.get("short_present_games", 0) or 0)
+            symbol_requested_buy_actions = int(raw_metrics.get("requested_buy_actions", 0) or 0)
+            symbol_requested_sell_actions = int(raw_metrics.get("requested_sell_actions", 0) or 0)
+            symbol_blocked_buy_entries = int(raw_metrics.get("blocked_buy_entries", 0) or 0)
+            symbol_blocked_sell_entries = int(raw_metrics.get("blocked_sell_entries", 0) or 0)
             symbol_directional_actions = symbol_buy_actions + symbol_sell_actions
             symbol_directional_entries = symbol_long_entries + symbol_short_entries
             symbol_return_pct = float(raw_metrics.get("return_sum", 0.0) or 0.0) / max(symbol_games, 1)
@@ -516,11 +614,23 @@ class Arena:
                 "sell_share": symbol_sell_actions / max(symbol_directional_actions, 1),
                 "long_entry_share": symbol_long_entries / max(symbol_directional_entries, 1),
                 "short_entry_share": symbol_short_entries / max(symbol_directional_entries, 1),
+                "executed_long_entry_share": symbol_long_entries / max(symbol_directional_entries, 1),
+                "executed_short_entry_share": symbol_short_entries / max(symbol_directional_entries, 1),
                 "directional_imbalance": (
                     abs(symbol_long_entries - symbol_short_entries) / symbol_directional_entries
                     if symbol_directional_entries > 0
                     else 1.0
                 ),
+                "balanced_episode_rate": (symbol_balanced_games / max(symbol_games, 1)) * 100.0,
+                "episodes_long_present_rate": (symbol_long_present_games / max(symbol_games, 1)) * 100.0,
+                "episodes_short_present_rate": (symbol_short_present_games / max(symbol_games, 1)) * 100.0,
+                "veto_to_hold_rate": float(raw_metrics.get("entry_veto_to_hold", 0.0) or 0.0)
+                / max(symbol_requested_buy_actions + symbol_requested_sell_actions, 1),
+                "net_return_long_pct": float(raw_metrics.get("net_return_long_pct", 0.0) or 0.0),
+                "net_return_short_pct": float(raw_metrics.get("net_return_short_pct", 0.0) or 0.0),
+                "blocked_buy_total": symbol_blocked_buy_entries,
+                "blocked_sell_total": symbol_blocked_sell_entries,
+                "directional_collapse": bool(symbol_long_entries <= 0 or symbol_short_entries <= 0),
                 "family": str(raw_metrics.get("family") or family),
                 "feature_profile": str(raw_metrics.get("feature_profile") or feature_profile),
                 "mechanics_profile_version": str(
@@ -542,6 +652,7 @@ class Arena:
                 "hold_actions": symbol_metrics_view["hold_actions"],
                 "long_entries": symbol_metrics_view["long_entries"],
                 "short_entries": symbol_metrics_view["short_entries"],
+                "balanced_episode_rate": symbol_metrics_view["balanced_episode_rate"],
                 "ema200_blocked_buy": symbol_metrics_view["ema200_blocked_buy"],
                 "ema200_blocked_sell": symbol_metrics_view["ema200_blocked_sell"],
                 "return_pct": symbol_metrics_view["return_pct"],
@@ -582,8 +693,19 @@ class Arena:
             "sell_share": sell_share,
             "long_entry_share": long_entry_share,
             "short_entry_share": short_entry_share,
+            "executed_long_entry_share": executed_long_entry_share,
+            "executed_short_entry_share": executed_short_entry_share,
             "directional_imbalance": directional_imbalance,
             "directional_bias": directional_bias,
+            "balanced_episode_rate": (balanced_games / evaluation_games) * 100.0,
+            "episodes_long_present_rate": (long_present_games / evaluation_games) * 100.0,
+            "episodes_short_present_rate": (short_present_games / evaluation_games) * 100.0,
+            "veto_to_hold_rate": veto_to_hold_rate,
+            "net_return_long_pct": net_return_long_pct,
+            "net_return_short_pct": net_return_short_pct,
+            "blocked_buy_total": blocked_buy_entries,
+            "blocked_sell_total": blocked_sell_entries,
+            "directional_collapse": bool(long_entries <= 0 or short_entries <= 0),
             "directional_by_symbol": directional_by_symbol,
             "metrics_by_symbol": finalized_symbol_metrics,
             "metrics_by_position_mechanics": global_position_mechanics,
@@ -837,6 +959,15 @@ class Arena:
             "close_actions": 0,
             "long_entries": 0,
             "short_entries": 0,
+            "balanced_games": 0,
+            "long_present_games": 0,
+            "short_present_games": 0,
+            "requested_buy_actions": 0,
+            "requested_sell_actions": 0,
+            "blocked_buy_entries": 0,
+            "blocked_sell_entries": 0,
+            "net_return_long_pct": 0.0,
+            "net_return_short_pct": 0.0,
             "ema200_blocked_buy": 0,
             "ema200_blocked_sell": 0,
             "hold_streak_mean_sum": 0.0,
@@ -920,6 +1051,15 @@ class Arena:
                 episode_close_actions = int(summary.get("close_actions", 0) or 0)
                 episode_long_entries = int(summary.get("long_entries", 0) or 0)
                 episode_short_entries = int(summary.get("short_entries", 0) or 0)
+                episode_balanced = bool(summary.get("balanced_episode", False))
+                episode_long_present = bool(summary.get("long_present", False))
+                episode_short_present = bool(summary.get("short_present", False))
+                episode_requested_buy_actions = int(summary.get("requested_buy_actions", 0) or 0)
+                episode_requested_sell_actions = int(summary.get("requested_sell_actions", 0) or 0)
+                episode_blocked_buy_entries = int(summary.get("blocked_buy_entries", 0) or 0)
+                episode_blocked_sell_entries = int(summary.get("blocked_sell_entries", 0) or 0)
+                episode_net_return_long_pct = float(summary.get("net_return_long_pct", 0.0) or 0.0)
+                episode_net_return_short_pct = float(summary.get("net_return_short_pct", 0.0) or 0.0)
                 episode_blocked_buy = int(summary.get("ema200_blocked_buy", 0) or 0)
                 episode_blocked_sell = int(summary.get("ema200_blocked_sell", 0) or 0)
 
@@ -930,6 +1070,15 @@ class Arena:
                 state["close_actions"] += episode_close_actions
                 state["long_entries"] += episode_long_entries
                 state["short_entries"] += episode_short_entries
+                state["balanced_games"] += int(episode_balanced)
+                state["long_present_games"] += int(episode_long_present)
+                state["short_present_games"] += int(episode_short_present)
+                state["requested_buy_actions"] += episode_requested_buy_actions
+                state["requested_sell_actions"] += episode_requested_sell_actions
+                state["blocked_buy_entries"] += episode_blocked_buy_entries
+                state["blocked_sell_entries"] += episode_blocked_sell_entries
+                state["net_return_long_pct"] += episode_net_return_long_pct
+                state["net_return_short_pct"] += episode_net_return_short_pct
                 state["ema200_blocked_buy"] += episode_blocked_buy
                 state["ema200_blocked_sell"] += episode_blocked_sell
                 mechanics_metrics = dict(summary.get("metrics_by_position_mechanics") or {})
@@ -973,6 +1122,15 @@ class Arena:
                 symbol_metrics["close_actions"] += episode_close_actions
                 symbol_metrics["long_entries"] += episode_long_entries
                 symbol_metrics["short_entries"] += episode_short_entries
+                symbol_metrics["balanced_games"] += int(episode_balanced)
+                symbol_metrics["long_present_games"] += int(episode_long_present)
+                symbol_metrics["short_present_games"] += int(episode_short_present)
+                symbol_metrics["requested_buy_actions"] += episode_requested_buy_actions
+                symbol_metrics["requested_sell_actions"] += episode_requested_sell_actions
+                symbol_metrics["blocked_buy_entries"] += episode_blocked_buy_entries
+                symbol_metrics["blocked_sell_entries"] += episode_blocked_sell_entries
+                symbol_metrics["net_return_long_pct"] += episode_net_return_long_pct
+                symbol_metrics["net_return_short_pct"] += episode_net_return_short_pct
                 symbol_metrics["ema200_blocked_buy"] += episode_blocked_buy
                 symbol_metrics["ema200_blocked_sell"] += episode_blocked_sell
                 symbol_metrics["family"] = str(summary.get("family") or state.get("family") or "mixed")
@@ -1270,13 +1428,30 @@ class Arena:
             len(eval_symbols),
             self._read_int_env("ARENA_MIN_SYMBOLS", 3),
         )
+        try:
+            challenger_directional_imbalance = float(challenger_metrics.get("directional_imbalance", 1.0))
+        except (TypeError, ValueError):
+            challenger_directional_imbalance = 1.0
+        challenger_directional_ok = (
+            int(challenger_metrics.get("long_entries", 0) or 0) > 0
+            and int(challenger_metrics.get("short_entries", 0) or 0) > 0
+            and challenger_directional_imbalance <= 0.75
+            and not (
+                str(challenger_metrics.get("directional_bias") or "inactive").strip().lower() != "balanced"
+                and float(challenger_metrics.get("profit_factor", 0.0) or 0.0) < 1.0
+            )
+        )
         sample_size_ok = (
             int(challenger_metrics.get("evaluation_games", 0)) >= min_games
             and int(challenger_metrics.get("evaluation_symbols", 0)) >= min_symbols
         )
 
         is_bootstrap = champion_path is None
-        is_victory = sample_size_ok and (is_bootstrap or challenger_score > (champion_score + min_score_edge))
+        is_victory = (
+            sample_size_ok
+            and challenger_directional_ok
+            and (is_bootstrap or challenger_score > (champion_score + min_score_edge))
+        )
 
         report = {
             "timestamp": datetime.now().isoformat(),
@@ -1298,6 +1473,7 @@ class Arena:
             "eval_symbols": eval_symbols,
             "validation": {
                 "sample_size_ok": sample_size_ok,
+                "directional_ok": challenger_directional_ok,
                 "min_games": min_games,
                 "min_symbols": min_symbols,
                 "score_edge_required": min_score_edge,
@@ -1318,7 +1494,15 @@ class Arena:
             "action_required": (
                 "BOOTSTRAP_CHAMPION"
                 if is_bootstrap and is_victory
-                else ("HOT_SWAP_DEPLOY" if is_victory else ("EXTEND_VALIDATION" if not sample_size_ok else "KEEP_CURRENT"))
+                else (
+                    "HOT_SWAP_DEPLOY"
+                    if is_victory
+                    else (
+                        "EXTEND_VALIDATION"
+                        if not sample_size_ok
+                        else ("REJECT_DIRECTIONAL_COLLAPSE" if not challenger_directional_ok else "KEEP_CURRENT")
+                    )
+                )
             ),
         }
         arena_progress["status"] = "completed"

@@ -123,6 +123,8 @@ class TradingEnvironment:
         symbol: str = "XAUUSD",
         config=None,
         max_steps: int = 1000,
+        training_mode: bool = False,
+        training_progress_step: int | None = None,
     ) -> None:
         """Initialise l'environnement de trading.
 
@@ -135,9 +137,19 @@ class TradingEnvironment:
             max_steps (int): Nombre maximum de pas par épisode.
         """
         self.symbol = symbol
+        self.config = config
         self.spec = SymbolSpec.for_symbol(symbol)
         self.max_steps_per_episode = max_steps
         self.commission_rate = 0.00005
+        self.training_mode = bool(training_mode)
+        self.training_progress_step = int(training_progress_step or 0)
+        self.randomize_episode_start = bool(
+            getattr(config, "randomize_episode_start", True)
+        ) if config is not None else True
+        self.episode_warmup_bars = max(
+            0,
+            int(getattr(config, "episode_warmup_bars", 100) or 0),
+        ) if config is not None else 100
 
         if config:
             self.quality_mult = config.quality_trade_bonus
@@ -188,6 +200,7 @@ class TradingEnvironment:
         self.day_labels = self._normalize_day_labels(day_labels, len(self.data))
         self.base_feature_count = self.data.shape[1]
         self.observation_dim = self.base_feature_count + 6
+        self._regime_start_indices = self._build_regime_start_indices()
         self._reset_state()
 
     def _generate_synthetic_data(self, n_steps: int = 5000) -> np.ndarray:
@@ -268,6 +281,63 @@ class TradingEnvironment:
             [str(label or f"day_{index:04d}") for index, label in enumerate(normalized)],
             dtype=object,
         )
+
+    def _classify_regime(self, step_index: int) -> str:
+        """Classe un index de marche dans un regime simple bull/bear/range.
+
+        Args:
+            step_index (int): Index de barre cible.
+
+        Returns:
+            str: Regime estime (`bull`, `bear` ou `range`).
+        """
+        if len(self.data) <= 0:
+            return "range"
+
+        index = max(0, min(step_index, len(self.data) - 1))
+        close_price = float(self.data[index, 3])
+        ema_200 = (
+            float(self.data[index, MARKET_COL_EMA_200])
+            if self.base_feature_count > MARKET_COL_EMA_200
+            else close_price
+        )
+        slope_anchor = max(0, index - 12)
+        previous_ema = (
+            float(self.data[slope_anchor, MARKET_COL_EMA_200])
+            if self.base_feature_count > MARKET_COL_EMA_200
+            else ema_200
+        )
+        return_anchor = max(0, index - 48)
+        previous_close = float(self.data[return_anchor, 3])
+        return_48bars = (
+            (close_price - previous_close) / max(abs(previous_close), 1e-8)
+            if return_anchor != index
+            else 0.0
+        )
+        ema_slope = ema_200 - previous_ema
+
+        if close_price > ema_200 and ema_slope > 0.0 and return_48bars > 0.003:
+            return "bull"
+        if close_price < ema_200 and ema_slope < 0.0 and return_48bars < -0.003:
+            return "bear"
+        return "range"
+
+    def _build_regime_start_indices(self) -> dict[str, list[int]]:
+        """Construit les points de depart valides regroupes par regime.
+
+        Returns:
+            dict[str, list[int]]: Index de depart candidats par regime.
+        """
+        max_available_index = max(0, len(self.data) - 2)
+        min_start_index = min(self.episode_warmup_bars, max_available_index)
+        max_start_index = max(
+            min_start_index,
+            max_available_index - max(0, int(self.max_steps_per_episode)),
+        )
+        buckets = {"bull": [], "bear": [], "range": []}
+        for index in range(min_start_index, max_start_index + 1):
+            buckets[self._classify_regime(index)].append(index)
+        return buckets
 
     def _get_temporal_features(self, step_index: int) -> tuple[float, float]:
         """Construit des features temporelles a partir des jours reels.
@@ -385,7 +455,7 @@ class TradingEnvironment:
 
     def _reset_state(self) -> None:
         """Réinitialise l'état interne de l'épisode."""
-        self.current_step = min(100, max(0, len(self.data) - 2))
+        self.current_step = self._resolve_episode_start_index()
         self.start_step = self.current_step
         self.balance = self.spec.initial_balance
         self.peak_equity = self.spec.initial_balance
@@ -406,6 +476,19 @@ class TradingEnvironment:
         self.action_counts = {name: 0 for name in ACTION_NAMES}
         self.long_entries = 0
         self.short_entries = 0
+        self.requested_buy_actions = 0
+        self.requested_sell_actions = 0
+        self.blocked_buy_entries = 0
+        self.blocked_sell_entries = 0
+        self.blocked_buy_vwap = 0
+        self.blocked_sell_vwap = 0
+        self.blocked_buy_adx = 0
+        self.blocked_sell_adx = 0
+        self.blocked_buy_obv = 0
+        self.blocked_sell_obv = 0
+        self.blocked_buy_directional = 0
+        self.blocked_sell_directional = 0
+        self.entry_veto_to_hold = 0
         self.ema200_blocked_buy = 0
         self.ema200_blocked_sell = 0
         self.entry_blocked_vwap = 0
@@ -434,6 +517,8 @@ class TradingEnvironment:
         self.position_had_slbe = False
         self.close_winner_count = 0
         self.close_loser_count = 0
+        self.net_realized_long_pct = 0.0
+        self.net_realized_short_pct = 0.0
         self.tp_like_exit_count = 0
         self.split_rejected = 0
         self.split_rejected_no_value = 0
@@ -450,12 +535,46 @@ class TradingEnvironment:
         self.days_above_10pct = 0
         self.positive_days = 0
         self.daily_max_drawdown_pct = 0.0
+        self._rebalance_bonus_paid_buy = False
+        self._rebalance_bonus_paid_sell = False
+        self._episode_regime = self._classify_regime(self.current_step)
         self._active_day_label = str(self.day_labels[active_index]) if len(self.day_labels) else "day_0000"
         self._active_day_start_equity = self.spec.initial_balance
         self._active_day_peak_equity = self.spec.initial_balance
         self._active_day_trough_equity = self.spec.initial_balance
         self._active_day_max_drawdown_pct = 0.0
         self._active_day_last_equity = self.spec.initial_balance
+
+    def _resolve_episode_start_index(self) -> int:
+        """Choisit un index de depart valide dans la fenetre historique.
+
+        Returns:
+            int: Index de depart de l'episode.
+        """
+        if len(self.data) <= 0:
+            return 0
+
+        max_available_index = max(0, len(self.data) - 2)
+        min_start_index = min(self.episode_warmup_bars, max_available_index)
+        max_start_index = max(
+            min_start_index,
+            max_available_index - max(0, int(self.max_steps_per_episode)),
+        )
+
+        if not self.randomize_episode_start or max_start_index <= min_start_index:
+            return int(min_start_index)
+        if self.training_mode:
+            complete_regime_matrix = all(
+                len(self._regime_start_indices.get(regime, [])) > 0
+                for regime in ("bull", "bear", "range")
+            )
+            if complete_regime_matrix:
+                target_regime = np.random.choice(["bull", "bear", "range"])
+                bucket = list(self._regime_start_indices.get(str(target_regime), []))
+                if bucket:
+                    return int(np.random.choice(bucket))
+
+        return int(np.random.randint(min_start_index, max_start_index + 1))
 
     def _record_closed_trade(self, realized_pnl: float) -> float:
         """Enregistre un trade clôturé dans les métriques d'épisode.
@@ -553,12 +672,9 @@ class TradingEnvironment:
         else:
             self.actions_below_vwap += 1
 
-        min_adx = float(
-            (self.position_mechanics_profile.get("entry_filter") or {}).get("min_adx", 0.0)
-        )
-        trend_adx = float(
-            (self.position_mechanics_profile.get("entry_filter") or {}).get("trend_adx", min_adx)
-        )
+        entry_filter = self._get_active_entry_filter()
+        min_adx = float(entry_filter.get("min_adx", 0.0) or 0.0)
+        trend_adx = float(entry_filter.get("trend_adx", min_adx) or min_adx)
         if context["adx"] < min_adx:
             self.actions_low_adx += 1
         if action == HOLD:
@@ -571,6 +687,137 @@ class TradingEnvironment:
         elif action == SELL and context["obv_slope"] >= 0:
             self.obv_divergent_actions += 1
 
+    def _get_active_entry_filter(self) -> dict[str, float | bool | str]:
+        """Retourne le filtre d'entree courant, avec curriculum si necessaire.
+
+        Returns:
+            dict[str, float | bool | str]: Filtre d'entree actif.
+        """
+        entry_filter = dict(self.position_mechanics_profile.get("entry_filter") or {})
+        curriculum_end_step = int(
+            getattr(self.config, "directional_curriculum_end_step", 4000) or 4000
+        )
+        if (
+            not self.training_mode
+            or curriculum_end_step <= 0
+            or self.training_progress_step >= curriculum_end_step
+        ):
+            return entry_filter
+
+        exploration_filter = dict(entry_filter)
+        exploration_filter["require_vwap_alignment"] = False
+        exploration_filter["require_obv_confirmation"] = False
+        exploration_filter["min_adx"] = max(
+            8.0,
+            float(entry_filter.get("min_adx", 0.0) or 0.0) - 2.0,
+        )
+        exploration_filter["trend_adx"] = max(
+            12.0,
+            float(entry_filter.get("trend_adx", exploration_filter["min_adx"]) or exploration_filter["min_adx"]) - 2.0,
+        )
+        return exploration_filter
+
+    @staticmethod
+    def _classify_directional_bias(long_entries: int, short_entries: int) -> str:
+        """Retourne une etiquette simple du biais directionnel de l'episode.
+
+        Args:
+            long_entries (int): Nombre d'entrees longues.
+            short_entries (int): Nombre d'entrees courtes.
+
+        Returns:
+            str: `inactive`, `buy_heavy`, `sell_heavy` ou `balanced`.
+        """
+        total_entries = long_entries + short_entries
+        if total_entries <= 0:
+            return "inactive"
+        long_share = long_entries / total_entries
+        short_share = short_entries / total_entries
+        if long_share <= 0.20 and short_share >= 0.80:
+            return "sell_heavy"
+        if short_share <= 0.20 and long_share >= 0.80:
+            return "buy_heavy"
+        return "balanced"
+
+    def _should_hard_veto_directional_entry(
+        self,
+        action: int,
+        directional_policy: dict[str, float],
+    ) -> bool:
+        """Determine si une nouvelle entree doit etre bloquee par direction.
+
+        Args:
+            action (int): Action directionnelle candidate.
+            directional_policy (dict[str, float]): Politique directionnelle active.
+
+        Returns:
+            bool: `True` si l'entree doit etre convertie en `HOLD`.
+        """
+        resolved_policy = self._resolve_directional_policy_terms(directional_policy)
+        hard_veto_after_entries = int(resolved_policy["hard_veto_after_entries"])
+        hard_veto_max_share = resolved_policy["hard_veto_max_share"]
+        total_entries = self.long_entries + self.short_entries
+        if hard_veto_after_entries <= 0 or total_entries < hard_veto_after_entries:
+            return False
+
+        projected_long_entries = self.long_entries + (1 if action == BUY else 0)
+        projected_short_entries = self.short_entries + (1 if action == SELL else 0)
+        projected_total_entries = projected_long_entries + projected_short_entries
+        if projected_total_entries <= 0:
+            return False
+
+        projected_share = (
+            projected_long_entries / projected_total_entries
+            if action == BUY
+            else projected_short_entries / projected_total_entries
+        )
+        return projected_share > hard_veto_max_share
+
+    def _compute_rebalance_bonus(
+        self,
+        action: int,
+        directional_policy: dict[str, float],
+    ) -> float:
+        """Calcule le bonus de reequilibrage lors d'une entree minoritaire.
+
+        Args:
+            action (int): Action finale d'entree (`BUY` ou `SELL`).
+            directional_policy (dict[str, float]): Politique directionnelle active.
+
+        Returns:
+            float: Bonus a ajouter a la recompense.
+        """
+        resolved_policy = self._resolve_directional_policy_terms(directional_policy)
+        total_entries = self.long_entries + self.short_entries
+        if total_entries <= 0:
+            return 0.0
+
+        target_is_buy = action == BUY
+        paid_flag = self._rebalance_bonus_paid_buy if target_is_buy else self._rebalance_bonus_paid_sell
+        if paid_flag:
+            return 0.0
+
+        target_entries = self.long_entries if target_is_buy else self.short_entries
+        opposite_entries = self.short_entries if target_is_buy else self.long_entries
+        imbalance = abs(self.long_entries - self.short_entries) / max(total_entries, 1)
+        missing_side_entry = target_entries == 0 and opposite_entries > 0
+        minority_reentry = (
+            target_entries < opposite_entries
+            and imbalance > resolved_policy["max_directional_imbalance"]
+        )
+        if not (missing_side_entry or minority_reentry):
+            return 0.0
+
+        bonus = float(resolved_policy["rebalance_bonus"])
+        if bonus <= 0.0:
+            return 0.0
+
+        if target_is_buy:
+            self._rebalance_bonus_paid_buy = True
+        else:
+            self._rebalance_bonus_paid_sell = True
+        return bonus
+
     def _apply_entry_filter(self, action: int, context: dict[str, float]) -> tuple[int, str | None]:
         """Filtre une entree directionnelle selon le profil horizon/famille.
 
@@ -579,12 +826,13 @@ class TradingEnvironment:
             context (dict[str, float]): Contexte courant du marche.
 
         Returns:
-            tuple[int, str | None]: Action finale et raison du veto eventuel.
+            tuple[int, str | None]: Action finale. Un veto convertit
+                l'entree en ``HOLD`` et fournit la raison du veto.
         """
         if action not in (BUY, SELL):
             return action, None
 
-        entry_filter = dict(self.position_mechanics_profile.get("entry_filter") or {})
+        entry_filter = self._get_active_entry_filter()
         ema_mode = str(entry_filter.get("ema_mode", "strict")).lower()
         require_vwap_alignment = bool(entry_filter.get("require_vwap_alignment", False))
         require_obv_confirmation = bool(entry_filter.get("require_obv_confirmation", False))
@@ -599,35 +847,43 @@ class TradingEnvironment:
 
         if context["adx"] < min_adx and not fallback_direction_ok:
             self.entry_blocked_adx += 1
-            return action, "adx"
+            if action == BUY:
+                self.blocked_buy_adx += 1
+            else:
+                self.blocked_sell_adx += 1
+            return HOLD, "adx"
 
         if action == BUY:
             if ema_mode == "strict" and context["close"] < context["ema_200"]:
                 self.ema200_blocked_buy += 1
-                return action, "ema200"
+                return HOLD, "ema200"
             if ema_mode == "moderate" and context["close"] < context["ema_200"] and context["price_vs_vwap"] < 0:
                 self.ema200_blocked_buy += 1
-                return action, "ema200"
+                return HOLD, "ema200"
             if require_vwap_alignment and context["price_vs_vwap"] < 0 and not fallback_direction_ok:
                 self.entry_blocked_vwap += 1
-                return action, "vwap"
+                self.blocked_buy_vwap += 1
+                return HOLD, "vwap"
             if require_obv_confirmation and context["obv_slope"] <= 0 and not fallback_direction_ok:
                 self.entry_blocked_obv += 1
-                return action, "obv"
+                self.blocked_buy_obv += 1
+                return HOLD, "obv"
             return BUY, None
 
         if ema_mode == "strict" and context["close"] > context["ema_200"]:
             self.ema200_blocked_sell += 1
-            return action, "ema200"
+            return HOLD, "ema200"
         if ema_mode == "moderate" and context["close"] > context["ema_200"] and context["price_vs_vwap"] > 0:
             self.ema200_blocked_sell += 1
-            return action, "ema200"
+            return HOLD, "ema200"
         if require_vwap_alignment and context["price_vs_vwap"] > 0 and not fallback_direction_ok:
             self.entry_blocked_vwap += 1
-            return action, "vwap"
+            self.blocked_sell_vwap += 1
+            return HOLD, "vwap"
         if require_obv_confirmation and context["obv_slope"] >= 0 and not fallback_direction_ok:
             self.entry_blocked_obv += 1
-            return action, "obv"
+            self.blocked_sell_obv += 1
+            return HOLD, "obv"
         return SELL, None
 
     def _get_unrealized_return(self, price: float) -> float:
@@ -663,7 +919,11 @@ class TradingEnvironment:
         pnl = trade_ret * realized_notional
         commission = realized_notional * self.commission_rate
         realized_trade = pnl - commission
-        self._record_closed_trade(realized_trade)
+        realized_pct = self._record_closed_trade(realized_trade)
+        if direction > 0:
+            self.net_realized_long_pct += realized_pct
+        else:
+            self.net_realized_short_pct += realized_pct
 
         full_close = close_size is None or realized_notional >= current_notional
         if full_close:
@@ -837,6 +1097,16 @@ class TradingEnvironment:
             ),
             "imbalance_penalty": float(directional_policy.get("imbalance_penalty", 0.0) or 0.0),
             "entry_penalty_scale": float(directional_policy.get("entry_penalty_scale", 0.35) or 0.35),
+            "hard_veto_after_entries": float(directional_policy.get("hard_veto_after_entries", 4) or 4),
+            "hard_veto_max_share": float(directional_policy.get("hard_veto_max_share", 0.80) or 0.80),
+            "final_max_directional_imbalance": float(
+                directional_policy.get(
+                    "final_max_directional_imbalance",
+                    directional_policy.get("max_directional_imbalance", 1.0),
+                )
+                or 1.0
+            ),
+            "rebalance_bonus": float(directional_policy.get("rebalance_bonus", 0.0) or 0.0),
         }
 
     def _compute_directional_entry_feedback(self, directional_policy: dict[str, float]) -> float:
@@ -940,15 +1210,42 @@ class TradingEnvironment:
                 reward += float(slbe_policy.get("bonus", self.slbe_bonus) or self.slbe_bonus)
 
         requested_action = action
+        if requested_action == BUY:
+            self.requested_buy_actions += 1
+        elif requested_action == SELL:
+            self.requested_sell_actions += 1
 
         if self.position_size == 0 and action in [SPLIT, CLOSE]:
             action = HOLD
 
         action, veto_reason = self._apply_entry_filter(action, context)
         if veto_reason:
-            # On conserve la transition dans le MDP, mais on penalise
-            # fortement l'action vetoee pour eviter un faux signal policy.
-            reward -= 5.0
+            # Une entree vetoee devient un HOLD reel. La penalite reste
+            # moderee pour ne pas figer artificiellement une direction.
+            self.entry_veto_to_hold += 1
+            if requested_action == BUY:
+                self.blocked_buy_entries += 1
+            elif requested_action == SELL:
+                self.blocked_sell_entries += 1
+            reward -= 1.0
+        elif (
+            action in (BUY, SELL)
+            and (
+                (action == BUY and self.position_size <= 0)
+                or (action == SELL and self.position_size >= 0)
+            )
+            and self._should_hard_veto_directional_entry(action, directional_policy)
+        ):
+            veto_reason = "directional"
+            self.entry_veto_to_hold += 1
+            if action == BUY:
+                self.blocked_buy_entries += 1
+                self.blocked_buy_directional += 1
+            else:
+                self.blocked_sell_entries += 1
+                self.blocked_sell_directional += 1
+            action = HOLD
+            reward -= 1.0
 
         final_action_name = ACTION_NAMES[action] if 0 <= action < len(ACTION_NAMES) else f"ACT_{action}"
         self.action_counts[final_action_name] = self.action_counts.get(final_action_name, 0) + 1
@@ -970,6 +1267,7 @@ class TradingEnvironment:
                 self.split_count = 0
                 self.position_pyramids = 0
                 self.position_had_slbe = False
+                reward += self._compute_rebalance_bonus(BUY, directional_policy)
                 self.long_entries += 1
                 reward += self._compute_directional_entry_feedback(directional_policy)
             elif self.position_size < max_position:
@@ -1004,6 +1302,7 @@ class TradingEnvironment:
                 self.split_count = 0
                 self.position_pyramids = 0
                 self.position_had_slbe = False
+                reward += self._compute_rebalance_bonus(SELL, directional_policy)
                 self.short_entries += 1
                 reward += self._compute_directional_entry_feedback(directional_policy)
             elif self.position_size > -max_position:
@@ -1094,10 +1393,11 @@ class TradingEnvironment:
             stale_penalty = float(hold_policy.get("stale_penalty", 1.0) or 1.0)
             trend_penalty = float(hold_policy.get("trend_penalty", 0.0) or 0.0)
             range_penalty = float(hold_policy.get("range_penalty", 0.0) or 0.0)
+            active_entry_filter = self._get_active_entry_filter()
             trend_adx = float(
-                (self.position_mechanics_profile.get("entry_filter") or {}).get(
+                active_entry_filter.get(
                     "trend_adx",
-                    (self.position_mechanics_profile.get("entry_filter") or {}).get("min_adx", 20.0),
+                    active_entry_filter.get("min_adx", 20.0),
                 )
                 or 20.0
             )
@@ -1185,7 +1485,7 @@ class TradingEnvironment:
 
             resolved_directional_policy = self._resolve_directional_policy_terms(directional_policy)
             min_entry_share = resolved_directional_policy["min_entry_share"]
-            max_imbalance = resolved_directional_policy["max_directional_imbalance"]
+            max_imbalance = resolved_directional_policy["final_max_directional_imbalance"]
             imbalance_penalty = resolved_directional_policy["imbalance_penalty"]
             if total_entries > 0:
                 long_share = self.long_entries / total_entries
@@ -1286,6 +1586,19 @@ class TradingEnvironment:
             "realized_close_bonus_count": self.realized_close_bonus_count,
             "realized_split_bonus_count": self.realized_split_bonus_count,
             "slbe_exit_bonus_count": self.slbe_exit_bonus_count,
+            "requested_buy_actions": self.requested_buy_actions,
+            "requested_sell_actions": self.requested_sell_actions,
+            "blocked_buy_entries": self.blocked_buy_entries,
+            "blocked_sell_entries": self.blocked_sell_entries,
+            "blocked_buy_vwap": self.blocked_buy_vwap,
+            "blocked_sell_vwap": self.blocked_sell_vwap,
+            "blocked_buy_adx": self.blocked_buy_adx,
+            "blocked_sell_adx": self.blocked_sell_adx,
+            "blocked_buy_obv": self.blocked_buy_obv,
+            "blocked_sell_obv": self.blocked_sell_obv,
+            "blocked_buy_directional": self.blocked_buy_directional,
+            "blocked_sell_directional": self.blocked_sell_directional,
+            "entry_veto_to_hold": self.entry_veto_to_hold,
             "entry_blocked_vwap": self.entry_blocked_vwap,
             "entry_blocked_adx": self.entry_blocked_adx,
             "entry_blocked_obv": self.entry_blocked_obv,
@@ -1299,6 +1612,28 @@ class TradingEnvironment:
         positive_day_rate = (
             self.positive_days / max(len(self.daily_net_return_pct_by_day), 1)
         ) * 100.0
+        directional_entries = self.long_entries + self.short_entries
+        directional_imbalance = (
+            abs(self.long_entries - self.short_entries) / directional_entries
+            if directional_entries > 0
+            else 1.0
+        )
+        directional_bias = self._classify_directional_bias(
+            self.long_entries,
+            self.short_entries,
+        )
+        balanced_episode = (
+            directional_entries > 0
+            and self.long_entries > 0
+            and self.short_entries > 0
+            and directional_bias == "balanced"
+        )
+        executed_long_entry_share = self.long_entries / max(directional_entries, 1)
+        executed_short_entry_share = self.short_entries / max(directional_entries, 1)
+        veto_to_hold_rate = self.entry_veto_to_hold / max(
+            self.requested_buy_actions + self.requested_sell_actions,
+            1,
+        )
         return {
             "symbol": self.symbol,
             "horizon": self.horizon,
@@ -1328,8 +1663,29 @@ class TradingEnvironment:
             "hold_actions": int(self.action_counts.get("HOLD", 0)),
             "split_actions": int(self.action_counts.get("SPLIT", 0)),
             "close_actions": int(self.action_counts.get("CLOSE", 0)),
+            "requested_buy_actions": self.requested_buy_actions,
+            "requested_sell_actions": self.requested_sell_actions,
             "long_entries": self.long_entries,
             "short_entries": self.short_entries,
+            "long_present": self.long_entries > 0,
+            "short_present": self.short_entries > 0,
+            "balanced_episode": balanced_episode,
+            "executed_long_entry_share": executed_long_entry_share,
+            "executed_short_entry_share": executed_short_entry_share,
+            "directional_imbalance": directional_imbalance,
+            "directional_bias": directional_bias,
+            "blocked_buy_entries": self.blocked_buy_entries,
+            "blocked_sell_entries": self.blocked_sell_entries,
+            "blocked_buy_vwap": self.blocked_buy_vwap,
+            "blocked_sell_vwap": self.blocked_sell_vwap,
+            "blocked_buy_adx": self.blocked_buy_adx,
+            "blocked_sell_adx": self.blocked_sell_adx,
+            "blocked_buy_obv": self.blocked_buy_obv,
+            "blocked_sell_obv": self.blocked_sell_obv,
+            "blocked_buy_directional": self.blocked_buy_directional,
+            "blocked_sell_directional": self.blocked_sell_directional,
+            "entry_veto_to_hold": self.entry_veto_to_hold,
+            "veto_to_hold_rate": veto_to_hold_rate,
             "ema200_blocked_buy": self.ema200_blocked_buy,
             "ema200_blocked_sell": self.ema200_blocked_sell,
             "entry_blocked_vwap": self.entry_blocked_vwap,
@@ -1341,5 +1697,8 @@ class TradingEnvironment:
             "obv_divergent_actions": self.obv_divergent_actions,
             "hold_in_trend_count": self.hold_in_trend_count,
             "hold_in_range_count": self.hold_in_range_count,
+            "net_return_long_pct": self.net_realized_long_pct,
+            "net_return_short_pct": self.net_realized_short_pct,
+            "episode_regime": self._episode_regime,
             "metrics_by_position_mechanics": mechanics_metrics,
         }

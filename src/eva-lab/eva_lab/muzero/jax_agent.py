@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import faulthandler
 import logging
 import os
+import signal
 from datetime import datetime
 from time import perf_counter
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -25,6 +27,10 @@ from eva_lab.muzero.jax_trainer import MuZeroTrainerJAX, TrainingBatch
 from eva_lab.muzero.replay_buffer import GameHistory, PrioritizedReplayBuffer
 
 logger = logging.getLogger(__name__)
+
+
+class CollectionStepTimeoutError(TimeoutError):
+    """Signale qu'un pas de collecte MuZero a depasse le budget autorise."""
 
 
 class PreparedTrainingStep(NamedTuple):
@@ -70,6 +76,57 @@ class JAXMuZeroAgent:
             config.hidden_state_size,
         )
 
+    def _run_collection_step_with_timeout(
+        self,
+        step_callback: Callable[[], tuple[object, float, bool, float, float, int, np.ndarray]],
+        *,
+        symbol: str,
+        step_index: int,
+        timeout_seconds: float,
+    ) -> tuple[object, float, bool, float, float, int, np.ndarray]:
+        """Execute un pas de collecte avec un timeout interruptible.
+
+        Args:
+            step_callback (Callable[[], tuple[object, float, bool, float, float, int, np.ndarray]]):
+                Fonction qui execute le pas complet et retourne
+                ``(next_obs, reward, done, value, mcts_elapsed_seconds, action, policy)``.
+            symbol (str): Symbole de l'episode courant.
+            step_index (int): Index humain du pas courant.
+            timeout_seconds (float): Budget maximal autorise pour le pas.
+
+        Returns:
+            tuple[object, float, bool, float, float, int, np.ndarray]: Resultat du pas.
+
+        Raises:
+            CollectionStepTimeoutError: Si le pas depasse le budget autorise.
+        """
+        effective_timeout = max(0.0, float(timeout_seconds or 0.0))
+        if (
+            effective_timeout <= 0.0
+            or os.name == "nt"
+            or not hasattr(signal, "setitimer")
+            or not hasattr(signal, "SIGALRM")
+        ):
+            return step_callback()
+
+        previous_handler = signal.getsignal(signal.SIGALRM)
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, 0.0)
+
+        def _handle_timeout(_signum, _frame):
+            raise CollectionStepTimeoutError(
+                f"Pas MuZero depasse sur {symbol} au step {step_index}."
+            )
+
+        signal.signal(signal.SIGALRM, _handle_timeout)
+        signal.setitimer(signal.ITIMER_REAL, effective_timeout)
+        faulthandler.dump_traceback_later(effective_timeout, repeat=False)
+        try:
+            return step_callback()
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+            signal.signal(signal.SIGALRM, previous_handler)
+
     def _initial_inference(self, params, observation):
         """Execute l'inference initiale MuZero sur une observation brute."""
         return self.initial_apply(params, None, observation)
@@ -78,37 +135,229 @@ class JAXMuZeroAgent:
         """Execute l'inference recurrente MuZero sur un etat latent."""
         return self.recurrent_apply(params, None, hidden_state, action_onehot)
 
-    def play_game(self, env, exploration: bool = True) -> GameHistory:
-        """Joue une partie complete dans l'environnement et alimente le replay buffer."""
+    def play_game(
+        self,
+        env,
+        exploration: bool = True,
+        progress_callback: Callable[[dict[str, object]], None] | None = None,
+    ) -> GameHistory:
+        """Joue une partie complete dans l'environnement et alimente le replay buffer.
+
+        Args:
+            env (TradingEnvironment): Environnement de self-play courant.
+            exploration (bool): Active le bruit d'exploration a la racine.
+            progress_callback (Callable[[dict[str, object]], None] | None):
+                Callback appele periodiquement pour exposer un heartbeat
+                intra-partie pendant la collecte.
+
+        Returns:
+            GameHistory: Episode collecte, eventuellement tronque si un
+                garde-fou de temps coupe la partie.
+        """
         game = GameHistory()
         obs, _ = env.reset()
         done = False
         steps = 0
+        episode_started_at = perf_counter()
+        last_heartbeat_at = episode_started_at
+        heartbeat_every_steps = max(
+            1,
+            int(getattr(self.config, "collection_heartbeat_every_steps", 25) or 25),
+        )
+        heartbeat_every_seconds = max(
+            1.0,
+            float(getattr(self.config, "collection_heartbeat_every_seconds", 30.0) or 30.0),
+        )
+        max_episode_seconds = max(
+            0.0,
+            float(getattr(self.config, "collection_max_episode_seconds", 0.0) or 0.0),
+        )
+        max_step_seconds = max(
+            0.0,
+            float(getattr(self.config, "collection_max_step_seconds", 0.0) or 0.0),
+        )
+        mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
 
         while not done and steps < self.config.max_moves:
             steps += 1
-            obs_jax = jnp.array(obs).reshape(1, -1)
-            hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
-            root_legal_actions = env.get_legal_root_actions()
+            step_started_at = perf_counter()
+            current_observation = obs
 
-            mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
-            root = mcts.run(
-                hidden_state,
-                root_logits,
-                root_value_logits,
-                root_legal_actions=root_legal_actions,
-                add_exploration_noise=exploration,
-            )
+            def _execute_collection_step() -> tuple[object, float, bool, float, float]:
+                obs_jax = jnp.array(current_observation).reshape(1, -1)
+                hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
+                root_legal_actions = env.get_legal_root_actions()
 
-            action = self._select_action(root, exploration)
-            policy = self._get_policy_distribution(root)
-            value = float(root.value)
+                mcts_started_at = perf_counter()
+                root = mcts.run(
+                    hidden_state,
+                    root_logits,
+                    root_value_logits,
+                    root_legal_actions=root_legal_actions,
+                    add_exploration_noise=exploration,
+                    num_simulations=int(
+                        getattr(self.config, "collection_num_simulations", self.config.num_simulations)
+                        or self.config.num_simulations
+                    ),
+                )
+                mcts_elapsed_seconds = perf_counter() - mcts_started_at
 
-            next_obs, reward, done, _, _ = env.step(action)
-            game.store(obs, action, reward, policy, value)
+                action = self._select_action(root, exploration)
+                policy = self._get_policy_distribution(root)
+                value = float(root.value)
+                next_obs, reward, done_flag, _, _ = env.step(action)
+                return next_obs, reward, done_flag, value, mcts_elapsed_seconds, action, policy
+
+            try:
+                (
+                    next_obs,
+                    reward,
+                    done,
+                    value,
+                    mcts_elapsed_seconds,
+                    action,
+                    policy,
+                ) = self._run_collection_step_with_timeout(
+                    _execute_collection_step,
+                    symbol=str(getattr(env, "symbol", "unknown")),
+                    step_index=steps,
+                    timeout_seconds=max_step_seconds,
+                )
+            except CollectionStepTimeoutError as exc:
+                logger.exception(
+                    "Collecte MuZero interrompue sur %s au step %s: %s",
+                    getattr(env, "symbol", "unknown"),
+                    steps,
+                    exc,
+                )
+                game.metadata["stopped_reason"] = "depassement_temps_pas_interruptible"
+                game.metadata["stopped_step"] = int(steps)
+                game.metadata["step_elapsed_seconds"] = float(perf_counter() - step_started_at)
+                break
+
+            game.store(current_observation, action, reward, policy, value)
             obs = next_obs
 
-        self.replay_buffer.save_game(game)
+            now = perf_counter()
+            episode_elapsed_seconds = now - episode_started_at
+            step_elapsed_seconds = now - step_started_at
+            should_emit_heartbeat = (
+                done
+                or steps == 1
+                or steps % heartbeat_every_steps == 0
+                or (now - last_heartbeat_at) >= heartbeat_every_seconds
+            )
+            if should_emit_heartbeat:
+                heartbeat_payload = {
+                    "symbol": str(getattr(env, "symbol", "unknown")),
+                    "steps": int(steps),
+                    "max_moves": int(self.config.max_moves),
+                    "elapsed_seconds": float(episode_elapsed_seconds),
+                    "step_elapsed_seconds": float(step_elapsed_seconds),
+                    "mcts_elapsed_seconds": float(mcts_elapsed_seconds),
+                    "done": bool(done),
+                }
+                logger.info(
+                    "[collecte:%s] heartbeat partie | step=%s/%s | episode=%.1fs | step=%.3fs | mcts=%.3fs | sims=%s | done=%s",
+                    heartbeat_payload["symbol"],
+                    heartbeat_payload["steps"],
+                    heartbeat_payload["max_moves"],
+                    heartbeat_payload["elapsed_seconds"],
+                    heartbeat_payload["step_elapsed_seconds"],
+                    heartbeat_payload["mcts_elapsed_seconds"],
+                    int(
+                        getattr(self.config, "collection_num_simulations", self.config.num_simulations)
+                        or self.config.num_simulations
+                    ),
+                    heartbeat_payload["done"],
+                )
+                if progress_callback is not None:
+                    progress_callback(heartbeat_payload)
+                last_heartbeat_at = now
+
+            if max_step_seconds > 0.0 and step_elapsed_seconds > max_step_seconds:
+                logger.warning(
+                    "Collecte MuZero interrompue: pas trop long sur %s (step=%s, %.3fs > %.3fs).",
+                    getattr(env, "symbol", "unknown"),
+                    steps,
+                    step_elapsed_seconds,
+                    max_step_seconds,
+                )
+                game.metadata["stopped_reason"] = "depassement_temps_pas"
+                game.metadata["stopped_step"] = int(steps)
+                game.metadata["step_elapsed_seconds"] = float(step_elapsed_seconds)
+                break
+
+            if max_episode_seconds > 0.0 and episode_elapsed_seconds > max_episode_seconds:
+                logger.warning(
+                    "Collecte MuZero interrompue: episode trop long sur %s (step=%s, %.1fs > %.1fs).",
+                    getattr(env, "symbol", "unknown"),
+                    steps,
+                    episode_elapsed_seconds,
+                    max_episode_seconds,
+                )
+                game.metadata["stopped_reason"] = "depassement_temps_episode"
+                game.metadata["stopped_step"] = int(steps)
+                game.metadata["episode_elapsed_seconds"] = float(episode_elapsed_seconds)
+                break
+
+        game.metadata["total_steps"] = int(steps)
+        try:
+            episode_summary = dict(env.get_summary() or {})
+        except Exception as exc:
+            logger.warning(
+                "Resume d'episode MuZero indisponible pour %s: %s",
+                getattr(env, "symbol", "unknown"),
+                exc,
+            )
+            episode_summary = {}
+
+        metadata_fields = (
+            "symbol",
+            "return_pct",
+            "net_realized_pct",
+            "total_trades",
+            "buy_actions",
+            "sell_actions",
+            "hold_actions",
+            "split_actions",
+            "close_actions",
+            "long_entries",
+            "short_entries",
+            "long_present",
+            "short_present",
+            "balanced_episode",
+            "executed_long_entry_share",
+            "executed_short_entry_share",
+            "directional_imbalance",
+            "directional_bias",
+            "entry_veto_to_hold",
+            "requested_buy_actions",
+            "requested_sell_actions",
+            "blocked_buy_entries",
+            "blocked_sell_entries",
+            "blocked_buy_vwap",
+            "blocked_sell_vwap",
+            "blocked_buy_adx",
+            "blocked_sell_adx",
+            "blocked_buy_obv",
+            "blocked_sell_obv",
+            "blocked_buy_directional",
+            "blocked_sell_directional",
+            "net_return_long_pct",
+            "net_return_short_pct",
+            "episode_regime",
+        )
+        for field_name in metadata_fields:
+            if field_name in episode_summary:
+                game.metadata[field_name] = episode_summary[field_name]
+        if len(game) > 0:
+            self.replay_buffer.save_game(game)
+        else:
+            logger.warning(
+                "Episode MuZero ignore car aucune transition n'a ete collectee pour %s.",
+                getattr(env, "symbol", "unknown"),
+            )
         return game
 
     def prepare_training_step(self) -> PreparedTrainingStep | None:
@@ -161,6 +410,7 @@ class JAXMuZeroAgent:
         platform_token = str(os.getenv("JAX_PLATFORMS", "auto")).strip() or "auto"
         cuda_token = str(os.getenv("CUDA_VISIBLE_DEVICES", "")).strip() or "none"
         metrics_payload["gpu_target_mode"] = f"{platform_token}:{cuda_token}"
+        metrics_payload.update(self.replay_buffer.diversity_stats())
         priority_errors = np.asarray(
             metrics_payload.pop("priority_errors", []),
             dtype=np.float32,
@@ -259,12 +509,12 @@ class JAXMuZeroAgent:
         while len(new_values) < total_observations:
             new_values.append(0.0)
 
+        mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
         for observation_index in selected_indices:
             obs = game.observations[observation_index]
             obs_jax = jnp.array(obs).reshape(1, -1)
             hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
             root_legal_actions = TradingEnvironment.infer_legal_root_actions_from_observation(obs)
-            mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
             root = mcts.run(
                 hidden_state,
                 root_logits,
@@ -364,6 +614,22 @@ class JAXMuZeroAgent:
         sanitized: dict[str, object] = {}
         for key, value in dict(metrics or {}).items():
             array = np.asarray(value)
+            if array.dtype.kind in {"U", "S"}:
+                if array.ndim == 0:
+                    sanitized[str(key)] = str(array.item())
+                else:
+                    sanitized[str(key)] = [str(item) for item in array.tolist()]
+                continue
+            if array.dtype.kind == "O":
+                if array.ndim == 0:
+                    scalar = array.item()
+                    sanitized[str(key)] = scalar if isinstance(scalar, (str, bool, int, float)) else str(scalar)
+                else:
+                    serialized_values: list[object] = []
+                    for item in array.tolist():
+                        serialized_values.append(item if isinstance(item, (str, bool, int, float)) else str(item))
+                    sanitized[str(key)] = serialized_values
+                continue
             if array.ndim == 0:
                 sanitized[str(key)] = float(array)
             else:

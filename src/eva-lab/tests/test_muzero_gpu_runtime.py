@@ -99,6 +99,32 @@ class MuZeroGpuRuntimeTests(unittest.TestCase):
             dataset_source="csv",
         )
 
+    def test_collection_num_simulations_defaults_to_lighter_budget(self) -> None:
+        """Utilise un budget de collecte plus leger que l'optimisation par defaut."""
+
+        with patch.dict(os.environ, {"MUZERO_NUM_SIMULATIONS": "100"}, clear=False):
+            os.environ.pop("MUZERO_COLLECTION_NUM_SIMULATIONS", None)
+            config = self._build_config("scalp")
+
+        self.assertEqual(config.num_simulations, 100)
+        self.assertEqual(config.collection_num_simulations, 32)
+
+    def test_collection_num_simulations_can_be_overridden(self) -> None:
+        """Respecte un budget de collecte explicite si l'utilisateur le force."""
+
+        with patch.dict(
+            os.environ,
+            {
+                "MUZERO_NUM_SIMULATIONS": "96",
+                "MUZERO_COLLECTION_NUM_SIMULATIONS": "24",
+            },
+            clear=False,
+        ):
+            config = self._build_config("scalp")
+
+        self.assertEqual(config.num_simulations, 96)
+        self.assertEqual(config.collection_num_simulations, 24)
+
     def test_static_expected_context_matches_runtime_context(self) -> None:
         """Produit la meme empreinte et la meme signature que l'agent JAX runtime."""
 
