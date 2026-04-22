@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import importlib.util
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 
 from eva_lab.muzero.environment import BUY, CLOSE, HOLD, SELL, SPLIT, TradingEnvironment
 from eva_lab.muzero.replay_buffer import GameHistory, PrioritizedReplayBuffer
+from eva_lab.training_utils import resolve_position_mechanics_profile
 
 
 class MuZeroPolicySignalTests(unittest.TestCase):
@@ -28,6 +30,22 @@ class MuZeroPolicySignalTests(unittest.TestCase):
 
         if importlib.util.find_spec("jax") is None or importlib.util.find_spec("haiku") is None:
             raise unittest.SkipTest("Stack JAX/Haiku indisponible sur cet environnement.")
+
+    @staticmethod
+    def _load_train_global_models_module():
+        """Charge le module de training global sans dependre d'un package."""
+
+        module_path = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "train_global_models.py"
+        )
+        spec = importlib.util.spec_from_file_location("test_train_global_models", module_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Impossible de charger train_global_models.py pour les tests.")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 
     def test_root_without_position_masks_split_and_close(self) -> None:
         """Masque `SPLIT` et `CLOSE` a la racine sans position ouverte."""
@@ -54,6 +72,77 @@ class MuZeroPolicySignalTests(unittest.TestCase):
             TradingEnvironment.infer_legal_root_actions_from_observation(observation),
             [HOLD, BUY, SELL, SPLIT, CLOSE],
         )
+
+    def test_root_policy_mask_removes_blocked_buy_but_keeps_hold(self) -> None:
+        """Retire `BUY` du masque racine si l'entree est vetoee par le filtre."""
+
+        data = np.zeros((8, 26), dtype=np.float32)
+        data[:, 0] = 100.0
+        data[:, 1] = 101.0
+        data[:, 2] = 99.0
+        data[:, 3] = 100.0
+        data[:, 4] = 1000.0
+        data[:, 5] = 110.0
+        data[:, 8] = 105.0
+        data[:, 10] = -1.0
+        data[:, 15] = 20.0
+
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = {
+            "entry_filter": {
+                "ema_mode": "strict",
+                "require_vwap_alignment": True,
+                "require_obv_confirmation": False,
+                "allow_trend_fallback": False,
+                "min_adx": 5.0,
+                "trend_adx": 10.0,
+            },
+            "directional_policy": {},
+        }
+        env.reset()
+
+        legal_actions = env.get_root_policy_actions()
+
+        self.assertIn(HOLD, legal_actions)
+        self.assertNotIn(BUY, legal_actions)
+        self.assertIn(SELL, legal_actions)
+
+    def test_observation_only_root_policy_mask_reconstructs_entry_veto(self) -> None:
+        """Reconstruit le veto racine depuis l'observation seule."""
+
+        data = np.zeros((8, 26), dtype=np.float32)
+        data[:, 0] = 100.0
+        data[:, 1] = 101.0
+        data[:, 2] = 99.0
+        data[:, 3] = 100.0
+        data[:, 4] = 1000.0
+        data[:, 5] = 110.0
+        data[:, 8] = 105.0
+        data[:, 10] = -1.0
+        data[:, 15] = 20.0
+
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = {
+            "entry_filter": {
+                "ema_mode": "strict",
+                "require_vwap_alignment": True,
+                "require_obv_confirmation": False,
+                "allow_trend_fallback": False,
+                "min_adx": 5.0,
+                "trend_adx": 10.0,
+            },
+            "directional_policy": {},
+        }
+        observation, _ = env.reset()
+
+        legal_actions = TradingEnvironment.infer_root_policy_actions_from_observation(
+            observation,
+            entry_filter=env.position_mechanics_profile["entry_filter"],
+        )
+
+        self.assertIn(HOLD, legal_actions)
+        self.assertNotIn(BUY, legal_actions)
+        self.assertIn(SELL, legal_actions)
 
     def test_reward_policy_aliases_support_v2_keys(self) -> None:
         """Resolve correctement les cles V2 de recompense."""
@@ -228,6 +317,47 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertEqual(env.entry_veto_to_hold, 1)
         self.assertLess(reward, 0.0)
 
+    def test_root_policy_mask_blocks_dominant_side_after_four_entries(self) -> None:
+        """Retire l'action dominante du masque racine apres quatre entrees."""
+
+        data = np.zeros((8, 26), dtype=np.float32)
+        data[:, 0] = 100.0
+        data[:, 1] = 101.0
+        data[:, 2] = 99.0
+        data[:, 3] = 100.0
+        data[:, 4] = 1000.0
+        data[:, 5] = 90.0
+        data[:, 8] = 95.0
+        data[:, 10] = -1.0
+        data[:, 15] = 25.0
+
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = {
+            "entry_filter": {
+                "ema_mode": "relaxed",
+                "require_vwap_alignment": False,
+                "require_obv_confirmation": False,
+                "allow_trend_fallback": True,
+                "min_adx": 5.0,
+                "trend_adx": 10.0,
+            },
+            "directional_policy": {
+                "hard_veto_after_entries": 4,
+                "hard_veto_max_share": 0.80,
+                "min_entry_share": 0.20,
+                "max_directional_imbalance": 0.40,
+                "imbalance_penalty": 8.0,
+            },
+        }
+        env.reset()
+        env.short_entries = 4
+
+        legal_actions = env.get_root_policy_actions()
+
+        self.assertNotIn(SELL, legal_actions)
+        self.assertIn(HOLD, legal_actions)
+        self.assertEqual(env.root_mask_blocked_sell_directional, 1)
+
     def test_rebalance_bonus_is_paid_once_for_missing_side(self) -> None:
         """N'accorde le bonus de reequilibrage qu'a la premiere entree utile."""
 
@@ -249,6 +379,109 @@ class MuZeroPolicySignalTests(unittest.TestCase):
 
         self.assertAlmostEqual(first_bonus, 0.35)
         self.assertEqual(second_bonus, 0.0)
+
+    def test_scalp_curriculum_relaxes_filters_longer_after_8000(self) -> None:
+        """Garde un filtre `scalp` assoupli au-dela de `8000` steps."""
+
+        env = TradingEnvironment(
+            symbol="XAUUSD",
+            training_mode=True,
+            training_progress_step=9500,
+        )
+        env.config = SimpleNamespace(
+            horizon="scalp",
+            directional_curriculum_soft_end_step=8000,
+            directional_curriculum_end_step=15000,
+        )
+        env.position_mechanics_profile = {
+            "entry_filter": {
+                "ema_mode": "moderate",
+                "require_vwap_alignment": True,
+                "require_obv_confirmation": True,
+                "allow_trend_fallback": False,
+                "min_adx": 13.5,
+                "trend_adx": 18.5,
+            }
+        }
+
+        active_filter = env._get_active_entry_filter()
+
+        self.assertFalse(active_filter["require_vwap_alignment"])
+        self.assertFalse(active_filter["require_obv_confirmation"])
+        self.assertTrue(active_filter["allow_trend_fallback"])
+        self.assertAlmostEqual(float(active_filter["min_adx"]), 10.5)
+        self.assertAlmostEqual(float(active_filter["trend_adx"]), 15.5)
+
+    def test_scalp_curriculum_uses_stronger_relaxation_early(self) -> None:
+        """Assouplit davantage `ADX` en debut de run `scalp`."""
+
+        env = TradingEnvironment(
+            symbol="XAUUSD",
+            training_mode=True,
+            training_progress_step=3000,
+        )
+        env.config = SimpleNamespace(
+            horizon="scalp",
+            directional_curriculum_soft_end_step=8000,
+            directional_curriculum_end_step=15000,
+        )
+        env.position_mechanics_profile = {
+            "entry_filter": {
+                "ema_mode": "moderate",
+                "require_vwap_alignment": True,
+                "require_obv_confirmation": True,
+                "allow_trend_fallback": False,
+                "min_adx": 13.5,
+                "trend_adx": 18.5,
+            }
+        }
+
+        active_filter = env._get_active_entry_filter()
+
+        self.assertFalse(active_filter["require_vwap_alignment"])
+        self.assertFalse(active_filter["require_obv_confirmation"])
+        self.assertTrue(active_filter["allow_trend_fallback"])
+        self.assertAlmostEqual(float(active_filter["min_adx"]), 8.5)
+        self.assertAlmostEqual(float(active_filter["trend_adx"]), 13.5)
+
+    def test_scalp_curriculum_restores_family_filter_after_15000(self) -> None:
+        """Revient au filtre famille apres la fin du curriculum `scalp`."""
+
+        env = TradingEnvironment(
+            symbol="XAUUSD",
+            training_mode=True,
+            training_progress_step=16000,
+        )
+        env.config = SimpleNamespace(
+            horizon="scalp",
+            directional_curriculum_soft_end_step=8000,
+            directional_curriculum_end_step=15000,
+        )
+        env.position_mechanics_profile = {
+            "entry_filter": {
+                "ema_mode": "moderate",
+                "require_vwap_alignment": True,
+                "require_obv_confirmation": False,
+                "allow_trend_fallback": False,
+                "min_adx": 13.5,
+                "trend_adx": 18.5,
+            }
+        }
+
+        active_filter = env._get_active_entry_filter()
+
+        self.assertTrue(active_filter["require_vwap_alignment"])
+        self.assertFalse(active_filter["require_obv_confirmation"])
+        self.assertFalse(active_filter["allow_trend_fallback"])
+        self.assertAlmostEqual(float(active_filter["min_adx"]), 13.5)
+        self.assertAlmostEqual(float(active_filter["trend_adx"]), 18.5)
+
+    def test_scalp_profiles_disable_obv_as_hard_gate(self) -> None:
+        """Supprime `OBV` des gates durs pour toutes les familles `scalp`."""
+
+        for family in ("fx", "indices", "metals", "crypto"):
+            profile = resolve_position_mechanics_profile("scalp", family)
+            self.assertFalse(profile["entry_filter"]["require_obv_confirmation"])
 
     def test_priority_update_changes_tree_weight(self) -> None:
         """Met a jour la priorite stockee dans la SumTree."""
@@ -348,6 +581,42 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertLessEqual(buy_only_count, 3)
         self.assertLessEqual(sell_only_count, 3)
         self.assertGreaterEqual(balanced_count, 4)
+
+    def test_replay_diversity_stats_expose_root_mask_and_post_veto_rates(self) -> None:
+        """Expose les nouvelles metriques de friction policy/environnement."""
+
+        buffer = PrioritizedReplayBuffer(max_games=4)
+        game = GameHistory()
+        game.store(np.zeros(4, dtype=np.float32), HOLD, 0.0, np.ones(5, dtype=np.float32) / 5.0, 0.0)
+        game.metadata.update(
+            {
+                "balanced_episode": True,
+                "long_present": True,
+                "short_present": True,
+                "long_entries": 3,
+                "short_entries": 2,
+                "requested_buy_actions": 5,
+                "requested_sell_actions": 5,
+                "entry_veto_to_hold": 1,
+                "root_mask_directional_candidates_total": 10,
+                "root_mask_blocked_buy_total": 2,
+                "root_mask_blocked_sell_total": 1,
+                "root_mask_blocked_buy_vwap": 1,
+                "root_mask_blocked_sell_adx": 1,
+                "root_mask_blocked_buy_directional": 1,
+                "blocked_buy_entries": 1,
+                "blocked_sell_entries": 0,
+            }
+        )
+        buffer.save_game(game)
+
+        stats = buffer.diversity_stats()
+
+        self.assertAlmostEqual(float(stats["root_mask_rate"]), 0.3, places=6)
+        self.assertAlmostEqual(float(stats["post_veto_to_hold_rate"]), 0.1, places=6)
+        self.assertAlmostEqual(float(stats["veto_to_hold_rate"]), 0.1, places=6)
+        self.assertEqual(float(stats["root_mask_blocked_buy_total"]), 2.0)
+        self.assertEqual(float(stats["root_mask_blocked_sell_total"]), 1.0)
 
     def test_arena_score_penalizes_sell_heavy_candidate(self) -> None:
         """Degrade le score Arena d'un candidat unidirectionnel."""
@@ -540,6 +809,43 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertIn(BUY, root.children)
         self.assertGreater(root.children[HOLD].prior, root.children[BUY].prior)
 
+    def test_self_play_calls_root_policy_mask(self) -> None:
+        """Utilise le masque racine metier pendant le self-play."""
+
+        self._require_jax_stack()
+
+        from eva_lab.muzero.config import MuZeroConfigV3
+        from eva_lab.muzero.jax_agent import JAXMuZeroAgent
+
+        class TrackingEnvironment(TradingEnvironment):
+            """Expose l'appel au masque racine pour le test."""
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.root_policy_called = False
+
+            def get_root_policy_actions(self) -> list[int]:
+                self.root_policy_called = True
+                return super().get_root_policy_actions()
+
+        config = MuZeroConfigV3(
+            horizon="scalp",
+            symbols=["XAUUSD"],
+            max_symbols=1,
+            dataset_source="csv",
+        )
+        config.num_simulations = 1
+        config.collection_num_simulations = 1
+        config.max_moves = 1
+        config.window_size = 512
+        config.batch_size = 2
+
+        agent = JAXMuZeroAgent(config)
+        env = TrackingEnvironment(symbol="XAUUSD", config=config, max_steps=1)
+        agent.play_game(env, exploration=True)
+
+        self.assertTrue(env.root_policy_called)
+
     def test_reanalyze_rewrites_policy_and_value_shapes(self) -> None:
         """Reecrit politiques et valeurs d'un episode sans casser les longueurs."""
 
@@ -594,6 +900,80 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertEqual(len(game.values), 1)
         self.assertAlmostEqual(float(np.sum(game.policies[0])), 1.0, places=5)
         self.assertNotAlmostEqual(float(game.values[0]), 123.456, places=3)
+
+    def test_policy_precheck_window_blocks_high_friction_profile(self) -> None:
+        """Refuse une fenetre si la friction masque/veto reste trop elevee."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            policy_precheck_max_loss_pol=5.8,
+            policy_precheck_min_top1_share=0.75,
+            policy_precheck_max_root_mask_rate=0.25,
+            policy_precheck_max_post_veto_rate=0.10,
+            policy_precheck_min_balanced_episode_rate=0.85,
+            policy_precheck_min_long_entry_share=0.35,
+            policy_precheck_min_short_entry_share=0.35,
+        )
+        history = [
+            {
+                "loss_pol": 5.4,
+                "policy_top1_share": 0.81,
+                "root_mask_rate": 0.42,
+                "post_veto_to_hold_rate": 0.05,
+                "balanced_episode_rate": 92.0,
+                "long_entry_share": 0.52,
+                "short_entry_share": 0.48,
+            }
+            for _ in range(500)
+        ]
+
+        verdict = module._evaluate_policy_precheck_window(
+            history=history,
+            config=config,
+            step=12000,
+            stage="mid_run",
+        )
+
+        self.assertEqual(verdict["status"], "fail")
+        self.assertEqual(verdict["reason"], "root_mask_rate")
+
+    def test_policy_precheck_window_accepts_balanced_five_x_profile(self) -> None:
+        """Valide une fenetre `5.x` stable avec friction faible et flux equilibre."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            policy_precheck_max_loss_pol=5.8,
+            policy_precheck_min_top1_share=0.75,
+            policy_precheck_max_root_mask_rate=0.25,
+            policy_precheck_max_post_veto_rate=0.10,
+            policy_precheck_min_balanced_episode_rate=0.85,
+            policy_precheck_min_long_entry_share=0.35,
+            policy_precheck_min_short_entry_share=0.35,
+        )
+        history = [
+            {
+                "loss_pol": 5.35,
+                "policy_top1_share": 0.79,
+                "root_mask_rate": 0.14,
+                "post_veto_to_hold_rate": 0.04,
+                "balanced_episode_rate": 91.0,
+                "long_entry_share": 0.55,
+                "short_entry_share": 0.45,
+            }
+            for _ in range(500)
+        ]
+
+        verdict = module._evaluate_policy_precheck_window(
+            history=history,
+            config=config,
+            step=12000,
+            stage="mid_run",
+        )
+
+        self.assertEqual(verdict["status"], "pass")
+        self.assertEqual(verdict["reason"], "eligible")
 
 
 if __name__ == "__main__":

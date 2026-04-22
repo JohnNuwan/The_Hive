@@ -55,6 +55,48 @@ class TelegramClientTests(unittest.TestCase):
         payload = post_mock.call_args.kwargs["json"]
         self.assertEqual(payload["parse_mode"], "HTML")
 
+    @patch("shared.telegram_client.get_settings")
+    @patch("shared.telegram_client.requests.post")
+    def test_send_sync_repairs_common_mojibake_text(
+        self,
+        post_mock: MagicMock,
+        settings_mock: MagicMock,
+    ) -> None:
+        """Repare les chaines UTF-8 decodees a tort avant l'envoi Telegram."""
+
+        settings_mock.return_value = SimpleNamespace(
+            telegram_bot_token="token",
+            telegram_chat_id="chat",
+        )
+        post_mock.return_value = SimpleNamespace(status_code=200, text="ok")
+
+        client = TelegramClient()
+        client._send_sync_internal("📈 *E.V.A | Bilan AprÃ¨s-Midi*")
+
+        payload = post_mock.call_args.kwargs["json"]
+        self.assertEqual(payload["text"], "📈 *E.V.A | Bilan Après-Midi*")
+
+    @patch("shared.telegram_client.get_settings")
+    @patch("shared.telegram_client.requests.post")
+    def test_send_photo_repairs_caption_mojibake_text(
+        self,
+        post_mock: MagicMock,
+        settings_mock: MagicMock,
+    ) -> None:
+        """Repare egalement les captions d'images Telegram."""
+
+        settings_mock.return_value = SimpleNamespace(
+            telegram_bot_token="token",
+            telegram_chat_id="chat",
+        )
+        post_mock.return_value = SimpleNamespace(status_code=200, text="ok")
+
+        client = TelegramClient()
+        client._send_photo_sync_internal(b"png", "NEWS FILTER ACTIVÃ‰")
+
+        payload = post_mock.call_args.kwargs["data"]
+        self.assertEqual(payload["caption"], "NEWS FILTER ACTIVÉ")
+
 
 if __name__ == "__main__":
     unittest.main()

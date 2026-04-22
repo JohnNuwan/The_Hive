@@ -382,9 +382,23 @@ class PrioritizedReplayBuffer:
                 "executed_long_entry_share": 0.0,
                 "executed_short_entry_share": 0.0,
                 "directional_imbalance": 1.0,
+                "root_mask_rate": 0.0,
                 "veto_to_hold_rate": 0.0,
+                "post_veto_to_hold_rate": 0.0,
                 "net_return_long_pct": 0.0,
                 "net_return_short_pct": 0.0,
+                "root_mask_blocked_buy_total": 0.0,
+                "root_mask_blocked_sell_total": 0.0,
+                "root_mask_blocked_buy_ema200": 0.0,
+                "root_mask_blocked_sell_ema200": 0.0,
+                "root_mask_blocked_buy_vwap": 0.0,
+                "root_mask_blocked_sell_vwap": 0.0,
+                "root_mask_blocked_buy_adx": 0.0,
+                "root_mask_blocked_sell_adx": 0.0,
+                "root_mask_blocked_buy_obv": 0.0,
+                "root_mask_blocked_sell_obv": 0.0,
+                "root_mask_blocked_buy_directional": 0.0,
+                "root_mask_blocked_sell_directional": 0.0,
                 "blocked_buy_total": 0.0,
                 "blocked_sell_total": 0.0,
                 "directional_collapse": True,
@@ -397,6 +411,19 @@ class PrioritizedReplayBuffer:
         short_present_games = 0
         total_long_entries = 0.0
         total_short_entries = 0.0
+        root_mask_directional_candidates_total = 0.0
+        root_mask_blocked_buy_total = 0.0
+        root_mask_blocked_sell_total = 0.0
+        root_mask_blocked_buy_ema200 = 0.0
+        root_mask_blocked_sell_ema200 = 0.0
+        root_mask_blocked_buy_vwap = 0.0
+        root_mask_blocked_sell_vwap = 0.0
+        root_mask_blocked_buy_adx = 0.0
+        root_mask_blocked_sell_adx = 0.0
+        root_mask_blocked_buy_obv = 0.0
+        root_mask_blocked_sell_obv = 0.0
+        root_mask_blocked_buy_directional = 0.0
+        root_mask_blocked_sell_directional = 0.0
         blocked_buy_total = 0.0
         blocked_sell_total = 0.0
         entry_veto_total = 0.0
@@ -421,6 +448,22 @@ class PrioritizedReplayBuffer:
 
             total_long_entries += self._metadata_float(game, "long_entries")
             total_short_entries += self._metadata_float(game, "short_entries")
+            root_mask_directional_candidates_total += self._metadata_float(
+                game,
+                "root_mask_directional_candidates_total",
+            )
+            root_mask_blocked_buy_total += self._metadata_float(game, "root_mask_blocked_buy_total")
+            root_mask_blocked_sell_total += self._metadata_float(game, "root_mask_blocked_sell_total")
+            root_mask_blocked_buy_ema200 += self._metadata_float(game, "root_mask_blocked_buy_ema200")
+            root_mask_blocked_sell_ema200 += self._metadata_float(game, "root_mask_blocked_sell_ema200")
+            root_mask_blocked_buy_vwap += self._metadata_float(game, "root_mask_blocked_buy_vwap")
+            root_mask_blocked_sell_vwap += self._metadata_float(game, "root_mask_blocked_sell_vwap")
+            root_mask_blocked_buy_adx += self._metadata_float(game, "root_mask_blocked_buy_adx")
+            root_mask_blocked_sell_adx += self._metadata_float(game, "root_mask_blocked_sell_adx")
+            root_mask_blocked_buy_obv += self._metadata_float(game, "root_mask_blocked_buy_obv")
+            root_mask_blocked_sell_obv += self._metadata_float(game, "root_mask_blocked_sell_obv")
+            root_mask_blocked_buy_directional += self._metadata_float(game, "root_mask_blocked_buy_directional")
+            root_mask_blocked_sell_directional += self._metadata_float(game, "root_mask_blocked_sell_directional")
             blocked_buy_total += self._metadata_float(game, "blocked_buy_entries")
             blocked_sell_total += self._metadata_float(game, "blocked_sell_entries")
             entry_veto_total += self._metadata_float(game, "entry_veto_to_hold")
@@ -442,9 +485,26 @@ class PrioritizedReplayBuffer:
             "executed_long_entry_share": executed_long_entry_share,
             "executed_short_entry_share": executed_short_entry_share,
             "directional_imbalance": directional_imbalance,
+            "root_mask_rate": (
+                (root_mask_blocked_buy_total + root_mask_blocked_sell_total)
+                / max(root_mask_directional_candidates_total, 1.0)
+            ),
             "veto_to_hold_rate": entry_veto_total / max(requested_directional_total, 1.0),
+            "post_veto_to_hold_rate": entry_veto_total / max(requested_directional_total, 1.0),
             "net_return_long_pct": long_return_sum / max(long_return_games, 1),
             "net_return_short_pct": short_return_sum / max(short_return_games, 1),
+            "root_mask_blocked_buy_total": root_mask_blocked_buy_total,
+            "root_mask_blocked_sell_total": root_mask_blocked_sell_total,
+            "root_mask_blocked_buy_ema200": root_mask_blocked_buy_ema200,
+            "root_mask_blocked_sell_ema200": root_mask_blocked_sell_ema200,
+            "root_mask_blocked_buy_vwap": root_mask_blocked_buy_vwap,
+            "root_mask_blocked_sell_vwap": root_mask_blocked_sell_vwap,
+            "root_mask_blocked_buy_adx": root_mask_blocked_buy_adx,
+            "root_mask_blocked_sell_adx": root_mask_blocked_sell_adx,
+            "root_mask_blocked_buy_obv": root_mask_blocked_buy_obv,
+            "root_mask_blocked_sell_obv": root_mask_blocked_sell_obv,
+            "root_mask_blocked_buy_directional": root_mask_blocked_buy_directional,
+            "root_mask_blocked_sell_directional": root_mask_blocked_sell_directional,
             "blocked_buy_total": blocked_buy_total,
             "blocked_sell_total": blocked_sell_total,
             "directional_collapse": bool(total_long_entries <= 0.0 or total_short_entries <= 0.0),

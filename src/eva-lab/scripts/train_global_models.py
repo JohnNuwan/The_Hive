@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import os
+import statistics
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -260,6 +262,122 @@ def _build_resume_candidates(
         seen_paths.add(normalized_path)
         candidates.append({"source": source_name, "path": normalized_path})
     return candidates
+
+
+def _to_metric_float(
+    metrics: dict[str, object],
+    key: str,
+    default: float = 0.0,
+) -> float:
+    """Convertit une metrique libre en flottant robuste.
+
+    Args:
+        metrics (dict[str, object]): Dictionnaire source.
+        key (str): Nom de la metrique.
+        default (float): Valeur de repli.
+
+    Returns:
+        float: Valeur convertie ou repli.
+    """
+    try:
+        return float(metrics.get(key, default) or default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _normalize_rate(value: float) -> float:
+    """Normalise un taux qui peut etre exprime en ratio ou en pourcentage.
+
+    Args:
+        value (float): Valeur brute.
+
+    Returns:
+        float: Valeur ramenee dans `[0, 1]` si necessaire.
+    """
+    return value / 100.0 if value > 1.0 else value
+
+
+def _evaluate_policy_precheck_window(
+    *,
+    history: list[dict[str, object]],
+    config: MuZeroConfigV3,
+    step: int,
+    stage: str,
+) -> dict[str, object]:
+    """Evalue la fenetre glissante de policy avant autorisation Arena.
+
+    Args:
+        history (list[dict[str, object]]): Historique recent des metriques.
+        config (MuZeroConfigV3): Configuration MuZero courante.
+        step (int): Etape a laquelle le precheck est evalue.
+        stage (str): Etiquette du contexte (`mid_run`, `pre_arena`, etc.).
+
+    Returns:
+        dict[str, object]: Verdict structure du precheck policy.
+    """
+    if not history:
+        return {
+            "status": "fail",
+            "reason": "fenetre_policy_absente",
+            "step": step,
+            "stage": stage,
+            "window_size": 0,
+            "checks": {},
+            "medians": {},
+        }
+
+    loss_values = [_to_metric_float(item, "loss_pol", default=999.0) for item in history]
+    top1_values = [_to_metric_float(item, "policy_top1_share", default=0.0) for item in history]
+    root_mask_values = [_to_metric_float(item, "root_mask_rate", default=1.0) for item in history]
+    post_veto_values = [_to_metric_float(item, "post_veto_to_hold_rate", default=1.0) for item in history]
+    balanced_values = [
+        _normalize_rate(_to_metric_float(item, "balanced_episode_rate", default=0.0))
+        for item in history
+    ]
+    long_share_values = [_to_metric_float(item, "long_entry_share", default=0.0) for item in history]
+    short_share_values = [_to_metric_float(item, "short_entry_share", default=0.0) for item in history]
+
+    medians = {
+        "loss_pol": statistics.median(loss_values),
+        "policy_top1_share": statistics.median(top1_values),
+        "root_mask_rate": statistics.median(root_mask_values),
+        "post_veto_to_hold_rate": statistics.median(post_veto_values),
+        "balanced_episode_rate": statistics.median(balanced_values),
+        "long_entry_share": statistics.median(long_share_values),
+        "short_entry_share": statistics.median(short_share_values),
+    }
+    checks = {
+        "loss_pol": medians["loss_pol"] <= float(getattr(config, "policy_precheck_max_loss_pol", 5.8) or 5.8),
+        "policy_top1_share": medians["policy_top1_share"] >= float(
+            getattr(config, "policy_precheck_min_top1_share", 0.75) or 0.75
+        ),
+        "root_mask_rate": medians["root_mask_rate"] <= float(
+            getattr(config, "policy_precheck_max_root_mask_rate", 0.25) or 0.25
+        ),
+        "post_veto_to_hold_rate": medians["post_veto_to_hold_rate"] <= float(
+            getattr(config, "policy_precheck_max_post_veto_rate", 0.10) or 0.10
+        ),
+        "balanced_episode_rate": medians["balanced_episode_rate"] >= float(
+            getattr(config, "policy_precheck_min_balanced_episode_rate", 0.85) or 0.85
+        ),
+        "long_entry_share": medians["long_entry_share"] >= float(
+            getattr(config, "policy_precheck_min_long_entry_share", 0.35) or 0.35
+        ),
+        "short_entry_share": medians["short_entry_share"] >= float(
+            getattr(config, "policy_precheck_min_short_entry_share", 0.35) or 0.35
+        ),
+    }
+    failed_check = next((name for name, passed in checks.items() if not passed), None)
+    return {
+        "status": "pass" if all(checks.values()) else "fail",
+        "reason": "eligible" if failed_check is None else failed_check,
+        "step": step,
+        "stage": stage,
+        "window_size": len(history),
+        "checks": checks,
+        "medians": medians,
+        "latest_metrics": dict(history[-1] or {}),
+    }
 
 
 def _build_terminal_failure_summary(
@@ -713,6 +831,10 @@ def main() -> dict[str, object]:
     dataset_id = str(dataset_descriptor.get("dataset_id") or "")
     start_time = datetime.now()
     last_metrics: dict[str, object] | None = None
+    last_optimization_step = 0
+    policy_precheck_history: deque[dict[str, object]] = deque(maxlen=500)
+    policy_precheck_payload: dict[str, object] | None = None
+    policy_precheck_executed = False
     reanalyze_games_total = 0
     reanalyze_positions_total = 0
     gold_precheck_payload: dict[str, object] | None = None
@@ -720,6 +842,7 @@ def main() -> dict[str, object]:
     killed_after_precheck = False
     directional_collapse_payload: dict[str, object] | None = None
     killed_after_directional_collapse = False
+    killed_after_policy_precheck = False
 
     if mechanics_only_mode:
         valid_symbols = [str(symbol).strip() for symbol in config.symbols if str(symbol).strip()]
@@ -872,6 +995,7 @@ def main() -> dict[str, object]:
             current_prepared_step = agent.prepare_training_step()
 
             for step in range(1, config.training_steps + 1):
+                last_optimization_step = step
                 mark_step_running(
                     step_name,
                     engine=engine,
@@ -966,6 +1090,7 @@ def main() -> dict[str, object]:
                     "reanalyze_ms": float(reanalyze_ms),
                 }
                 last_metrics = metrics
+                policy_precheck_history.append(dict(metrics))
                 merge_training_status(
                     {
                         "latest_metrics": dict(last_metrics),
@@ -990,6 +1115,48 @@ def main() -> dict[str, object]:
                 except (TypeError, ValueError):
                     directional_imbalance = 1.0
                 directional_bias = str(metrics.get("directional_bias") or "inactive").strip().lower()
+                policy_precheck_step = int(
+                    getattr(config, "policy_precheck_step", 12000) or 12000
+                )
+
+                if (
+                    not policy_precheck_executed
+                    and policy_precheck_step > 0
+                    and step >= policy_precheck_step
+                ):
+                    policy_precheck_payload = _evaluate_policy_precheck_window(
+                        history=list(policy_precheck_history),
+                        config=config,
+                        step=step,
+                        stage="mid_run",
+                    )
+                    merge_training_status(
+                        {
+                            "policy_precheck": dict(policy_precheck_payload),
+                            "latest_metrics": {
+                                **dict(last_metrics),
+                                "policy_precheck_passed": policy_precheck_payload.get("status") == "pass",
+                            },
+                        }
+                    )
+                    policy_precheck_executed = True
+                    append_training_log(
+                        (
+                            f"MuZero {horizon}: precheck policy {policy_precheck_payload.get('status')} "
+                            f"a l'etape {step} ({policy_precheck_payload.get('reason')})."
+                        ),
+                        level="WARNING" if policy_precheck_payload.get("status") == "fail" else "INFO",
+                        source="muzero",
+                    )
+                    if policy_precheck_payload.get("status") == "fail":
+                        merge_training_status(
+                            {
+                                "status": "policy_precheck_failed",
+                                "reason": "policy_precheck_failed",
+                            }
+                        )
+                        killed_after_policy_precheck = True
+                        break
 
                 if step >= collapse_check_step and (long_entry_share <= 0.0 or short_entry_share <= 0.0):
                     directional_collapse_payload = {
@@ -1136,6 +1303,7 @@ def main() -> dict[str, object]:
                         (
                             "[%s] step %05d/%05d | loss=%.4f | val=%.4f | rew=%.4f | "
                             "pol=%.4f | ent=%.4f | top1=%.4f | legal=%.2f | masked=%.2f | "
+                            "root_mask=%.2f | post_veto=%.2f | "
                             "prep=%.1fms | put=%.1fms | upd=%.1fms | reanalyze=%.1fms | "
                             "mode=%s | %.2f steps/s"
                         ),
@@ -1150,6 +1318,8 @@ def main() -> dict[str, object]:
                         float(metrics.get("policy_top1_share", 0.0)),
                         float(metrics.get("root_legal_action_count", 0.0)),
                         float(metrics.get("invalid_root_action_masked_rate", 0.0)),
+                        float(metrics.get("root_mask_rate", 0.0)),
+                        float(metrics.get("post_veto_to_hold_rate", 0.0)),
                         float(metrics.get("batch_prepare_ms", 0.0)),
                         float(metrics.get("device_put_ms", 0.0)),
                         float(metrics.get("update_ms", 0.0)),
@@ -1162,6 +1332,8 @@ def main() -> dict[str, object]:
                         f"{horizon}: step {step}/{config.training_steps} | "
                         f"loss={float(metrics['loss_total']):.4f} | "
                         f"pol={float(metrics['loss_pol']):.4f} | "
+                        f"root_mask={float(metrics.get('root_mask_rate', 0.0)):.4f} | "
+                        f"post_veto={float(metrics.get('post_veto_to_hold_rate', 0.0)):.4f} | "
                         f"ent={float(metrics.get('policy_entropy', 0.0)):.4f} | "
                         f"prep_ms={float(metrics.get('batch_prepare_ms', 0.0)):.1f} | "
                         f"upd_ms={float(metrics.get('update_ms', 0.0)):.1f}",
@@ -1225,6 +1397,37 @@ def main() -> dict[str, object]:
         latest_checkpoint_reference and Path(latest_checkpoint_reference).exists()
     )
     active_run_id = str(load_training_status().get("run_id") or "").strip() or None
+
+    if (
+        not mechanics_only_mode
+        and not killed_after_directional_collapse
+        and not killed_after_precheck
+        and last_metrics is not None
+    ):
+        final_policy_precheck = _evaluate_policy_precheck_window(
+            history=list(policy_precheck_history),
+            config=config,
+            step=last_optimization_step,
+            stage="pre_arena",
+        )
+        policy_precheck_payload = dict(final_policy_precheck)
+        merge_training_status(
+            {
+                "policy_precheck": dict(policy_precheck_payload),
+                "latest_metrics": {
+                    **dict(last_metrics),
+                    "policy_precheck_passed": policy_precheck_payload.get("status") == "pass",
+                },
+            }
+        )
+        if policy_precheck_payload.get("status") == "fail":
+            merge_training_status(
+                {
+                    "status": "policy_precheck_failed",
+                    "reason": "policy_precheck_failed",
+                }
+            )
+            killed_after_policy_precheck = True
 
     if killed_after_directional_collapse:
         promotion_gate = {
@@ -1361,6 +1564,155 @@ def main() -> dict[str, object]:
             "checkpoint_schema_version": challenger_checkpoint_schema_version,
             "lineage": challenger_lineage,
             "precheck": dict(gold_precheck_payload or {}),
+            "promotion": promotion_result,
+            "terminal_summary_path": str(terminal_summary_path),
+        }
+
+    if killed_after_policy_precheck:
+        policy_metrics = dict((policy_precheck_payload or {}).get("medians") or {})
+        promotion_gate = {
+            "allowed": False,
+            "status": "blocked",
+            "reason": "policy_precheck_failed",
+            "gate_profile": gate_profile,
+            "failure_mode": str((policy_precheck_payload or {}).get("reason") or "policy_precheck_failed"),
+            "checks": dict((policy_precheck_payload or {}).get("checks") or {}),
+            "metrics": policy_metrics,
+        }
+        promotion_result = {
+            "status": "skipped",
+            "reason": "policy_precheck_failed",
+            "engine": engine,
+            "horizon": horizon,
+            "source_path": str(challenger_path),
+            "champion_paths": [],
+            "promotion_gate": promotion_gate,
+            "artifact_compatibility": challenger_compatibility,
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "resume_source": resume_source,
+            "lineage": challenger_lineage,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_trial": ga_trial,
+            "ga_scope": ga_scope,
+            "policy_precheck": dict(policy_precheck_payload or {}),
+        }
+        promoter = ChampionPromoter(weights_dir=config.weights_path, results_dir=config.results_path)
+        promoter.persist_challenger_manifest(
+            engine=engine,
+            horizon=horizon,
+            status="blocked",
+            challenger_id=challenger_id,
+            challenger_path=str(challenger_path),
+            latest_checkpoint=str(latest_path),
+            battle_report=None,
+            training_metrics=training_metrics_payload,
+            promotion_gate=promotion_gate,
+            promotion_result=promotion_result,
+            artifact_compatibility=dict(promotion_result.get("artifact_compatibility") or {}),
+            checkpoint_schema_version=challenger_checkpoint_schema_version,
+            resume_source=resume_source,
+            lineage=challenger_lineage,
+        )
+        terminal_summary = {
+            "run_id": active_run_id,
+            "sequence_id": str(os.getenv("TRAINING_SEQUENCE_ID", "")).strip() or None,
+            "sequence_profile": str(os.getenv("TRAINING_SEQUENCE_PROFILE", "")).strip() or None,
+            "window_id": str(os.getenv("TRAINING_WINDOW_ID", "")).strip() or None,
+            "trial_id": str(os.getenv("TRAINING_TRIAL_ID", "")).strip() or ga_trial,
+            "engine": engine,
+            "horizon": horizon,
+            "family": family,
+            "feature_profile": feature_profile.get("profile_name"),
+            "mechanics_profile_version": mechanics_profile_version,
+            "ga_trial": ga_trial,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_scope": ga_scope,
+            "ga_parent_champion_id": ga_parent_champion_id,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "trial_mode": trial_mode,
+            "trial_cost_profile": trial_cost_profile,
+            "dataset_id": dataset_id,
+            "dataset_source": dataset_source,
+            "focus_symbols": focus_symbols,
+            "gate_profile": gate_profile,
+            "terminal_status": "completed",
+            "failed_step": (policy_precheck_payload or {}).get("step"),
+            "failure_mode": promotion_gate.get("failure_mode"),
+            "arena_outcome": None,
+            "promotion_gate": promotion_gate,
+            "metrics": policy_metrics,
+            "metrics_by_symbol": {},
+            "metrics_by_position_mechanics": {},
+            "training_metrics": training_metrics_payload,
+            "resume_source": resume_source,
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "lineage": challenger_lineage,
+            "artifact_state": {
+                "precheck_report_present": False,
+                "arena_report_present": False,
+                "battle_report_present": False,
+                "promotion_present": True,
+                "candidate_checkpoint_present": challenger_path.exists(),
+                "latest_checkpoint_present": latest_checkpoint_present,
+            },
+            "challenger_path": str(challenger_path),
+            "latest_checkpoint": str(latest_path),
+            "latest_candidate": challenger_id,
+            "latest_verdict": {
+                "status": "policy_precheck_failed",
+                "reason": promotion_gate.get("reason"),
+                "failure_mode": promotion_gate.get("failure_mode"),
+            },
+            "gold_precheck": dict(gold_precheck_payload or {}),
+            "precheck_status": (gold_precheck_payload or {}).get("status"),
+            "policy_precheck": dict(policy_precheck_payload or {}),
+        }
+        terminal_summary_path = write_terminal_summary(terminal_summary)
+        logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
+        append_training_log(
+            (
+                f"MuZero {horizon}: arena annulee apres echec du precheck policy "
+                f"({(policy_precheck_payload or {}).get('reason')})."
+            ),
+            level="WARNING",
+            source="muzero",
+        )
+        return {
+            "engine": engine,
+            "horizon": horizon,
+            "timeframe": config.primary_timeframe,
+            "symbols": valid_symbols,
+            "family": family,
+            "feature_profile": feature_profile.get("profile_name"),
+            "mechanics_profile_version": mechanics_profile_version,
+            "dataset_id": dataset_id,
+            "dataset_source": dataset_source,
+            "focus_symbols": focus_symbols,
+            "gate_profile": gate_profile,
+            "dataset_descriptor": dataset_descriptor,
+            "dataset_coverage": dict(getattr(config, "dataset_coverage", {}) or {}),
+            "games_per_symbol": games_per_symbol,
+            "total_games": total_games,
+            "latest_checkpoint": latest_checkpoint_reference,
+            "challenger_path": str(challenger_path),
+            "training_metrics": training_metrics_payload,
+            "ga_status": ga_status,
+            "ga_generation": ga_generation,
+            "ga_trial": ga_trial,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_scope": ga_scope,
+            "ga_parent_champion_id": ga_parent_champion_id,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "trial_mode": trial_mode,
+            "trial_cost_profile": trial_cost_profile,
+            "resume_source": resume_source,
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "lineage": challenger_lineage,
+            "precheck": dict(gold_precheck_payload or {}),
+            "policy_precheck": dict(policy_precheck_payload or {}),
             "promotion": promotion_result,
             "terminal_summary_path": str(terminal_summary_path),
         }

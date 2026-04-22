@@ -186,7 +186,7 @@ class JAXMuZeroAgent:
             def _execute_collection_step() -> tuple[object, float, bool, float, float]:
                 obs_jax = jnp.array(current_observation).reshape(1, -1)
                 hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
-                root_legal_actions = env.get_legal_root_actions()
+                root_legal_actions = env.get_root_policy_actions()
 
                 mcts_started_at = perf_counter()
                 root = mcts.run(
@@ -334,6 +334,20 @@ class JAXMuZeroAgent:
             "entry_veto_to_hold",
             "requested_buy_actions",
             "requested_sell_actions",
+            "root_mask_directional_candidates_total",
+            "root_mask_blocked_buy_total",
+            "root_mask_blocked_sell_total",
+            "root_mask_blocked_buy_ema200",
+            "root_mask_blocked_sell_ema200",
+            "root_mask_blocked_buy_vwap",
+            "root_mask_blocked_sell_vwap",
+            "root_mask_blocked_buy_adx",
+            "root_mask_blocked_sell_adx",
+            "root_mask_blocked_buy_obv",
+            "root_mask_blocked_sell_obv",
+            "root_mask_blocked_buy_directional",
+            "root_mask_blocked_sell_directional",
+            "root_mask_rate",
             "blocked_buy_entries",
             "blocked_sell_entries",
             "blocked_buy_vwap",
@@ -346,6 +360,7 @@ class JAXMuZeroAgent:
             "blocked_sell_directional",
             "net_return_long_pct",
             "net_return_short_pct",
+            "post_veto_to_hold_rate",
             "episode_regime",
         )
         for field_name in metadata_fields:
@@ -423,6 +438,32 @@ class JAXMuZeroAgent:
 
         self.training_step_count += 1
         return self._sanitize_metrics(metrics_payload)
+
+    def _build_root_policy_entry_filter(
+        self,
+        *,
+        training_mode: bool,
+    ) -> dict[str, float | bool | str]:
+        """Construit le filtre racine cohérent avec le curriculum courant.
+
+        Args:
+            training_mode (bool): Active le curriculum d'apprentissage.
+
+        Returns:
+            dict[str, float | bool | str]: Filtre racine observation-only.
+        """
+        return TradingEnvironment.resolve_active_entry_filter(
+            dict(getattr(self.config, "position_mechanics_profile", {}).get("entry_filter") or {}),
+            training_mode=training_mode,
+            training_progress_step=int(self.training_step_count),
+            horizon=str(getattr(self.config, "horizon", "") or ""),
+            curriculum_soft_end_step=int(
+                getattr(self.config, "directional_curriculum_soft_end_step", 8000) or 8000
+            ),
+            curriculum_end_step=int(
+                getattr(self.config, "directional_curriculum_end_step", 15000) or 15000
+            ),
+        )
 
     @staticmethod
     def _select_reanalyze_indices(total_observations: int, max_positions: int) -> list[int]:
@@ -514,7 +555,10 @@ class JAXMuZeroAgent:
             obs = game.observations[observation_index]
             obs_jax = jnp.array(obs).reshape(1, -1)
             hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
-            root_legal_actions = TradingEnvironment.infer_legal_root_actions_from_observation(obs)
+            root_legal_actions = TradingEnvironment.infer_root_policy_actions_from_observation(
+                obs,
+                entry_filter=self._build_root_policy_entry_filter(training_mode=True),
+            )
             root = mcts.run(
                 hidden_state,
                 root_logits,
@@ -727,7 +771,10 @@ class JAXMuZeroAgent:
 
         obs_jax = jnp.array(obs_vec).reshape(1, -1)
         hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
-        root_legal_actions = TradingEnvironment.infer_legal_root_actions_from_observation(obs_vec)
+        root_legal_actions = TradingEnvironment.infer_root_policy_actions_from_observation(
+            obs_vec,
+            entry_filter=self._build_root_policy_entry_filter(training_mode=False),
+        )
         mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
         root = mcts.run(
             hidden_state,

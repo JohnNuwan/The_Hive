@@ -1,70 +1,66 @@
-"""
-News Filter Service — Filtre de calendrier économique
-═══════════════════════════════════════════════════
+"""Filtre de calendrier economique pour THE HIVE."""
 
-Bloque automatiquement le trading pendant les événements macro à fort impact.
-Conforme à la Constitution ROE: news_filter_minutes = 30 (avant/après).
-
-Événements surveillés (High Impact):
-  - NFP (Non-Farm Payrolls)
-  - FOMC (Federal Reserve)
-  - CPI / PPI (Inflation)
-  - BCE (ECB) décisions de taux
-  - PMI Manufacturing / Services
-"""
+from __future__ import annotations
 
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 from dateutil import parser
 
-from shared.telegram_client import TelegramClient
 from shared.config import get_settings
+from shared.telegram_client import TelegramClient
 
 logger = logging.getLogger(__name__)
 
 
 class NewsFilterService:
-    """
-    Filtre de nouvelles économiques pour The Banker.
+    """Bloque temporairement le trading autour des annonces macro critiques.
 
-    En production, se connecte à une API de calendrier économique
-    (Forex Factory, Investing.com, MQL5 Calendar).
+    Le filtre observe le calendrier Forex Factory et suspend le trading
+    pendant une fenetre configurable avant et apres les evenements a fort
+    impact. Les notifications Telegram distinguent les symboles bloques des
+    symboles encore autorises.
     """
 
-    def __init__(self, filter_minutes: int = 30):
-        self.filter_minutes = filter_minutes  # Minutes avant/après événement
+    def __init__(self, filter_minutes: int = 30) -> None:
+        """Initialise le filtre de nouvelles.
+
+        Args:
+            filter_minutes (int): Nombre de minutes a bloquer avant et apres
+                un evenement critique.
+        """
+        self.filter_minutes = filter_minutes
         self.is_active = False
-        self.blocked_until: Optional[datetime] = None
-        self.current_blocking_event: Optional[str] = None
-        self.current_blocking_currency: str = "ALL"
-        self.high_impact_events: List[Dict[str, Any]] = []
+        self.blocked_until: datetime | None = None
+        self.current_blocking_event: str | None = None
+        self.current_blocking_currency = "ALL"
+        self.high_impact_events: list[dict[str, Any]] = []
         self._running = True
-        self.last_fetch_time: Optional[datetime] = None
+        self.last_fetch_time: datetime | None = None
 
     async def start_monitoring(self) -> None:
-        """Démarre la surveillance du calendrier en tâche de fond."""
+        """Demarre la surveillance continue du calendrier economique."""
         logger.info(
-            f"📰 News Filter démarré (buffer: ±{self.filter_minutes}min)"
+            "News Filter demarre (buffer: ±%s min).",
+            self.filter_minutes,
         )
         while self._running:
             try:
                 await self._check_calendar()
-            except Exception as e:
-                logger.error(f"Erreur News Filter: {e}")
-            await asyncio.sleep(60)  # Vérification chaque minute
+            except Exception as exc:
+                logger.error("Erreur News Filter: %s", exc)
+            await asyncio.sleep(60)
 
     async def _check_calendar(self) -> None:
-        """Vérifie le calendrier et active/désactive le filtre."""
+        """Met a jour l'etat du filtre selon les annonces en cours."""
         self.high_impact_events = await self._fetch_economic_calendar()
         now = datetime.now()
 
         for event in self.high_impact_events:
-            # On considère "High" (et parfois Holiday comme critique selon les setups)
-            if event.get("impact", "").upper() not in ["HIGH", "HOLIDAY"]:
+            if event.get("impact", "").upper() not in {"HIGH", "HOLIDAY"}:
                 continue
 
             event_time = event["time"]
@@ -77,121 +73,148 @@ class NewsFilterService:
                     self.blocked_until = window_end
                     self.current_blocking_event = event["name"]
                     self.current_blocking_currency = event.get("currency", "ALL").upper()
-                    
-                    # Compute Affected vs Active Symbols
+
                     all_symbols = get_settings().banker_symbols
-                    affected = [s for s in all_symbols if self.current_blocking_currency in s] if self.current_blocking_currency != "ALL" else all_symbols
-                    active = [s for s in all_symbols if s not in affected]
-                    
-                    # Formatting
-                    aff_str = ", ".join(affected) if affected else "Aucun"
-                    act_str = ", ".join(active) if active else "Aucun"
-                    
-                    msg = (
-                        f"🚨 *NEWS FILTER ACTIVÉ*\n\n"
-                        f"📰 *Événement*: `{event['name']}` ({self.current_blocking_currency})\n"
-                        f"💥 *Impact*: {event.get('impact', 'HIGH')}\n"
-                        f"⏳ *Durée*: Jusqu'à {window_end.strftime('%H:%M')}\n\n"
-                        f"🛑 *Trading Suspendu*:\n{aff_str}\n\n"
-                        f"✅ *Trading Actif*:\n{act_str}"
+                    if self.current_blocking_currency != "ALL":
+                        affected = [
+                            symbol
+                            for symbol in all_symbols
+                            if self.current_blocking_currency in symbol
+                        ]
+                    else:
+                        affected = list(all_symbols)
+                    active = [symbol for symbol in all_symbols if symbol not in affected]
+
+                    affected_text = ", ".join(affected) if affected else "Aucun"
+                    active_text = ", ".join(active) if active else "Aucun"
+                    message = (
+                        f"\U0001F6A8 *NEWS FILTER ACTIV\u00c9*\n\n"
+                        f"\U0001F4F0 *\u00c9v\u00e9nement*: `{event['name']}` "
+                        f"({self.current_blocking_currency})\n"
+                        f"\U0001F4A5 *Impact*: {event.get('impact', 'HIGH')}\n"
+                        f"\u23F3 *Dur\u00e9e*: Jusqu'\u00e0 {window_end.strftime('%H:%M')}\n\n"
+                        f"\U0001F6D1 *Trading Suspendu*:\n{affected_text}\n\n"
+                        f"\u2705 *Trading Actif*:\n{active_text}"
                     )
-                    logger.warning(f"News Filter activated for {self.current_blocking_currency} until {window_end.strftime('%H:%M')}")
-                    asyncio.create_task(TelegramClient().send_message(msg))
+                    logger.warning(
+                        "News Filter active pour %s jusqu'a %s.",
+                        self.current_blocking_currency,
+                        window_end.strftime("%H:%M"),
+                    )
+                    asyncio.create_task(TelegramClient().send_message(message))
                 return
 
-        # Aucun événement en cours
         if self.is_active and (not self.blocked_until or now > self.blocked_until):
+            message = (
+                f"\u2705 *NEWS FILTER D\u00c9SACTIV\u00c9*\n"
+                f"L'\u00e9v\u00e9nement `{self.current_blocking_event}` est termin\u00e9.\n"
+                "Reprise du Trading."
+            )
             self.is_active = False
             self.blocked_until = None
-            msg = f"✅ *NEWS FILTER DÉSACTIVÉ*\nL'événement `{self.current_blocking_event}` est terminé.\nReprise du Trading."
             self.current_blocking_event = None
             self.current_blocking_currency = "ALL"
-            logger.info(msg.replace("\n", " "))
-            asyncio.create_task(TelegramClient().send_message(msg))
+            logger.info(message.replace("\n", " "))
+            asyncio.create_task(TelegramClient().send_message(message))
 
     def should_block_trading(self, symbol: str = "") -> bool:
-        """Retourne True si le trading doit être bloqué pour ce symbole."""
-        if not self.is_active: return False
-        
-        curr = self.current_blocking_currency
-        if curr == "ALL" or not curr:
-            return True
-            
-        # Bloque uniquement si la devise impactée fait partie du symbole
-        if curr.upper() in symbol.upper():
-            return True
-            
-        return False
+        """Indique si le symbole doit etre bloque par le filtre.
 
-    async def _fetch_economic_calendar(self) -> List[Dict[str, Any]]:
+        Args:
+            symbol (str): Symbole a verifier.
+
+        Returns:
+            bool: ``True`` si le trading doit etre bloque.
         """
-        Récupère le calendrier économique temps réel via ForexFactory avec un cache de 4 heures.
+        if not self.is_active:
+            return False
+
+        currency = self.current_blocking_currency
+        if currency == "ALL" or not currency:
+            return True
+        return currency.upper() in symbol.upper()
+
+    async def _fetch_economic_calendar(self) -> list[dict[str, Any]]:
+        """Recupere le calendrier economique via Forex Factory.
+
+        Un cache de 4 heures est applique pour limiter les erreurs ``429``.
+
+        Returns:
+            list[dict[str, Any]]: Liste triee des evenements connus.
         """
         now = datetime.now()
-        # Anti 429: Fetch uniquement toutes les 4 heures
         if self.high_impact_events and self.last_fetch_time:
-            if (now - self.last_fetch_time).total_seconds() < 14400:
+            if (now - self.last_fetch_time).total_seconds() < 14_400:
                 return self.high_impact_events
 
         url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-        
+
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(url)
-                
+
                 if response.status_code == 429:
-                    logger.warning("⚠️ News Filter: ForexFactory Rate Limit (429). Backing off 15 min.")
-                    self.last_fetch_time = now - timedelta(seconds=14400 - 900) # retry in 15 min
+                    logger.warning(
+                        "News Filter: limite Forex Factory atteinte (429), nouveau test dans 15 min."
+                    )
+                    self.last_fetch_time = now - timedelta(seconds=14_400 - 900)
                     return self.high_impact_events
-                    
+
                 response.raise_for_status()
-                data = response.json()
-                
-                events = []
-                for item in data:
-                    try:
-                        # Parsing des dates ISO 8601 renvoyées par ForexFactory
-                        event_date = parser.isoparse(item["date"]).replace(tzinfo=None)
-                        events.append({
-                            "name": item.get("title", "Unknown"),
-                            "impact": item.get("impact", "").upper(),
-                            "currency": item.get("country", ""),
-                            "time": event_date,
-                        })
-                    except Exception as e:
-                        logger.warning(f"Erreur parsing date calendrier: {e} sur {item}")
-                        
-                # On trie par date histoire d'être propre
-                events.sort(key=lambda x: x["time"])
-                self.last_fetch_time = now
-                self.high_impact_events = events
-                return events
-                
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 429:
-                 logger.warning("⚠️ News Filter: 429 Rate Limit hit. Backing off.")
-                 self.last_fetch_time = now - timedelta(seconds=14400 - 900)
+                payload = response.json()
+
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                logger.warning(
+                    "News Filter: limite Forex Factory atteinte (429), nouveau test differe."
+                )
+                self.last_fetch_time = now - timedelta(seconds=14_400 - 900)
             else:
-                 logger.error(f"News Filter API error: {e}")
+                logger.error("News Filter API error: %s", exc)
             return self.high_impact_events
-        except Exception as e:
-            logger.error(f"Impossible de joindre ForexFactory: {e}")
-            # Renvoie le cache précédent si échec au lieu de vider la mémoire
+        except Exception as exc:
+            logger.error("Impossible de joindre Forex Factory: %s", exc)
             return self.high_impact_events
 
-    def get_status(self) -> Dict[str, Any]:
-        """Retourne l'état complet du filtre."""
+        events: list[dict[str, Any]] = []
+        for item in payload:
+            try:
+                event_date = parser.isoparse(item["date"]).replace(tzinfo=None)
+            except Exception as exc:
+                logger.warning("Erreur de parsing calendrier: %s sur %s", exc, item)
+                continue
+
+            events.append(
+                {
+                    "name": item.get("title", "Unknown"),
+                    "impact": item.get("impact", "").upper(),
+                    "currency": item.get("country", ""),
+                    "time": event_date,
+                }
+            )
+
+        events.sort(key=lambda event: event["time"])
+        self.last_fetch_time = now
+        self.high_impact_events = events
+        return events
+
+    def get_status(self) -> dict[str, Any]:
+        """Retourne l'etat detaille du filtre.
+
+        Returns:
+            dict[str, Any]: Etat courant et prochains evenements.
+        """
         now = datetime.now()
         upcoming = [
             {
-                "name": e["name"],
-                "impact": e["impact"],
-                "currency": e["currency"],
-                "time": e["time"].isoformat(),
-                "minutes_until": max(0, int((e["time"] - now).total_seconds() / 60)),
+                "name": event["name"],
+                "impact": event["impact"],
+                "currency": event["currency"],
+                "time": event["time"].isoformat(),
+                "minutes_until": max(0, int((event["time"] - now).total_seconds() / 60)),
             }
-            for e in self.high_impact_events
-            if e["time"] > now
+            for event in self.high_impact_events
+            if event["time"] > now
         ]
         return {
             "is_active": self.is_active,
@@ -202,4 +225,5 @@ class NewsFilterService:
         }
 
     def stop(self) -> None:
+        """Arrete proprement la surveillance du filtre."""
         self._running = False

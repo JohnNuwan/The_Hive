@@ -962,7 +962,7 @@ def _upgrade_scalp_position_mechanics_profile_v2(
             "entry_filter": {
                 "ema_mode": "relaxed",
                 "require_vwap_alignment": True,
-                "require_obv_confirmation": True,
+                "require_obv_confirmation": False,
                 "allow_trend_fallback": True,
                 "min_adx": 10.0,
                 "trend_adx": 14.0,
@@ -1023,7 +1023,7 @@ def _upgrade_scalp_position_mechanics_profile_v2(
             "entry_filter": {
                 "ema_mode": "relaxed",
                 "require_vwap_alignment": True,
-                "require_obv_confirmation": True,
+                "require_obv_confirmation": False,
                 "allow_trend_fallback": True,
                 "min_adx": 12.0,
                 "trend_adx": 17.0,

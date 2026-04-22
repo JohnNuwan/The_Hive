@@ -489,6 +489,19 @@ class TradingEnvironment:
         self.blocked_buy_directional = 0
         self.blocked_sell_directional = 0
         self.entry_veto_to_hold = 0
+        self.root_mask_directional_candidates_total = 0
+        self.root_mask_blocked_buy_total = 0
+        self.root_mask_blocked_sell_total = 0
+        self.root_mask_blocked_buy_ema200 = 0
+        self.root_mask_blocked_sell_ema200 = 0
+        self.root_mask_blocked_buy_vwap = 0
+        self.root_mask_blocked_sell_vwap = 0
+        self.root_mask_blocked_buy_adx = 0
+        self.root_mask_blocked_sell_adx = 0
+        self.root_mask_blocked_buy_obv = 0
+        self.root_mask_blocked_sell_obv = 0
+        self.root_mask_blocked_buy_directional = 0
+        self.root_mask_blocked_sell_directional = 0
         self.ema200_blocked_buy = 0
         self.ema200_blocked_sell = 0
         self.entry_blocked_vwap = 0
@@ -687,35 +700,96 @@ class TradingEnvironment:
         elif action == SELL and context["obv_slope"] >= 0:
             self.obv_divergent_actions += 1
 
+    @staticmethod
+    def resolve_active_entry_filter(
+        entry_filter: dict[str, float | bool | str],
+        *,
+        training_mode: bool,
+        training_progress_step: int,
+        horizon: str,
+        curriculum_soft_end_step: int,
+        curriculum_end_step: int,
+    ) -> dict[str, float | bool | str]:
+        """Retourne le filtre d'entree actif apres application du curriculum.
+
+        Args:
+            entry_filter (dict[str, float | bool | str]): Filtre de base du profil.
+            training_mode (bool): Indique si l'environnement est en apprentissage.
+            training_progress_step (int): Etape d'optimisation courante.
+            horizon (str): Horizon strategique du run.
+            curriculum_soft_end_step (int): Fin de la phase la plus permissive.
+            curriculum_end_step (int): Fin du curriculum.
+
+        Returns:
+            dict[str, float | bool | str]: Filtre actif applique au pas courant.
+        """
+        resolved_filter = dict(entry_filter or {})
+        if (
+            not training_mode
+            or curriculum_end_step <= 0
+            or training_progress_step >= curriculum_end_step
+        ):
+            return resolved_filter
+
+        normalized_horizon = str(horizon or "").strip().lower()
+        exploration_filter = dict(resolved_filter)
+        if normalized_horizon == "scalp":
+            soft_end_step = max(
+                1,
+                min(int(curriculum_soft_end_step or 0) or curriculum_end_step, curriculum_end_step),
+            )
+            exploration_filter["allow_trend_fallback"] = True
+            exploration_filter["require_vwap_alignment"] = False
+            exploration_filter["require_obv_confirmation"] = False
+            if training_progress_step < soft_end_step:
+                relax_delta = 5.0
+                min_floor = 7.0
+                trend_floor = 10.0
+            else:
+                relax_delta = 3.0
+                min_floor = 8.0
+                trend_floor = 12.0
+        else:
+            exploration_filter["allow_trend_fallback"] = True
+            exploration_filter["require_vwap_alignment"] = False
+            exploration_filter["require_obv_confirmation"] = False
+            relax_delta = 2.0
+            min_floor = 8.0
+            trend_floor = 12.0
+
+        exploration_filter["min_adx"] = max(
+            min_floor,
+            float(resolved_filter.get("min_adx", 0.0) or 0.0) - relax_delta,
+        )
+        exploration_filter["trend_adx"] = max(
+            trend_floor,
+            float(
+                resolved_filter.get(
+                    "trend_adx",
+                    exploration_filter["min_adx"],
+                ) or exploration_filter["min_adx"]
+            ) - relax_delta,
+        )
+        return exploration_filter
+
     def _get_active_entry_filter(self) -> dict[str, float | bool | str]:
         """Retourne le filtre d'entree courant, avec curriculum si necessaire.
 
         Returns:
             dict[str, float | bool | str]: Filtre d'entree actif.
         """
-        entry_filter = dict(self.position_mechanics_profile.get("entry_filter") or {})
-        curriculum_end_step = int(
-            getattr(self.config, "directional_curriculum_end_step", 4000) or 4000
+        return self.resolve_active_entry_filter(
+            dict(self.position_mechanics_profile.get("entry_filter") or {}),
+            training_mode=self.training_mode,
+            training_progress_step=self.training_progress_step,
+            horizon=str(getattr(self.config, "horizon", "") or ""),
+            curriculum_soft_end_step=int(
+                getattr(self.config, "directional_curriculum_soft_end_step", 8000) or 8000
+            ),
+            curriculum_end_step=int(
+                getattr(self.config, "directional_curriculum_end_step", 15000) or 15000
+            ),
         )
-        if (
-            not self.training_mode
-            or curriculum_end_step <= 0
-            or self.training_progress_step >= curriculum_end_step
-        ):
-            return entry_filter
-
-        exploration_filter = dict(entry_filter)
-        exploration_filter["require_vwap_alignment"] = False
-        exploration_filter["require_obv_confirmation"] = False
-        exploration_filter["min_adx"] = max(
-            8.0,
-            float(entry_filter.get("min_adx", 0.0) or 0.0) - 2.0,
-        )
-        exploration_filter["trend_adx"] = max(
-            12.0,
-            float(entry_filter.get("trend_adx", exploration_filter["min_adx"]) or exploration_filter["min_adx"]) - 2.0,
-        )
-        return exploration_filter
 
     @staticmethod
     def _classify_directional_bias(long_entries: int, short_entries: int) -> str:
@@ -753,15 +827,42 @@ class TradingEnvironment:
         Returns:
             bool: `True` si l'entree doit etre convertie en `HOLD`.
         """
-        resolved_policy = self._resolve_directional_policy_terms(directional_policy)
+        return self._would_hard_veto_directional_entry(
+            action,
+            directional_policy,
+            long_entries=self.long_entries,
+            short_entries=self.short_entries,
+        )
+
+    @classmethod
+    def _would_hard_veto_directional_entry(
+        cls,
+        action: int,
+        directional_policy: dict[str, float],
+        *,
+        long_entries: int,
+        short_entries: int,
+    ) -> bool:
+        """Determine si une entree depasserait le plafond directionnel dur.
+
+        Args:
+            action (int): Action directionnelle candidate.
+            directional_policy (dict[str, float]): Politique directionnelle active.
+            long_entries (int): Nombre d'entrees longues deja executees.
+            short_entries (int): Nombre d'entrees courtes deja executees.
+
+        Returns:
+            bool: `True` si l'entree doit etre vetoee.
+        """
+        resolved_policy = cls._resolve_directional_policy_terms(directional_policy)
         hard_veto_after_entries = int(resolved_policy["hard_veto_after_entries"])
         hard_veto_max_share = resolved_policy["hard_veto_max_share"]
-        total_entries = self.long_entries + self.short_entries
+        total_entries = int(long_entries) + int(short_entries)
         if hard_veto_after_entries <= 0 or total_entries < hard_veto_after_entries:
             return False
 
-        projected_long_entries = self.long_entries + (1 if action == BUY else 0)
-        projected_short_entries = self.short_entries + (1 if action == SELL else 0)
+        projected_long_entries = int(long_entries) + (1 if action == BUY else 0)
+        projected_short_entries = int(short_entries) + (1 if action == SELL else 0)
         projected_total_entries = projected_long_entries + projected_short_entries
         if projected_total_entries <= 0:
             return False
@@ -772,6 +873,158 @@ class TradingEnvironment:
             else projected_short_entries / projected_total_entries
         )
         return projected_share > hard_veto_max_share
+
+    @staticmethod
+    def _is_directional_entry_for_state(action: int, position_size: float) -> bool:
+        """Retourne vrai si l'action ouvre ou retourne une exposition directionnelle.
+
+        Args:
+            action (int): Action candidate.
+            position_size (float): Exposition courante.
+
+        Returns:
+            bool: `True` si l'action doit subir le veto directionnel dur.
+        """
+        return action in (BUY, SELL) and (
+            (action == BUY and position_size <= 0.0)
+            or (action == SELL and position_size >= 0.0)
+        )
+
+    @staticmethod
+    def _compute_fallback_direction_ok(
+        context: dict[str, float],
+        entry_filter: dict[str, float | bool | str],
+    ) -> bool:
+        """Calcule le mode de repli `trend_fallback` pour un contexte de marche.
+
+        Args:
+            context (dict[str, float]): Contexte courant du marche.
+            entry_filter (dict[str, float | bool | str]): Filtre actif.
+
+        Returns:
+            bool: `True` si le fallback autorise l'entree malgre un veto doux.
+        """
+        min_adx = float(entry_filter.get("min_adx", 0.0) or 0.0)
+        trend_adx = float(entry_filter.get("trend_adx", min_adx) or min_adx)
+        allow_trend_fallback = bool(entry_filter.get("allow_trend_fallback", False))
+        return (
+            allow_trend_fallback
+            and context["adx"] >= max(min_adx * 0.6, trend_adx - 4.0, 0.0)
+            and abs(context["momentum"]) >= max(context["atr_pct"], 1e-5)
+        )
+
+    @classmethod
+    def _evaluate_entry_veto_reason(
+        cls,
+        action: int,
+        context: dict[str, float],
+        entry_filter: dict[str, float | bool | str],
+        *,
+        position_size: float = 0.0,
+        long_entries: int = 0,
+        short_entries: int = 0,
+        directional_policy: dict[str, float] | None = None,
+        include_directional_hard_veto: bool = True,
+    ) -> str | None:
+        """Retourne la premiere raison de veto applicable a une entree.
+
+        Args:
+            action (int): Action candidate.
+            context (dict[str, float]): Contexte courant du marche.
+            entry_filter (dict[str, float | bool | str]): Filtre actif.
+            position_size (float): Taille de position courante.
+            long_entries (int): Entrees longues deja executees.
+            short_entries (int): Entrees courtes deja executees.
+            directional_policy (dict[str, float] | None): Politique directionnelle active.
+            include_directional_hard_veto (bool): Active le veto directionnel dur.
+
+        Returns:
+            str | None: Raison du veto, sinon `None`.
+        """
+        if action not in (BUY, SELL):
+            return None
+
+        ema_mode = str(entry_filter.get("ema_mode", "strict")).lower()
+        require_vwap_alignment = bool(entry_filter.get("require_vwap_alignment", False))
+        require_obv_confirmation = bool(entry_filter.get("require_obv_confirmation", False))
+        min_adx = float(entry_filter.get("min_adx", 0.0) or 0.0)
+        fallback_direction_ok = cls._compute_fallback_direction_ok(context, entry_filter)
+
+        if context["adx"] < min_adx and not fallback_direction_ok:
+            return "adx"
+
+        if action == BUY:
+            if ema_mode == "strict" and context["close"] < context["ema_200"]:
+                return "ema200"
+            if (
+                ema_mode == "moderate"
+                and context["close"] < context["ema_200"]
+                and context["price_vs_vwap"] < 0
+            ):
+                return "ema200"
+            if require_vwap_alignment and context["price_vs_vwap"] < 0 and not fallback_direction_ok:
+                return "vwap"
+            if require_obv_confirmation and context["obv_slope"] <= 0 and not fallback_direction_ok:
+                return "obv"
+        else:
+            if ema_mode == "strict" and context["close"] > context["ema_200"]:
+                return "ema200"
+            if (
+                ema_mode == "moderate"
+                and context["close"] > context["ema_200"]
+                and context["price_vs_vwap"] > 0
+            ):
+                return "ema200"
+            if require_vwap_alignment and context["price_vs_vwap"] > 0 and not fallback_direction_ok:
+                return "vwap"
+            if require_obv_confirmation and context["obv_slope"] >= 0 and not fallback_direction_ok:
+                return "obv"
+
+        if (
+            include_directional_hard_veto
+            and directional_policy
+            and cls._is_directional_entry_for_state(action, position_size)
+            and cls._would_hard_veto_directional_entry(
+                action,
+                directional_policy,
+                long_entries=long_entries,
+                short_entries=short_entries,
+            )
+        ):
+            return "directional"
+        return None
+
+    def _register_root_mask_block(self, action: int, reason: str) -> None:
+        """Incremente les compteurs du masque racine pour la raison donnee.
+
+        Args:
+            action (int): Action retiree du masque.
+            reason (str): Raison du retrait.
+        """
+        if action == BUY:
+            self.root_mask_blocked_buy_total += 1
+            if reason == "ema200":
+                self.root_mask_blocked_buy_ema200 += 1
+            elif reason == "vwap":
+                self.root_mask_blocked_buy_vwap += 1
+            elif reason == "adx":
+                self.root_mask_blocked_buy_adx += 1
+            elif reason == "obv":
+                self.root_mask_blocked_buy_obv += 1
+            elif reason == "directional":
+                self.root_mask_blocked_buy_directional += 1
+        elif action == SELL:
+            self.root_mask_blocked_sell_total += 1
+            if reason == "ema200":
+                self.root_mask_blocked_sell_ema200 += 1
+            elif reason == "vwap":
+                self.root_mask_blocked_sell_vwap += 1
+            elif reason == "adx":
+                self.root_mask_blocked_sell_adx += 1
+            elif reason == "obv":
+                self.root_mask_blocked_sell_obv += 1
+            elif reason == "directional":
+                self.root_mask_blocked_sell_directional += 1
 
     def _compute_rebalance_bonus(
         self,
@@ -829,62 +1082,48 @@ class TradingEnvironment:
             tuple[int, str | None]: Action finale. Un veto convertit
                 l'entree en ``HOLD`` et fournit la raison du veto.
         """
-        if action not in (BUY, SELL):
+        veto_reason = self._evaluate_entry_veto_reason(
+            action,
+            context,
+            self._get_active_entry_filter(),
+            position_size=self.position_size,
+            long_entries=self.long_entries,
+            short_entries=self.short_entries,
+            directional_policy=dict(self.position_mechanics_profile.get("directional_policy") or {}),
+            include_directional_hard_veto=True,
+        )
+        if veto_reason is None:
             return action, None
 
-        entry_filter = self._get_active_entry_filter()
-        ema_mode = str(entry_filter.get("ema_mode", "strict")).lower()
-        require_vwap_alignment = bool(entry_filter.get("require_vwap_alignment", False))
-        require_obv_confirmation = bool(entry_filter.get("require_obv_confirmation", False))
-        allow_trend_fallback = bool(entry_filter.get("allow_trend_fallback", False))
-        min_adx = float(entry_filter.get("min_adx", 0.0) or 0.0)
-        trend_adx = float(entry_filter.get("trend_adx", min_adx) or min_adx)
-        fallback_direction_ok = (
-            allow_trend_fallback
-            and context["adx"] >= max(min_adx * 0.6, trend_adx - 4.0, 0.0)
-            and abs(context["momentum"]) >= max(context["atr_pct"], 1e-5)
-        )
-
-        if context["adx"] < min_adx and not fallback_direction_ok:
+        if veto_reason == "adx":
             self.entry_blocked_adx += 1
             if action == BUY:
                 self.blocked_buy_adx += 1
             else:
                 self.blocked_sell_adx += 1
-            return HOLD, "adx"
-
-        if action == BUY:
-            if ema_mode == "strict" and context["close"] < context["ema_200"]:
+        elif veto_reason == "ema200":
+            if action == BUY:
                 self.ema200_blocked_buy += 1
-                return HOLD, "ema200"
-            if ema_mode == "moderate" and context["close"] < context["ema_200"] and context["price_vs_vwap"] < 0:
-                self.ema200_blocked_buy += 1
-                return HOLD, "ema200"
-            if require_vwap_alignment and context["price_vs_vwap"] < 0 and not fallback_direction_ok:
-                self.entry_blocked_vwap += 1
-                self.blocked_buy_vwap += 1
-                return HOLD, "vwap"
-            if require_obv_confirmation and context["obv_slope"] <= 0 and not fallback_direction_ok:
-                self.entry_blocked_obv += 1
-                self.blocked_buy_obv += 1
-                return HOLD, "obv"
-            return BUY, None
-
-        if ema_mode == "strict" and context["close"] > context["ema_200"]:
-            self.ema200_blocked_sell += 1
-            return HOLD, "ema200"
-        if ema_mode == "moderate" and context["close"] > context["ema_200"] and context["price_vs_vwap"] > 0:
-            self.ema200_blocked_sell += 1
-            return HOLD, "ema200"
-        if require_vwap_alignment and context["price_vs_vwap"] > 0 and not fallback_direction_ok:
+            else:
+                self.ema200_blocked_sell += 1
+        elif veto_reason == "vwap":
             self.entry_blocked_vwap += 1
-            self.blocked_sell_vwap += 1
-            return HOLD, "vwap"
-        if require_obv_confirmation and context["obv_slope"] >= 0 and not fallback_direction_ok:
+            if action == BUY:
+                self.blocked_buy_vwap += 1
+            else:
+                self.blocked_sell_vwap += 1
+        elif veto_reason == "obv":
             self.entry_blocked_obv += 1
-            self.blocked_sell_obv += 1
-            return HOLD, "obv"
-        return SELL, None
+            if action == BUY:
+                self.blocked_buy_obv += 1
+            else:
+                self.blocked_sell_obv += 1
+        elif veto_reason == "directional":
+            if action == BUY:
+                self.blocked_buy_directional += 1
+            else:
+                self.blocked_sell_directional += 1
+        return HOLD, veto_reason
 
     def _get_unrealized_return(self, price: float) -> float:
         """Calcule le rendement latent courant de la position.
@@ -1002,6 +1241,82 @@ class TradingEnvironment:
             legal_actions.extend([SPLIT, CLOSE])
         return legal_actions
 
+    def get_root_policy_actions(self) -> list[int]:
+        """Retourne le masque racine structurel et metier pour le self-play.
+
+        Returns:
+            list[int]: Actions autorisees a la racine apres application
+                des veto d'entree et du veto directionnel dur.
+        """
+        legal_actions = [HOLD]
+        structural_actions = self.get_legal_root_actions()
+        context = self._get_market_context()
+        entry_filter = self._get_active_entry_filter()
+        directional_policy = dict(self.position_mechanics_profile.get("directional_policy") or {})
+
+        for action in structural_actions:
+            if action not in (BUY, SELL):
+                if action not in legal_actions:
+                    legal_actions.append(action)
+                continue
+            self.root_mask_directional_candidates_total += 1
+            veto_reason = self._evaluate_entry_veto_reason(
+                action,
+                context,
+                entry_filter,
+                position_size=self.position_size,
+                long_entries=self.long_entries,
+                short_entries=self.short_entries,
+                directional_policy=directional_policy,
+                include_directional_hard_veto=True,
+            )
+            if veto_reason is None:
+                legal_actions.append(action)
+                continue
+            self._register_root_mask_block(action, veto_reason)
+
+        return legal_actions
+
+    @staticmethod
+    def _build_observation_context(observation: np.ndarray) -> dict[str, float]:
+        """Reconstruit un contexte de marche minimal depuis une observation MuZero.
+
+        Args:
+            observation (np.ndarray): Observation complete de forme ``[32]``.
+
+        Returns:
+            dict[str, float]: Contexte compatible avec les veto d'entree.
+
+        Raises:
+            ValueError: Si l'observation est trop courte.
+        """
+        observation_array = np.asarray(observation, dtype=np.float32).reshape(-1)
+        if observation_array.size < 24:
+            raise ValueError("Observation MuZero invalide: contexte de marche incomplet.")
+
+        close_price = float(observation_array[3])
+        ema_200 = float(observation_array[MARKET_COL_EMA_200]) if observation_array.size > MARKET_COL_EMA_200 else close_price
+        vwap = float(observation_array[MARKET_COL_VWAP]) if observation_array.size > MARKET_COL_VWAP else close_price
+        obv = float(observation_array[MARKET_COL_OBV]) if observation_array.size > MARKET_COL_OBV else 0.0
+        momentum = float(observation_array[MARKET_COL_MOMENTUM]) if observation_array.size > MARKET_COL_MOMENTUM else 0.0
+        adx = float(observation_array[MARKET_COL_ADX]) if observation_array.size > MARKET_COL_ADX else 0.0
+        atr = float(observation_array[MARKET_COL_ATR]) if observation_array.size > MARKET_COL_ATR else 0.0
+        obv_slope_proxy = momentum if abs(momentum) > 1e-8 else float(np.sign(obv))
+        return {
+            "close": close_price,
+            "ema_200": ema_200,
+            "vwap": vwap,
+            "price_vs_vwap": (close_price - vwap) / max(abs(vwap), 1e-8),
+            "obv": obv,
+            "obv_slope": obv_slope_proxy,
+            "obv_divergence": float(np.sign(momentum) != np.sign(obv_slope_proxy)),
+            "adx": adx,
+            "atr": atr,
+            "atr_pct": atr / max(abs(close_price), 1e-8),
+            "bb_width_proxy": 0.0,
+            "momentum": momentum,
+        }
+
     @staticmethod
     def infer_legal_root_actions_from_observation(observation: np.ndarray) -> list[int]:
         """Reconstruit les actions legales racine a partir d'une observation.
@@ -1025,6 +1340,57 @@ class TradingEnvironment:
         if abs(float(observation_array[OBS_POSITION_STATE_INDEX])) > 1e-6:
             legal_actions.extend([SPLIT, CLOSE])
         return legal_actions
+
+    @classmethod
+    def infer_root_policy_actions_from_observation(
+        cls,
+        observation: np.ndarray,
+        entry_filter: dict[str, float | bool | str] | None = None,
+    ) -> list[int]:
+        """Reconstruit un masque racine metier depuis une observation seule.
+
+        Cette variante est utilisee en reanalyse et en inference live. Elle
+        reconstruit les veto `EMA/VWAP/ADX/OBV` a partir du vecteur
+        d'observation mais n'essaie pas de reproduire le veto directionnel
+        dur, car l'historique `long_entries/short_entries` n'est pas present.
+
+        Args:
+            observation (np.ndarray): Observation MuZero complete.
+            entry_filter (dict[str, float | bool | str] | None): Filtre actif
+                a appliquer. Sans valeur, on conserve uniquement la legalite
+                structurelle.
+
+        Returns:
+            list[int]: Actions autorisees a la racine.
+        """
+        legal_actions = cls.infer_legal_root_actions_from_observation(observation)
+        if entry_filter is None:
+            return legal_actions
+
+        observation_array = np.asarray(observation, dtype=np.float32).reshape(-1)
+        position_state = 0.0
+        if observation_array.size >= OBS_EXTRA_FEATURE_COUNT:
+            position_state = float(observation_array[OBS_POSITION_STATE_INDEX])
+        context = cls._build_observation_context(observation_array)
+        filtered_actions = [HOLD]
+        for action in legal_actions:
+            if action not in (BUY, SELL):
+                if action not in filtered_actions:
+                    filtered_actions.append(action)
+                continue
+            veto_reason = cls._evaluate_entry_veto_reason(
+                action,
+                context,
+                dict(entry_filter or {}),
+                position_size=position_state,
+                long_entries=0,
+                short_entries=0,
+                directional_policy=None,
+                include_directional_hard_veto=False,
+            )
+            if veto_reason is None:
+                filtered_actions.append(action)
+        return filtered_actions
 
     @staticmethod
     def _resolve_reward_policy_terms(reward_policy: dict[str, float]) -> dict[str, float]:
@@ -1227,24 +1593,6 @@ class TradingEnvironment:
                 self.blocked_buy_entries += 1
             elif requested_action == SELL:
                 self.blocked_sell_entries += 1
-            reward -= 1.0
-        elif (
-            action in (BUY, SELL)
-            and (
-                (action == BUY and self.position_size <= 0)
-                or (action == SELL and self.position_size >= 0)
-            )
-            and self._should_hard_veto_directional_entry(action, directional_policy)
-        ):
-            veto_reason = "directional"
-            self.entry_veto_to_hold += 1
-            if action == BUY:
-                self.blocked_buy_entries += 1
-                self.blocked_buy_directional += 1
-            else:
-                self.blocked_sell_entries += 1
-                self.blocked_sell_directional += 1
-            action = HOLD
             reward -= 1.0
 
         final_action_name = ACTION_NAMES[action] if 0 <= action < len(ACTION_NAMES) else f"ACT_{action}"
@@ -1518,6 +1866,14 @@ class TradingEnvironment:
             "requested_action": ACTION_NAMES[requested_action] if 0 <= requested_action < len(ACTION_NAMES) else f"ACT_{requested_action}",
             "final_action": final_action_name,
             "veto_reason": veto_reason,
+            "root_mask_rate": (
+                (self.root_mask_blocked_buy_total + self.root_mask_blocked_sell_total)
+                / max(self.root_mask_directional_candidates_total, 1)
+            ),
+            "post_veto_to_hold_rate": (
+                self.entry_veto_to_hold
+                / max(self.requested_buy_actions + self.requested_sell_actions, 1)
+            ),
             "family": self.family,
             "feature_profile": self.feature_profile.get("profile_name"),
         }
@@ -1588,6 +1944,19 @@ class TradingEnvironment:
             "slbe_exit_bonus_count": self.slbe_exit_bonus_count,
             "requested_buy_actions": self.requested_buy_actions,
             "requested_sell_actions": self.requested_sell_actions,
+            "root_mask_directional_candidates_total": self.root_mask_directional_candidates_total,
+            "root_mask_blocked_buy_total": self.root_mask_blocked_buy_total,
+            "root_mask_blocked_sell_total": self.root_mask_blocked_sell_total,
+            "root_mask_blocked_buy_ema200": self.root_mask_blocked_buy_ema200,
+            "root_mask_blocked_sell_ema200": self.root_mask_blocked_sell_ema200,
+            "root_mask_blocked_buy_vwap": self.root_mask_blocked_buy_vwap,
+            "root_mask_blocked_sell_vwap": self.root_mask_blocked_sell_vwap,
+            "root_mask_blocked_buy_adx": self.root_mask_blocked_buy_adx,
+            "root_mask_blocked_sell_adx": self.root_mask_blocked_sell_adx,
+            "root_mask_blocked_buy_obv": self.root_mask_blocked_buy_obv,
+            "root_mask_blocked_sell_obv": self.root_mask_blocked_sell_obv,
+            "root_mask_blocked_buy_directional": self.root_mask_blocked_buy_directional,
+            "root_mask_blocked_sell_directional": self.root_mask_blocked_sell_directional,
             "blocked_buy_entries": self.blocked_buy_entries,
             "blocked_sell_entries": self.blocked_sell_entries,
             "blocked_buy_vwap": self.blocked_buy_vwap,
@@ -1634,6 +2003,10 @@ class TradingEnvironment:
             self.requested_buy_actions + self.requested_sell_actions,
             1,
         )
+        root_mask_rate = (
+            (self.root_mask_blocked_buy_total + self.root_mask_blocked_sell_total)
+            / max(self.root_mask_directional_candidates_total, 1)
+        )
         return {
             "symbol": self.symbol,
             "horizon": self.horizon,
@@ -1665,6 +2038,20 @@ class TradingEnvironment:
             "close_actions": int(self.action_counts.get("CLOSE", 0)),
             "requested_buy_actions": self.requested_buy_actions,
             "requested_sell_actions": self.requested_sell_actions,
+            "root_mask_directional_candidates_total": self.root_mask_directional_candidates_total,
+            "root_mask_blocked_buy_total": self.root_mask_blocked_buy_total,
+            "root_mask_blocked_sell_total": self.root_mask_blocked_sell_total,
+            "root_mask_blocked_buy_ema200": self.root_mask_blocked_buy_ema200,
+            "root_mask_blocked_sell_ema200": self.root_mask_blocked_sell_ema200,
+            "root_mask_blocked_buy_vwap": self.root_mask_blocked_buy_vwap,
+            "root_mask_blocked_sell_vwap": self.root_mask_blocked_sell_vwap,
+            "root_mask_blocked_buy_adx": self.root_mask_blocked_buy_adx,
+            "root_mask_blocked_sell_adx": self.root_mask_blocked_sell_adx,
+            "root_mask_blocked_buy_obv": self.root_mask_blocked_buy_obv,
+            "root_mask_blocked_sell_obv": self.root_mask_blocked_sell_obv,
+            "root_mask_blocked_buy_directional": self.root_mask_blocked_buy_directional,
+            "root_mask_blocked_sell_directional": self.root_mask_blocked_sell_directional,
+            "root_mask_rate": root_mask_rate,
             "long_entries": self.long_entries,
             "short_entries": self.short_entries,
             "long_present": self.long_entries > 0,
@@ -1686,6 +2073,7 @@ class TradingEnvironment:
             "blocked_sell_directional": self.blocked_sell_directional,
             "entry_veto_to_hold": self.entry_veto_to_hold,
             "veto_to_hold_rate": veto_to_hold_rate,
+            "post_veto_to_hold_rate": veto_to_hold_rate,
             "ema200_blocked_buy": self.ema200_blocked_buy,
             "ema200_blocked_sell": self.ema200_blocked_sell,
             "entry_blocked_vwap": self.entry_blocked_vwap,

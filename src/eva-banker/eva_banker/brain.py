@@ -2341,15 +2341,15 @@ class AutoTradingEngine:
                 await asyncio.sleep(3600)
 
     async def _send_half_day_report(self):
-        """GÃ©nÃ¨re et envoie le rapport de la demi-journÃ©e."""
+        """Genere et envoie le rapport de la demi-journee."""
         try:
             now = datetime.now()
             # Define period:
             if now.hour < 15:
-                period_name = "MatinÃ©e"
+                period_name = "Matin\u00e9e"
                 period_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             else:
-                period_name = "AprÃ¨s-Midi"
+                period_name = "Apr\u00e8s-Midi"
                 period_start = now.replace(hour=12, minute=0, second=0, microsecond=0)
             
             period_end = now

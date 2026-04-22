@@ -130,8 +130,11 @@ class MuZeroConfigV3:
         self.collection_max_step_seconds = float(
             os.getenv("MUZERO_COLLECTION_MAX_STEP_SECONDS", "20")
         )
+        self.directional_curriculum_soft_end_step = int(
+            os.getenv("MUZERO_DIRECTIONAL_CURRICULUM_SOFT_END_STEP", "8000")
+        )
         self.directional_curriculum_end_step = int(
-            os.getenv("MUZERO_DIRECTIONAL_CURRICULUM_END_STEP", "4000")
+            os.getenv("MUZERO_DIRECTIONAL_CURRICULUM_END_STEP", "15000")
         )
         self.directional_collapse_check_step = int(
             os.getenv("MUZERO_DIRECTIONAL_COLLAPSE_CHECK_STEP", "4000")
@@ -141,6 +144,30 @@ class MuZeroConfigV3:
         )
         self.directional_collapse_max_imbalance = float(
             os.getenv("MUZERO_DIRECTIONAL_COLLAPSE_MAX_IMBALANCE", "0.80")
+        )
+        self.policy_precheck_step = int(
+            os.getenv("MUZERO_POLICY_PRECHECK_STEP", "12000")
+        )
+        self.policy_precheck_max_loss_pol = float(
+            os.getenv("MUZERO_POLICY_PRECHECK_MAX_LOSS_POL", "5.8")
+        )
+        self.policy_precheck_min_top1_share = float(
+            os.getenv("MUZERO_POLICY_PRECHECK_MIN_TOP1_SHARE", "0.75")
+        )
+        self.policy_precheck_max_root_mask_rate = float(
+            os.getenv("MUZERO_POLICY_PRECHECK_MAX_ROOT_MASK_RATE", "0.25")
+        )
+        self.policy_precheck_max_post_veto_rate = float(
+            os.getenv("MUZERO_POLICY_PRECHECK_MAX_POST_VETO_RATE", "0.10")
+        )
+        self.policy_precheck_min_balanced_episode_rate = float(
+            os.getenv("MUZERO_POLICY_PRECHECK_MIN_BALANCED_EPISODE_RATE", "0.85")
+        )
+        self.policy_precheck_min_long_entry_share = float(
+            os.getenv("MUZERO_POLICY_PRECHECK_MIN_LONG_ENTRY_SHARE", "0.35")
+        )
+        self.policy_precheck_min_short_entry_share = float(
+            os.getenv("MUZERO_POLICY_PRECHECK_MIN_SHORT_ENTRY_SHARE", "0.35")
         )
 
         self.num_simulations = int(os.getenv("MUZERO_NUM_SIMULATIONS", "100"))

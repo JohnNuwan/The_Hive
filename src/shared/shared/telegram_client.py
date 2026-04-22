@@ -14,6 +14,108 @@ from shared.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+_MOJIBAKE_MARKERS = (
+    "Ã",
+    "â",
+    "€",
+    "œ",
+    "ž",
+    "Ÿ",
+    "ï",
+    "‰",
+    "™",
+    "š",
+    "‹",
+    "›",
+    "“",
+    "”",
+    "•",
+    "–",
+    "—",
+)
+
+
+def _count_mojibake_markers(text: str) -> int:
+    """Compte les marqueurs usuels de texte UTF-8 mal decode.
+
+    Args:
+        text (str): Texte a analyser.
+
+    Returns:
+        int: Nombre de marqueurs detectes.
+    """
+    return sum(text.count(marker) for marker in _MOJIBAKE_MARKERS)
+
+
+def _attempt_redecode_text(text: str, encoding: str) -> str | None:
+    """Tente de reparer un texte UTF-8 decode avec le mauvais codec.
+
+    Args:
+        text (str): Texte possiblement corrompu.
+        encoding (str): Codec a reutiliser pour reconstituer les octets.
+
+    Returns:
+        str | None: Texte repare si la tentative reussit, sinon ``None``.
+    """
+    try:
+        return text.encode(encoding).decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return None
+
+
+def _normalize_telegram_text(text: str) -> str:
+    """Normalise un texte Telegram avant envoi.
+
+    Cette normalisation corrige le cas courant d'un texte UTF-8 lu comme
+    ``latin-1`` ou ``cp1252``. Si aucune amelioration nette n'est detectee,
+    le texte d'origine est conserve.
+
+    Args:
+        text (str): Texte brut a transmettre.
+
+    Returns:
+        str: Texte nettoye pour Telegram.
+    """
+    normalized = str(text or "")
+    if _count_mojibake_markers(normalized) == 0:
+        return normalized
+
+    chunks: list[str] = []
+    current_chunk: list[str] = []
+    allowed_marker_chars = set(_MOJIBAKE_MARKERS)
+
+    def flush_chunk() -> None:
+        if not current_chunk:
+            return
+        segment = "".join(current_chunk)
+        current_chunk.clear()
+        baseline_score = _count_mojibake_markers(segment)
+        if baseline_score == 0:
+            chunks.append(segment)
+            return
+
+        best_candidate = segment
+        best_score = baseline_score
+        for encoding in ("latin-1", "cp1252"):
+            candidate = _attempt_redecode_text(segment, encoding)
+            if candidate is None:
+                continue
+            candidate_score = _count_mojibake_markers(candidate)
+            if candidate_score < best_score:
+                best_candidate = candidate
+                best_score = candidate_score
+        chunks.append(best_candidate)
+
+    for char in normalized:
+        if ord(char) <= 255 or char in allowed_marker_chars:
+            current_chunk.append(char)
+            continue
+        flush_chunk()
+        chunks.append(char)
+
+    flush_chunk()
+    return "".join(chunks)
+
 
 class TelegramClient:
     """Envoie des messages Telegram vers un chat ou un topic configure.
@@ -74,7 +176,7 @@ class TelegramClient:
         """
         payload: dict[str, object] = {
             "chat_id": self.chat_id,
-            "text": message,
+            "text": _normalize_telegram_text(message),
             "disable_web_page_preview": True,
         }
         if parse_mode:
@@ -150,7 +252,7 @@ class TelegramClient:
         url = f"https://api.telegram.org/bot{self.token}/sendPhoto"
         data: dict[str, object] = {
             "chat_id": self.chat_id,
-            "caption": caption,
+            "caption": _normalize_telegram_text(caption),
         }
         if parse_mode:
             data["parse_mode"] = parse_mode
