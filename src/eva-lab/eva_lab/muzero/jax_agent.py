@@ -348,6 +348,22 @@ class JAXMuZeroAgent:
             "root_mask_blocked_buy_directional",
             "root_mask_blocked_sell_directional",
             "root_mask_rate",
+            "soft_entry_penalty_count",
+            "soft_entry_penalty_total",
+            "soft_entry_bonus_count",
+            "soft_entry_bonus_total",
+            "soft_entry_penalty_rate",
+            "soft_entry_bonus_rate",
+            "soft_penalty_net",
+            "soft_penalty_to_bonus_ratio",
+            "soft_penalty_ema200_count",
+            "soft_penalty_vwap_count",
+            "soft_penalty_adx_count",
+            "soft_penalty_obv_count",
+            "soft_penalty_ema_rate",
+            "soft_penalty_vwap_rate",
+            "soft_penalty_adx_rate",
+            "soft_penalty_obv_rate",
             "blocked_buy_entries",
             "blocked_sell_entries",
             "blocked_buy_vwap",
@@ -443,26 +459,41 @@ class JAXMuZeroAgent:
         self,
         *,
         training_mode: bool,
+        symbol: str | None = None,
     ) -> dict[str, float | bool | str]:
         """Construit le filtre racine cohérent avec le curriculum courant.
 
         Args:
             training_mode (bool): Active le curriculum d'apprentissage.
+            symbol (str | None): Symbole courant si disponible.
 
         Returns:
             dict[str, float | bool | str]: Filtre racine observation-only.
         """
+        horizon = str(getattr(self.config, "horizon", "") or "")
+        curriculum_soft_end_step = int(
+            getattr(self.config, "directional_curriculum_soft_end_step", 8000) or 8000
+        )
+        curriculum_end_step = int(
+            getattr(self.config, "directional_curriculum_end_step", 15000) or 15000
+        )
+        if symbol:
+            return TradingEnvironment.build_runtime_entry_filter(
+                horizon=horizon,
+                symbol=symbol,
+                configured_family=getattr(self.config, "model_family", None),
+                training_mode=training_mode,
+                training_progress_step=int(self.training_step_count),
+                curriculum_soft_end_step=curriculum_soft_end_step,
+                curriculum_end_step=curriculum_end_step,
+            )
         return TradingEnvironment.resolve_active_entry_filter(
             dict(getattr(self.config, "position_mechanics_profile", {}).get("entry_filter") or {}),
             training_mode=training_mode,
             training_progress_step=int(self.training_step_count),
-            horizon=str(getattr(self.config, "horizon", "") or ""),
-            curriculum_soft_end_step=int(
-                getattr(self.config, "directional_curriculum_soft_end_step", 8000) or 8000
-            ),
-            curriculum_end_step=int(
-                getattr(self.config, "directional_curriculum_end_step", 15000) or 15000
-            ),
+            horizon=horizon,
+            curriculum_soft_end_step=curriculum_soft_end_step,
+            curriculum_end_step=curriculum_end_step,
         )
 
     @staticmethod
@@ -557,7 +588,10 @@ class JAXMuZeroAgent:
             hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
             root_legal_actions = TradingEnvironment.infer_root_policy_actions_from_observation(
                 obs,
-                entry_filter=self._build_root_policy_entry_filter(training_mode=True),
+                entry_filter=self._build_root_policy_entry_filter(
+                    training_mode=True,
+                    symbol=str((game.metadata or {}).get("symbol") or ""),
+                ),
             )
             root = mcts.run(
                 hidden_state,
@@ -766,14 +800,24 @@ class JAXMuZeroAgent:
         """
         if isinstance(observation, dict):
             obs_vec = self.process_observation(observation)
+            observation_symbol = str(
+                observation.get("symbol")
+                or observation.get("instrument")
+                or observation.get("ticker")
+                or ""
+            )
         else:
             obs_vec = np.asarray(observation, dtype=np.float32)
+            observation_symbol = ""
 
         obs_jax = jnp.array(obs_vec).reshape(1, -1)
         hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
         root_legal_actions = TradingEnvironment.infer_root_policy_actions_from_observation(
             obs_vec,
-            entry_filter=self._build_root_policy_entry_filter(training_mode=False),
+            entry_filter=self._build_root_policy_entry_filter(
+                training_mode=False,
+                symbol=observation_symbol,
+            ),
         )
         mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
         root = mcts.run(

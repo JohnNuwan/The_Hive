@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import json
 import logging
 import os
@@ -313,23 +314,31 @@ def _evaluate_policy_precheck_window(
         stage (str): Etiquette du contexte (`mid_run`, `pre_arena`, etc.).
 
     Returns:
-        dict[str, object]: Verdict structure du precheck policy.
+        dict[str, object]: Verdict structure du precheck policy avec
+            le niveau autorise (`full_ready`, `screen_only` ou `blocked`).
     """
     if not history:
         return {
-            "status": "fail",
+            "status": "blocked",
             "reason": "fenetre_policy_absente",
             "step": step,
             "stage": stage,
             "window_size": 0,
             "checks": {},
+            "full_checks": {},
+            "screen_checks": {},
             "medians": {},
         }
 
     loss_values = [_to_metric_float(item, "loss_pol", default=999.0) for item in history]
     top1_values = [_to_metric_float(item, "policy_top1_share", default=0.0) for item in history]
+    entropy_values = [_to_metric_float(item, "policy_entropy", default=1.0) for item in history]
     root_mask_values = [_to_metric_float(item, "root_mask_rate", default=1.0) for item in history]
     post_veto_values = [_to_metric_float(item, "post_veto_to_hold_rate", default=1.0) for item in history]
+    soft_ratio_values = [
+        _to_metric_float(item, "soft_penalty_to_bonus_ratio", default=999.0)
+        for item in history
+    ]
     balanced_values = [
         _normalize_rate(_to_metric_float(item, "balanced_episode_rate", default=0.0))
         for item in history
@@ -340,22 +349,27 @@ def _evaluate_policy_precheck_window(
     medians = {
         "loss_pol": statistics.median(loss_values),
         "policy_top1_share": statistics.median(top1_values),
+        "policy_entropy": statistics.median(entropy_values),
         "root_mask_rate": statistics.median(root_mask_values),
         "post_veto_to_hold_rate": statistics.median(post_veto_values),
+        "soft_penalty_to_bonus_ratio": statistics.median(soft_ratio_values),
         "balanced_episode_rate": statistics.median(balanced_values),
         "long_entry_share": statistics.median(long_share_values),
         "short_entry_share": statistics.median(short_share_values),
     }
-    checks = {
+    full_checks = {
         "loss_pol": medians["loss_pol"] <= float(getattr(config, "policy_precheck_max_loss_pol", 5.8) or 5.8),
         "policy_top1_share": medians["policy_top1_share"] >= float(
             getattr(config, "policy_precheck_min_top1_share", 0.75) or 0.75
         ),
+        "policy_entropy": medians["policy_entropy"] <= float(
+            getattr(config, "policy_precheck_max_policy_entropy", 1.0) or 1.0
+        ),
         "root_mask_rate": medians["root_mask_rate"] <= float(
-            getattr(config, "policy_precheck_max_root_mask_rate", 0.25) or 0.25
+            getattr(config, "policy_precheck_max_root_mask_rate", 0.05) or 0.05
         ),
         "post_veto_to_hold_rate": medians["post_veto_to_hold_rate"] <= float(
-            getattr(config, "policy_precheck_max_post_veto_rate", 0.10) or 0.10
+            getattr(config, "policy_precheck_max_post_veto_rate", 0.01) or 0.01
         ),
         "balanced_episode_rate": medians["balanced_episode_rate"] >= float(
             getattr(config, "policy_precheck_min_balanced_episode_rate", 0.85) or 0.85
@@ -367,16 +381,330 @@ def _evaluate_policy_precheck_window(
             getattr(config, "policy_precheck_min_short_entry_share", 0.35) or 0.35
         ),
     }
-    failed_check = next((name for name, passed in checks.items() if not passed), None)
+    screen_checks = {
+        "loss_pol": medians["loss_pol"] <= float(getattr(config, "policy_screen_max_loss_pol", 6.6) or 6.6),
+        "policy_top1_share": medians["policy_top1_share"] >= float(
+            getattr(config, "policy_screen_min_top1_share", 0.88) or 0.88
+        ),
+        "policy_entropy": medians["policy_entropy"] <= float(
+            getattr(config, "policy_screen_max_policy_entropy", 0.45) or 0.45
+        ),
+        "root_mask_rate": medians["root_mask_rate"] <= float(
+            getattr(config, "policy_screen_max_root_mask_rate", 0.05) or 0.05
+        ),
+        "post_veto_to_hold_rate": medians["post_veto_to_hold_rate"] <= float(
+            getattr(config, "policy_screen_max_post_veto_rate", 0.01) or 0.01
+        ),
+        "balanced_episode_rate": medians["balanced_episode_rate"] >= float(
+            getattr(config, "policy_screen_min_balanced_episode_rate", 0.85) or 0.85
+        ),
+        "long_entry_share": medians["long_entry_share"] >= float(
+            getattr(config, "policy_screen_min_long_entry_share", 0.35) or 0.35
+        ),
+        "short_entry_share": medians["short_entry_share"] >= float(
+            getattr(config, "policy_screen_min_short_entry_share", 0.35) or 0.35
+        ),
+    }
+    full_failed_check = next((name for name, passed in full_checks.items() if not passed), None)
+    screen_failed_check = next((name for name, passed in screen_checks.items() if not passed), None)
+    if full_failed_check is None:
+        status = "full_ready"
+        reason = "eligible_full"
+        checks = full_checks
+    elif screen_failed_check is None:
+        status = "screen_only"
+        reason = "eligible_screen"
+        checks = screen_checks
+    else:
+        status = "blocked"
+        reason = screen_failed_check
+        checks = screen_checks
     return {
-        "status": "pass" if all(checks.values()) else "fail",
-        "reason": "eligible" if failed_check is None else failed_check,
+        "status": status,
+        "reason": reason,
         "step": step,
         "stage": stage,
         "window_size": len(history),
         "checks": checks,
+        "full_checks": full_checks,
+        "screen_checks": screen_checks,
         "medians": medians,
         "latest_metrics": dict(history[-1] or {}),
+    }
+
+
+def _summarize_policy_window(history: list[dict[str, object]]) -> dict[str, float]:
+    """Resume une fenetre de metrics pour le tri des checkpoints.
+
+    Args:
+        history (list[dict[str, object]]): Fenetre glissante a resumer.
+
+    Returns:
+        dict[str, float]: Medians utiles pour le classement.
+    """
+    if not history:
+        return {
+            "loss_pol": 999.0,
+            "policy_top1_share": 0.0,
+            "policy_entropy": 1.0,
+            "root_mask_rate": 1.0,
+            "post_veto_to_hold_rate": 1.0,
+            "soft_penalty_to_bonus_ratio": 999.0,
+        }
+    return {
+        "loss_pol": statistics.median(
+            [_to_metric_float(item, "loss_pol", default=999.0) for item in history]
+        ),
+        "policy_top1_share": statistics.median(
+            [_to_metric_float(item, "policy_top1_share", default=0.0) for item in history]
+        ),
+        "policy_entropy": statistics.median(
+            [_to_metric_float(item, "policy_entropy", default=1.0) for item in history]
+        ),
+        "root_mask_rate": statistics.median(
+            [_to_metric_float(item, "root_mask_rate", default=1.0) for item in history]
+        ),
+        "post_veto_to_hold_rate": statistics.median(
+            [_to_metric_float(item, "post_veto_to_hold_rate", default=1.0) for item in history]
+        ),
+        "soft_penalty_to_bonus_ratio": statistics.median(
+            [
+                _to_metric_float(item, "soft_penalty_to_bonus_ratio", default=999.0)
+                for item in history
+            ]
+        ),
+    }
+
+
+def _extract_checkpoint_step(path: Path) -> int | None:
+    """Extrait l'etape numerique d'un checkpoint MuZero.
+
+    Args:
+        path (Path): Chemin de checkpoint.
+
+    Returns:
+        int | None: Etape numerique si le nom est conforme.
+    """
+    stem = str(path.stem)
+    if "_ckpt_" not in stem:
+        return None
+    raw_step = stem.rsplit("_ckpt_", 1)[-1]
+    try:
+        return int(raw_step)
+    except ValueError:
+        return None
+
+
+def _select_recent_screen_checkpoints(
+    *,
+    history: list[dict[str, object]],
+    weights_dir: Path,
+    horizon: str,
+    last_step: int,
+    config: MuZeroConfigV3,
+) -> list[dict[str, object]]:
+    """Selectionne la grappe recente de checkpoints la plus prometteuse.
+
+    Args:
+        history (list[dict[str, object]]): Historique recent des metrics.
+        weights_dir (Path): Repertoire des checkpoints.
+        horizon (str): Horizon MuZero courant.
+        last_step (int): Derniere etape d'optimisation terminee.
+        config (MuZeroConfigV3): Configuration MuZero.
+
+    Returns:
+        list[dict[str, object]]: Checkpoints tries par etape croissante.
+    """
+    recent_steps = max(
+        int(getattr(config, "arena_screen_recent_steps", 2500) or 2500),
+        int(getattr(config, "checkpoint_interval", 500) or 500),
+    )
+    candidate_count = max(1, int(getattr(config, "arena_screen_candidate_count", 5) or 5))
+    window_size = max(1, int(getattr(config, "arena_screen_window_size", 500) or 500))
+    recent_floor = max(0, int(last_step) - recent_steps)
+
+    available_checkpoints: list[dict[str, object]] = []
+    for checkpoint_path in sorted(weights_dir.glob(f"muzero_{horizon}_ckpt_*.pkl")):
+        checkpoint_step = _extract_checkpoint_step(checkpoint_path)
+        if checkpoint_step is None or checkpoint_step > int(last_step):
+            continue
+        available_checkpoints.append(
+            {
+                "checkpoint_step": checkpoint_step,
+                "checkpoint_path": checkpoint_path,
+            }
+        )
+    if not available_checkpoints:
+        return []
+
+    recent_checkpoints = [
+        dict(item)
+        for item in available_checkpoints
+        if int(item["checkpoint_step"]) >= recent_floor
+    ]
+    if not recent_checkpoints:
+        recent_checkpoints = [dict(item) for item in available_checkpoints[-candidate_count:]]
+
+    recent_history = [
+        dict(item)
+        for item in history
+        if int(item.get("training_step", 0) or 0) >= recent_floor
+    ]
+    if not recent_history:
+        recent_history = [dict(item) for item in history]
+    recent_history.sort(key=lambda item: int(item.get("training_step", 0) or 0))
+
+    effective_window = min(window_size, len(recent_history))
+    if effective_window <= 0:
+        return recent_checkpoints[-candidate_count:]
+
+    candidate_windows: list[dict[str, object]] = []
+    for index in range(0, len(recent_history) - effective_window + 1):
+        window = recent_history[index:index + effective_window]
+        center_step = int(
+            statistics.median([int(item.get("training_step", 0) or 0) for item in window])
+        )
+        candidate_windows.append(
+            {
+                "start_step": int(window[0].get("training_step", 0) or 0),
+                "end_step": int(window[-1].get("training_step", 0) or 0),
+                "center_step": center_step,
+                "summary": _summarize_policy_window(window),
+            }
+        )
+
+    best_window = min(
+        candidate_windows,
+        key=lambda item: (
+            float(dict(item.get("summary") or {}).get("loss_pol", 999.0)),
+            -float(dict(item.get("summary") or {}).get("policy_top1_share", 0.0)),
+            float(dict(item.get("summary") or {}).get("soft_penalty_to_bonus_ratio", 999.0)),
+            float(dict(item.get("summary") or {}).get("root_mask_rate", 1.0)),
+            float(dict(item.get("summary") or {}).get("post_veto_to_hold_rate", 1.0)),
+            abs(int(item.get("center_step") or 0) - int(last_step)),
+        ),
+    )
+    anchor_step = int(best_window.get("center_step") or int(last_step))
+    ranked = sorted(
+        recent_checkpoints,
+        key=lambda item: (
+            abs(int(item["checkpoint_step"]) - anchor_step),
+            abs(int(last_step) - int(item["checkpoint_step"])),
+            -int(item["checkpoint_step"]),
+        ),
+    )
+    selected = sorted(
+        [dict(item) for item in ranked[:candidate_count]],
+        key=lambda item: int(item["checkpoint_step"]),
+    )
+    for item in selected:
+        item["selection_anchor_step"] = anchor_step
+        item["selection_window"] = dict(best_window)
+    return selected
+
+
+def _build_screen_candidate_sort_key(candidate: dict[str, object]) -> tuple[float, ...]:
+    """Construit la cle de tri du gagnant provisoire du screen Arena.
+
+    Args:
+        candidate (dict[str, object]): Resultat brut d'un checkpoint evalue.
+
+    Returns:
+        tuple[float, ...]: Cle deterministe de classement.
+    """
+    battle_report = dict(candidate.get("battle_report") or {})
+    challenger = dict(battle_report.get("challenger") or {})
+    metrics = dict(challenger.get("metrics") or {})
+    outcome = 1.0 if str(battle_report.get("outcome") or "").upper() == "VICTORY" else 0.0
+    return (
+        outcome,
+        _to_metric_float(challenger.get("score")),
+        _to_metric_float(metrics.get("return_pct")),
+        _to_metric_float(metrics.get("profit_factor")),
+        -_to_metric_float(metrics.get("max_drawdown_pct"), default=100.0),
+        float(int(candidate.get("checkpoint_step") or 0)),
+    )
+
+
+def _select_best_screen_candidate(candidates: list[dict[str, object]]) -> dict[str, object]:
+    """Retourne le meilleur checkpoint issu du screen automatique.
+
+    Args:
+        candidates (list[dict[str, object]]): Resultats evalues.
+
+    Returns:
+        dict[str, object]: Candidat gagnant.
+
+    Raises:
+        ValueError: Si la liste est vide.
+    """
+    if not candidates:
+        raise ValueError("Impossible de selectionner un checkpoint sans candidats.")
+    ranked = sorted(candidates, key=_build_screen_candidate_sort_key, reverse=True)
+    return dict(ranked[0])
+
+
+@contextmanager
+def _temporary_env_overrides(overrides: dict[str, str]) -> Any:
+    """Applique temporairement des variables d'environnement.
+
+    Args:
+        overrides (dict[str, str]): Variables a surcharger.
+
+    Yields:
+        Any: Contexte d'execution temporaire.
+    """
+    previous_values: dict[str, str | None] = {}
+    try:
+        for key, value in overrides.items():
+            previous_values[key] = os.environ.get(key)
+            os.environ[key] = str(value)
+        yield
+    finally:
+        for key, previous_value in previous_values.items():
+            if previous_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous_value
+
+
+def _evaluate_screen_winner_gate(
+    battle_report: dict[str, object],
+    config: MuZeroConfigV3,
+) -> dict[str, object]:
+    """Valide le gagnant du screen avant la full Arena.
+
+    Args:
+        battle_report (dict[str, object]): Rapport Arena du checkpoint gagnant.
+        config (MuZeroConfigV3): Configuration MuZero.
+
+    Returns:
+        dict[str, object]: Verdict intermediaire avant full Arena.
+    """
+    challenger_metrics = dict((dict(battle_report.get("challenger") or {})).get("metrics") or {})
+    checks = {
+        "profit_factor": _to_metric_float(challenger_metrics.get("profit_factor")) >= float(
+            getattr(config, "arena_screen_min_profit_factor", 1.20) or 1.20
+        ),
+        "return_pct": _to_metric_float(challenger_metrics.get("return_pct")) > float(
+            getattr(config, "arena_screen_min_return_pct", 0.0) or 0.0
+        ),
+        "expectancy_pct": _to_metric_float(challenger_metrics.get("expectancy_pct")) > float(
+            getattr(config, "arena_screen_min_expectancy_pct", 0.0) or 0.0
+        ),
+        "positive_episode_rate": _to_metric_float(challenger_metrics.get("positive_episode_rate")) >= float(
+            getattr(config, "arena_screen_min_positive_episode_rate", 55.0) or 55.0
+        ),
+        "directional_bias": str(challenger_metrics.get("directional_bias") or "inactive").strip().lower()
+        == "balanced",
+    }
+    failure_reason = next((name for name, passed in checks.items() if not passed), "eligible")
+    return {
+        "allowed": all(checks.values()),
+        "status": "eligible" if all(checks.values()) else "blocked",
+        "reason": failure_reason,
+        "checks": checks,
+        "metrics": challenger_metrics,
     }
 
 
@@ -832,7 +1160,12 @@ def main() -> dict[str, object]:
     start_time = datetime.now()
     last_metrics: dict[str, object] | None = None
     last_optimization_step = 0
-    policy_precheck_history: deque[dict[str, object]] = deque(maxlen=500)
+    policy_precheck_history: deque[dict[str, object]] = deque(
+        maxlen=max(
+            int(getattr(config, "policy_precheck_window_size", 500) or 500),
+            int(getattr(config, "arena_screen_recent_steps", 2500) or 2500),
+        )
+    )
     policy_precheck_payload: dict[str, object] | None = None
     policy_precheck_executed = False
     reanalyze_games_total = 0
@@ -1090,7 +1423,12 @@ def main() -> dict[str, object]:
                     "reanalyze_ms": float(reanalyze_ms),
                 }
                 last_metrics = metrics
-                policy_precheck_history.append(dict(metrics))
+                policy_precheck_history.append(
+                    {
+                        **dict(metrics),
+                        "training_step": step,
+                    }
+                )
                 merge_training_status(
                     {
                         "latest_metrics": dict(last_metrics),
@@ -1135,7 +1473,8 @@ def main() -> dict[str, object]:
                             "policy_precheck": dict(policy_precheck_payload),
                             "latest_metrics": {
                                 **dict(last_metrics),
-                                "policy_precheck_passed": policy_precheck_payload.get("status") == "pass",
+                                "policy_precheck_passed": policy_precheck_payload.get("status") != "blocked",
+                                "policy_precheck_mode": policy_precheck_payload.get("status"),
                             },
                         }
                     )
@@ -1145,10 +1484,10 @@ def main() -> dict[str, object]:
                             f"MuZero {horizon}: precheck policy {policy_precheck_payload.get('status')} "
                             f"a l'etape {step} ({policy_precheck_payload.get('reason')})."
                         ),
-                        level="WARNING" if policy_precheck_payload.get("status") == "fail" else "INFO",
+                        level="WARNING" if policy_precheck_payload.get("status") == "blocked" else "INFO",
                         source="muzero",
                     )
-                    if policy_precheck_payload.get("status") == "fail":
+                    if policy_precheck_payload.get("status") == "blocked":
                         merge_training_status(
                             {
                                 "status": "policy_precheck_failed",
@@ -1303,7 +1642,7 @@ def main() -> dict[str, object]:
                         (
                             "[%s] step %05d/%05d | loss=%.4f | val=%.4f | rew=%.4f | "
                             "pol=%.4f | ent=%.4f | top1=%.4f | legal=%.2f | masked=%.2f | "
-                            "root_mask=%.2f | post_veto=%.2f | "
+                            "root_mask=%.2f | post_veto=%.2f | soft_ratio=%.2f | soft_net=%.3f | "
                             "prep=%.1fms | put=%.1fms | upd=%.1fms | reanalyze=%.1fms | "
                             "mode=%s | %.2f steps/s"
                         ),
@@ -1320,6 +1659,8 @@ def main() -> dict[str, object]:
                         float(metrics.get("invalid_root_action_masked_rate", 0.0)),
                         float(metrics.get("root_mask_rate", 0.0)),
                         float(metrics.get("post_veto_to_hold_rate", 0.0)),
+                        float(metrics.get("soft_penalty_to_bonus_ratio", 0.0)),
+                        float(metrics.get("soft_penalty_net", 0.0)),
                         float(metrics.get("batch_prepare_ms", 0.0)),
                         float(metrics.get("device_put_ms", 0.0)),
                         float(metrics.get("update_ms", 0.0)),
@@ -1334,6 +1675,7 @@ def main() -> dict[str, object]:
                         f"pol={float(metrics['loss_pol']):.4f} | "
                         f"root_mask={float(metrics.get('root_mask_rate', 0.0)):.4f} | "
                         f"post_veto={float(metrics.get('post_veto_to_hold_rate', 0.0)):.4f} | "
+                        f"soft_ratio={float(metrics.get('soft_penalty_to_bonus_ratio', 0.0)):.3f} | "
                         f"ent={float(metrics.get('policy_entropy', 0.0)):.4f} | "
                         f"prep_ms={float(metrics.get('batch_prepare_ms', 0.0)):.1f} | "
                         f"upd_ms={float(metrics.get('update_ms', 0.0)):.1f}",
@@ -1416,11 +1758,12 @@ def main() -> dict[str, object]:
                 "policy_precheck": dict(policy_precheck_payload),
                 "latest_metrics": {
                     **dict(last_metrics),
-                    "policy_precheck_passed": policy_precheck_payload.get("status") == "pass",
+                    "policy_precheck_passed": policy_precheck_payload.get("status") != "blocked",
+                    "policy_precheck_mode": policy_precheck_payload.get("status"),
                 },
             }
         )
-        if policy_precheck_payload.get("status") == "fail":
+        if policy_precheck_payload.get("status") == "blocked":
             merge_training_status(
                 {
                     "status": "policy_precheck_failed",
@@ -1905,8 +2248,271 @@ def main() -> dict[str, object]:
         champion_reference = live_champion_id
     else:
         champion_reference = genetic.get_champion(horizon=horizon)
+    selected_candidate_id = challenger_id
+    selected_challenger_path = Path(challenger_path)
+    selected_latest_checkpoint = latest_checkpoint_reference
+    selected_checkpoint_step: int | None = None
+    selected_challenger_lineage = dict(challenger_lineage)
+    screen_results: list[dict[str, object]] = []
+    screen_gate: dict[str, object] | None = None
+    policy_precheck_mode = str((policy_precheck_payload or {}).get("status") or "full_ready").strip().lower()
 
-    battle_report = arena.battle(challenger_id, champion_reference, horizon=horizon)
+    if policy_precheck_mode == "screen_only":
+        screen_candidates = _select_recent_screen_checkpoints(
+            history=list(policy_precheck_history),
+            weights_dir=weights_dir,
+            horizon=horizon,
+            last_step=last_optimization_step,
+            config=config,
+        )
+        if not screen_candidates:
+            screen_gate = {
+                "allowed": False,
+                "status": "blocked",
+                "reason": "screen_candidates_absent",
+                "checks": {},
+                "metrics": {},
+            }
+        else:
+            screen_budget = {
+                "ARENA_GAMES_PER_SYMBOL": str(
+                    int(getattr(config, "arena_screen_games_per_symbol", 4) or 4)
+                ),
+                "ARENA_MIN_GAMES": str(int(getattr(config, "arena_screen_min_games", 14) or 14)),
+                "ARENA_MIN_SYMBOLS": str(int(getattr(config, "arena_screen_min_symbols", 7) or 7)),
+            }
+            screen_labels = ", ".join(
+                f"ckpt{int(item.get('checkpoint_step') or 0)}"
+                for item in screen_candidates
+            )
+            append_training_log(
+                f"MuZero {horizon}: screen Arena automatique sur {screen_labels}.",
+                source="muzero",
+            )
+            with _temporary_env_overrides(screen_budget):
+                for candidate in screen_candidates:
+                    checkpoint_step = int(candidate.get("checkpoint_step") or 0)
+                    checkpoint_path = Path(str(candidate.get("checkpoint_path") or ""))
+                    battle_report_screen = arena.battle(
+                        str(checkpoint_path),
+                        champion_reference,
+                        horizon=horizon,
+                    )
+                    report_payload = {
+                        "kind": "auto_screen",
+                        "generated_at": datetime.now().isoformat(),
+                        "source_run_id": active_run_id,
+                        "engine": engine,
+                        "horizon": horizon,
+                        "checkpoint_step": checkpoint_step,
+                        "checkpoint_path": str(checkpoint_path),
+                        "champion_reference": champion_reference,
+                        "symbols": list(valid_symbols),
+                        "selection_window": dict(candidate.get("selection_window") or {}),
+                        "selection_anchor_step": candidate.get("selection_anchor_step"),
+                        "budget": {
+                            "games_per_symbol": int(screen_budget["ARENA_GAMES_PER_SYMBOL"]),
+                            "min_games": int(screen_budget["ARENA_MIN_GAMES"]),
+                            "min_symbols": int(screen_budget["ARENA_MIN_SYMBOLS"]),
+                        },
+                        "battle_report": battle_report_screen,
+                    }
+                    report_path = results_dir / f"screen_{active_run_id}_ckpt{checkpoint_step}.json"
+                    report_path.write_text(
+                        json.dumps(report_payload, indent=2, default=float),
+                        encoding="utf-8",
+                    )
+                    screen_results.append(
+                        {
+                            "checkpoint_step": checkpoint_step,
+                            "checkpoint_path": str(checkpoint_path),
+                            "report_path": str(report_path),
+                            "battle_report": battle_report_screen,
+                            "selection_window": dict(candidate.get("selection_window") or {}),
+                            "selection_anchor_step": candidate.get("selection_anchor_step"),
+                        }
+                    )
+            winner = _select_best_screen_candidate(screen_results)
+            screen_gate = _evaluate_screen_winner_gate(
+                dict(winner.get("battle_report") or {}),
+                config,
+            )
+            selected_checkpoint_step = int(winner.get("checkpoint_step") or 0)
+            selected_candidate_id = f"{challenger_id}_ckpt{selected_checkpoint_step}"
+            selected_challenger_path = Path(str(winner.get("checkpoint_path") or challenger_path))
+            selected_latest_checkpoint = str(selected_challenger_path)
+            selected_challenger_lineage = {
+                **challenger_lineage,
+                "selected_checkpoint_step": selected_checkpoint_step,
+                "selection_method": "auto_screen_recent_best_window",
+            }
+            append_training_log(
+                (
+                    f"MuZero {horizon}: gagnant screen ckpt{selected_checkpoint_step} | "
+                    f"gate={screen_gate.get('status')} ({screen_gate.get('reason')})."
+                ),
+                level="WARNING" if not bool(screen_gate.get("allowed")) else "INFO",
+                source="muzero",
+            )
+
+        if not bool((screen_gate or {}).get("allowed")):
+            promotion_gate = {
+                "allowed": False,
+                "status": "blocked",
+                "reason": str((screen_gate or {}).get("reason") or "screen_only_gate_failed"),
+                "gate_profile": gate_profile,
+                "failure_mode": str((screen_gate or {}).get("reason") or "screen_only_gate_failed"),
+                "checks": dict((screen_gate or {}).get("checks") or {}),
+                "metrics": dict((screen_gate or {}).get("metrics") or {}),
+            }
+            promotion_result = {
+                "status": "skipped",
+                "reason": "screen_only_gate_failed",
+                "engine": engine,
+                "horizon": horizon,
+                "source_path": str(selected_challenger_path),
+                "champion_paths": [],
+                "promotion_gate": promotion_gate,
+                "artifact_compatibility": challenger_compatibility,
+                "checkpoint_schema_version": challenger_checkpoint_schema_version,
+                "resume_source": resume_source,
+                "lineage": selected_challenger_lineage,
+                "seed_parent_champion_id": ga_parent_champion_id,
+                "ga_campaign_id": ga_campaign_id,
+                "ga_trial": ga_trial,
+                "ga_scope": ga_scope,
+                "policy_precheck": dict(policy_precheck_payload or {}),
+                "screen_results": list(screen_results),
+            }
+            promoter.persist_challenger_manifest(
+                engine=engine,
+                horizon=horizon,
+                status="blocked",
+                challenger_id=selected_candidate_id,
+                challenger_path=str(selected_challenger_path),
+                latest_checkpoint=str(selected_latest_checkpoint),
+                battle_report=dict((_select_best_screen_candidate(screen_results).get("battle_report") or {}))
+                if screen_results
+                else None,
+                training_metrics=training_metrics_payload,
+                promotion_gate=promotion_gate,
+                promotion_result=promotion_result,
+                artifact_compatibility=dict(promotion_result.get("artifact_compatibility") or {}),
+                checkpoint_schema_version=challenger_checkpoint_schema_version,
+                resume_source=resume_source,
+                lineage=selected_challenger_lineage,
+            )
+            terminal_summary = {
+                "run_id": active_run_id,
+                "sequence_id": str(os.getenv("TRAINING_SEQUENCE_ID", "")).strip() or None,
+                "sequence_profile": str(os.getenv("TRAINING_SEQUENCE_PROFILE", "")).strip() or None,
+                "window_id": str(os.getenv("TRAINING_WINDOW_ID", "")).strip() or None,
+                "trial_id": str(os.getenv("TRAINING_TRIAL_ID", "")).strip() or ga_trial,
+                "engine": engine,
+                "horizon": horizon,
+                "family": family,
+                "feature_profile": feature_profile.get("profile_name"),
+                "mechanics_profile_version": mechanics_profile_version,
+                "ga_trial": ga_trial,
+                "ga_campaign_id": ga_campaign_id,
+                "ga_scope": ga_scope,
+                "ga_parent_champion_id": ga_parent_champion_id,
+                "seed_parent_champion_id": ga_parent_champion_id,
+                "trial_mode": trial_mode,
+                "trial_cost_profile": trial_cost_profile,
+                "dataset_id": dataset_id,
+                "dataset_source": dataset_source,
+                "focus_symbols": focus_symbols,
+                "gate_profile": gate_profile,
+                "terminal_status": "completed",
+                "failed_step": selected_checkpoint_step,
+                "failure_mode": promotion_gate.get("failure_mode"),
+                "arena_outcome": None,
+                "promotion_gate": promotion_gate,
+                "metrics": dict((screen_gate or {}).get("metrics") or {}),
+                "metrics_by_symbol": {},
+                "metrics_by_position_mechanics": {},
+                "training_metrics": training_metrics_payload,
+                "resume_source": resume_source,
+                "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+                "checkpoint_schema_version": challenger_checkpoint_schema_version,
+                "lineage": selected_challenger_lineage,
+                "artifact_state": {
+                    "precheck_report_present": False,
+                    "arena_report_present": bool(screen_results),
+                    "battle_report_present": bool(screen_results),
+                    "promotion_present": True,
+                    "candidate_checkpoint_present": selected_challenger_path.exists(),
+                    "latest_checkpoint_present": Path(str(selected_latest_checkpoint)).exists(),
+                },
+                "challenger_path": str(selected_challenger_path),
+                "latest_checkpoint": str(selected_latest_checkpoint),
+                "latest_candidate": selected_candidate_id,
+                "latest_verdict": {
+                    "status": "screen_only_gate_failed",
+                    "reason": promotion_gate.get("reason"),
+                    "failure_mode": promotion_gate.get("failure_mode"),
+                },
+                "gold_precheck": dict(gold_precheck_payload or {}),
+                "precheck_status": (gold_precheck_payload or {}).get("status"),
+                "policy_precheck": dict(policy_precheck_payload or {}),
+                "policy_precheck_mode": policy_precheck_mode,
+                "screen_results": list(screen_results),
+                "screen_gate": dict(screen_gate or {}),
+            }
+            terminal_summary_path = write_terminal_summary(terminal_summary)
+            logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
+            return {
+                "engine": engine,
+                "horizon": horizon,
+                "timeframe": config.primary_timeframe,
+                "symbols": valid_symbols,
+                "family": family,
+                "feature_profile": feature_profile.get("profile_name"),
+                "mechanics_profile_version": mechanics_profile_version,
+                "dataset_id": dataset_id,
+                "dataset_source": dataset_source,
+                "focus_symbols": focus_symbols,
+                "gate_profile": gate_profile,
+                "dataset_descriptor": dataset_descriptor,
+                "dataset_coverage": dict(getattr(config, "dataset_coverage", {}) or {}),
+                "games_per_symbol": games_per_symbol,
+                "total_games": total_games,
+                "latest_checkpoint": str(selected_latest_checkpoint),
+                "challenger_path": str(selected_challenger_path),
+                "training_metrics": training_metrics_payload,
+                "ga_status": ga_status,
+                "ga_generation": ga_generation,
+                "ga_trial": ga_trial,
+                "ga_campaign_id": ga_campaign_id,
+                "ga_scope": ga_scope,
+                "ga_parent_champion_id": ga_parent_champion_id,
+                "seed_parent_champion_id": ga_parent_champion_id,
+                "trial_mode": trial_mode,
+                "trial_cost_profile": trial_cost_profile,
+                "resume_source": resume_source,
+                "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+                "checkpoint_schema_version": challenger_checkpoint_schema_version,
+                "lineage": selected_challenger_lineage,
+                "precheck": dict(gold_precheck_payload or {}),
+                "policy_precheck": dict(policy_precheck_payload or {}),
+                "policy_precheck_mode": policy_precheck_mode,
+                "screen_results": list(screen_results),
+                "screen_gate": dict(screen_gate or {}),
+                "promotion": promotion_result,
+                "terminal_summary_path": str(terminal_summary_path),
+            }
+
+    arena_candidate_id = selected_candidate_id
+    arena_candidate_path = Path(selected_challenger_path)
+    arena_latest_checkpoint = (
+        Path(str(selected_latest_checkpoint))
+        if selected_latest_checkpoint
+        else latest_path
+    )
+    arena_lineage = dict(selected_challenger_lineage)
+
+    battle_report = arena.battle(str(arena_candidate_path), champion_reference, horizon=horizon)
     logger.info("Verdict ADN %s: %s", horizon, battle_report["outcome"])
     logger.info(
         "Validation Arena %s: %s",
@@ -1930,14 +2536,14 @@ def main() -> dict[str, object]:
             horizon=horizon,
             candidate_gate=promotion_gate,
             engine=engine,
-            challenger_id=challenger_id,
+            challenger_id=arena_candidate_id,
         )
         promotion_result = {
             "status": "candidate_only",
             "reason": "deferred_ga_selection",
             "engine": engine,
             "horizon": horizon,
-            "source_path": str(challenger_path),
+            "source_path": str(arena_candidate_path),
             "champion_paths": [],
             "promotion_gate": promotion_gate,
             "artifact_compatibility": challenger_compatibility,
@@ -1951,27 +2557,39 @@ def main() -> dict[str, object]:
             "ga_trial": ga_trial,
             "ga_scope": ga_scope,
             "resume_source": resume_source,
-            "lineage": challenger_lineage,
+            "lineage": arena_lineage,
             "seed_parent_champion_id": ga_parent_champion_id,
+            "policy_precheck": dict(policy_precheck_payload or {}),
+            "policy_precheck_mode": policy_precheck_mode,
+            "screen_results": list(screen_results),
+            "screen_gate": dict(screen_gate or {}),
         }
     else:
         promotion_result = promoter.promote_muzero_challenger(
-            challenger_path=challenger_path,
+            challenger_path=arena_candidate_path,
             horizon=horizon,
             battle_report=battle_report,
             training_metrics=training_metrics_payload,
-            latest_checkpoint=(Path(ga_seed_checkpoint_path) if mechanics_only_mode and ga_seed_checkpoint_path else latest_path),
-            challenger_id=challenger_id,
+            latest_checkpoint=arena_latest_checkpoint,
+            challenger_id=arena_candidate_id,
             gate_profile=gate_profile,
             promotion_metadata={
                 "resume_source": resume_source,
-                "lineage": challenger_lineage,
+                "lineage": arena_lineage,
                 "seed_parent_champion_id": ga_parent_champion_id,
                 "ga_campaign_id": ga_campaign_id,
                 "ga_trial": ga_trial,
                 "ga_scope": ga_scope,
+                "policy_precheck": dict(policy_precheck_payload or {}),
+                "policy_precheck_mode": policy_precheck_mode,
+                "screen_results": list(screen_results),
+                "screen_gate": dict(screen_gate or {}),
             },
         )
+    promotion_result.setdefault("policy_precheck", dict(policy_precheck_payload or {}))
+    promotion_result.setdefault("policy_precheck_mode", policy_precheck_mode)
+    promotion_result.setdefault("screen_results", list(screen_results))
+    promotion_result.setdefault("screen_gate", dict(screen_gate or {}))
     logger.info("Promotion live %s: %s", horizon, promotion_result.get("status"))
     append_training_log(
         "MuZero "
@@ -1981,7 +2599,7 @@ def main() -> dict[str, object]:
         source="muzero",
     )
     genetic.register_new_generation(
-        gen_id=challenger_id,
+        gen_id=arena_candidate_id,
         metrics=registry_metrics,
         is_champion=promotion_result.get("status") == "promoted",
         horizon=horizon,
@@ -1995,9 +2613,9 @@ def main() -> dict[str, object]:
                 if promotion_result.get("status") == "candidate_only"
                 else "blocked"
             ),
-            challenger_id=challenger_id,
-            challenger_path=str(challenger_path),
-            latest_checkpoint=latest_checkpoint_reference,
+            challenger_id=arena_candidate_id,
+            challenger_path=str(arena_candidate_path),
+            latest_checkpoint=str(arena_latest_checkpoint),
             battle_report=battle_report,
             training_metrics=training_metrics_payload,
             promotion_gate=dict(promotion_result.get("promotion_gate") or {}),
@@ -2008,7 +2626,7 @@ def main() -> dict[str, object]:
                 or challenger_checkpoint_schema_version
             ),
             resume_source=resume_source,
-            lineage=challenger_lineage,
+            lineage=arena_lineage,
         )
     champion_paths = promotion_result.get("champion_paths", [])
 
@@ -2034,8 +2652,8 @@ def main() -> dict[str, object]:
         "dataset_coverage": dict(getattr(config, "dataset_coverage", {}) or {}),
         "games_per_symbol": games_per_symbol,
         "total_games": total_games,
-        "latest_checkpoint": latest_checkpoint_reference,
-        "challenger_path": str(challenger_path),
+        "latest_checkpoint": str(arena_latest_checkpoint),
+        "challenger_path": str(arena_candidate_path),
         "live_champion_reference": champion_reference,
         "live_champion_id": live_champion_id or None,
         "champion_paths": champion_paths,
@@ -2061,8 +2679,13 @@ def main() -> dict[str, object]:
             promotion_result.get("checkpoint_schema_version")
             or challenger_checkpoint_schema_version
         ),
-        "lineage": challenger_lineage,
+        "lineage": arena_lineage,
         "gold_precheck": dict(gold_precheck_payload or {}),
+        "policy_precheck": dict(policy_precheck_payload or {}),
+        "policy_precheck_mode": policy_precheck_mode,
+        "screen_results": list(screen_results),
+        "screen_gate": dict(screen_gate or {}),
+        "selected_checkpoint_step": selected_checkpoint_step,
         "battle_report": battle_report,
         "promotion": promotion_result,
     }
@@ -2110,8 +2733,8 @@ def main() -> dict[str, object]:
             challenger_metrics_full.get("metrics_by_position_mechanics") or {}
         ),
         "training_metrics": training_metrics_payload,
-        "challenger_path": str(challenger_path),
-        "latest_checkpoint": latest_checkpoint_reference,
+        "challenger_path": str(arena_candidate_path),
+        "latest_checkpoint": str(arena_latest_checkpoint),
         "battle_report_path": str(unique_report_path),
         "live_comparison": dict(promotion_result.get("live_comparison") or {}),
         "resume_source": resume_source,
@@ -2120,15 +2743,15 @@ def main() -> dict[str, object]:
             promotion_result.get("checkpoint_schema_version")
             or challenger_checkpoint_schema_version
         ),
-        "lineage": challenger_lineage,
+        "lineage": arena_lineage,
         "artifact_state": {
             "arena_report_present": True,
             "battle_report_present": True,
             "promotion_present": bool(promotion_result),
-            "candidate_checkpoint_present": challenger_path.exists(),
-            "latest_checkpoint_present": latest_checkpoint_present,
+            "candidate_checkpoint_present": arena_candidate_path.exists(),
+            "latest_checkpoint_present": arena_latest_checkpoint.exists(),
         },
-        "latest_candidate": challenger_id,
+        "latest_candidate": arena_candidate_id,
         "latest_verdict": {
             "status": promotion_result.get("status"),
             "reason": promotion_result.get("reason") or promotion_gate.get("reason"),
@@ -2136,6 +2759,11 @@ def main() -> dict[str, object]:
         },
         "gold_precheck": dict(gold_precheck_payload or {}),
         "precheck_status": (gold_precheck_payload or {}).get("status"),
+        "policy_precheck": dict(policy_precheck_payload or {}),
+        "policy_precheck_mode": policy_precheck_mode,
+        "screen_results": list(screen_results),
+        "screen_gate": dict(screen_gate or {}),
+        "selected_checkpoint_step": selected_checkpoint_step,
     }
     terminal_summary_path = write_terminal_summary(terminal_summary)
     logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)

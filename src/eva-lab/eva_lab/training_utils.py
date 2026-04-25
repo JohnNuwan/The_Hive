@@ -894,6 +894,12 @@ def _upgrade_scalp_position_mechanics_profile_v2(
                 "hold_drag_penalty_multiplier": 0.35,
                 "pyramid_failure_penalty": 0.18,
                 "pyramid_negative_exit_penalty": 0.45,
+                "soft_countertrend_ema_penalty": 0.18,
+                "soft_countertrend_vwap_penalty": 0.10,
+                "soft_low_adx_penalty": 0.08,
+                "soft_obv_divergence_penalty": 0.0,
+                "soft_trend_alignment_bonus": 0.08,
+                "soft_strong_alignment_bonus": 0.14,
             },
         },
         "indices": {
@@ -955,6 +961,12 @@ def _upgrade_scalp_position_mechanics_profile_v2(
                 "hold_drag_penalty_multiplier": 0.42,
                 "pyramid_failure_penalty": 0.16,
                 "pyramid_negative_exit_penalty": 0.38,
+                "soft_countertrend_ema_penalty": 0.16,
+                "soft_countertrend_vwap_penalty": 0.08,
+                "soft_low_adx_penalty": 0.07,
+                "soft_obv_divergence_penalty": 0.0,
+                "soft_trend_alignment_bonus": 0.07,
+                "soft_strong_alignment_bonus": 0.12,
             },
         },
         "metals": {
@@ -1016,6 +1028,12 @@ def _upgrade_scalp_position_mechanics_profile_v2(
                 "hold_drag_penalty_multiplier": 0.45,
                 "pyramid_failure_penalty": 0.18,
                 "pyramid_negative_exit_penalty": 0.42,
+                "soft_countertrend_ema_penalty": 0.20,
+                "soft_countertrend_vwap_penalty": 0.10,
+                "soft_low_adx_penalty": 0.08,
+                "soft_obv_divergence_penalty": 0.0,
+                "soft_trend_alignment_bonus": 0.08,
+                "soft_strong_alignment_bonus": 0.15,
             },
         },
         "crypto": {
@@ -1077,6 +1095,12 @@ def _upgrade_scalp_position_mechanics_profile_v2(
                 "hold_drag_penalty_multiplier": 0.38,
                 "pyramid_failure_penalty": 0.20,
                 "pyramid_negative_exit_penalty": 0.45,
+                "soft_countertrend_ema_penalty": 0.14,
+                "soft_countertrend_vwap_penalty": 0.06,
+                "soft_low_adx_penalty": 0.06,
+                "soft_obv_divergence_penalty": 0.0,
+                "soft_trend_alignment_bonus": 0.06,
+                "soft_strong_alignment_bonus": 0.10,
             },
         },
     }
@@ -1401,6 +1425,42 @@ def _apply_position_mechanics_env_overrides(profile: dict[str, Any]) -> dict[str
         "reward_policy",
         "pyramid_negative_exit_penalty",
         "MUZERO_REWARD_PYRAMID_NEGATIVE_EXIT_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "soft_countertrend_ema_penalty",
+        "MUZERO_REWARD_SOFT_COUNTERTREND_EMA_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "soft_countertrend_vwap_penalty",
+        "MUZERO_REWARD_SOFT_COUNTERTREND_VWAP_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "soft_low_adx_penalty",
+        "MUZERO_REWARD_SOFT_LOW_ADX_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "soft_obv_divergence_penalty",
+        "MUZERO_REWARD_SOFT_OBV_DIVERGENCE_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "soft_trend_alignment_bonus",
+        "MUZERO_REWARD_SOFT_TREND_ALIGNMENT_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "soft_strong_alignment_bonus",
+        "MUZERO_REWARD_SOFT_STRONG_ALIGNMENT_BONUS",
         lambda env_name, current: _env_float(env_name, float(current or 0.0)),
     )
     if override_sources:

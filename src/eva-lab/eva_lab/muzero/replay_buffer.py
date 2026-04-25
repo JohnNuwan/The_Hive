@@ -401,6 +401,20 @@ class PrioritizedReplayBuffer:
                 "root_mask_blocked_sell_directional": 0.0,
                 "blocked_buy_total": 0.0,
                 "blocked_sell_total": 0.0,
+                "soft_entry_penalty_rate": 0.0,
+                "soft_entry_bonus_rate": 0.0,
+                "soft_entry_penalty_total": 0.0,
+                "soft_entry_bonus_total": 0.0,
+                "soft_penalty_net": 0.0,
+                "soft_penalty_to_bonus_ratio": 0.0,
+                "soft_penalty_ema200_count": 0.0,
+                "soft_penalty_vwap_count": 0.0,
+                "soft_penalty_adx_count": 0.0,
+                "soft_penalty_obv_count": 0.0,
+                "soft_penalty_ema_rate": 0.0,
+                "soft_penalty_vwap_rate": 0.0,
+                "soft_penalty_adx_rate": 0.0,
+                "soft_penalty_obv_rate": 0.0,
                 "directional_collapse": True,
                 "long_entry_share": 0.0,
                 "short_entry_share": 0.0,
@@ -428,6 +442,14 @@ class PrioritizedReplayBuffer:
         blocked_sell_total = 0.0
         entry_veto_total = 0.0
         requested_directional_total = 0.0
+        soft_entry_penalty_count = 0.0
+        soft_entry_bonus_count = 0.0
+        soft_entry_penalty_total = 0.0
+        soft_entry_bonus_total = 0.0
+        soft_penalty_ema200_count = 0.0
+        soft_penalty_vwap_count = 0.0
+        soft_penalty_adx_count = 0.0
+        soft_penalty_obv_count = 0.0
         long_return_sum = 0.0
         short_return_sum = 0.0
         long_return_games = 0
@@ -469,6 +491,14 @@ class PrioritizedReplayBuffer:
             entry_veto_total += self._metadata_float(game, "entry_veto_to_hold")
             requested_directional_total += self._metadata_float(game, "requested_buy_actions")
             requested_directional_total += self._metadata_float(game, "requested_sell_actions")
+            soft_entry_penalty_count += self._metadata_float(game, "soft_entry_penalty_count")
+            soft_entry_bonus_count += self._metadata_float(game, "soft_entry_bonus_count")
+            soft_entry_penalty_total += self._metadata_float(game, "soft_entry_penalty_total")
+            soft_entry_bonus_total += self._metadata_float(game, "soft_entry_bonus_total")
+            soft_penalty_ema200_count += self._metadata_float(game, "soft_penalty_ema200_count")
+            soft_penalty_vwap_count += self._metadata_float(game, "soft_penalty_vwap_count")
+            soft_penalty_adx_count += self._metadata_float(game, "soft_penalty_adx_count")
+            soft_penalty_obv_count += self._metadata_float(game, "soft_penalty_obv_count")
 
         directional_entries = total_long_entries + total_short_entries
         executed_long_entry_share = total_long_entries / max(directional_entries, 1.0)
@@ -507,6 +537,24 @@ class PrioritizedReplayBuffer:
             "root_mask_blocked_sell_directional": root_mask_blocked_sell_directional,
             "blocked_buy_total": blocked_buy_total,
             "blocked_sell_total": blocked_sell_total,
+            "soft_entry_penalty_rate": soft_entry_penalty_count / max(directional_entries, 1.0),
+            "soft_entry_bonus_rate": soft_entry_bonus_count / max(directional_entries, 1.0),
+            "soft_entry_penalty_total": soft_entry_penalty_total,
+            "soft_entry_bonus_total": soft_entry_bonus_total,
+            "soft_penalty_net": soft_entry_penalty_total - soft_entry_bonus_total,
+            "soft_penalty_to_bonus_ratio": (
+                soft_entry_penalty_total / max(soft_entry_bonus_total, 1e-6)
+                if (soft_entry_penalty_total > 0.0 or soft_entry_bonus_total > 0.0)
+                else 0.0
+            ),
+            "soft_penalty_ema200_count": soft_penalty_ema200_count,
+            "soft_penalty_vwap_count": soft_penalty_vwap_count,
+            "soft_penalty_adx_count": soft_penalty_adx_count,
+            "soft_penalty_obv_count": soft_penalty_obv_count,
+            "soft_penalty_ema_rate": soft_penalty_ema200_count / max(directional_entries, 1.0),
+            "soft_penalty_vwap_rate": soft_penalty_vwap_count / max(directional_entries, 1.0),
+            "soft_penalty_adx_rate": soft_penalty_adx_count / max(directional_entries, 1.0),
+            "soft_penalty_obv_rate": soft_penalty_obv_count / max(directional_entries, 1.0),
             "directional_collapse": bool(total_long_entries <= 0.0 or total_short_entries <= 0.0),
             "long_entry_share": executed_long_entry_share,
             "short_entry_share": executed_short_entry_share,

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from eva_lab.champion_promoter import ChampionPromoter
+from eva_lab.training_status import load_training_status
 from shared.telegram_client import TelegramClient
 
 logger = logging.getLogger(__name__)
@@ -43,6 +46,265 @@ def _format_metric(value: Any, suffix: str = "") -> str:
     except (TypeError, ValueError):
         return f"n/a{suffix}"
     return f"{numeric:.2f}{suffix}"
+
+
+def _format_share_metric(value: Any) -> str:
+    """Formate une part ou un ratio en pourcentage lisible.
+
+    Args:
+        value (Any): Valeur brute, generalement comprise entre 0 et 1.
+
+    Returns:
+        str: Pourcentage lisible.
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "n/a%"
+    if abs(numeric) <= 1.0:
+        numeric *= 100.0
+    return f"{numeric:.2f}%"
+
+
+def _format_ratio(current: Any, total: Any) -> str:
+    """Formate un ratio courant/total.
+
+    Args:
+        current (Any): Valeur courante.
+        total (Any): Valeur maximale.
+
+    Returns:
+        str: Ratio lisible ou ``n/a``.
+    """
+    try:
+        left = int(float(current))
+        right = int(float(total))
+    except (TypeError, ValueError):
+        return "n/a"
+    if right <= 0:
+        return str(left)
+    return f"{left}/{right}"
+
+
+def _format_timestamp(value: Any) -> str:
+    """Formate un horodatage ISO pour Telegram.
+
+    Args:
+        value (Any): Valeur brute a convertir.
+
+    Returns:
+        str: Horodatage lisible.
+    """
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return "n/a"
+    try:
+        timestamp = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return raw_value
+    return timestamp.strftime("%d/%m/%Y %H:%M")
+
+
+def _resolve_digest_horizons(horizons: list[str] | None = None) -> list[str]:
+    """Retourne les horizons a afficher dans le digest.
+
+    Args:
+        horizons (list[str] | None): Horizons explicites optionnels.
+
+    Returns:
+        list[str]: Horizons normalises et dedupliques.
+    """
+    if horizons:
+        raw_items = list(horizons)
+    else:
+        raw_items = os.getenv("MUZERO_HORIZONS", "scalp,intraday,swing").split(",")
+
+    resolved: list[str] = []
+    for item in raw_items:
+        horizon = str(item or "").strip().lower()
+        if horizon and horizon not in resolved:
+            resolved.append(horizon)
+    return resolved or ["scalp"]
+
+
+def _humanize_token(value: Any, default: str = "n/a") -> str:
+    """Normalise un identifiant technique en texte lisible.
+
+    Args:
+        value (Any): Valeur brute a humaniser.
+        default (str): Valeur de repli.
+
+    Returns:
+        str: Texte court plus lisible.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return default
+    return text.replace("_", " ")
+
+
+def _shorten_identifier(value: Any, default: str = "aucun", max_length: int = 44) -> str:
+    """Raccourcit un identifiant ou chemin pour Telegram.
+
+    Args:
+        value (Any): Identifiant brut.
+        default (str): Valeur de repli si vide.
+        max_length (int): Longueur maximale affichee.
+
+    Returns:
+        str: Identifiant compact et lisible.
+    """
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return default
+    candidate = raw_value
+    if "/" in raw_value or "\\" in raw_value:
+        candidate = Path(raw_value).name
+    if candidate.lower().endswith(".pkl"):
+        candidate = candidate[:-4]
+    candidate = candidate.replace("_", "-")
+    if len(candidate) <= max_length:
+        return candidate
+    head = max_length // 2 - 2
+    tail = max_length - head - 3
+    return f"{candidate[:head]}...{candidate[-tail:]}"
+
+
+def build_training_digest_message(
+    *,
+    run_status: dict[str, Any] | None = None,
+    horizon_statuses: dict[str, dict[str, Any]] | None = None,
+    horizons: list[str] | None = None,
+) -> str:
+    """Construit un digest Telegram compact de l'etat training.
+
+    Args:
+        run_status (dict[str, Any] | None): Statut courant explicite du run.
+        horizon_statuses (dict[str, dict[str, Any]] | None): Statuts champion
+            deja resolves par horizon.
+        horizons (list[str] | None): Horizons a inclure si les statuts doivent
+            etre resolves automatiquement.
+
+    Returns:
+        str: Message pret pour Telegram.
+    """
+    status = dict(run_status or load_training_status() or {})
+    current_step = dict(status.get("current_step") or {})
+    latest_metrics = dict(status.get("latest_metrics") or {})
+    arena_progress = dict(status.get("arena_progress") or {})
+    resolved_horizons = _resolve_digest_horizons(horizons)
+
+    if horizon_statuses is None:
+        promoter = ChampionPromoter()
+        resolved_horizon_statuses: dict[str, dict[str, Any]] = {}
+        for horizon in resolved_horizons:
+            try:
+                resolved_horizon_statuses[horizon] = promoter.build_horizon_status(horizon)
+            except Exception as exc:
+                logger.warning("Lecture du statut champion impossible pour %s: %s", horizon, exc)
+                resolved_horizon_statuses[horizon] = {"horizon": horizon, "gate_reason": "lecture_impossible"}
+        horizon_statuses = resolved_horizon_statuses
+
+    lines = [
+        "POINT ENTRAINEMENT",
+        _format_timestamp(datetime.now().isoformat()),
+        "",
+        "RUN",
+        f"- id: {_shorten_identifier(status.get('run_id'), default='aucun', max_length=56)}",
+        f"- statut: {_humanize_token(status.get('status'), default='inconnu')}",
+        f"- strategie: {_humanize_token(status.get('strategy'))}",
+        f"- raison: {_humanize_token(status.get('reason'))}",
+        f"- reprise: {_humanize_token(status.get('resume_source'))}",
+    ]
+
+    if current_step:
+        lines.extend(
+            [
+                "",
+                "ACTIF",
+                f"- etape: {_humanize_token(current_step.get('name'))}",
+                f"- phase: {_humanize_token(current_step.get('phase'))} | horizon: {_humanize_token(current_step.get('horizon'))}",
+                f"- symbole: {current_step.get('symbol') or 'n/a'} ({_format_ratio(current_step.get('symbol_index'), current_step.get('symbol_total'))})",
+                f"- partie: {_format_ratio(current_step.get('part_index'), current_step.get('part_total'))} | episode: {_format_ratio(current_step.get('episode_step_current'), current_step.get('episode_step_total'))}",
+                f"- replay: {_format_ratio(status.get('replay_cache_entries'), 196)}",
+                f"- maj: {_format_timestamp(current_step.get('updated_at') or status.get('updated_at'))}",
+            ]
+        )
+
+    if latest_metrics:
+        lines.extend(
+            [
+                "",
+                "METRIQUES",
+                f"- policy: loss_pol={_format_metric(latest_metrics.get('loss_pol'))} | top1={_format_share_metric(latest_metrics.get('policy_top1_share'))} | entropy={_format_metric(latest_metrics.get('policy_entropy'))}",
+                f"- filtres: root_mask={_format_share_metric(latest_metrics.get('root_mask_rate'))} | post_veto={_format_share_metric(latest_metrics.get('post_veto_to_hold_rate'))}",
+                f"- reward: bonus_doux={_format_share_metric(latest_metrics.get('soft_entry_bonus_rate'))} | penalite_douce={_format_share_metric(latest_metrics.get('soft_entry_penalty_rate'))}",
+                f"- shaping: ratio={_format_metric(latest_metrics.get('soft_penalty_to_bonus_ratio'))} | net={_format_metric(latest_metrics.get('soft_penalty_net'))}",
+                f"- equilibre: eq={_format_share_metric(latest_metrics.get('balanced_episode_rate'))} | long={_format_share_metric(latest_metrics.get('long_entry_share'))} | short={_format_share_metric(latest_metrics.get('short_entry_share'))}",
+            ]
+        )
+
+    if arena_progress:
+        lines.extend(
+            [
+                "",
+                "Arena:",
+                f"- statut: {_humanize_token(arena_progress.get('status'), default='running')}",
+                f"- role: {_humanize_token(arena_progress.get('current_role'))}",
+                f"- symbole: {arena_progress.get('current_symbol') or 'n/a'} ({_format_ratio(arena_progress.get('symbol_index'), arena_progress.get('symbol_total'))})",
+                f"- scores: challenger={_format_metric(arena_progress.get('challenger_score'))} | champion={_format_metric(arena_progress.get('champion_score'))}",
+            ]
+        )
+
+    lines.extend(["", "CHAMPIONS MUZERO"])
+    for horizon in resolved_horizons:
+        horizon_payload = dict((horizon_statuses or {}).get(horizon) or {})
+        directional = dict(horizon_payload.get("directional_metrics") or {})
+        candidate_metrics = dict(horizon_payload.get("candidate_metrics") or {})
+        lines.extend(
+            [
+                f"{str(horizon or '').upper() or 'N/A'}",
+                f"- selection: {_humanize_token(horizon_payload.get('selection'))}",
+                f"- live: {_shorten_identifier(horizon_payload.get('live_champion_id'))}",
+                f"- candidat: {_shorten_identifier(horizon_payload.get('candidate_id'))}",
+                f"- gate: {_humanize_token(horizon_payload.get('gate_reason'))}",
+                f"- PF={_format_metric(candidate_metrics.get('profit_factor'))} | Ret={_format_metric(candidate_metrics.get('return_pct'), '%')} | WR={_format_metric(candidate_metrics.get('win_rate'), '%')}",
+                f"- Bias={_humanize_token(directional.get('directional_bias'))}",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def send_training_digest(
+    *,
+    run_status: dict[str, Any] | None = None,
+    horizon_statuses: dict[str, dict[str, Any]] | None = None,
+    horizons: list[str] | None = None,
+) -> None:
+    """Envoie un digest Telegram compact de l'etat training.
+
+    Args:
+        run_status (dict[str, Any] | None): Statut courant explicite du run.
+        horizon_statuses (dict[str, dict[str, Any]] | None): Statuts champion
+            deja resolves par horizon.
+        horizons (list[str] | None): Horizons a afficher.
+    """
+    if not _env_flag("TELEGRAM_NOTIFY_TRAINING", True):
+        return
+    if not _env_flag("TELEGRAM_NOTIFY_TRAINING_DIGEST", True):
+        return
+
+    try:
+        TelegramClient().send_sync(
+            build_training_digest_message(
+                run_status=run_status,
+                horizon_statuses=horizon_statuses,
+                horizons=horizons,
+            )
+        )
+    except Exception as exc:
+        logger.warning("Notification Telegram de digest training ignoree: %s", exc)
 
 
 def send_training_run_started(

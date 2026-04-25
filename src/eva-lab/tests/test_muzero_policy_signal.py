@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -144,6 +145,111 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertNotIn(BUY, legal_actions)
         self.assertIn(SELL, legal_actions)
 
+    def test_runtime_family_uses_symbol_profile_when_config_is_mixed(self) -> None:
+        """Utilise la famille du symbole si le run global est `mixed`."""
+
+        config = SimpleNamespace(
+            horizon="scalp",
+            primary_timeframe="M5",
+            model_family="mixed",
+            quality_trade_bonus=10.0,
+            final_growth_bonus=50.0,
+            final_growth_threshold=0.10,
+            drawdown_time_penalty_rate=0.2,
+            max_drawdown_penalty=10.0,
+            loss_penalty_multiplier=2.0,
+            slbe_activation_bonus=6.0,
+            daily_stretch_target_pct=10.0,
+            daily_stretch_max_drawdown_pct=3.5,
+            daily_stretch_reward_bonus=4.0,
+            randomize_episode_start=True,
+            episode_warmup_bars=100,
+        )
+        env = TradingEnvironment(symbol="XAUUSD", config=config, max_steps=4)
+
+        self.assertEqual(env.family, "metals")
+        self.assertEqual(env.position_mechanics_profile.get("family"), "metals")
+        self.assertEqual(env.position_mechanics_profile.get("profile_name"), "scalp_metals_v2")
+
+        runtime_filter = TradingEnvironment.build_runtime_entry_filter(
+            horizon="scalp",
+            symbol="XAUUSD",
+            configured_family="mixed",
+            training_mode=True,
+            training_progress_step=9000,
+            curriculum_soft_end_step=8000,
+            curriculum_end_step=15000,
+        )
+
+        self.assertEqual(runtime_filter["ema_mode"], "relaxed")
+
+    def test_root_policy_mask_moderate_ema_allows_buy_without_strong_countertrend(self) -> None:
+        """N'applique plus `EMA200` en veto doux sans contre-tendance nette."""
+
+        data = np.zeros((8, 26), dtype=np.float32)
+        data[:, 0] = 100.0
+        data[:, 1] = 101.0
+        data[:, 2] = 99.0
+        data[:, 3] = 100.0
+        data[:, 4] = 1000.0
+        data[:, 5] = 105.0
+        data[:, 8] = 101.0
+        data[:, 10] = 0.25
+        data[:, 15] = 20.0
+
+        env = TradingEnvironment(data=data, symbol="EURUSD", max_steps=4)
+        env.position_mechanics_profile = {
+            "entry_filter": {
+                "ema_mode": "moderate",
+                "require_vwap_alignment": False,
+                "require_obv_confirmation": False,
+                "allow_trend_fallback": False,
+                "min_adx": 5.0,
+                "trend_adx": 10.0,
+            },
+            "directional_policy": {},
+        }
+        env.reset()
+
+        legal_actions = env.get_root_policy_actions()
+
+        self.assertIn(BUY, legal_actions)
+        self.assertEqual(env.root_mask_blocked_buy_ema200, 0)
+
+    def test_root_policy_mask_moderate_ema_blocks_buy_on_strong_countertrend(self) -> None:
+        """Conserve le veto `EMA200` si plusieurs signaux valident la contre-tendance."""
+
+        data = np.zeros((8, 26), dtype=np.float32)
+        data[:, 0] = 100.0
+        data[:, 1] = 101.0
+        data[:, 2] = 99.0
+        data[:, 3] = 100.0
+        data[:, 4] = 1000.0
+        data[:, 5] = 105.0
+        data[:, 8] = 101.0
+        data[:, 10] = -2.0
+        data[:, 15] = 20.0
+        data[:, 22] = 1.0
+
+        env = TradingEnvironment(data=data, symbol="EURUSD", max_steps=4)
+        env.position_mechanics_profile = {
+            "entry_filter": {
+                "ema_mode": "moderate",
+                "require_vwap_alignment": False,
+                "require_obv_confirmation": False,
+                "allow_trend_fallback": False,
+                "min_adx": 5.0,
+                "trend_adx": 10.0,
+            },
+            "directional_policy": {},
+        }
+        env.reset()
+
+        legal_actions = env.get_root_policy_actions()
+
+        self.assertNotIn(BUY, legal_actions)
+        self.assertEqual(env.root_mask_blocked_buy_ema200, 1)
+
     def test_reward_policy_aliases_support_v2_keys(self) -> None:
         """Resolve correctement les cles V2 de recompense."""
 
@@ -153,6 +259,8 @@ class MuZeroPolicySignalTests(unittest.TestCase):
                 "close_realized_bonus_multiplier": 1.7,
                 "split_realized_bonus_multiplier": 1.2,
                 "hold_drag_penalty_multiplier": 0.4,
+                "soft_countertrend_ema_penalty": 0.2,
+                "soft_trend_alignment_bonus": 0.1,
             }
         )
 
@@ -160,6 +268,203 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertAlmostEqual(resolved["close_realized_multiplier"], 1.7)
         self.assertAlmostEqual(resolved["split_realized_multiplier"], 1.2)
         self.assertAlmostEqual(resolved["hold_drag_multiplier"], 0.4)
+        self.assertAlmostEqual(resolved["soft_countertrend_ema_penalty"], 0.2)
+        self.assertAlmostEqual(resolved["soft_trend_alignment_bonus"], 0.1)
+
+    def test_soft_entry_quality_penalizes_countertrend_without_veto(self) -> None:
+        """Penalise une entree contre-tendance meme si elle reste autorisee."""
+
+        env = TradingEnvironment(symbol="EURUSD", max_steps=4)
+        env.horizon = "scalp"
+        adjustment = env._compute_soft_entry_quality_adjustment(
+            BUY,
+            {
+                "close": 100.0,
+                "ema_200": 105.0,
+                "ema_gap_pct": -0.03,
+                "price_vs_vwap": -0.01,
+                "obv_slope": -1.0,
+                "adx": 8.0,
+                "atr_pct": 0.01,
+                "momentum": -0.02,
+            },
+            {
+                "min_adx": 12.0,
+                "trend_adx": 18.0,
+                "allow_trend_fallback": False,
+            },
+            {
+                "soft_countertrend_ema_penalty": 0.2,
+                "soft_countertrend_vwap_penalty": 0.1,
+                "soft_low_adx_penalty": 0.08,
+                "soft_obv_divergence_penalty": 0.02,
+                "soft_trend_alignment_bonus": 0.0,
+                "soft_strong_alignment_bonus": 0.0,
+            },
+        )
+
+        self.assertLess(adjustment, 0.0)
+        self.assertEqual(env.soft_penalty_ema200_count, 1)
+        self.assertEqual(env.soft_penalty_vwap_count, 1)
+        self.assertEqual(env.soft_penalty_adx_count, 1)
+        self.assertEqual(env.soft_penalty_obv_count, 0)
+        self.assertEqual(env.soft_entry_penalty_count, 1)
+
+    def test_soft_entry_quality_rewards_aligned_setup(self) -> None:
+        """Verse un bonus doux quand le setup est propre et aligne."""
+
+        env = TradingEnvironment(symbol="EURUSD", max_steps=4)
+        adjustment = env._compute_soft_entry_quality_adjustment(
+            BUY,
+            {
+                "close": 105.0,
+                "ema_200": 100.0,
+                "ema_gap_pct": 0.02,
+                "price_vs_vwap": 0.01,
+                "obv_slope": 1.0,
+                "adx": 22.0,
+                "atr_pct": 0.01,
+                "momentum": 0.03,
+            },
+            {
+                "min_adx": 12.0,
+                "trend_adx": 18.0,
+                "allow_trend_fallback": False,
+            },
+            {
+                "soft_countertrend_ema_penalty": 0.2,
+                "soft_countertrend_vwap_penalty": 0.1,
+                "soft_low_adx_penalty": 0.08,
+                "soft_obv_divergence_penalty": 0.02,
+                "soft_trend_alignment_bonus": 0.08,
+                "soft_strong_alignment_bonus": 0.14,
+            },
+        )
+
+        self.assertGreater(adjustment, 0.0)
+        self.assertEqual(env.soft_entry_bonus_count, 1)
+
+    def test_soft_entry_quality_uses_weaker_early_penalty_scale(self) -> None:
+        """Reduit les penalites douces en debut de training `scalp`."""
+
+        shaping_config = SimpleNamespace(
+            soft_reward_early_end_step=4000,
+            soft_reward_mid_end_step=10000,
+            soft_reward_penalty_scale_early=0.45,
+            soft_reward_penalty_scale_mid=0.65,
+            soft_reward_penalty_scale_late=0.85,
+        )
+        early_env = TradingEnvironment(symbol="EURUSD", max_steps=4)
+        early_env.horizon = "scalp"
+        early_env.training_progress_step = 1000
+        early_env.config = shaping_config
+
+        late_env = TradingEnvironment(symbol="EURUSD", max_steps=4)
+        late_env.horizon = "scalp"
+        late_env.training_progress_step = 12000
+        late_env.config = shaping_config
+
+        market_view = {
+            "close": 100.0,
+            "ema_200": 105.0,
+            "ema_gap_pct": -0.03,
+            "price_vs_vwap": -0.01,
+            "obv_slope": -1.0,
+            "adx": 8.0,
+            "atr_pct": 0.01,
+            "momentum": -0.02,
+        }
+        entry_filter = {
+            "min_adx": 12.0,
+            "trend_adx": 18.0,
+            "allow_trend_fallback": False,
+        }
+        reward_terms = {
+            "soft_countertrend_ema_penalty": 0.2,
+            "soft_countertrend_vwap_penalty": 0.1,
+            "soft_low_adx_penalty": 0.08,
+            "soft_obv_divergence_penalty": 0.02,
+            "soft_trend_alignment_bonus": 0.0,
+            "soft_strong_alignment_bonus": 0.0,
+        }
+
+        early_adjustment = early_env._compute_soft_entry_quality_adjustment(
+            BUY,
+            market_view,
+            entry_filter,
+            reward_terms,
+        )
+        late_adjustment = late_env._compute_soft_entry_quality_adjustment(
+            BUY,
+            market_view,
+            entry_filter,
+            reward_terms,
+        )
+
+        self.assertLess(early_adjustment, 0.0)
+        self.assertLess(late_adjustment, 0.0)
+        self.assertLess(abs(early_adjustment), abs(late_adjustment))
+
+    def test_soft_entry_quality_uses_stronger_early_bonus_scale(self) -> None:
+        """Renforce les bonus doux au debut du training `scalp`."""
+
+        shaping_config = SimpleNamespace(
+            soft_reward_early_end_step=4000,
+            soft_reward_mid_end_step=10000,
+            soft_reward_bonus_scale_early=1.15,
+            soft_reward_bonus_scale_mid=1.00,
+            soft_reward_bonus_scale_late=0.95,
+        )
+        early_env = TradingEnvironment(symbol="EURUSD", max_steps=4)
+        early_env.horizon = "scalp"
+        early_env.training_progress_step = 1000
+        early_env.config = shaping_config
+
+        late_env = TradingEnvironment(symbol="EURUSD", max_steps=4)
+        late_env.horizon = "scalp"
+        late_env.training_progress_step = 12000
+        late_env.config = shaping_config
+
+        market_view = {
+            "close": 105.0,
+            "ema_200": 100.0,
+            "ema_gap_pct": 0.02,
+            "price_vs_vwap": 0.01,
+            "obv_slope": 1.0,
+            "adx": 22.0,
+            "atr_pct": 0.01,
+            "momentum": 0.03,
+        }
+        entry_filter = {
+            "min_adx": 12.0,
+            "trend_adx": 18.0,
+            "allow_trend_fallback": False,
+        }
+        reward_terms = {
+            "soft_countertrend_ema_penalty": 0.2,
+            "soft_countertrend_vwap_penalty": 0.1,
+            "soft_low_adx_penalty": 0.08,
+            "soft_obv_divergence_penalty": 0.02,
+            "soft_trend_alignment_bonus": 0.08,
+            "soft_strong_alignment_bonus": 0.14,
+        }
+
+        early_adjustment = early_env._compute_soft_entry_quality_adjustment(
+            BUY,
+            market_view,
+            entry_filter,
+            reward_terms,
+        )
+        late_adjustment = late_env._compute_soft_entry_quality_adjustment(
+            BUY,
+            market_view,
+            entry_filter,
+            reward_terms,
+        )
+
+        self.assertGreater(early_adjustment, 0.0)
+        self.assertGreater(late_adjustment, 0.0)
+        self.assertGreater(early_adjustment, late_adjustment)
 
     def test_directional_policy_aliases_support_v2_keys(self) -> None:
         """Lit bien `max_directional_imbalance` depuis les profils V2."""
@@ -909,18 +1214,29 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         config = SimpleNamespace(
             policy_precheck_max_loss_pol=5.8,
             policy_precheck_min_top1_share=0.75,
-            policy_precheck_max_root_mask_rate=0.25,
-            policy_precheck_max_post_veto_rate=0.10,
+            policy_precheck_max_policy_entropy=1.0,
+            policy_precheck_max_root_mask_rate=0.05,
+            policy_precheck_max_post_veto_rate=0.01,
             policy_precheck_min_balanced_episode_rate=0.85,
             policy_precheck_min_long_entry_share=0.35,
             policy_precheck_min_short_entry_share=0.35,
+            policy_screen_max_loss_pol=6.6,
+            policy_screen_min_top1_share=0.88,
+            policy_screen_max_policy_entropy=0.45,
+            policy_screen_max_root_mask_rate=0.05,
+            policy_screen_max_post_veto_rate=0.01,
+            policy_screen_min_balanced_episode_rate=0.85,
+            policy_screen_min_long_entry_share=0.35,
+            policy_screen_min_short_entry_share=0.35,
         )
         history = [
             {
                 "loss_pol": 5.4,
-                "policy_top1_share": 0.81,
-                "root_mask_rate": 0.42,
-                "post_veto_to_hold_rate": 0.05,
+                "policy_top1_share": 0.90,
+                "policy_entropy": 0.38,
+                "root_mask_rate": 0.11,
+                "post_veto_to_hold_rate": 0.004,
+                "soft_penalty_to_bonus_ratio": 1.2,
                 "balanced_episode_rate": 92.0,
                 "long_entry_share": 0.52,
                 "short_entry_share": 0.48,
@@ -935,7 +1251,7 @@ class MuZeroPolicySignalTests(unittest.TestCase):
             stage="mid_run",
         )
 
-        self.assertEqual(verdict["status"], "fail")
+        self.assertEqual(verdict["status"], "blocked")
         self.assertEqual(verdict["reason"], "root_mask_rate")
 
     def test_policy_precheck_window_accepts_balanced_five_x_profile(self) -> None:
@@ -946,18 +1262,29 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         config = SimpleNamespace(
             policy_precheck_max_loss_pol=5.8,
             policy_precheck_min_top1_share=0.75,
-            policy_precheck_max_root_mask_rate=0.25,
-            policy_precheck_max_post_veto_rate=0.10,
+            policy_precheck_max_policy_entropy=1.0,
+            policy_precheck_max_root_mask_rate=0.05,
+            policy_precheck_max_post_veto_rate=0.01,
             policy_precheck_min_balanced_episode_rate=0.85,
             policy_precheck_min_long_entry_share=0.35,
             policy_precheck_min_short_entry_share=0.35,
+            policy_screen_max_loss_pol=6.6,
+            policy_screen_min_top1_share=0.88,
+            policy_screen_max_policy_entropy=0.45,
+            policy_screen_max_root_mask_rate=0.05,
+            policy_screen_max_post_veto_rate=0.01,
+            policy_screen_min_balanced_episode_rate=0.85,
+            policy_screen_min_long_entry_share=0.35,
+            policy_screen_min_short_entry_share=0.35,
         )
         history = [
             {
                 "loss_pol": 5.35,
                 "policy_top1_share": 0.79,
-                "root_mask_rate": 0.14,
-                "post_veto_to_hold_rate": 0.04,
+                "policy_entropy": 0.36,
+                "root_mask_rate": 0.03,
+                "post_veto_to_hold_rate": 0.005,
+                "soft_penalty_to_bonus_ratio": 1.1,
                 "balanced_episode_rate": 91.0,
                 "long_entry_share": 0.55,
                 "short_entry_share": 0.45,
@@ -972,8 +1299,166 @@ class MuZeroPolicySignalTests(unittest.TestCase):
             stage="mid_run",
         )
 
-        self.assertEqual(verdict["status"], "pass")
-        self.assertEqual(verdict["reason"], "eligible")
+        self.assertEqual(verdict["status"], "full_ready")
+        self.assertEqual(verdict["reason"], "eligible_full")
+
+    def test_policy_precheck_window_allows_screen_only_profile(self) -> None:
+        """Autorise le screen si la policy est proche de la cible sans etre `full_ready`."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            policy_precheck_max_loss_pol=5.8,
+            policy_precheck_min_top1_share=0.75,
+            policy_precheck_max_policy_entropy=1.0,
+            policy_precheck_max_root_mask_rate=0.05,
+            policy_precheck_max_post_veto_rate=0.01,
+            policy_precheck_min_balanced_episode_rate=0.85,
+            policy_precheck_min_long_entry_share=0.35,
+            policy_precheck_min_short_entry_share=0.35,
+            policy_screen_max_loss_pol=6.6,
+            policy_screen_min_top1_share=0.88,
+            policy_screen_max_policy_entropy=0.45,
+            policy_screen_max_root_mask_rate=0.05,
+            policy_screen_max_post_veto_rate=0.01,
+            policy_screen_min_balanced_episode_rate=0.85,
+            policy_screen_min_long_entry_share=0.35,
+            policy_screen_min_short_entry_share=0.35,
+        )
+        history = [
+            {
+                "loss_pol": 6.25,
+                "policy_top1_share": 0.91,
+                "policy_entropy": 0.39,
+                "root_mask_rate": 0.02,
+                "post_veto_to_hold_rate": 0.003,
+                "soft_penalty_to_bonus_ratio": 1.25,
+                "balanced_episode_rate": 90.0,
+                "long_entry_share": 0.51,
+                "short_entry_share": 0.49,
+            }
+            for _ in range(500)
+        ]
+
+        verdict = module._evaluate_policy_precheck_window(
+            history=history,
+            config=config,
+            step=12000,
+            stage="pre_arena",
+        )
+
+        self.assertEqual(verdict["status"], "screen_only")
+        self.assertEqual(verdict["reason"], "eligible_screen")
+
+    def test_recent_screen_selection_prefers_best_recent_window(self) -> None:
+        """Choisit les checkpoints autour de la meilleure fenetre recente, pas du dernier step."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            arena_screen_recent_steps=2500,
+            arena_screen_candidate_count=5,
+            arena_screen_window_size=500,
+            checkpoint_interval=500,
+        )
+        history: list[dict[str, object]] = []
+        for step in range(9500, 12001, 100):
+            if step <= 10400:
+                loss_pol = 5.2
+                top1 = 0.90
+                soft_ratio = 1.05
+            else:
+                loss_pol = 6.8
+                top1 = 0.82
+                soft_ratio = 1.80
+            history.append(
+                {
+                    "training_step": step,
+                    "loss_pol": loss_pol,
+                    "policy_top1_share": top1,
+                    "policy_entropy": 0.35,
+                    "root_mask_rate": 0.02,
+                    "post_veto_to_hold_rate": 0.002,
+                    "soft_penalty_to_bonus_ratio": soft_ratio,
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            weights_dir = Path(temp_dir)
+            for checkpoint_step in (9500, 10000, 10500, 11000, 11500, 12000):
+                (weights_dir / f"muzero_scalp_ckpt_{checkpoint_step}.pkl").touch()
+
+            selected = module._select_recent_screen_checkpoints(
+                history=history,
+                weights_dir=weights_dir,
+                horizon="scalp",
+                last_step=12000,
+                config=config,
+            )
+
+        selected_steps = [int(item["checkpoint_step"]) for item in selected]
+        self.assertEqual(selected_steps, [9500, 10000, 10500, 11000, 11500])
+        self.assertNotIn(12000, selected_steps)
+        self.assertTrue(all("selection_window" in item for item in selected))
+
+    def test_screen_winner_gate_accepts_clean_balanced_candidate(self) -> None:
+        """Autorise la full Arena si le gagnant du screen est propre."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            arena_screen_min_profit_factor=1.20,
+            arena_screen_min_return_pct=0.0,
+            arena_screen_min_expectancy_pct=0.0,
+            arena_screen_min_positive_episode_rate=55.0,
+        )
+        verdict = module._evaluate_screen_winner_gate(
+            {
+                "challenger": {
+                    "metrics": {
+                        "profit_factor": 1.35,
+                        "return_pct": 0.08,
+                        "expectancy_pct": 0.01,
+                        "positive_episode_rate": 61.0,
+                        "directional_bias": "balanced",
+                    }
+                }
+            },
+            config,
+        )
+
+        self.assertTrue(verdict["allowed"])
+        self.assertEqual(verdict["status"], "eligible")
+
+    def test_screen_winner_gate_blocks_negative_expectancy_candidate(self) -> None:
+        """Refuse la full Arena si le gagnant du screen reste negatif en expectancy."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            arena_screen_min_profit_factor=1.20,
+            arena_screen_min_return_pct=0.0,
+            arena_screen_min_expectancy_pct=0.0,
+            arena_screen_min_positive_episode_rate=55.0,
+        )
+        verdict = module._evaluate_screen_winner_gate(
+            {
+                "challenger": {
+                    "metrics": {
+                        "profit_factor": 1.42,
+                        "return_pct": 0.04,
+                        "expectancy_pct": 0.0,
+                        "positive_episode_rate": 58.0,
+                        "directional_bias": "balanced",
+                    }
+                }
+            },
+            config,
+        )
+
+        self.assertFalse(verdict["allowed"])
+        self.assertEqual(verdict["status"], "blocked")
+        self.assertEqual(verdict["reason"], "expectancy_pct")
 
 
 if __name__ == "__main__":

@@ -112,6 +112,74 @@ class SymbolSpec:
 class TradingEnvironment:
     """Environnement de trading compatible Gymnasium pour MuZero.
 
+    L'observation contient les colonnes de marchÃ© brutes suivies de six
+    caractÃ©ristiques supplÃ©mentaires dÃ©crivant l'Ã©tat de position.
+    """
+
+    @staticmethod
+    def resolve_runtime_family(symbol: str, configured_family: str | None = None) -> str:
+        """Resout la famille runtime a utiliser pour un symbole.
+
+        Un run multi-univers peut exposer ``model_family="mixed"`` au niveau
+        global. Dans ce cas, retomber sur un profil unique `fx` pour tous les
+        symboles fausse le masque racine, surtout autour de `EMA200`. On
+        conserve donc la famille explicite seulement si elle est specifique,
+        sinon on revient a la famille reelle du symbole.
+
+        Args:
+            symbol (str): Symbole de marche courant.
+            configured_family (str | None): Famille globale du run si fournie.
+
+        Returns:
+            str: Famille runtime retenue pour les profils du symbole.
+        """
+        normalized_family = resolve_model_family(family=configured_family)
+        if normalized_family and normalized_family != "mixed":
+            return normalized_family
+        return resolve_model_family(symbol=symbol)
+
+    @classmethod
+    def build_runtime_entry_filter(
+        cls,
+        *,
+        horizon: str,
+        symbol: str,
+        configured_family: str | None = None,
+        training_mode: bool,
+        training_progress_step: int,
+        curriculum_soft_end_step: int,
+        curriculum_end_step: int,
+    ) -> dict[str, float | bool | str]:
+        """Construit le filtre runtime coherent avec un symbole.
+
+        Args:
+            horizon (str): Horizon strategique du run.
+            symbol (str): Symbole de marche courant.
+            configured_family (str | None): Famille globale du run si fournie.
+            training_mode (bool): Active le curriculum d'apprentissage.
+            training_progress_step (int): Etape d'optimisation courante.
+            curriculum_soft_end_step (int): Fin de la phase la plus permissive.
+            curriculum_end_step (int): Fin du curriculum complet.
+
+        Returns:
+            dict[str, float | bool | str]: Filtre d'entree actif pour le
+                symbole courant.
+        """
+        runtime_family = cls.resolve_runtime_family(
+            symbol=symbol,
+            configured_family=configured_family,
+        )
+        runtime_profile = resolve_position_mechanics_profile(horizon, runtime_family)
+        return cls.resolve_active_entry_filter(
+            dict(runtime_profile.get("entry_filter") or {}),
+            training_mode=training_mode,
+            training_progress_step=training_progress_step,
+            horizon=horizon,
+            curriculum_soft_end_step=curriculum_soft_end_step,
+            curriculum_end_step=curriculum_end_step,
+        )
+    """Environnement de trading compatible Gymnasium pour MuZero.
+
     L'observation contient les colonnes de marché brutes suivies de six
     caractéristiques supplémentaires décrivant l'état de position.
     """
@@ -187,7 +255,10 @@ class TradingEnvironment:
         self.horizon = str(getattr(config, "horizon", "intraday") or "intraday").lower()
         self.primary_timeframe = str(getattr(config, "primary_timeframe", "H1") or "H1").upper()
         configured_family = getattr(config, "model_family", None)
-        self.family = resolve_model_family(symbol=symbol, family=configured_family)
+        self.family = self.resolve_runtime_family(
+            symbol=symbol,
+            configured_family=configured_family,
+        )
         self.feature_profile = resolve_feature_profile(self.horizon, self.family)
         self.position_mechanics_profile = resolve_position_mechanics_profile(
             self.horizon,
@@ -504,6 +575,14 @@ class TradingEnvironment:
         self.root_mask_blocked_sell_directional = 0
         self.ema200_blocked_buy = 0
         self.ema200_blocked_sell = 0
+        self.soft_entry_penalty_count = 0
+        self.soft_entry_penalty_total = 0.0
+        self.soft_entry_bonus_count = 0
+        self.soft_entry_bonus_total = 0.0
+        self.soft_penalty_ema200_count = 0
+        self.soft_penalty_vwap_count = 0
+        self.soft_penalty_adx_count = 0
+        self.soft_penalty_obv_count = 0
         self.entry_blocked_vwap = 0
         self.entry_blocked_adx = 0
         self.entry_blocked_obv = 0
@@ -661,6 +740,7 @@ class TradingEnvironment:
         return {
             "close": close_price,
             "ema_200": ema_200,
+            "ema_gap_pct": (close_price - ema_200) / max(abs(ema_200), 1e-8),
             "vwap": vwap,
             "price_vs_vwap": (close_price - vwap) / max(abs(vwap), 1e-8),
             "obv": obv,
@@ -953,6 +1033,12 @@ class TradingEnvironment:
         if context["adx"] < min_adx and not fallback_direction_ok:
             return "adx"
 
+        atr_pct = max(float(context.get("atr_pct", 0.0) or 0.0), 1e-5)
+        ema_gap_pct = float(context.get("ema_gap_pct", 0.0) or 0.0)
+        momentum = float(context.get("momentum", 0.0) or 0.0)
+        ema_gap_floor = max(atr_pct * 0.35, 0.0002)
+        momentum_floor = max(atr_pct, 1e-5)
+
         if action == BUY:
             if ema_mode == "strict" and context["close"] < context["ema_200"]:
                 return "ema200"
@@ -960,6 +1046,9 @@ class TradingEnvironment:
                 ema_mode == "moderate"
                 and context["close"] < context["ema_200"]
                 and context["price_vs_vwap"] < 0
+                and ema_gap_pct <= -ema_gap_floor
+                and momentum <= -momentum_floor
+                and not fallback_direction_ok
             ):
                 return "ema200"
             if require_vwap_alignment and context["price_vs_vwap"] < 0 and not fallback_direction_ok:
@@ -973,6 +1062,9 @@ class TradingEnvironment:
                 ema_mode == "moderate"
                 and context["close"] > context["ema_200"]
                 and context["price_vs_vwap"] > 0
+                and ema_gap_pct >= ema_gap_floor
+                and momentum >= momentum_floor
+                and not fallback_direction_ok
             ):
                 return "ema200"
             if require_vwap_alignment and context["price_vs_vwap"] > 0 and not fallback_direction_ok:
@@ -1070,6 +1162,161 @@ class TradingEnvironment:
         else:
             self._rebalance_bonus_paid_sell = True
         return bonus
+
+    def _resolve_soft_reward_phase_scales(self) -> tuple[float, float]:
+        """Retourne les multiplicateurs de shaping doux pour la phase courante.
+
+        Returns:
+            tuple[float, float]: Couple ``(penalty_scale, bonus_scale)``.
+        """
+        early_end_step = max(
+            0,
+            int(getattr(self.config, "soft_reward_early_end_step", 4000) or 4000),
+        )
+        mid_end_step = max(
+            early_end_step,
+            int(getattr(self.config, "soft_reward_mid_end_step", 10000) or 10000),
+        )
+        current_step = max(0, int(self.training_progress_step or 0))
+        if current_step < early_end_step:
+            return (
+                float(getattr(self.config, "soft_reward_penalty_scale_early", 0.45) or 0.45),
+                float(getattr(self.config, "soft_reward_bonus_scale_early", 1.15) or 1.15),
+            )
+        if current_step < mid_end_step:
+            return (
+                float(getattr(self.config, "soft_reward_penalty_scale_mid", 0.65) or 0.65),
+                float(getattr(self.config, "soft_reward_bonus_scale_mid", 1.0) or 1.0),
+            )
+        return (
+            float(getattr(self.config, "soft_reward_penalty_scale_late", 0.85) or 0.85),
+            float(getattr(self.config, "soft_reward_bonus_scale_late", 0.95) or 0.95),
+        )
+
+    def _compute_soft_entry_quality_adjustment(
+        self,
+        action: int,
+        context: dict[str, float],
+        entry_filter: dict[str, float | bool | str],
+        reward_terms: dict[str, float],
+    ) -> float:
+        """Calcule un ajustement doux de reward pour la qualite d'entree.
+
+        L'objectif est de redonner du signal a la policy sans revenir aux
+        veto durs qui bloquaient artificiellement l'exploration. Les setups
+        contre-tendance ou de faible qualite restent possibles, mais deviennent
+        moins attractifs qu'une entree propre et alignee.
+
+        Args:
+            action (int): Action directionnelle executee.
+            context (dict[str, float]): Contexte de marche du pas courant.
+            entry_filter (dict[str, float | bool | str]): Filtre actif.
+            reward_terms (dict[str, float]): Parametres de reward resolves.
+
+        Returns:
+            float: Ajustement de reward positif ou negatif.
+        """
+        if action not in (BUY, SELL):
+            return 0.0
+
+        direction_sign = 1.0 if action == BUY else -1.0
+        fallback_direction_ok = self._compute_fallback_direction_ok(context, entry_filter)
+        min_adx = float(entry_filter.get("min_adx", 0.0) or 0.0)
+        trend_adx = float(entry_filter.get("trend_adx", min_adx) or min_adx)
+        atr_pct = max(float(context.get("atr_pct", 0.0) or 0.0), 1e-5)
+        ema_gap_pct = float(context.get("ema_gap_pct", 0.0) or 0.0)
+        price_vs_vwap = float(context.get("price_vs_vwap", 0.0) or 0.0)
+        momentum = float(context.get("momentum", 0.0) or 0.0)
+        obv_slope = float(context.get("obv_slope", 0.0) or 0.0)
+        adx = float(context.get("adx", 0.0) or 0.0)
+
+        against_ema = (direction_sign > 0 and ema_gap_pct < 0.0) or (
+            direction_sign < 0 and ema_gap_pct > 0.0
+        )
+        against_vwap = (direction_sign > 0 and price_vs_vwap < 0.0) or (
+            direction_sign < 0 and price_vs_vwap > 0.0
+        )
+        against_obv = (direction_sign > 0 and obv_slope <= 0.0) or (
+            direction_sign < 0 and obv_slope >= 0.0
+        )
+        against_momentum = (direction_sign > 0 and momentum < 0.0) or (
+            direction_sign < 0 and momentum > 0.0
+        )
+
+        ema_gap_floor = max(atr_pct * 0.20, 0.0001)
+        vwap_gap_floor = max(atr_pct * 0.12, 0.00005)
+        momentum_floor = max(atr_pct * 0.50, 1e-5)
+        phase_penalty_scale, phase_bonus_scale = self._resolve_soft_reward_phase_scales()
+        penalty_scale = (0.5 if fallback_direction_ok else 1.0) * phase_penalty_scale
+        bonus_scale = phase_bonus_scale
+        reward_adjustment = 0.0
+        strong_countertrend = abs(ema_gap_pct) >= ema_gap_floor and (
+            against_momentum or against_vwap
+        )
+        net_vwap_contradiction = abs(price_vs_vwap) >= vwap_gap_floor and (
+            (against_ema and abs(ema_gap_pct) >= ema_gap_floor * 0.5)
+            or abs(momentum) >= momentum_floor * 0.8
+        )
+        adx_structure_required = abs(momentum) >= momentum_floor or abs(ema_gap_pct) >= ema_gap_floor * 0.5
+
+        if against_ema and strong_countertrend:
+            ema_severity = min(1.0, abs(ema_gap_pct) / max(ema_gap_floor, 1e-6))
+            momentum_severity = (
+                min(1.0, abs(momentum) / max(momentum_floor, 1e-6))
+                if against_momentum
+                else 0.0
+            )
+            ema_penalty = reward_terms["soft_countertrend_ema_penalty"] * penalty_scale * (
+                0.55 + (0.45 * max(ema_severity, momentum_severity))
+            )
+            reward_adjustment -= ema_penalty
+            self.soft_penalty_ema200_count += 1
+
+        if against_vwap and net_vwap_contradiction:
+            vwap_severity = min(1.0, abs(price_vs_vwap) / max(vwap_gap_floor, 1e-6))
+            vwap_penalty = reward_terms["soft_countertrend_vwap_penalty"] * penalty_scale * (
+                0.55 + (0.45 * vwap_severity)
+            )
+            reward_adjustment -= vwap_penalty
+            self.soft_penalty_vwap_count += 1
+
+        if min_adx > 0.0 and adx < min_adx and not fallback_direction_ok and adx_structure_required:
+            adx_deficit = min(1.0, (min_adx - adx) / max(min_adx, 1e-6))
+            adx_penalty = reward_terms["soft_low_adx_penalty"] * penalty_scale * (0.8 + adx_deficit)
+            reward_adjustment -= adx_penalty
+            self.soft_penalty_adx_count += 1
+
+        if (
+            self.horizon != "scalp"
+            and against_obv
+            and reward_terms["soft_obv_divergence_penalty"] > 0.0
+        ):
+            obv_penalty = reward_terms["soft_obv_divergence_penalty"] * penalty_scale
+            reward_adjustment -= obv_penalty
+            self.soft_penalty_obv_count += 1
+
+        aligned_with_ema = not against_ema
+        aligned_with_vwap = not against_vwap
+        aligned_with_obv = not against_obv
+        strong_trend_context = adx >= max(trend_adx, min_adx)
+        supportive_momentum = (
+            (direction_sign > 0 and momentum >= momentum_floor)
+            or (direction_sign < 0 and momentum <= -momentum_floor)
+        )
+
+        if aligned_with_ema and aligned_with_vwap:
+            reward_adjustment += reward_terms["soft_trend_alignment_bonus"] * bonus_scale
+            if strong_trend_context and supportive_momentum and aligned_with_obv:
+                reward_adjustment += reward_terms["soft_strong_alignment_bonus"] * bonus_scale
+
+        if reward_adjustment < 0.0:
+            self.soft_entry_penalty_count += 1
+            self.soft_entry_penalty_total += abs(reward_adjustment)
+        elif reward_adjustment > 0.0:
+            self.soft_entry_bonus_count += 1
+            self.soft_entry_bonus_total += reward_adjustment
+
+        return reward_adjustment
 
     def _apply_entry_filter(self, action: int, context: dict[str, float]) -> tuple[int, str | None]:
         """Filtre une entree directionnelle selon le profil horizon/famille.
@@ -1305,6 +1552,7 @@ class TradingEnvironment:
         return {
             "close": close_price,
             "ema_200": ema_200,
+            "ema_gap_pct": (close_price - ema_200) / max(abs(ema_200), 1e-8),
             "vwap": vwap,
             "price_vs_vwap": (close_price - vwap) / max(abs(vwap), 1e-8),
             "obv": obv,
@@ -1439,6 +1687,24 @@ class TradingEnvironment:
             "pyramid_negative_exit_penalty": float(
                 reward_policy.get("pyramid_negative_exit_penalty", 0.0) or 0.0
             ),
+            "soft_countertrend_ema_penalty": float(
+                reward_policy.get("soft_countertrend_ema_penalty", 0.0) or 0.0
+            ),
+            "soft_countertrend_vwap_penalty": float(
+                reward_policy.get("soft_countertrend_vwap_penalty", 0.0) or 0.0
+            ),
+            "soft_low_adx_penalty": float(
+                reward_policy.get("soft_low_adx_penalty", 0.0) or 0.0
+            ),
+            "soft_obv_divergence_penalty": float(
+                reward_policy.get("soft_obv_divergence_penalty", 0.0) or 0.0
+            ),
+            "soft_trend_alignment_bonus": float(
+                reward_policy.get("soft_trend_alignment_bonus", 0.0) or 0.0
+            ),
+            "soft_strong_alignment_bonus": float(
+                reward_policy.get("soft_strong_alignment_bonus", 0.0) or 0.0
+            ),
         }
 
     @staticmethod
@@ -1550,6 +1816,7 @@ class TradingEnvironment:
         pyramid_reject_penalty = reward_terms["pyramid_reject_penalty"]
         pyramid_negative_exit_penalty = reward_terms["pyramid_negative_exit_penalty"]
         max_position = (1 + int(pyramiding_policy.get("max_additions", 1))) * trade_notional
+        active_entry_filter = self._get_active_entry_filter()
 
         if self.slbe_active and self.position_size != 0:
             hit = False
@@ -1615,6 +1882,12 @@ class TradingEnvironment:
                 self.split_count = 0
                 self.position_pyramids = 0
                 self.position_had_slbe = False
+                reward += self._compute_soft_entry_quality_adjustment(
+                    BUY,
+                    context,
+                    active_entry_filter,
+                    reward_terms,
+                )
                 reward += self._compute_rebalance_bonus(BUY, directional_policy)
                 self.long_entries += 1
                 reward += self._compute_directional_entry_feedback(directional_policy)
@@ -1629,6 +1902,12 @@ class TradingEnvironment:
                     self.avg_entry_price = total_value / self.position_size
                     self.position_pyramids += 1
                     self.pyramids_opened += 1
+                    reward += 0.5 * self._compute_soft_entry_quality_adjustment(
+                        BUY,
+                        context,
+                        active_entry_filter,
+                        reward_terms,
+                    )
                     reward += float(pyramiding_policy.get("reward_bonus", 0.1) or 0.1)
                 else:
                     self.pyramids_rejected += 1
@@ -1650,6 +1929,12 @@ class TradingEnvironment:
                 self.split_count = 0
                 self.position_pyramids = 0
                 self.position_had_slbe = False
+                reward += self._compute_soft_entry_quality_adjustment(
+                    SELL,
+                    context,
+                    active_entry_filter,
+                    reward_terms,
+                )
                 reward += self._compute_rebalance_bonus(SELL, directional_policy)
                 self.short_entries += 1
                 reward += self._compute_directional_entry_feedback(directional_policy)
@@ -1664,6 +1949,12 @@ class TradingEnvironment:
                     self.avg_entry_price = total_value / abs(self.position_size)
                     self.position_pyramids += 1
                     self.pyramids_opened += 1
+                    reward += 0.5 * self._compute_soft_entry_quality_adjustment(
+                        SELL,
+                        context,
+                        active_entry_filter,
+                        reward_terms,
+                    )
                     reward += float(pyramiding_policy.get("reward_bonus", 0.1) or 0.1)
                 else:
                     self.pyramids_rejected += 1
@@ -1741,7 +2032,6 @@ class TradingEnvironment:
             stale_penalty = float(hold_policy.get("stale_penalty", 1.0) or 1.0)
             trend_penalty = float(hold_policy.get("trend_penalty", 0.0) or 0.0)
             range_penalty = float(hold_policy.get("range_penalty", 0.0) or 0.0)
-            active_entry_filter = self._get_active_entry_filter()
             trend_adx = float(
                 active_entry_filter.get(
                     "trend_adx",
@@ -1874,6 +2164,36 @@ class TradingEnvironment:
                 self.entry_veto_to_hold
                 / max(self.requested_buy_actions + self.requested_sell_actions, 1)
             ),
+            "soft_entry_penalty_rate": (
+                self.soft_entry_penalty_count
+                / max(self.long_entries + self.short_entries + self.pyramids_opened, 1)
+            ),
+            "soft_entry_bonus_rate": (
+                self.soft_entry_bonus_count
+                / max(self.long_entries + self.short_entries + self.pyramids_opened, 1)
+            ),
+            "soft_penalty_net": self.soft_entry_penalty_total - self.soft_entry_bonus_total,
+            "soft_penalty_to_bonus_ratio": (
+                self.soft_entry_penalty_total / max(self.soft_entry_bonus_total, 1e-6)
+                if (self.soft_entry_penalty_total > 0.0 or self.soft_entry_bonus_total > 0.0)
+                else 0.0
+            ),
+            "soft_penalty_ema_rate": (
+                self.soft_penalty_ema200_count
+                / max(self.long_entries + self.short_entries + self.pyramids_opened, 1)
+            ),
+            "soft_penalty_vwap_rate": (
+                self.soft_penalty_vwap_count
+                / max(self.long_entries + self.short_entries + self.pyramids_opened, 1)
+            ),
+            "soft_penalty_adx_rate": (
+                self.soft_penalty_adx_count
+                / max(self.long_entries + self.short_entries + self.pyramids_opened, 1)
+            ),
+            "soft_penalty_obv_rate": (
+                self.soft_penalty_obv_count
+                / max(self.long_entries + self.short_entries + self.pyramids_opened, 1)
+            ),
             "family": self.family,
             "feature_profile": self.feature_profile.get("profile_name"),
         }
@@ -1939,6 +2259,14 @@ class TradingEnvironment:
             "inactive_episode_penalties": self.inactive_episode_penalties,
             "insufficient_entry_penalties": self.insufficient_entry_penalties,
             "directional_imbalance_penalties": self.directional_imbalance_penalties,
+            "soft_entry_penalty_count": self.soft_entry_penalty_count,
+            "soft_entry_penalty_total": self.soft_entry_penalty_total,
+            "soft_entry_bonus_count": self.soft_entry_bonus_count,
+            "soft_entry_bonus_total": self.soft_entry_bonus_total,
+            "soft_penalty_ema200_count": self.soft_penalty_ema200_count,
+            "soft_penalty_vwap_count": self.soft_penalty_vwap_count,
+            "soft_penalty_adx_count": self.soft_penalty_adx_count,
+            "soft_penalty_obv_count": self.soft_penalty_obv_count,
             "realized_close_bonus_count": self.realized_close_bonus_count,
             "realized_split_bonus_count": self.realized_split_bonus_count,
             "slbe_exit_bonus_count": self.slbe_exit_bonus_count,
@@ -2002,6 +2330,12 @@ class TradingEnvironment:
         veto_to_hold_rate = self.entry_veto_to_hold / max(
             self.requested_buy_actions + self.requested_sell_actions,
             1,
+        )
+        soft_event_total = max(directional_entries + self.pyramids_opened, 1)
+        soft_penalty_to_bonus_ratio = (
+            self.soft_entry_penalty_total / max(self.soft_entry_bonus_total, 1e-6)
+            if (self.soft_entry_penalty_total > 0.0 or self.soft_entry_bonus_total > 0.0)
+            else 0.0
         )
         root_mask_rate = (
             (self.root_mask_blocked_buy_total + self.root_mask_blocked_sell_total)
@@ -2074,6 +2408,22 @@ class TradingEnvironment:
             "entry_veto_to_hold": self.entry_veto_to_hold,
             "veto_to_hold_rate": veto_to_hold_rate,
             "post_veto_to_hold_rate": veto_to_hold_rate,
+            "soft_entry_penalty_count": self.soft_entry_penalty_count,
+            "soft_entry_penalty_total": self.soft_entry_penalty_total,
+            "soft_entry_bonus_count": self.soft_entry_bonus_count,
+            "soft_entry_bonus_total": self.soft_entry_bonus_total,
+            "soft_entry_penalty_rate": self.soft_entry_penalty_count / soft_event_total,
+            "soft_entry_bonus_rate": self.soft_entry_bonus_count / soft_event_total,
+            "soft_penalty_net": self.soft_entry_penalty_total - self.soft_entry_bonus_total,
+            "soft_penalty_to_bonus_ratio": soft_penalty_to_bonus_ratio,
+            "soft_penalty_ema200_count": self.soft_penalty_ema200_count,
+            "soft_penalty_vwap_count": self.soft_penalty_vwap_count,
+            "soft_penalty_adx_count": self.soft_penalty_adx_count,
+            "soft_penalty_obv_count": self.soft_penalty_obv_count,
+            "soft_penalty_ema_rate": self.soft_penalty_ema200_count / soft_event_total,
+            "soft_penalty_vwap_rate": self.soft_penalty_vwap_count / soft_event_total,
+            "soft_penalty_adx_rate": self.soft_penalty_adx_count / soft_event_total,
+            "soft_penalty_obv_rate": self.soft_penalty_obv_count / soft_event_total,
             "ema200_blocked_buy": self.ema200_blocked_buy,
             "ema200_blocked_sell": self.ema200_blocked_sell,
             "entry_blocked_vwap": self.entry_blocked_vwap,

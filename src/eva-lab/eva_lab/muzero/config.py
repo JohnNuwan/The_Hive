@@ -145,6 +145,30 @@ class MuZeroConfigV3:
         self.directional_collapse_max_imbalance = float(
             os.getenv("MUZERO_DIRECTIONAL_COLLAPSE_MAX_IMBALANCE", "0.80")
         )
+        self.soft_reward_early_end_step = int(
+            os.getenv("MUZERO_SOFT_REWARD_EARLY_END_STEP", "4000")
+        )
+        self.soft_reward_mid_end_step = int(
+            os.getenv("MUZERO_SOFT_REWARD_MID_END_STEP", "10000")
+        )
+        self.soft_reward_penalty_scale_early = float(
+            os.getenv("MUZERO_SOFT_REWARD_PENALTY_SCALE_EARLY", "0.45")
+        )
+        self.soft_reward_penalty_scale_mid = float(
+            os.getenv("MUZERO_SOFT_REWARD_PENALTY_SCALE_MID", "0.65")
+        )
+        self.soft_reward_penalty_scale_late = float(
+            os.getenv("MUZERO_SOFT_REWARD_PENALTY_SCALE_LATE", "0.85")
+        )
+        self.soft_reward_bonus_scale_early = float(
+            os.getenv("MUZERO_SOFT_REWARD_BONUS_SCALE_EARLY", "1.15")
+        )
+        self.soft_reward_bonus_scale_mid = float(
+            os.getenv("MUZERO_SOFT_REWARD_BONUS_SCALE_MID", "1.00")
+        )
+        self.soft_reward_bonus_scale_late = float(
+            os.getenv("MUZERO_SOFT_REWARD_BONUS_SCALE_LATE", "0.95")
+        )
         self.policy_precheck_step = int(
             os.getenv("MUZERO_POLICY_PRECHECK_STEP", "12000")
         )
@@ -154,11 +178,14 @@ class MuZeroConfigV3:
         self.policy_precheck_min_top1_share = float(
             os.getenv("MUZERO_POLICY_PRECHECK_MIN_TOP1_SHARE", "0.75")
         )
+        self.policy_precheck_max_policy_entropy = float(
+            os.getenv("MUZERO_POLICY_PRECHECK_MAX_POLICY_ENTROPY", "1.00")
+        )
         self.policy_precheck_max_root_mask_rate = float(
-            os.getenv("MUZERO_POLICY_PRECHECK_MAX_ROOT_MASK_RATE", "0.25")
+            os.getenv("MUZERO_POLICY_PRECHECK_MAX_ROOT_MASK_RATE", "0.05")
         )
         self.policy_precheck_max_post_veto_rate = float(
-            os.getenv("MUZERO_POLICY_PRECHECK_MAX_POST_VETO_RATE", "0.10")
+            os.getenv("MUZERO_POLICY_PRECHECK_MAX_POST_VETO_RATE", "0.01")
         )
         self.policy_precheck_min_balanced_episode_rate = float(
             os.getenv("MUZERO_POLICY_PRECHECK_MIN_BALANCED_EPISODE_RATE", "0.85")
@@ -168,6 +195,63 @@ class MuZeroConfigV3:
         )
         self.policy_precheck_min_short_entry_share = float(
             os.getenv("MUZERO_POLICY_PRECHECK_MIN_SHORT_ENTRY_SHARE", "0.35")
+        )
+        self.policy_screen_max_loss_pol = float(
+            os.getenv("MUZERO_POLICY_SCREEN_MAX_LOSS_POL", "6.6")
+        )
+        self.policy_screen_min_top1_share = float(
+            os.getenv("MUZERO_POLICY_SCREEN_MIN_TOP1_SHARE", "0.88")
+        )
+        self.policy_screen_max_policy_entropy = float(
+            os.getenv("MUZERO_POLICY_SCREEN_MAX_POLICY_ENTROPY", "0.45")
+        )
+        self.policy_screen_max_root_mask_rate = float(
+            os.getenv("MUZERO_POLICY_SCREEN_MAX_ROOT_MASK_RATE", "0.05")
+        )
+        self.policy_screen_max_post_veto_rate = float(
+            os.getenv("MUZERO_POLICY_SCREEN_MAX_POST_VETO_RATE", "0.01")
+        )
+        self.policy_screen_min_balanced_episode_rate = float(
+            os.getenv("MUZERO_POLICY_SCREEN_MIN_BALANCED_EPISODE_RATE", "0.85")
+        )
+        self.policy_screen_min_long_entry_share = float(
+            os.getenv("MUZERO_POLICY_SCREEN_MIN_LONG_ENTRY_SHARE", "0.35")
+        )
+        self.policy_screen_min_short_entry_share = float(
+            os.getenv("MUZERO_POLICY_SCREEN_MIN_SHORT_ENTRY_SHARE", "0.35")
+        )
+        self.policy_precheck_window_size = int(
+            os.getenv("MUZERO_POLICY_PRECHECK_WINDOW_SIZE", "500")
+        )
+        self.arena_screen_recent_steps = int(
+            os.getenv("MUZERO_ARENA_SCREEN_RECENT_STEPS", "2500")
+        )
+        self.arena_screen_candidate_count = int(
+            os.getenv("MUZERO_ARENA_SCREEN_CANDIDATE_COUNT", "5")
+        )
+        self.arena_screen_window_size = int(
+            os.getenv("MUZERO_ARENA_SCREEN_WINDOW_SIZE", "500")
+        )
+        self.arena_screen_games_per_symbol = int(
+            os.getenv("MUZERO_ARENA_SCREEN_GAMES_PER_SYMBOL", "4")
+        )
+        self.arena_screen_min_games = int(
+            os.getenv("MUZERO_ARENA_SCREEN_MIN_GAMES", "14")
+        )
+        self.arena_screen_min_symbols = int(
+            os.getenv("MUZERO_ARENA_SCREEN_MIN_SYMBOLS", "7")
+        )
+        self.arena_screen_min_profit_factor = float(
+            os.getenv("MUZERO_ARENA_SCREEN_MIN_PROFIT_FACTOR", "1.20")
+        )
+        self.arena_screen_min_return_pct = float(
+            os.getenv("MUZERO_ARENA_SCREEN_MIN_RETURN_PCT", "0.0")
+        )
+        self.arena_screen_min_expectancy_pct = float(
+            os.getenv("MUZERO_ARENA_SCREEN_MIN_EXPECTANCY_PCT", "0.0")
+        )
+        self.arena_screen_min_positive_episode_rate = float(
+            os.getenv("MUZERO_ARENA_SCREEN_MIN_POSITIVE_EPISODE_RATE", "55.0")
         )
 
         self.num_simulations = int(os.getenv("MUZERO_NUM_SIMULATIONS", "100"))
