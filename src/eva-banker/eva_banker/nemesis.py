@@ -45,10 +45,28 @@ class NemesisSystem:
             50,
             int(os.getenv("BANKER_NEMESIS_MAX_LEDGER_ENTRIES", "200")),
         )
+        self.symbol_quarantine_hours = max(
+            1,
+            int(os.getenv("BANKER_SYMBOL_QUARANTINE_HOURS", "12")),
+        )
+        self.symbol_quarantine_lookback_hours = max(
+            1,
+            int(os.getenv("BANKER_SYMBOL_QUARANTINE_LOOKBACK_HOURS", "24")),
+        )
+        self.symbol_quarantine_same_type_threshold = max(
+            2,
+            int(os.getenv("BANKER_SYMBOL_QUARANTINE_SAME_TYPE_THRESHOLD", "3")),
+        )
+        self.symbol_quarantine_total_threshold = max(
+            2,
+            int(os.getenv("BANKER_SYMBOL_QUARANTINE_TOTAL_THRESHOLD", "4")),
+        )
         self.defeat_ledger: List[Dict[str, Any]] = []
         self.known_nemeses: Dict[str, int] = {}
         self.lifetime_nemeses: Dict[str, int] = {}
         self.last_meditation_by_type: Dict[str, str] = {}
+        self.symbol_quarantine_until_by_symbol: Dict[str, str] = {}
+        self.quarantine_reason_by_symbol: Dict[str, str] = {}
         self.trading_blocked_until: Optional[datetime] = None
         self._meditation_in_progress = False
 
@@ -84,6 +102,12 @@ class NemesisSystem:
 
         self.lifetime_nemeses[nemesis_type] = self.lifetime_nemeses.get(nemesis_type, 0) + 1
         self._refresh_recent_nemeses(now=now)
+        self._refresh_symbol_quarantines(now=now)
+        self._update_symbol_quarantine(
+            symbol=str(market_context.get("symbol") or "").strip().upper(),
+            nemesis_type=nemesis_type,
+            now=now,
+        )
         recent_count = self.known_nemeses.get(nemesis_type, 0)
 
         logger.warning(
@@ -197,6 +221,8 @@ class NemesisSystem:
                     "known_nemeses": self.known_nemeses,
                     "lifetime_nemeses": self.lifetime_nemeses,
                     "last_meditation_by_type": self.last_meditation_by_type,
+                    "symbol_quarantine_until_by_symbol": self.symbol_quarantine_until_by_symbol,
+                    "quarantine_reason_by_symbol": self.quarantine_reason_by_symbol,
                     "trading_blocked_until": (
                         self.trading_blocked_until.isoformat()
                         if self.trading_blocked_until
@@ -227,6 +253,12 @@ class NemesisSystem:
                 state.get("known_nemeses", {}),
             )
             self.last_meditation_by_type = state.get("last_meditation_by_type", {})
+            self.symbol_quarantine_until_by_symbol = dict(
+                state.get("symbol_quarantine_until_by_symbol", {})
+            )
+            self.quarantine_reason_by_symbol = dict(
+                state.get("quarantine_reason_by_symbol", {})
+            )
             if state.get("trading_blocked_until"):
                 self.trading_blocked_until = datetime.fromisoformat(
                     state["trading_blocked_until"]
@@ -243,6 +275,7 @@ class NemesisSystem:
 
             self._trim_ledger()
             self._refresh_recent_nemeses()
+            self._refresh_symbol_quarantines()
             logger.info("Etat Nemesis charge depuis Redis.")
         except Exception:
             pass
@@ -255,6 +288,7 @@ class NemesisSystem:
             Dict[str, Any]: Blocage, compteurs recents et historique recent.
         """
         self._refresh_recent_nemeses()
+        self._refresh_symbol_quarantines()
         return {
             "total_defeats": len(self.defeat_ledger),
             "known_nemeses": self.known_nemeses,
@@ -268,8 +302,28 @@ class NemesisSystem:
             "meditation_active": self._meditation_in_progress,
             "trigger_threshold": self.trigger_threshold,
             "lookback_hours": self.lookback_hours,
+            "quarantined_symbols": sorted(self.symbol_quarantine_until_by_symbol.keys()),
+            "quarantine_reason_by_symbol": dict(self.quarantine_reason_by_symbol),
+            "quarantine_until_by_symbol": dict(self.symbol_quarantine_until_by_symbol),
             "recent_defeats": self.defeat_ledger[-5:],
         }
+
+    def is_symbol_quarantined(self, symbol: str) -> bool:
+        """Indique si un symbole est temporairement retire du live universe.
+
+        Args:
+            symbol (str): Symbole a verifier.
+
+        Returns:
+            bool: ``True`` si le symbole reste en quarantaine.
+        """
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_symbol:
+            return False
+        self._refresh_symbol_quarantines()
+        until_raw = self.symbol_quarantine_until_by_symbol.get(normalized_symbol)
+        until_dt = self._parse_timestamp(until_raw)
+        return bool(until_dt and datetime.now() < until_dt)
 
     def _trim_ledger(self) -> None:
         """
@@ -303,6 +357,75 @@ class NemesisSystem:
             recent_counts[nemesis_type] = recent_counts.get(nemesis_type, 0) + 1
 
         self.known_nemeses = recent_counts
+
+    def _refresh_symbol_quarantines(self, now: Optional[datetime] = None) -> None:
+        """Nettoie les quarantaines symbole expirees.
+
+        Args:
+            now (Optional[datetime]): Horodatage de reference.
+        """
+        now = now or datetime.now()
+        expired_symbols = [
+            symbol
+            for symbol, until_raw in self.symbol_quarantine_until_by_symbol.items()
+            if (self._parse_timestamp(until_raw) or now) <= now
+        ]
+        for symbol in expired_symbols:
+            self.symbol_quarantine_until_by_symbol.pop(symbol, None)
+            self.quarantine_reason_by_symbol.pop(symbol, None)
+
+    def _update_symbol_quarantine(
+        self,
+        *,
+        symbol: str,
+        nemesis_type: str,
+        now: Optional[datetime] = None,
+    ) -> None:
+        """Met a jour la quarantaine locale d'un symbole.
+
+        Args:
+            symbol (str): Symbole concerne par la perte.
+            nemesis_type (str): Type de defaite classe.
+            now (Optional[datetime]): Horodatage de reference.
+        """
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_symbol:
+            return
+        now = now or datetime.now()
+        lookback_start = now - timedelta(hours=self.symbol_quarantine_lookback_hours)
+        same_type_losses = 0
+        total_losses = 0
+        for entry in self.defeat_ledger:
+            entry_time = self._parse_timestamp(entry.get("timestamp"))
+            if entry_time is None or entry_time < lookback_start:
+                continue
+            entry_context = dict(entry.get("context") or {})
+            entry_symbol = str(entry_context.get("symbol") or "").strip().upper()
+            if entry_symbol != normalized_symbol:
+                continue
+            total_losses += 1
+            if str(entry.get("nemesis_type") or "").strip().upper() == nemesis_type:
+                same_type_losses += 1
+
+        if (
+            same_type_losses < self.symbol_quarantine_same_type_threshold
+            and total_losses < self.symbol_quarantine_total_threshold
+        ):
+            return
+
+        quarantine_until = now + timedelta(hours=self.symbol_quarantine_hours)
+        self.symbol_quarantine_until_by_symbol[normalized_symbol] = quarantine_until.isoformat()
+        if same_type_losses >= self.symbol_quarantine_same_type_threshold:
+            reason = f"nemesis_repeat::{nemesis_type}"
+        else:
+            reason = "defeats_repeat::all"
+        self.quarantine_reason_by_symbol[normalized_symbol] = reason
+        logger.warning(
+            "Quarantaine live activee pour %s jusqu'a %s (%s).",
+            normalized_symbol,
+            quarantine_until.isoformat(),
+            reason,
+        )
 
     @staticmethod
     def _parse_timestamp(raw_value: Optional[str]) -> Optional[datetime]:

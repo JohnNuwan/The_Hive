@@ -441,6 +441,41 @@ class AutoTradingEngine:
         symbol_upper = str(symbol or "").upper()
         return self._cpu_live_symbol_max_volumes.get(symbol_upper, self._cpu_live_max_volume)
 
+    def _resolve_cpu_live_runtime_symbols(self) -> list[str]:
+        """Construit l'allowlist effective du mode `cpu_live`.
+
+        Le mode `cpu_live` garde une allowlist locale pour les cas de repli,
+        mais doit aussi suivre les meilleurs symboles exposes par EVA Lab
+        lorsqu'un champion live valide est disponible.
+
+        Returns:
+            list[str]: Liste dedoublonnee des symboles autorises pendant le live.
+        """
+        effective_symbols: list[str] = []
+        seen: set[str] = set()
+        nemesis = get_nemesis_system()
+
+        for symbol in self._cpu_live_symbols:
+            normalized = str(symbol or "").strip().upper()
+            if not normalized or normalized in seen or nemesis.is_symbol_quarantined(normalized):
+                continue
+            effective_symbols.append(normalized)
+            seen.add(normalized)
+
+        if self._lab_universe_gate_allowed:
+            live_priority_symbols = (
+                list(self._lab_universe_top_symbols)
+                or list(self._lab_universe_symbols)
+            )
+            for symbol in live_priority_symbols:
+                normalized = str(symbol or "").strip().upper()
+                if not normalized or normalized in seen or nemesis.is_symbol_quarantined(normalized):
+                    continue
+                effective_symbols.append(normalized)
+                seen.add(normalized)
+
+        return effective_symbols
+
     def _log_pause_state(
         self,
         key: str,
@@ -563,6 +598,111 @@ class AutoTradingEngine:
             return "swing"
         return "intraday"
 
+    @staticmethod
+    def _compute_live_unrealized_return(position) -> float:
+        """Calcule le rendement latent signe d'une position live.
+
+        Args:
+            position: Position ouverte MT5 ou ``None``.
+
+        Returns:
+            float: Rendement signe courant, ou ``0.0`` si indisponible.
+        """
+        if position is None:
+            return 0.0
+        try:
+            open_price = float(getattr(position, "open_price", 0.0) or 0.0)
+            current_price = float(getattr(position, "current_price", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if open_price <= 0.0 or current_price <= 0.0:
+            return 0.0
+        action = str(getattr(position, "action", "") or "").upper()
+        buy_token = str(getattr(TradeAction.BUY, "value", "BUY")).upper()
+        sell_token = str(getattr(TradeAction.SELL, "value", "SELL")).upper()
+        if action == buy_token:
+            return (current_price - open_price) / open_price
+        if action == sell_token:
+            return (open_price - current_price) / open_price
+        return 0.0
+
+    @staticmethod
+    def _is_live_position_secured(position) -> bool:
+        """Detecte si la position live est deja protegee au break-even.
+
+        Args:
+            position: Position ouverte MT5 ou ``None``.
+
+        Returns:
+            bool: ``True`` si le stop courant protege au moins le break-even.
+        """
+        if position is None:
+            return False
+        try:
+            open_price = float(getattr(position, "open_price", 0.0) or 0.0)
+            stop_loss = float(getattr(position, "stop_loss", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if open_price <= 0.0 or stop_loss <= 0.0:
+            return False
+        action = str(getattr(position, "action", "") or "").upper()
+        buy_token = str(getattr(TradeAction.BUY, "value", "BUY")).upper()
+        sell_token = str(getattr(TradeAction.SELL, "value", "SELL")).upper()
+        if action == buy_token:
+            return stop_loss >= open_price
+        if action == sell_token:
+            return stop_loss <= open_price
+        return False
+
+    @staticmethod
+    def _resolve_live_position_state(position) -> dict[str, float]:
+        """Construit l'etat de position live attendu par MuZero.
+
+        Args:
+            position: Position ouverte MT5 ciblee, ou ``None``.
+
+        Returns:
+            dict[str, float]: Etat normalise de position, rendement latent
+                signe et drapeau de protection active.
+        """
+        if position is None:
+            return {
+                "position_state": 0.0,
+                "unrealized_return": 0.0,
+                "slbe_state": 0.0,
+            }
+        action = str(getattr(position, "action", "") or "").upper()
+        buy_token = str(getattr(TradeAction.BUY, "value", "BUY")).upper()
+        sell_token = str(getattr(TradeAction.SELL, "value", "SELL")).upper()
+        if action == buy_token:
+            position_state = 1.0
+        elif action == sell_token:
+            position_state = -1.0
+        else:
+            position_state = 0.0
+        return {
+            "position_state": position_state,
+            "unrealized_return": AutoTradingEngine._compute_live_unrealized_return(position),
+            "slbe_state": 1.0 if AutoTradingEngine._is_live_position_secured(position) else 0.0,
+        }
+
+    @staticmethod
+    def _find_symbol_position(symbol: str, positions: list | None) -> object | None:
+        """Retourne la premiere position ouverte pour un symbole donne.
+
+        Args:
+            symbol (str): Symbole live analyse.
+            positions (list | None): Positions ouvertes actuellement connues.
+
+        Returns:
+            object | None: Position correspondante, ou ``None`` si absente.
+        """
+        normalized_symbol = str(symbol or "").strip().upper()
+        for position in positions or []:
+            if str(getattr(position, "symbol", "") or "").strip().upper() == normalized_symbol:
+                return position
+        return None
+
     def _resolve_live_inference_url(self) -> str:
         """Construit l'URL d'inference live a appeler.
 
@@ -661,22 +801,32 @@ class AutoTradingEngine:
                 )
                 return previous_symbols
 
-        if self._cpu_live_mode and self._cpu_live_symbols:
-            allowed_cpu_symbols = set(self._cpu_live_symbols)
+        if self._cpu_live_mode:
+            cpu_runtime_symbols = self._resolve_cpu_live_runtime_symbols()
+            allowed_cpu_symbols = {symbol.upper() for symbol in cpu_runtime_symbols}
             restricted_cpu = [symbol for symbol in discovered if symbol.upper() in allowed_cpu_symbols]
             if restricted_cpu:
                 logger.info(
-                    "Mode cpu_live: univers restreint aux majeurs valides (%s/%s symboles).",
+                    "Mode cpu_live: univers restreint aux symboles live autorises (%s/%s symboles).",
                     len(restricted_cpu),
                     len(discovered),
                 )
                 discovered = restricted_cpu
             else:
                 logger.warning(
-                    "Mode cpu_live: aucun symbole courant ne correspond a l'allowlist %s.",
-                    self._cpu_live_symbols,
+                    "Mode cpu_live: aucun symbole courant ne correspond a l'allowlist effective %s.",
+                    cpu_runtime_symbols,
                 )
                 return previous_symbols
+
+        nemesis = get_nemesis_system()
+        non_quarantined = [
+            symbol
+            for symbol in discovered
+            if not nemesis.is_symbol_quarantined(symbol)
+        ]
+        if non_quarantined:
+            discovered = non_quarantined
 
         self.symbols = discovered
         self._last_universe_refresh = now
@@ -810,6 +960,7 @@ class AutoTradingEngine:
         Returns:
             dict[str, object]: Etat du cache EVA Lab et univers courant.
         """
+        nemesis_status = get_nemesis_system().get_status()
         return {
             "enabled": self._lab_universe_enabled,
             "horizon": "scalp" if self._cpu_live_mode else self._lab_universe_horizon,
@@ -827,6 +978,7 @@ class AutoTradingEngine:
                 for engine, symbols in self._lab_universe_top_symbols_by_engine.items()
             },
             "cpu_live_symbols": list(self._cpu_live_symbols),
+            "cpu_live_effective_symbols": self._resolve_cpu_live_runtime_symbols(),
             "gate_allowed": self._lab_universe_gate_allowed,
             "selection": self._lab_universe_selection,
             "gate_reason": self._lab_universe_gate_reason,
@@ -843,6 +995,13 @@ class AutoTradingEngine:
                 self._lab_universe_last_refresh.isoformat()
                 if self._lab_universe_last_refresh is not None
                 else None
+            ),
+            "quarantined_symbols": list(nemesis_status.get("quarantined_symbols") or []),
+            "quarantine_reason_by_symbol": dict(
+                nemesis_status.get("quarantine_reason_by_symbol") or {}
+            ),
+            "quarantine_until_by_symbol": dict(
+                nemesis_status.get("quarantine_until_by_symbol") or {}
             ),
             **self._build_live_governance_status(),
         }
@@ -898,6 +1057,7 @@ class AutoTradingEngine:
             "live_inference_url": self._resolve_live_inference_url(),
             "live_inference_timeout_seconds": self._live_inference_timeout_seconds,
             "cpu_live_symbols": list(self._cpu_live_symbols),
+            "cpu_live_effective_symbols": self._resolve_cpu_live_runtime_symbols(),
             "cpu_live_max_volume": self._cpu_live_max_volume,
             "cpu_live_symbol_max_volumes": dict(self._cpu_live_symbol_max_volumes),
             "ensemble_enabled": self._ensemble_enabled,
@@ -914,6 +1074,7 @@ class AutoTradingEngine:
             dict[str, object]: Parametres de volume, stale close et cooldown.
         """
         max_open_positions = int(getattr(self.risk, "max_open_positions", 0) or 0)
+        nemesis_status = get_nemesis_system().get_status()
         return {
             "runtime_profile": self._resolve_runtime_profile_name(),
             "max_open_positions": max_open_positions,
@@ -922,6 +1083,7 @@ class AutoTradingEngine:
             "cpu_live_max_volume": self._cpu_live_max_volume,
             "cpu_live_symbol_max_volumes": dict(self._cpu_live_symbol_max_volumes),
             "cpu_live_symbols": list(self._cpu_live_symbols),
+            "cpu_live_effective_symbols": self._resolve_cpu_live_runtime_symbols(),
             "live_family": self._lab_universe_family,
             "live_champion_id": self._lab_universe_live_champion_id,
             "live_champion_id_muzero": self._lab_universe_live_champion_id_muzero,
@@ -937,6 +1099,13 @@ class AutoTradingEngine:
             "ensemble_mode": "vote_50_50" if self._ensemble_enabled else "muzero_only",
             "ensemble_min_edge": self._ensemble_min_edge,
             "force_maintenance": self._force_maintenance,
+            "quarantined_symbols": list(nemesis_status.get("quarantined_symbols") or []),
+            "quarantine_reason_by_symbol": dict(
+                nemesis_status.get("quarantine_reason_by_symbol") or {}
+            ),
+            "quarantine_until_by_symbol": dict(
+                nemesis_status.get("quarantine_until_by_symbol") or {}
+            ),
             **self._build_live_governance_status(),
         }
 
@@ -2043,6 +2212,78 @@ class AutoTradingEngine:
         matching_deals.sort(key=lambda item: item.get("time") or datetime.min, reverse=True)
         return matching_deals[0]
 
+    @staticmethod
+    def _compute_directional_return_pct(action: str, entry_price: float, exit_price: float) -> float:
+        """Calcule le rendement signe d'un trade ferme.
+
+        Args:
+            action (str): Direction initiale du trade.
+            entry_price (float): Prix d'ouverture.
+            exit_price (float): Prix de cloture.
+
+        Returns:
+            float: Rendement du trade en pourcentage.
+        """
+
+        if entry_price <= 0.0 or exit_price <= 0.0:
+            return 0.0
+        realized_return = ((exit_price - entry_price) / entry_price) * 100.0
+        if str(action or "").strip().upper() == "SELL":
+            realized_return *= -1.0
+        return realized_return
+
+    @staticmethod
+    def _is_price_near_level(price: float, level: float, reference_price: float) -> bool:
+        """Indique si un prix se situe proche d'un niveau de gestion.
+
+        Args:
+            price (float): Prix observe.
+            level (float): Niveau cible a comparer.
+            reference_price (float): Prix de reference du trade.
+
+        Returns:
+            bool: ``True`` si le prix reste suffisamment proche du niveau.
+        """
+
+        if price <= 0.0 or level <= 0.0:
+            return False
+        tolerance = max(abs(reference_price) * 0.0015, abs(level) * 0.0005, 0.5)
+        return abs(price - level) <= tolerance
+
+    @classmethod
+    def _infer_close_reason(
+        cls,
+        *,
+        trade_info: dict[str, object] | None,
+        close_deal: dict | None,
+        pnl: float,
+    ) -> str:
+        """Inferre une raison de cloture stable pour le scoring live.
+
+        Args:
+            trade_info (dict[str, object] | None): Etat memorise a l'ouverture.
+            close_deal (dict | None): Deal de cloture renvoye par MT5.
+            pnl (float): Profit ou perte realise.
+
+        Returns:
+            str: Raison de cloture normalisee.
+        """
+
+        payload = dict(trade_info or {})
+        exit_price = float((close_deal or {}).get("price") or payload.get("entry_price") or 0.0)
+        entry_price = float(payload.get("entry_price") or 0.0)
+        stop_loss_price = float(payload.get("stop_loss_price") or 0.0)
+        take_profit_price = float(payload.get("take_profit_price") or 0.0)
+        if cls._is_price_near_level(exit_price, stop_loss_price, entry_price):
+            return "stop_loss"
+        if cls._is_price_near_level(exit_price, take_profit_price, entry_price):
+            return "tp_like"
+        if pnl > 0.0:
+            return "managed_profit_close"
+        if pnl < 0.0:
+            return "managed_loss_close"
+        return "flat_close"
+
     def _get_shepherd_thresholds(
         self,
         symbol: str,
@@ -2237,6 +2478,8 @@ class AutoTradingEngine:
                     price=exit_price,
                     pnl=profit,
                     ticket=ticket,
+                    trade_info=info,
+                    close_deal=close_deal,
                 ))
                 
                 # ðŸ›¡ï¸ ANTI-TILT LOOP: Report losses to Nemesis for Self-Healing
@@ -2443,31 +2686,6 @@ class AutoTradingEngine:
         except Exception as e:
             logger.warning(f"Failed to reach Accountant: {e}")
 
-    async def _send_pnl_feedback(self, symbol: str, action: str, price: float, pnl: float):
-        """Envoie le P&L rÃ©el d'une transaction fermÃ©e au Lab pour Shadow Learning"""
-        try:
-            import aiohttp
-            import os
-            lab_host = os.getenv("LAB_HOST", "localhost")
-            url = f"http://{lab_host}:8600/shadow/record"
-            
-            payload = {
-                "symbol": symbol,
-                "action": action,
-                "price": price,
-                "volume": 0.01,
-                "pnl": pnl,
-                "done": True
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=5.0) as resp:
-                     if resp.status == 200:
-                         logger.debug(f"P&L feedback for {symbol} sent to Lab.")
-                     else:
-                         logger.warning(f"Lab returned HTTP {resp.status} for P&L feedback.")
-        except Exception as e:
-            logger.warning(f"Failed to send P&L feedback to Lab: {e}")
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # MAIN DRIFT LOOP
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -2882,6 +3100,8 @@ class AutoTradingEngine:
                             }
                         )
                         live_horizon = self._resolve_inference_horizon(skill)
+                        live_position = self._find_symbol_position(symbol, positions)
+                        live_position_state = self._resolve_live_position_state(live_position)
                         observation = {
                             "symbol": symbol,
                             "horizon": live_horizon,
@@ -2900,7 +3120,10 @@ class AutoTradingEngine:
                                 "tick_volume": float(latest_candle.get("tick_volume", 0.0) or 0.0),
                                 "spread": float((tick.get("ask", current_price) - tick.get("bid", current_price)) if isinstance(tick, dict) else 0.0),
                             },
-                            "indicators": merged_indicators
+                            "indicators": merged_indicators,
+                            "position_state": float(live_position_state["position_state"]),
+                            "unrealized_return": float(live_position_state["unrealized_return"]),
+                            "slbe_state": float(live_position_state["slbe_state"]),
                         }
                         observation = self._json_safe_value(observation)
                         
@@ -3209,14 +3432,17 @@ class AutoTradingEngine:
                         balance = self.risk._account_balance
                         risk_pct = self.risk.max_risk_per_trade
                         
+                        sizing_hint = await self.mt5.get_symbol_risk_sizing_hint(symbol)
                         dynamic_vol = self.risk.calculate_lot_size(
                             balance=balance,
                             risk_percent=risk_pct,
                             sl_distance=sl_dist,
-                            symbol=symbol
+                            symbol=symbol,
+                            sizing_hint=sizing_hint,
                         )
-                        volume_constraints = await self.mt5.get_symbol_volume_constraints(symbol)
-                        broker_min_volume = float(volume_constraints.get("min", Decimal("0.01")))
+                        broker_min_volume = float(
+                            sizing_hint.get("volume_min", Decimal("0.01"))
+                        )
 
                         if dynamic_vol <= 0:
                             requested_action = self._trade_action_label(action)
@@ -3417,6 +3643,27 @@ class AutoTradingEngine:
                                         "entry_price": float(entry_price),
                                         "open_time": now_open,
                                         "skill": skill.value if hasattr(skill, "value") else str(skill),
+                                        "volume": float(order.volume),
+                                        "stop_loss_price": float(sl_price),
+                                        "take_profit_price": float(tp_price),
+                                        "comment": str(mt5_order_comment or order.comment or ""),
+                                        "context_label": str(last_strat.get("context_label", last_strat.get("context", "UNKNOWN"))),
+                                        "cortex_bias": str(last_strat.get("cortex_bias", last_strat.get("bias", "UNKNOWN"))),
+                                        "gnn_bias": str(last_strat.get("gnn_bias", "UNKNOWN")),
+                                        "live_engine": str(self._lab_active_live_engine or "muzero"),
+                                        "live_family": str(self._lab_universe_family or "mixed"),
+                                        "live_champion_id": str(
+                                            self._lab_universe_live_champion_id_muzero
+                                            or self._lab_universe_live_champion_id
+                                            or ""
+                                        ),
+                                        "entry_indicators": {
+                                            "rsi": float(rsi_val),
+                                            "adx": float(extended_features.get("adx", 0.0) or 0.0),
+                                            "vwap": float(extended_features.get("vwap", entry_price) or entry_price),
+                                            "ema_200": float(extended_features.get("EMA_200", 0.0) or 0.0),
+                                            "atr": float(features.get("ATR", 0.0) or 0.0),
+                                        },
                                     }
                                     self._known_tickets.add(ticket)
                                     self._last_symbol_entry_at[symbol] = now_open
@@ -3536,17 +3783,54 @@ class AutoTradingEngine:
         except Exception as e:
             logger.error("Envoi Shadow Learning impossible: %s", e)
 
-    async def _send_pnl_feedback(self, symbol: str, action: str, price: float, pnl: float, ticket: int | None = None):
-        """Envoie le P&L reel d'une cloture au Lab pour alimenter le dataset."""
+    async def _send_pnl_feedback(
+        self,
+        symbol: str,
+        action: str,
+        price: float,
+        pnl: float,
+        ticket: int | None = None,
+        trade_info: dict[str, object] | None = None,
+        close_deal: dict | None = None,
+    ):
+        """Envoie une cloture enrichie au Lab pour le scoring des trades live."""
         try:
             from shared.internal_auth import InternalAuth
             
             lab_host = os.getenv("LAB_HOST", "localhost")
             lab_url = f"http://{lab_host}:8600/shadow/feedback"
             safe_price = float(price or 0.0)
+            trade_payload = dict(trade_info or {})
+            entry_price = float(trade_payload.get("entry_price") or 0.0)
+            entry_time = self._normalize_live_timestamp(trade_payload.get("open_time"))
+            close_time = self._normalize_live_timestamp((close_deal or {}).get("time")) or datetime.now().isoformat()
+            duration_minutes = 0.0
+            if entry_time:
+                try:
+                    duration_minutes = max(
+                        0.0,
+                        (datetime.fromisoformat(close_time) - datetime.fromisoformat(entry_time)).total_seconds() / 60.0,
+                    )
+                except ValueError:
+                    duration_minutes = 0.0
+            close_reason = self._infer_close_reason(
+                trade_info=trade_payload,
+                close_deal=close_deal,
+                pnl=pnl,
+            )
+            directional_return_pct = self._compute_directional_return_pct(
+                action=action,
+                entry_price=entry_price,
+                exit_price=safe_price,
+            )
+            context_label = str(trade_payload.get("context_label") or "").strip().upper()
+            range_context = context_label in {"RANGING", "RANGE", "NEUTRAL"}
             observation = {
                 "price": safe_price,
-                "indicators": {"price_norm": safe_price / 3000.0 if safe_price else 0.0},
+                "indicators": {
+                    "price_norm": safe_price / 3000.0 if safe_price else 0.0,
+                    **dict(trade_payload.get("entry_indicators") or {}),
+                },
             }
             
             payload = {
@@ -3562,10 +3846,37 @@ class AutoTradingEngine:
                     "source": "banker_live_close",
                     "episode_id": f"live:{ticket}" if ticket else f"close:{symbol}:{int(datetime.now().timestamp())}",
                     "ticket": ticket,
+                    "entry_price": entry_price,
+                    "exit_price": safe_price,
+                    "entry_time": entry_time,
+                    "exit_time": close_time,
+                    "duration_minutes": round(duration_minutes, 3),
+                    "close_reason": close_reason,
+                    "trade_comment": str((close_deal or {}).get("comment") or trade_payload.get("comment") or ""),
+                    "strategy_family": str(trade_payload.get("skill") or ""),
+                    "context_label": context_label,
+                    "cortex_bias": str(trade_payload.get("cortex_bias") or ""),
+                    "gnn_bias": str(trade_payload.get("gnn_bias") or ""),
+                    "range_context": range_context,
+                    "hard_stop_exit": close_reason == "stop_loss",
+                    "directional_return_pct": directional_return_pct,
+                    "stop_loss_price": float(trade_payload.get("stop_loss_price") or 0.0),
+                    "take_profit_price": float(trade_payload.get("take_profit_price") or 0.0),
+                    "volume": float(trade_payload.get("volume") or 0.0),
+                    "live_engine": str(trade_payload.get("live_engine") or self._lab_active_live_engine or "muzero"),
+                    "live_family": str(trade_payload.get("live_family") or self._lab_universe_family or "mixed"),
+                    "live_champion_id": str(
+                        trade_payload.get("live_champion_id")
+                        or self._lab_universe_live_champion_id_muzero
+                        or self._lab_universe_live_champion_id
+                        or ""
+                    ),
                 },
                 "timestamp": datetime.now().isoformat(),
                 "done": True,
             }
+            if pnl < 0.0 and range_context:
+                payload["metadata"]["range_entry_loss"] = True
             
             token = InternalAuth.generate_token("banker")
             headers = {"X-Hive-Internal-Token": token}
@@ -3575,10 +3886,10 @@ class AutoTradingEngine:
                     if resp.status == 200:
                         result = await resp.json()
                         logger.info(
-                            "Shadow Feedback: cloture %s P&L=%.2f enregistree (wm_loss=%s)",
+                            "Shadow Feedback: cloture %s P&L=%.2f enregistree (label=%s)",
                             symbol,
                             pnl,
-                            result.get("wm_loss", "?"),
+                            (result.get("trade_review") or {}).get("quality_label", "?"),
                         )
                     else:
                         logger.warning("Shadow Feedback: echec HTTP %s", resp.status)

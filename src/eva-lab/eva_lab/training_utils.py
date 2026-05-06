@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -873,6 +874,14 @@ def _upgrade_scalp_position_mechanics_profile_v2(
                 "strong_winner_threshold": 0.0095,
                 "tp_like_threshold": 0.0042,
             },
+            "exit_plan_policy": {
+                "hard_stop_atr_mult": 0.90,
+                "soft_tp_atr_mult": 1.35,
+                "full_tp_atr_mult": 2.10,
+                "time_stop_steps": 24,
+                "runner_extension_atr_mult": 0.80,
+                "recovery_grace_steps": 6,
+            },
             "activity_policy": {
                 "min_entries": 2,
                 "inactive_episode_penalty": 16.0,
@@ -939,6 +948,14 @@ def _upgrade_scalp_position_mechanics_profile_v2(
                 "winner_threshold": 0.0048,
                 "strong_winner_threshold": 0.0088,
                 "tp_like_threshold": 0.0040,
+            },
+            "exit_plan_policy": {
+                "hard_stop_atr_mult": 0.80,
+                "soft_tp_atr_mult": 1.15,
+                "full_tp_atr_mult": 1.80,
+                "time_stop_steps": 21,
+                "runner_extension_atr_mult": 0.70,
+                "recovery_grace_steps": 5,
             },
             "activity_policy": {
                 "min_entries": 1,
@@ -1007,6 +1024,14 @@ def _upgrade_scalp_position_mechanics_profile_v2(
                 "strong_winner_threshold": 0.0078,
                 "tp_like_threshold": 0.0036,
             },
+            "exit_plan_policy": {
+                "hard_stop_atr_mult": 0.75,
+                "soft_tp_atr_mult": 1.10,
+                "full_tp_atr_mult": 1.70,
+                "time_stop_steps": 19,
+                "runner_extension_atr_mult": 0.65,
+                "recovery_grace_steps": 4,
+            },
             "activity_policy": {
                 "min_entries": 1,
                 "inactive_episode_penalty": 18.0,
@@ -1074,6 +1099,14 @@ def _upgrade_scalp_position_mechanics_profile_v2(
                 "strong_winner_threshold": 0.0100,
                 "tp_like_threshold": 0.0046,
             },
+            "exit_plan_policy": {
+                "hard_stop_atr_mult": 1.00,
+                "soft_tp_atr_mult": 1.50,
+                "full_tp_atr_mult": 2.30,
+                "time_stop_steps": 18,
+                "runner_extension_atr_mult": 0.90,
+                "recovery_grace_steps": 4,
+            },
             "activity_policy": {
                 "min_entries": 1,
                 "inactive_episode_penalty": 18.0,
@@ -1113,6 +1146,77 @@ def _upgrade_scalp_position_mechanics_profile_v2(
             upgraded[section_name] = current_section
         else:
             upgraded[section_name] = section_payload
+
+    hold_policy = dict(upgraded.get("hold_policy") or {})
+    hold_policy.setdefault("drag_profit_floor", 0.0040)
+    hold_policy.setdefault("drag_grace_steps", 3)
+    hold_policy.setdefault("drag_penalty_cap", 1.25)
+    upgraded["hold_policy"] = hold_policy
+
+    split_policy = dict(upgraded.get("split_policy") or {})
+    split_policy.setdefault("post_split_slbe_bonus", 0.60)
+    split_policy.setdefault("soft_partial_value_floor", 0.010)
+    upgraded["split_policy"] = split_policy
+
+    pyramiding_policy = dict(upgraded.get("pyramiding_policy") or {})
+    pyramiding_policy.setdefault("strong_trend_reward_bonus", 0.20)
+    upgraded["pyramiding_policy"] = pyramiding_policy
+
+    slbe_policy = dict(upgraded.get("slbe_policy") or {})
+    slbe_policy.setdefault("lock_profit_return", 0.0075)
+    slbe_policy.setdefault("lock_profit_buffer", 0.0010)
+    upgraded["slbe_policy"] = slbe_policy
+
+    close_policy = dict(upgraded.get("close_policy") or {})
+    close_policy.setdefault("reversal_close_bonus", 0.35)
+    close_policy.setdefault("early_profit_close_penalty", 0.20)
+    upgraded["close_policy"] = close_policy
+
+    reward_policy = dict(upgraded.get("reward_policy") or {})
+    reward_policy.setdefault("split_runner_profit_bonus", 0.45)
+    reward_policy.setdefault("split_early_zone_penalty", 0.25)
+    reward_policy.setdefault("split_decorative_penalty", 0.15)
+    reward_policy.setdefault("pyramid_exit_capture_bonus", 0.35)
+    reward_policy.setdefault("pyramid_bad_add_penalty", 0.35)
+    reward_policy.setdefault("runner_protected_exit_bonus", 0.30)
+    reward_policy.setdefault("runner_hold_capture_bonus", 0.10)
+    reward_policy.setdefault("runner_trade_completion_bonus", 0.40)
+    reward_policy.setdefault("runner_giveback_penalty", 0.45)
+    reward_policy.setdefault("runner_retained_profit_bonus", 0.25)
+    reward_policy.setdefault("split_zone_capture_bonus", 0.18)
+    reward_policy.setdefault("split_window_activation_bonus", 0.14)
+    reward_policy.setdefault("runner_extension_capture_bonus", 0.22)
+    reward_policy.setdefault("runner_missed_extension_penalty", 0.10)
+    reward_policy.setdefault("pyramid_add_capture_bonus", 0.18)
+    reward_policy.setdefault("pyramid_missed_add_penalty", 0.12)
+    reward_policy.setdefault("runner_giveback_ratio_penalty", 0.35)
+    reward_policy.setdefault("pyramid_trade_completion_bonus", 0.30)
+    reward_policy.setdefault("pyramid_stagnant_exit_penalty", 0.25)
+    reward_policy.setdefault("pyramid_hold_capture_bonus", 0.10)
+    reward_policy.setdefault("pyramid_window_activation_bonus", 0.12)
+    reward_policy.setdefault("missed_window_penalty", 0.05)
+    reward_policy.setdefault("runner_giveback_soft_penalty", 0.10)
+    reward_policy.setdefault("runner_giveback_hard_penalty", 0.22)
+    upgraded["reward_policy"] = reward_policy
+
+    exit_plan_policy = dict(upgraded.get("exit_plan_policy") or {})
+    exit_plan_policy.setdefault("hard_stop_atr_mult", 0.90)
+    exit_plan_policy.setdefault("soft_tp_atr_mult", 1.35)
+    exit_plan_policy.setdefault("full_tp_atr_mult", 2.10)
+    exit_plan_policy.setdefault(
+        "time_stop_steps",
+        max(
+            1,
+            int(
+                math.ceil(
+                    float(hold_policy.get("stale_penalty_after_steps", 48) or 48) * 0.5
+                )
+            ),
+        ),
+    )
+    exit_plan_policy.setdefault("runner_extension_atr_mult", 0.80)
+    exit_plan_policy.setdefault("recovery_grace_steps", 6)
+    upgraded["exit_plan_policy"] = exit_plan_policy
     return upgraded
 
 
@@ -1248,6 +1352,24 @@ def _apply_position_mechanics_env_overrides(profile: dict[str, Any]) -> dict[str
         lambda env_name, current: _env_float(env_name, float(current or 0.0)),
     )
     apply_value(
+        "hold_policy",
+        "drag_profit_floor",
+        "MUZERO_HOLD_DRAG_PROFIT_FLOOR",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "hold_policy",
+        "drag_grace_steps",
+        "MUZERO_HOLD_DRAG_GRACE_STEPS",
+        lambda env_name, current: _env_int(env_name, int(current or 0)),
+    )
+    apply_value(
+        "hold_policy",
+        "drag_penalty_cap",
+        "MUZERO_HOLD_DRAG_PENALTY_CAP",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
         "pyramiding_policy",
         "max_additions",
         "MUZERO_PYRAMID_MAX_ADDITIONS",
@@ -1266,6 +1388,12 @@ def _apply_position_mechanics_env_overrides(profile: dict[str, Any]) -> dict[str
         lambda env_name, current: _env_float(env_name, float(current or 0.0)),
     )
     apply_value(
+        "pyramiding_policy",
+        "strong_trend_reward_bonus",
+        "MUZERO_PYRAMID_STRONG_TREND_REWARD_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
         "split_policy",
         "max_splits",
         "MUZERO_SPLIT_MAX_SPLITS",
@@ -1278,6 +1406,18 @@ def _apply_position_mechanics_env_overrides(profile: dict[str, Any]) -> dict[str
         lambda env_name, current: _env_float(env_name, float(current or 0.0)),
     )
     apply_value(
+        "split_policy",
+        "post_split_slbe_bonus",
+        "MUZERO_SPLIT_POST_SPLIT_SLBE_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "split_policy",
+        "soft_partial_value_floor",
+        "MUZERO_SPLIT_SOFT_PARTIAL_VALUE_FLOOR",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
         "slbe_policy",
         "activation_return",
         "MUZERO_SLBE_ACTIVATION_RETURN",
@@ -1287,6 +1427,18 @@ def _apply_position_mechanics_env_overrides(profile: dict[str, Any]) -> dict[str
         "slbe_policy",
         "bonus",
         "MUZERO_SLBE_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "slbe_policy",
+        "lock_profit_return",
+        "MUZERO_SLBE_LOCK_PROFIT_RETURN",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "slbe_policy",
+        "lock_profit_buffer",
+        "MUZERO_SLBE_LOCK_PROFIT_BUFFER",
         lambda env_name, current: _env_float(env_name, float(current or 0.0)),
     )
     apply_value(
@@ -1306,6 +1458,54 @@ def _apply_position_mechanics_env_overrides(profile: dict[str, Any]) -> dict[str
         "tp_like_threshold",
         "MUZERO_CLOSE_TP_LIKE_THRESHOLD",
         lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "close_policy",
+        "reversal_close_bonus",
+        "MUZERO_CLOSE_REVERSAL_CLOSE_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "close_policy",
+        "early_profit_close_penalty",
+        "MUZERO_CLOSE_EARLY_PROFIT_CLOSE_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "exit_plan_policy",
+        "hard_stop_atr_mult",
+        "MUZERO_EXIT_PLAN_HARD_STOP_ATR_MULT",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "exit_plan_policy",
+        "soft_tp_atr_mult",
+        "MUZERO_EXIT_PLAN_SOFT_TP_ATR_MULT",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "exit_plan_policy",
+        "full_tp_atr_mult",
+        "MUZERO_EXIT_PLAN_FULL_TP_ATR_MULT",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "exit_plan_policy",
+        "time_stop_steps",
+        "MUZERO_EXIT_PLAN_TIME_STOP_STEPS",
+        lambda env_name, current: _env_int(env_name, int(current or 0)),
+    )
+    apply_value(
+        "exit_plan_policy",
+        "runner_extension_atr_mult",
+        "MUZERO_EXIT_PLAN_RUNNER_EXTENSION_ATR_MULT",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "exit_plan_policy",
+        "recovery_grace_steps",
+        "MUZERO_EXIT_PLAN_RECOVERY_GRACE_STEPS",
+        lambda env_name, current: _env_int(env_name, int(current or 0)),
     )
     apply_value(
         "entry_filter",
@@ -1461,6 +1661,150 @@ def _apply_position_mechanics_env_overrides(profile: dict[str, Any]) -> dict[str
         "reward_policy",
         "soft_strong_alignment_bonus",
         "MUZERO_REWARD_SOFT_STRONG_ALIGNMENT_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "split_runner_profit_bonus",
+        "MUZERO_SPLIT_RUNNER_PROFIT_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "split_early_zone_penalty",
+        "MUZERO_SPLIT_EARLY_ZONE_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "split_decorative_penalty",
+        "MUZERO_SPLIT_DECORATIVE_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "pyramid_exit_capture_bonus",
+        "MUZERO_PYRAMID_EXIT_CAPTURE_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "pyramid_bad_add_penalty",
+        "MUZERO_PYRAMID_BAD_ADD_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "runner_protected_exit_bonus",
+        "MUZERO_RUNNER_PROTECTED_EXIT_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "runner_hold_capture_bonus",
+        "MUZERO_RUNNER_HOLD_CAPTURE_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "split_zone_capture_bonus",
+        "MUZERO_SPLIT_ZONE_CAPTURE_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "split_window_activation_bonus",
+        "MUZERO_SPLIT_WINDOW_ACTIVATION_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "runner_extension_capture_bonus",
+        "MUZERO_RUNNER_EXTENSION_CAPTURE_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "runner_missed_extension_penalty",
+        "MUZERO_RUNNER_MISSED_EXTENSION_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "runner_trade_completion_bonus",
+        "MUZERO_RUNNER_TRADE_COMPLETION_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "runner_giveback_penalty",
+        "MUZERO_RUNNER_GIVEBACK_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "runner_giveback_ratio_penalty",
+        "MUZERO_RUNNER_GIVEBACK_RATIO_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "runner_giveback_soft_penalty",
+        "MUZERO_RUNNER_GIVEBACK_SOFT_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "runner_giveback_hard_penalty",
+        "MUZERO_RUNNER_GIVEBACK_HARD_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "runner_retained_profit_bonus",
+        "MUZERO_RUNNER_RETAINED_PROFIT_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "pyramid_trade_completion_bonus",
+        "MUZERO_PYRAMID_TRADE_COMPLETION_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "pyramid_stagnant_exit_penalty",
+        "MUZERO_PYRAMID_STAGNANT_EXIT_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "pyramid_hold_capture_bonus",
+        "MUZERO_PYRAMID_HOLD_CAPTURE_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "pyramid_window_activation_bonus",
+        "MUZERO_PYRAMID_WINDOW_ACTIVATION_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "pyramid_add_capture_bonus",
+        "MUZERO_PYRAMID_ADD_CAPTURE_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "pyramid_missed_add_penalty",
+        "MUZERO_PYRAMID_MISSED_ADD_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "missed_window_penalty",
+        "MUZERO_MISSED_WINDOW_PENALTY",
         lambda env_name, current: _env_float(env_name, float(current or 0.0)),
     )
     if override_sources:

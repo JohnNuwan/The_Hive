@@ -11,7 +11,7 @@ from typing import Any, Callable
 import numpy as np
 
 from eva_lab.muzero.config import MuZeroConfigV3
-from eva_lab.muzero.environment import TradingEnvironment
+from eva_lab.muzero.environment import BUY, SELL, TradingEnvironment
 from eva_lab.muzero.dreamer_agent import JAXDreamerAgent
 from eva_lab.muzero.jax_agent import JAXMuZeroAgent
 from eva_lab.training_utils import (
@@ -21,6 +21,7 @@ from eva_lab.training_utils import (
     get_horizon_timeframe,
     load_history_frame,
     resolve_feature_profile,
+    resolve_family_training_symbols,
     resolve_training_symbols,
 )
 from eva_lab.training_status import set_arena_progress
@@ -29,20 +30,50 @@ logger = logging.getLogger(__name__)
 
 POSITION_MECHANICS_KEYS = (
     "split_efficiency",
+    "split_runner_capture_rate",
     "pyramid_efficiency",
+    "pyramid_entry_quality_score",
+    "pyramid_exit_capture_rate",
     "slbe_capture_rate",
     "hold_drag_score",
     "close_quality_score",
+    "split_profitable_count",
+    "split_runner_profitable_count",
+    "split_runner_failed_count",
+    "split_early_count",
+    "split_decorative_count",
+    "pyramid_profitable_count",
+    "pyramid_good_add_count",
+    "pyramid_bad_add_count",
+    "pyramid_profitable_exit_count",
+    "slbe_profitable_exits",
     "pyramids_opened",
     "pyramids_rejected",
+    "pyramid_opportunity_count",
     "slbe_triggered",
     "slbe_hit",
+    "slbe_lock_profit_count",
     "split_executed",
+    "split_opportunity_count",
     "close_winner_count",
     "close_loser_count",
+    "defensive_close_count",
+    "early_close_noise_count",
     "hold_streak_mean",
     "hold_under_trend_penalty_count",
+    "hold_drag_opportunity_count",
+    "hold_drag_penalized_count",
     "tp_like_exit_count",
+    "tp_like_missed_count",
+    "hard_stop_exit_count",
+    "soft_tp_hit_count",
+    "full_tp_hit_count",
+    "time_stop_trigger_count",
+    "runner_extension_count",
+    "runner_managed_exit_count",
+    "runner_exit_profitable_count",
+    "runner_forced_stop_count",
+    "forced_stop_near_miss_count",
     "entry_blocked_vwap",
     "entry_blocked_adx",
     "entry_blocked_obv",
@@ -77,7 +108,10 @@ POSITION_MECHANICS_KEYS = (
 
 POSITION_MECHANICS_RATIO_KEYS = {
     "split_efficiency",
+    "split_runner_capture_rate",
     "pyramid_efficiency",
+    "pyramid_entry_quality_score",
+    "pyramid_exit_capture_rate",
     "slbe_capture_rate",
     "hold_drag_score",
     "close_quality_score",
@@ -219,10 +253,74 @@ class Arena:
             "directional_by_symbol": {},
             "metrics_by_symbol": {},
             "metrics_by_position_mechanics": {},
+            "split_runner_capture_rate": 0.0,
+            "pyramid_entry_quality_score": 0.0,
+            "pyramid_exit_capture_rate": 0.0,
             "family": "mixed",
             "feature_profile": None,
             "mechanics_profile_version": None,
             "dataset_coverage": {},
+        }
+
+    @staticmethod
+    def _inverse_action(action: int) -> int:
+        """Inverse uniquement la direction d'une action MuZero.
+
+        Args:
+            action (int): Action brute proposee par le modele.
+
+        Returns:
+            int: Action eventuellement inversee.
+        """
+        if int(action) == BUY:
+            return SELL
+        if int(action) == SELL:
+            return BUY
+        return int(action)
+
+    @staticmethod
+    def _compute_inverse_edge(
+        challenger_metrics: dict[str, Any],
+        inverse_metrics: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Calcule l'edge du challenger face a son miroir directionnel.
+
+        Args:
+            challenger_metrics (dict[str, Any]): Metriques du challenger normal.
+            inverse_metrics (dict[str, Any]): Metriques du challenger inverse.
+
+        Returns:
+            dict[str, Any]: Resume global et par symbole de l'edge relatif.
+        """
+        challenger_by_symbol = dict(challenger_metrics.get("metrics_by_symbol") or {})
+        inverse_by_symbol = dict(inverse_metrics.get("metrics_by_symbol") or {})
+        profitable_symbols = 0
+        edge_by_symbol: dict[str, dict[str, float | bool]] = {}
+        for symbol in sorted(set(challenger_by_symbol) | set(inverse_by_symbol)):
+            challenger_symbol = dict(challenger_by_symbol.get(symbol) or {})
+            inverse_symbol = dict(inverse_by_symbol.get(symbol) or {})
+            challenger_pf = float(challenger_symbol.get("profit_factor", 0.0) or 0.0)
+            inverse_pf = float(inverse_symbol.get("profit_factor", 0.0) or 0.0)
+            challenger_return = float(challenger_symbol.get("return_pct", 0.0) or 0.0)
+            inverse_return = float(inverse_symbol.get("return_pct", 0.0) or 0.0)
+            beats_inverse = challenger_pf > inverse_pf or challenger_return > inverse_return
+            profitable_symbols += int(beats_inverse)
+            edge_by_symbol[symbol] = {
+                "profit_factor_delta": challenger_pf - inverse_pf,
+                "return_pct_delta": challenger_return - inverse_return,
+                "beats_inverse": beats_inverse,
+            }
+        return {
+            "edge_vs_inverse_pf": float(challenger_metrics.get("profit_factor", 0.0) or 0.0)
+            - float(inverse_metrics.get("profit_factor", 0.0) or 0.0),
+            "edge_vs_inverse_return_pct": float(challenger_metrics.get("return_pct", 0.0) or 0.0)
+            - float(inverse_metrics.get("return_pct", 0.0) or 0.0),
+            "edge_vs_inverse_expectancy_pct": float(
+                challenger_metrics.get("expectancy_pct", 0.0) or 0.0
+            )
+            - float(inverse_metrics.get("expectancy_pct", 0.0) or 0.0),
+            "edge_vs_inverse_by_symbol": edge_by_symbol,
+            "edge_vs_inverse_profitable_symbols": profitable_symbols,
         }
 
     @staticmethod
@@ -289,6 +387,53 @@ class Arena:
             in {"buy_heavy", "sell_heavy"}
         )
         directional_penalty -= min(12.0, heavy_symbols * 3.0)
+        mechanics_metrics = dict(metrics.get("metrics_by_position_mechanics") or {})
+        split_executed = int(mechanics_metrics.get("split_executed", metrics.get("split_executed", 0)) or 0)
+        pyramids_opened = int(mechanics_metrics.get("pyramids_opened", metrics.get("pyramids_opened", 0)) or 0)
+        slbe_triggered = int(mechanics_metrics.get("slbe_triggered", metrics.get("slbe_triggered", 0)) or 0)
+        mechanics_score = float(
+            mechanics_metrics.get("close_quality_score", metrics.get("close_quality_score", 0.0)) or 0.0
+        ) * 8.0
+        if split_executed >= 3:
+            mechanics_score += float(
+                mechanics_metrics.get("split_efficiency", metrics.get("split_efficiency", 0.0)) or 0.0
+            ) * 4.0
+            mechanics_score += float(
+                mechanics_metrics.get(
+                    "split_runner_capture_rate",
+                    metrics.get("split_runner_capture_rate", 0.0),
+                )
+                or 0.0
+            ) * 5.0
+        if pyramids_opened >= 3:
+            mechanics_score += float(
+                mechanics_metrics.get(
+                    "pyramid_efficiency",
+                    metrics.get("pyramid_efficiency", 0.0),
+                )
+                or 0.0
+            ) * 4.0
+            mechanics_score += float(
+                mechanics_metrics.get(
+                    "pyramid_entry_quality_score",
+                    metrics.get("pyramid_entry_quality_score", 0.0),
+                )
+                or 0.0
+            ) * 2.5
+            mechanics_score += float(
+                mechanics_metrics.get(
+                    "pyramid_exit_capture_rate",
+                    metrics.get("pyramid_exit_capture_rate", 0.0),
+                )
+                or 0.0
+            ) * 5.0
+        if slbe_triggered >= 3:
+            mechanics_score += float(
+                mechanics_metrics.get("slbe_capture_rate", metrics.get("slbe_capture_rate", 0.0)) or 0.0
+            ) * 5.0
+        mechanics_score -= float(
+            mechanics_metrics.get("hold_drag_score", metrics.get("hold_drag_score", 0.0)) or 0.0
+        ) * 6.0
         return (
             float(metrics.get("return_pct", 0.0)) * 8.0
             + max(0.0, profit_factor - 1.0) * 18.0
@@ -298,6 +443,7 @@ class Arena:
             - float(metrics.get("max_drawdown_pct", 0.0)) * 1.5
             + stretch_bonus
             + directional_penalty
+            + mechanics_score
         )
 
     @staticmethod
@@ -374,6 +520,13 @@ class Arena:
             "feature_profile": None,
             "mechanics_profile_version": None,
             "dataset_coverage": {},
+            "hard_stop_exit_count": 0,
+            "soft_tp_hit_count": 0,
+            "full_tp_hit_count": 0,
+            "time_stop_trigger_count": 0,
+            "runner_extension_count": 0,
+            "runner_exit_profitable_count": 0,
+            "forced_stop_near_miss_count": 0,
         }
 
     @staticmethod
@@ -390,26 +543,40 @@ class Arena:
         pyramids_rejected = int(state.get("pyramids_rejected", 0) or 0)
         split_executed = int(state.get("split_executed", 0) or 0)
         split_profitable_count = int(state.get("split_profitable_count", 0) or 0)
+        split_runner_profitable_count = int(state.get("split_runner_profitable_count", 0) or 0)
         pyramid_profitable_count = int(state.get("pyramid_profitable_count", 0) or 0)
+        pyramid_good_add_count = int(state.get("pyramid_good_add_count", 0) or 0)
+        pyramid_profitable_exit_count = int(state.get("pyramid_profitable_exit_count", 0) or 0)
         slbe_triggered = int(state.get("slbe_triggered", 0) or 0)
         slbe_profitable_exits = int(state.get("slbe_profitable_exits", 0) or 0)
         close_winner_count = int(state.get("close_winner_count", 0) or 0)
         close_loser_count = int(state.get("close_loser_count", 0) or 0)
         hold_under_trend_penalty_count = int(state.get("hold_under_trend_penalty_count", 0) or 0)
+        hold_drag_opportunity_count = int(state.get("hold_drag_opportunity_count", 0) or 0)
+        hold_drag_penalized_count = int(state.get("hold_drag_penalized_count", 0) or 0)
         evaluation_games = int(state.get("evaluation_games", 0) or 0)
 
         return {
             "split_efficiency": (
                 split_profitable_count / split_executed if split_executed > 0 else 0.0
             ),
+            "split_runner_capture_rate": (
+                split_runner_profitable_count / split_executed if split_executed > 0 else 0.0
+            ),
             "pyramid_efficiency": (
                 pyramid_profitable_count / pyramids_opened if pyramids_opened > 0 else 0.0
+            ),
+            "pyramid_entry_quality_score": (
+                pyramid_good_add_count / pyramids_opened if pyramids_opened > 0 else 0.0
+            ),
+            "pyramid_exit_capture_rate": (
+                pyramid_profitable_exit_count / pyramids_opened if pyramids_opened > 0 else 0.0
             ),
             "slbe_capture_rate": (
                 slbe_profitable_exits / slbe_triggered if slbe_triggered > 0 else 0.0
             ),
             "hold_drag_score": (
-                hold_under_trend_penalty_count / max(evaluation_games, 1)
+                hold_drag_penalized_count / max(hold_drag_opportunity_count, 1)
             ),
             "close_quality_score": (
                 close_winner_count / max(close_winner_count + close_loser_count, 1)
@@ -418,16 +585,41 @@ class Arena:
             ),
             "pyramids_opened": pyramids_opened,
             "pyramids_rejected": pyramids_rejected,
+            "pyramid_profitable_count": pyramid_profitable_count,
+            "pyramid_opportunity_count": int(state.get("pyramid_opportunity_count", 0) or 0),
             "slbe_triggered": slbe_triggered,
             "slbe_hit": int(state.get("slbe_hit", 0) or 0),
             "slbe_profitable_exits": slbe_profitable_exits,
+            "slbe_lock_profit_count": int(state.get("slbe_lock_profit_count", 0) or 0),
             "split_executed": split_executed,
             "split_profitable_count": split_profitable_count,
+            "split_runner_profitable_count": split_runner_profitable_count,
+            "split_runner_failed_count": int(state.get("split_runner_failed_count", 0) or 0),
+            "split_early_count": int(state.get("split_early_count", 0) or 0),
+            "split_decorative_count": int(state.get("split_decorative_count", 0) or 0),
+            "split_opportunity_count": int(state.get("split_opportunity_count", 0) or 0),
+            "pyramid_good_add_count": pyramid_good_add_count,
+            "pyramid_bad_add_count": int(state.get("pyramid_bad_add_count", 0) or 0),
+            "pyramid_profitable_exit_count": pyramid_profitable_exit_count,
             "close_winner_count": close_winner_count,
             "close_loser_count": close_loser_count,
+            "defensive_close_count": int(state.get("defensive_close_count", 0) or 0),
+            "early_close_noise_count": int(state.get("early_close_noise_count", 0) or 0),
+            "hard_stop_exit_count": int(state.get("hard_stop_exit_count", 0) or 0),
+            "soft_tp_hit_count": int(state.get("soft_tp_hit_count", 0) or 0),
+            "full_tp_hit_count": int(state.get("full_tp_hit_count", 0) or 0),
+            "time_stop_trigger_count": int(state.get("time_stop_trigger_count", 0) or 0),
+            "runner_extension_count": int(state.get("runner_extension_count", 0) or 0),
+            "runner_managed_exit_count": int(state.get("runner_managed_exit_count", 0) or 0),
+            "runner_exit_profitable_count": int(state.get("runner_exit_profitable_count", 0) or 0),
+            "runner_forced_stop_count": int(state.get("runner_forced_stop_count", 0) or 0),
+            "forced_stop_near_miss_count": int(state.get("forced_stop_near_miss_count", 0) or 0),
             "hold_streak_mean": float(state.get("hold_streak_mean_sum", 0.0) or 0.0) / max(evaluation_games, 1),
             "hold_under_trend_penalty_count": hold_under_trend_penalty_count,
+            "hold_drag_opportunity_count": hold_drag_opportunity_count,
+            "hold_drag_penalized_count": hold_drag_penalized_count,
             "tp_like_exit_count": int(state.get("tp_like_exit_count", 0) or 0),
+            "tp_like_missed_count": int(state.get("tp_like_missed_count", 0) or 0),
             "entry_blocked_vwap": int(state.get("entry_blocked_vwap", 0) or 0),
             "entry_blocked_adx": int(state.get("entry_blocked_adx", 0) or 0),
             "entry_blocked_obv": int(state.get("entry_blocked_obv", 0) or 0),
@@ -895,6 +1087,7 @@ class Arena:
         role: str | None = None,
         eval_games_per_symbol: int | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        action_transform: Callable[[int], int] | None = None,
     ) -> dict[str, Any]:
         """Evalue un modele sur plusieurs fenetres historiques reellement distinctes.
 
@@ -908,6 +1101,8 @@ class Arena:
                 utilisee.
             progress_callback (Callable[[dict[str, Any]], None] | None): Rappel
                 optionnel appele a chaque symbole complete.
+            action_transform (Callable[[int], int] | None): Transformation
+                optionnelle appliquee aux actions avant execution.
 
         Returns:
             dict[str, Any]: Metriques consolidees de robustesse.
@@ -1005,7 +1200,11 @@ class Arena:
                     config=config,
                     max_steps=max_steps,
                 )
-                agent.play_game(env, exploration=False)
+                agent.play_game(
+                    env,
+                    exploration=False,
+                    action_transform=action_transform,
+                )
                 summary = env.get_summary()
 
                 episode_return = float(summary.get("return_pct", 0.0))
@@ -1254,6 +1453,158 @@ class Arena:
             },
         }
 
+    def run_family_probes(
+        self,
+        challenger_id: str,
+        *,
+        horizon: str,
+        engine: str = "muzero",
+        weights_path: Path | None = None,
+    ) -> dict[str, Any]:
+        """Lance des probes rapides par famille pour un challenger mixte.
+
+        Args:
+            challenger_id (str): Identifiant logique du challenger.
+            horizon (str): Horizon strategique evalue.
+            engine (str): Moteur a evaluer.
+            weights_path (Path | None): Chemin explicite du checkpoint. Si
+                absent, il est resolu depuis l'identifiant.
+
+        Returns:
+            dict[str, Any]: Rapports par famille et verdict consolide.
+        """
+        normalized_engine = str(engine or "muzero").strip().lower()
+        normalized_horizon = str(horizon or "scalp").strip().lower()
+        challenger_path = weights_path or self._resolve_model_path(
+            challenger_id,
+            normalized_horizon,
+            engine=normalized_engine,
+        )
+        if challenger_path is None:
+            raise FileNotFoundError(f"Modele challenger introuvable: {challenger_id}")
+
+        min_required_by_family = {
+            "fx": 3,
+            "indices": 3,
+            "metals": 2,
+            "crypto": 2,
+        }
+        games_per_symbol = max(
+            1,
+            self._read_int_env("MUZERO_ARENA_FAMILY_PROBE_GAMES_PER_SYMBOL", 2),
+        )
+        max_symbols = self._read_int_env("ARENA_MAX_SYMBOLS", 12)
+        max_inverse_pf_gap = self._read_float_env(
+            "MUZERO_ARENA_FAMILY_PROBE_MAX_INVERSE_PF_GAP",
+            0.10,
+        )
+        reports: dict[str, Any] = {}
+        ready_families = 0
+        positive_families = 0
+        inverse_beaten_families: list[str] = []
+
+        for family in ("fx", "indices", "metals", "crypto"):
+            probe_symbols = resolve_family_training_symbols(
+                horizon=normalized_horizon,
+                family=family,
+                data_dir=self.data_dir,
+                max_symbols=max_symbols,
+            )
+            min_required = min_required_by_family[family]
+            if len(probe_symbols) < min_required:
+                reports[family] = {
+                    "status": "not_ready",
+                    "family": family,
+                    "required_symbols": min_required,
+                    "available_symbols": len(probe_symbols),
+                    "symbols": probe_symbols,
+                }
+                continue
+
+            ready_families += 1
+            challenger_metrics = self._evaluate_model(
+                challenger_path,
+                probe_symbols,
+                normalized_horizon,
+                engine=normalized_engine,
+                role=f"family_{family}",
+                eval_games_per_symbol=games_per_symbol,
+            )
+            inverse_metrics = (
+                self._evaluate_model(
+                    challenger_path,
+                    probe_symbols,
+                    normalized_horizon,
+                    engine=normalized_engine,
+                    role=f"inverse_family_{family}",
+                    eval_games_per_symbol=games_per_symbol,
+                    action_transform=self._inverse_action,
+                )
+                if normalized_engine == "muzero"
+                else self._empty_metrics()
+            )
+            edge = self._compute_inverse_edge(challenger_metrics, inverse_metrics)
+            challenger_pf = float(challenger_metrics.get("profit_factor", 0.0) or 0.0)
+            challenger_return = float(challenger_metrics.get("return_pct", 0.0) or 0.0)
+            inverse_pf = float(inverse_metrics.get("profit_factor", 0.0) or 0.0)
+            family_positive = challenger_pf >= 1.0 or challenger_return > 0.0
+            if family_positive:
+                positive_families += 1
+            inverse_beats = (
+                challenger_pf <= (inverse_pf - max_inverse_pf_gap)
+                and challenger_return <= 0.0
+            )
+            if inverse_beats:
+                inverse_beaten_families.append(family)
+            reports[family] = {
+                "status": "ready",
+                "family": family,
+                "symbols": probe_symbols,
+                "games_per_symbol": games_per_symbol,
+                "challenger": {
+                    "score": round(self._score_metrics(challenger_metrics), 4),
+                    "metrics": challenger_metrics,
+                },
+                "inverse_metrics": inverse_metrics,
+                "positive": family_positive,
+                "inverse_beats_challenger": inverse_beats,
+                **edge,
+            }
+
+        min_ready_families = max(
+            1,
+            self._read_int_env("MUZERO_ARENA_FAMILY_PROBE_MIN_READY_FAMILIES", 3),
+        )
+        min_positive_families = max(
+            1,
+            self._read_int_env("MUZERO_ARENA_FAMILY_PROBE_MIN_POSITIVE_FAMILIES", 2),
+        )
+        summary = {
+            "ready_families": ready_families,
+            "positive_families": positive_families,
+            "required_ready_families": min_ready_families,
+            "required_positive_families": min_positive_families,
+            "inverse_beaten_families": inverse_beaten_families,
+            "allowed": (
+                ready_families >= min_ready_families
+                and positive_families >= min_positive_families
+                and not inverse_beaten_families
+            ),
+        }
+        if ready_families < min_ready_families:
+            summary["reason"] = "family_probe_not_ready"
+        elif positive_families < min_positive_families:
+            summary["reason"] = "family_probe_insufficient_positive_families"
+        elif inverse_beaten_families:
+            summary["reason"] = "family_probe_inverse_beats_challenger"
+        else:
+            summary["reason"] = "family_probe_passed"
+
+        return {
+            "family_probe_reports": reports,
+            "family_probe_summary": summary,
+        }
+
     def battle(
         self,
         challenger_id: str,
@@ -1342,6 +1693,12 @@ class Arena:
                 "score": 0.0,
                 "metrics": {},
             },
+            "inverse_challenger": {
+                "id": f"{challenger_id}::inverse",
+                "path": str(challenger_path),
+                "score": 0.0,
+                "metrics": {},
+            },
             "symbols": {},
         }
 
@@ -1349,7 +1706,7 @@ class Arena:
             """Publie l'avancement partiel d'une evaluation Arena."""
 
             role_name = str(payload.get("role") or "").lower()
-            if role_name not in {"challenger", "champion"}:
+            if role_name not in {"challenger", "champion", "inverse_challenger"}:
                 return
 
             partial_metrics = dict(payload.get("metrics") or {})
@@ -1379,8 +1736,20 @@ class Arena:
             )
             arena_progress[f"{role_name}_score"] = score
             arena_progress[role_name] = {
-                "id": challenger_id if role_name == "challenger" else champion_id,
-                "path": str(challenger_path) if role_name == "challenger" else (str(champion_path) if champion_path is not None else None),
+                "id": (
+                    challenger_id
+                    if role_name == "challenger"
+                    else (
+                        f"{challenger_id}::inverse"
+                        if role_name == "inverse_challenger"
+                        else champion_id
+                    )
+                ),
+                "path": (
+                    str(challenger_path)
+                    if role_name in {"challenger", "inverse_challenger"}
+                    else (str(champion_path) if champion_path is not None else None)
+                ),
                 "score": score,
                 "metrics": partial_metrics,
             }
@@ -1419,9 +1788,23 @@ class Arena:
             if champion_path is not None
             else self._empty_metrics()
         )
+        inverse_metrics = (
+            self._evaluate_model(
+                challenger_path,
+                eval_symbols,
+                horizon,
+                engine=normalized_engine,
+                role="inverse_challenger",
+                progress_callback=publish_progress,
+                action_transform=self._inverse_action,
+            )
+            if normalized_engine == "muzero"
+            else self._empty_metrics()
+        )
 
         challenger_score = self._score_metrics(challenger_metrics)
         champion_score = self._score_metrics(champion_metrics)
+        inverse_score = self._score_metrics(inverse_metrics)
         min_score_edge = self._read_float_env("ARENA_MIN_SCORE_EDGE", 0.5)
         min_games = self._read_int_env("ARENA_MIN_GAMES", 12)
         min_symbols = min(
@@ -1445,11 +1828,26 @@ class Arena:
             int(challenger_metrics.get("evaluation_games", 0)) >= min_games
             and int(challenger_metrics.get("evaluation_symbols", 0)) >= min_symbols
         )
+        inverse_edge = self._compute_inverse_edge(challenger_metrics, inverse_metrics)
+        inverse_ok = True
+        inverse_checks = {
+            "profit_factor": float(challenger_metrics.get("profit_factor", 0.0) or 0.0)
+            > float(inverse_metrics.get("profit_factor", 0.0) or 0.0),
+            "return_pct": float(challenger_metrics.get("return_pct", 0.0) or 0.0)
+            > float(inverse_metrics.get("return_pct", 0.0) or 0.0),
+            "expectancy_pct": float(challenger_metrics.get("expectancy_pct", 0.0) or 0.0)
+            > float(inverse_metrics.get("expectancy_pct", 0.0) or 0.0),
+            "profitable_symbols": int(inverse_edge.get("edge_vs_inverse_profitable_symbols", 0))
+            >= self._read_int_env("MUZERO_ARENA_INVERSE_MIN_PROFITABLE_SYMBOLS", 5),
+        }
+        if normalized_engine == "muzero":
+            inverse_ok = all(inverse_checks.values())
 
         is_bootstrap = champion_path is None
         is_victory = (
             sample_size_ok
             and challenger_directional_ok
+            and inverse_ok
             and (is_bootstrap or challenger_score > (champion_score + min_score_edge))
         )
 
@@ -1474,6 +1872,8 @@ class Arena:
             "validation": {
                 "sample_size_ok": sample_size_ok,
                 "directional_ok": challenger_directional_ok,
+                "inverse_ok": inverse_ok,
+                "inverse_checks": inverse_checks,
                 "min_games": min_games,
                 "min_symbols": min_symbols,
                 "score_edge_required": min_score_edge,
@@ -1490,7 +1890,16 @@ class Arena:
                 "score": round(champion_score, 4),
                 "metrics": champion_metrics,
             },
+            "inverse_metrics": inverse_metrics,
+            "inverse_challenger": {
+                "id": f"{challenger_id}::inverse",
+                "path": str(challenger_path),
+                "score": round(inverse_score, 4),
+                "metrics": inverse_metrics,
+            },
+            "reverse_candidate_only": bool(not inverse_ok),
             "outcome": "VICTORY" if is_victory else "DEFEAT",
+            **inverse_edge,
             "action_required": (
                 "BOOTSTRAP_CHAMPION"
                 if is_bootstrap and is_victory
@@ -1500,7 +1909,15 @@ class Arena:
                     else (
                         "EXTEND_VALIDATION"
                         if not sample_size_ok
-                        else ("REJECT_DIRECTIONAL_COLLAPSE" if not challenger_directional_ok else "KEEP_CURRENT")
+                        else (
+                            "INVERSE_BEATS_CHALLENGER"
+                            if not inverse_ok
+                            else (
+                                "REJECT_DIRECTIONAL_COLLAPSE"
+                                if not challenger_directional_ok
+                                else "KEEP_CURRENT"
+                            )
+                        )
                     )
                 )
             ),
@@ -1518,6 +1935,7 @@ class Arena:
         arena_progress["dataset_coverage"] = dict(report.get("dataset_coverage") or {})
         arena_progress["challenger_score"] = round(challenger_score, 4)
         arena_progress["champion_score"] = round(champion_score, 4)
+        arena_progress["inverse_challenger_score"] = round(inverse_score, 4)
         arena_progress["challenger"] = {
             "id": challenger_id,
             "path": str(challenger_path),
@@ -1530,12 +1948,19 @@ class Arena:
             "score": round(champion_score, 4),
             "metrics": champion_metrics,
         }
+        arena_progress["inverse_challenger"] = {
+            "id": f"{challenger_id}::inverse",
+            "path": str(challenger_path),
+            "score": round(inverse_score, 4),
+            "metrics": inverse_metrics,
+        }
 
         final_symbols: dict[str, dict[str, Any]] = {}
         for order, symbol in enumerate(eval_symbols, start=1):
             symbol_entry: dict[str, Any] = {"symbol": symbol, "order": order}
             challenger_symbol = dict(challenger_metrics.get("metrics_by_symbol", {}).get(symbol) or {})
             champion_symbol = dict(champion_metrics.get("metrics_by_symbol", {}).get(symbol) or {})
+            inverse_symbol = dict(inverse_metrics.get("metrics_by_symbol", {}).get(symbol) or {})
             if challenger_symbol:
                 symbol_entry["challenger"] = {
                     "score": round(self._score_metrics(challenger_symbol), 4),
@@ -1545,6 +1970,11 @@ class Arena:
                 symbol_entry["champion"] = {
                     "score": round(self._score_metrics(champion_symbol), 4),
                     **champion_symbol,
+                }
+            if inverse_symbol:
+                symbol_entry["inverse_challenger"] = {
+                    "score": round(self._score_metrics(inverse_symbol), 4),
+                    **inverse_symbol,
                 }
             final_symbols[symbol] = symbol_entry
         arena_progress["symbols"] = final_symbols

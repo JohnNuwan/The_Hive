@@ -137,6 +137,7 @@ class Settings(BaseSettings):
     mt5_server: str = ""
     mt5_terminal_path: str = ""
     mt5_terminal_portable: bool = False
+    mt5_try_alternate_portable_mode: bool = True
     mt5_terminal_timeout_ms: int = 60000
     mt5_duplicate_order_cooldown_seconds: int = 20
     mt5_reconnect_cooldown_seconds: int = 15

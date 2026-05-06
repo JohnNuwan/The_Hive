@@ -28,7 +28,10 @@ from eva_lab.arena import Arena
 from eva_lab.champion_promoter import ChampionPromoter
 from eva_lab.genetic_updater import GeneticUpdater
 from eva_lab.muzero.config import MuZeroConfigV3
-from eva_lab.muzero.checkpoint_utils import archive_muzero_artifacts
+from eva_lab.muzero.checkpoint_utils import (
+    archive_muzero_artifacts,
+    recommend_muzero_seed_for_v66,
+)
 from eva_lab.muzero.environment import TradingEnvironment
 from eva_lab.muzero.jax_agent import JAXMuZeroAgent
 from eva_lab.timescale_store import record_arena_result, record_training_dataset
@@ -57,8 +60,24 @@ logger = logging.getLogger("eva_lab.train_muzero")
 
 
 
-def build_environment(symbol: str, config: MuZeroConfigV3) -> TradingEnvironment | None:
-    """Construit l'environnement MuZero a partir de l'historique du symbole."""
+def build_environment(
+    symbol: str,
+    config: MuZeroConfigV3,
+    *,
+    training_progress_step: int = 0,
+) -> TradingEnvironment | None:
+    """Construit l'environnement MuZero a partir de l'historique du symbole.
+
+    Args:
+        symbol (str): Symbole de marche cible.
+        config (MuZeroConfigV3): Configuration MuZero active.
+        training_progress_step (int): Etape d'optimisation a refléter dans
+            le curriculum de self-play.
+
+    Returns:
+        TradingEnvironment | None: Environnement pret ou ``None`` si
+            l'historique est inutilisable.
+    """
     frame = load_history_frame(symbol, config.primary_timeframe)
     if frame is None:
         logger.warning("Historique absent pour %s sur %s.", symbol, config.primary_timeframe)
@@ -78,7 +97,7 @@ def build_environment(symbol: str, config: MuZeroConfigV3) -> TradingEnvironment
         config=config,
         max_steps=max_steps,
         training_mode=True,
-        training_progress_step=0,
+        training_progress_step=int(training_progress_step or 0),
     )
     setattr(env, "dataset_source", str(frame.attrs.get("dataset_source") or getattr(config, "dataset_source", "csv")))
     return env
@@ -266,22 +285,29 @@ def _build_resume_candidates(
 
 
 def _to_metric_float(
-    metrics: dict[str, object],
-    key: str,
+    metrics: dict[str, object] | object,
+    key: str | None = None,
     default: float = 0.0,
 ) -> float:
     """Convertit une metrique libre en flottant robuste.
 
     Args:
-        metrics (dict[str, object]): Dictionnaire source.
-        key (str): Nom de la metrique.
+        metrics (dict[str, object] | object): Dictionnaire source ou valeur
+            scalaire brute.
+        key (str | None): Nom de la metrique si ``metrics`` est un
+            dictionnaire.
         default (float): Valeur de repli.
 
     Returns:
         float: Valeur convertie ou repli.
     """
+    raw_value: object
+    if isinstance(metrics, dict) and key is not None:
+        raw_value = metrics.get(key, default)
+    else:
+        raw_value = metrics
     try:
-        return float(metrics.get(key, default) or default)
+        return float(raw_value if raw_value is not None else default)
     except (TypeError, ValueError):
         return float(default)
 
@@ -296,6 +322,46 @@ def _normalize_rate(value: float) -> float:
         float: Valeur ramenee dans `[0, 1]` si necessaire.
     """
     return value / 100.0 if value > 1.0 else value
+
+
+def _resolve_policy_head_weight_sum(config: MuZeroConfigV3 | Any | None) -> float:
+    """Retourne le nombre effectif de tetes policy apres ponderation.
+
+    Args:
+        config (MuZeroConfigV3 | Any | None): Configuration MuZero active.
+
+    Returns:
+        float: Nombre effectif de tetes policy pris en compte.
+    """
+    if config is None:
+        return 6.0
+    root_weight = max(0.0, float(getattr(config, "policy_loss_root_weight", 1.0) or 1.0))
+    unroll_weight = max(0.0, float(getattr(config, "policy_loss_unroll_weight", 0.85) or 0.85))
+    num_unroll_steps = max(0, int(getattr(config, "num_unroll_steps", 5) or 5))
+    return max(1.0, root_weight + (unroll_weight * num_unroll_steps))
+
+
+def _resolve_loss_pol_per_head(
+    metrics: dict[str, object],
+    *,
+    config: MuZeroConfigV3 | Any | None,
+    default: float,
+) -> float:
+    """Retourne la loss policy par tete, meme si la metrique dediee manque.
+
+    Args:
+        metrics (dict[str, object]): Dictionnaire de metriques source.
+        config (MuZeroConfigV3 | Any | None): Configuration MuZero active.
+        default (float): Valeur de repli si la conversion echoue.
+
+    Returns:
+        float: Loss policy moyenne par tete.
+    """
+    explicit_per_head = _to_metric_float(metrics, "loss_pol_per_head", default=float("nan"))
+    if explicit_per_head == explicit_per_head:
+        return explicit_per_head
+    loss_pol = _to_metric_float(metrics, "loss_pol", default=default)
+    return loss_pol / _resolve_policy_head_weight_sum(config)
 
 
 def _evaluate_policy_precheck_window(
@@ -330,7 +396,30 @@ def _evaluate_policy_precheck_window(
             "medians": {},
         }
 
+    def _compute_metric_trend(metric_key: str, default: float = 0.0) -> float:
+        """Calcule une derive simple entre les deux moities de la fenetre.
+
+        Args:
+            metric_key (str): Cle de metrique a comparer.
+            default (float): Valeur de repli si la metrique est absente.
+
+        Returns:
+            float: Difference ``median(fin) - median(debut)``.
+        """
+        if len(history) < 2:
+            return 0.0
+        pivot = max(1, len(history) // 2)
+        left = [_to_metric_float(item, metric_key, default=default) for item in history[:pivot]]
+        right = [_to_metric_float(item, metric_key, default=default) for item in history[pivot:]]
+        if not left or not right:
+            return 0.0
+        return statistics.median(right) - statistics.median(left)
+
     loss_values = [_to_metric_float(item, "loss_pol", default=999.0) for item in history]
+    loss_per_head_values = [
+        _resolve_loss_pol_per_head(item, config=config, default=999.0)
+        for item in history
+    ]
     top1_values = [_to_metric_float(item, "policy_top1_share", default=0.0) for item in history]
     entropy_values = [_to_metric_float(item, "policy_entropy", default=1.0) for item in history]
     root_mask_values = [_to_metric_float(item, "root_mask_rate", default=1.0) for item in history]
@@ -339,26 +428,86 @@ def _evaluate_policy_precheck_window(
         _to_metric_float(item, "soft_penalty_to_bonus_ratio", default=999.0)
         for item in history
     ]
+    close_quality_values = [_to_metric_float(item, "close_quality_score", default=0.0) for item in history]
+    split_efficiency_values = [_to_metric_float(item, "split_efficiency", default=0.0) for item in history]
+    split_runner_capture_values = [
+        _to_metric_float(item, "split_runner_capture_rate", default=0.0)
+        for item in history
+    ]
+    pyramid_efficiency_values = [_to_metric_float(item, "pyramid_efficiency", default=0.0) for item in history]
+    pyramid_exit_capture_values = [
+        _to_metric_float(item, "pyramid_exit_capture_rate", default=0.0)
+        for item in history
+    ]
+    slbe_capture_values = [_to_metric_float(item, "slbe_capture_rate", default=0.0) for item in history]
+    hold_drag_values = [_to_metric_float(item, "hold_drag_score", default=1.0) for item in history]
     balanced_values = [
         _normalize_rate(_to_metric_float(item, "balanced_episode_rate", default=0.0))
         for item in history
     ]
     long_share_values = [_to_metric_float(item, "long_entry_share", default=0.0) for item in history]
     short_share_values = [_to_metric_float(item, "short_entry_share", default=0.0) for item in history]
+    good_close_symbol_counts: list[float] = []
+    min_symbol_close_quality = float(
+        getattr(config, "policy_precheck_min_symbol_close_quality_score", 0.25) or 0.25
+    )
+    min_symbol_close_events = int(
+        getattr(config, "policy_precheck_min_symbol_close_events", 6) or 6
+    )
+    for item in history:
+        close_quality_by_symbol = dict(item.get("close_quality_by_symbol") or {})
+        close_events_by_symbol = dict(item.get("close_events_by_symbol") or {})
+        good_symbol_count = 0
+        for symbol, raw_quality in close_quality_by_symbol.items():
+            try:
+                quality_value = float(raw_quality or 0.0)
+            except (TypeError, ValueError):
+                quality_value = 0.0
+            try:
+                close_events = int(float(close_events_by_symbol.get(symbol, 0) or 0))
+            except (TypeError, ValueError):
+                close_events = 0
+            if close_events >= min_symbol_close_events and quality_value >= min_symbol_close_quality:
+                good_symbol_count += 1
+        good_close_symbol_counts.append(float(good_symbol_count))
 
     medians = {
         "loss_pol": statistics.median(loss_values),
+        "loss_pol_per_head": statistics.median(loss_per_head_values),
         "policy_top1_share": statistics.median(top1_values),
         "policy_entropy": statistics.median(entropy_values),
         "root_mask_rate": statistics.median(root_mask_values),
         "post_veto_to_hold_rate": statistics.median(post_veto_values),
         "soft_penalty_to_bonus_ratio": statistics.median(soft_ratio_values),
+        "close_quality_score": statistics.median(close_quality_values),
+        "split_efficiency": statistics.median(split_efficiency_values),
+        "split_runner_capture_rate": statistics.median(split_runner_capture_values),
+        "pyramid_efficiency": statistics.median(pyramid_efficiency_values),
+        "pyramid_exit_capture_rate": statistics.median(pyramid_exit_capture_values),
+        "slbe_capture_rate": statistics.median(slbe_capture_values),
+        "hold_drag_score": statistics.median(hold_drag_values),
         "balanced_episode_rate": statistics.median(balanced_values),
         "long_entry_share": statistics.median(long_share_values),
         "short_entry_share": statistics.median(short_share_values),
+        "good_close_symbols": statistics.median(good_close_symbol_counts) if good_close_symbol_counts else 0.0,
+    }
+    trends = {
+        "loss_pol_trend": _compute_metric_trend("loss_pol", default=999.0),
+        "loss_pol_per_head_trend": (
+            statistics.median(loss_per_head_values[max(1, len(loss_per_head_values) // 2):])
+            - statistics.median(loss_per_head_values[:max(1, len(loss_per_head_values) // 2)])
+            if len(loss_per_head_values) >= 2
+            else 0.0
+        ),
+        "root_mask_rate_trend": _compute_metric_trend("root_mask_rate", default=1.0),
+        "split_runner_capture_trend": _compute_metric_trend("split_runner_capture_rate", default=0.0),
+        "pyramid_exit_capture_trend": _compute_metric_trend("pyramid_exit_capture_rate", default=0.0),
+        "close_quality_score_trend": _compute_metric_trend("close_quality_score", default=0.0),
     }
     full_checks = {
-        "loss_pol": medians["loss_pol"] <= float(getattr(config, "policy_precheck_max_loss_pol", 5.8) or 5.8),
+        "loss_pol_per_head": medians["loss_pol_per_head"] <= float(
+            getattr(config, "policy_precheck_max_loss_pol_per_head", 1.08) or 1.08
+        ),
         "policy_top1_share": medians["policy_top1_share"] >= float(
             getattr(config, "policy_precheck_min_top1_share", 0.75) or 0.75
         ),
@@ -367,6 +516,9 @@ def _evaluate_policy_precheck_window(
         ),
         "root_mask_rate": medians["root_mask_rate"] <= float(
             getattr(config, "policy_precheck_max_root_mask_rate", 0.05) or 0.05
+        ),
+        "root_mask_rate_trend": trends["root_mask_rate_trend"] <= float(
+            getattr(config, "policy_precheck_max_root_mask_rate_trend", 0.02) or 0.02
         ),
         "post_veto_to_hold_rate": medians["post_veto_to_hold_rate"] <= float(
             getattr(config, "policy_precheck_max_post_veto_rate", 0.01) or 0.01
@@ -380,9 +532,29 @@ def _evaluate_policy_precheck_window(
         "short_entry_share": medians["short_entry_share"] >= float(
             getattr(config, "policy_precheck_min_short_entry_share", 0.35) or 0.35
         ),
+        "close_quality_score": medians["close_quality_score"] >= float(
+            getattr(config, "policy_precheck_min_close_quality_score", 0.40) or 0.40
+        ),
+        "split_efficiency": medians["split_efficiency"] >= float(
+            getattr(config, "policy_precheck_min_split_efficiency", 0.35) or 0.35
+        ),
+        "pyramid_efficiency": medians["pyramid_efficiency"] >= float(
+            getattr(config, "policy_precheck_min_pyramid_efficiency", 0.35) or 0.35
+        ),
+        "slbe_capture_rate": medians["slbe_capture_rate"] >= float(
+            getattr(config, "policy_precheck_min_slbe_capture_rate", 0.45) or 0.45
+        ),
+        "hold_drag_score": medians["hold_drag_score"] <= float(
+            getattr(config, "policy_precheck_max_hold_drag_score", 0.10) or 0.10
+        ),
+        "good_close_symbols": medians["good_close_symbols"] >= float(
+            getattr(config, "policy_precheck_min_good_close_symbols", 5) or 5
+        ),
     }
     screen_checks = {
-        "loss_pol": medians["loss_pol"] <= float(getattr(config, "policy_screen_max_loss_pol", 6.6) or 6.6),
+        "loss_pol_per_head": medians["loss_pol_per_head"] <= float(
+            getattr(config, "policy_screen_max_loss_pol_per_head", 1.20) or 1.20
+        ),
         "policy_top1_share": medians["policy_top1_share"] >= float(
             getattr(config, "policy_screen_min_top1_share", 0.88) or 0.88
         ),
@@ -391,6 +563,9 @@ def _evaluate_policy_precheck_window(
         ),
         "root_mask_rate": medians["root_mask_rate"] <= float(
             getattr(config, "policy_screen_max_root_mask_rate", 0.05) or 0.05
+        ),
+        "root_mask_rate_trend": trends["root_mask_rate_trend"] <= float(
+            getattr(config, "policy_precheck_max_root_mask_rate_trend", 0.02) or 0.02
         ),
         "post_veto_to_hold_rate": medians["post_veto_to_hold_rate"] <= float(
             getattr(config, "policy_screen_max_post_veto_rate", 0.01) or 0.01
@@ -429,7 +604,434 @@ def _evaluate_policy_precheck_window(
         "full_checks": full_checks,
         "screen_checks": screen_checks,
         "medians": medians,
+        "trends": trends,
         "latest_metrics": dict(history[-1] or {}),
+    }
+
+
+def _evaluate_seed_viability_window(
+    *,
+    history: list[dict[str, object]],
+    config: MuZeroConfigV3,
+    step: int,
+    horizon: str,
+    weights_dir: Path,
+    trial_mode: str | None = None,
+) -> dict[str, object]:
+    """Evalue si le seed courant reste pedagogiquement viable pour V6.10.
+
+    Args:
+        history (list[dict[str, object]]): Historique recent des metriques.
+        config (MuZeroConfigV3): Configuration MuZero active.
+        step (int): Etape courante d'optimisation.
+        horizon (str): Horizon MuZero en cours.
+        weights_dir (Path): Dossier des checkpoints afin de proposer un seed
+            de repli si le seed courant echoue.
+        trial_mode (str | None): Etage de qualification seed en cours.
+
+    Returns:
+        dict[str, object]: Verdict structure sur la viabilite du seed,
+            avec recommandation de checkpoint si la fenetre est jugee
+            non productive.
+    """
+    normalized_trial_mode = str(trial_mode or "").strip().lower()
+    if normalized_trial_mode not in {"offensive_bootstrap", "seed_short_mixed"}:
+        recommendation = recommend_muzero_seed_for_v66(
+            weights_dir=weights_dir,
+            horizon=horizon,
+        )
+        return {
+            "allowed": True,
+            "status": "skipped",
+            "reason": "seed_viability_not_applicable",
+            "step": step,
+            "window_size": len(history),
+            "training_steps": int(getattr(config, "training_steps", 0) or 0),
+            "window_min_step": None,
+            "window_max_step": None,
+            "seed_stage": "full_run",
+            "metrics": {},
+            "checks": {},
+            "recommended_seed_for_v66": recommendation.get("recommended_seed_for_v66"),
+            "seed_selection_reason": recommendation.get("seed_selection_reason"),
+        }
+    seed_stage = (
+        "offensive_bootstrap"
+        if normalized_trial_mode == "offensive_bootstrap"
+        else "seed_short_mixed"
+    )
+    min_step = int(getattr(config, "seed_viability_min_step", 6000) or 6000)
+    max_step = int(getattr(config, "seed_viability_max_step", 8000) or 8000)
+    training_steps = int(getattr(config, "training_steps", max_step) or max_step)
+    effective_min_step = max(1, min(min_step, training_steps))
+    effective_max_step = max(effective_min_step, min(max_step, training_steps))
+    recommendation = recommend_muzero_seed_for_v66(
+        weights_dir=weights_dir,
+        horizon=horizon,
+    )
+    result = {
+        "allowed": True,
+        "status": "monitoring",
+        "reason": "before_seed_window",
+        "step": step,
+        "window_size": len(history),
+        "training_steps": training_steps,
+        "window_min_step": effective_min_step,
+        "window_max_step": effective_max_step,
+        "seed_stage": seed_stage,
+        "metrics": {},
+        "checks": {},
+        "recommended_seed_for_v66": recommendation.get("recommended_seed_for_v66"),
+        "seed_selection_reason": recommendation.get("seed_selection_reason"),
+    }
+    if step < effective_min_step and step < training_steps:
+        return result
+
+    if not history:
+        result.update(
+            {
+                "allowed": False,
+                "status": "seed_not_viable_for_v66",
+                "reason": "seed_window_without_history",
+            }
+        )
+        return result
+
+    def _compute_metric_trend(metric_key: str, default: float = 0.0) -> float:
+        """Calcule une derive simple entre les deux moities de la fenetre.
+
+        Args:
+            metric_key (str): Cle de metrique a comparer.
+            default (float): Valeur de repli si la metrique est absente.
+
+        Returns:
+            float: Difference ``median(fin) - median(debut)``.
+        """
+        if len(history) < 2:
+            return 0.0
+        pivot = max(1, len(history) // 2)
+        left = [_to_metric_float(item, metric_key, default=default) for item in history[:pivot]]
+        right = [_to_metric_float(item, metric_key, default=default) for item in history[pivot:]]
+        if not left or not right:
+            return 0.0
+        return statistics.median(right) - statistics.median(left)
+
+    loss_values = [_to_metric_float(item, "loss_pol", default=999.0) for item in history]
+    root_mask_values = [_to_metric_float(item, "root_mask_rate", default=1.0) for item in history]
+    split_runner_values = [
+        _to_metric_float(item, "split_runner_capture_rate", default=0.0)
+        for item in history
+    ]
+    split_zone_values = [
+        _to_metric_float(item, "split_zone_capture_rate", default=0.0)
+        for item in history
+    ]
+    split_monetization_capture_values = [
+        _to_metric_float(item, "split_monetization_capture_rate", default=0.0)
+        for item in history
+    ]
+    split_monetization_window_values = [
+        _to_metric_float(item, "split_monetization_window_count", default=0.0)
+        for item in history
+    ]
+    runner_extension_values = [
+        _to_metric_float(item, "runner_extension_capture_rate", default=0.0)
+        for item in history
+    ]
+    runner_profit_hold_capture_values = [
+        _to_metric_float(item, "runner_profit_hold_capture_rate", default=0.0)
+        for item in history
+    ]
+    runner_profit_hold_window_values = [
+        _to_metric_float(item, "runner_profit_hold_window_count", default=0.0)
+        for item in history
+    ]
+    runner_giveback_ratio_values = [
+        _to_metric_float(item, "runner_giveback_ratio", default=1.0)
+        for item in history
+    ]
+    profit_peak_giveback_ratio_values = [
+        _to_metric_float(item, "profit_peak_giveback_ratio", default=1.0)
+        for item in history
+    ]
+    pyramid_exit_values = [
+        _to_metric_float(item, "pyramid_exit_capture_rate", default=0.0)
+        for item in history
+    ]
+    pyramid_add_values = [
+        _to_metric_float(item, "pyramid_add_capture_rate", default=0.0)
+        for item in history
+    ]
+    pyramid_monetization_capture_values = [
+        _to_metric_float(item, "pyramid_monetization_capture_rate", default=0.0)
+        for item in history
+    ]
+    pyramid_monetization_window_values = [
+        _to_metric_float(item, "pyramid_monetization_window_count", default=0.0)
+        for item in history
+    ]
+    close_quality_values = [
+        _to_metric_float(item, "close_quality_score", default=0.0)
+        for item in history
+    ]
+    slbe_capture_values = [
+        _to_metric_float(item, "slbe_capture_rate", default=0.0)
+        for item in history
+    ]
+    split_tp_zone_opportunity_values = [
+        _to_metric_float(item, "split_tp_zone_opportunity_count", default=0.0)
+        for item in history
+    ]
+    runner_extension_opportunity_values = [
+        _to_metric_float(item, "runner_extension_opportunity_count", default=0.0)
+        for item in history
+    ]
+    pyramid_add_opportunity_values = [
+        _to_metric_float(item, "pyramid_add_opportunity_count", default=0.0)
+        for item in history
+    ]
+    loss_per_head_values = [
+        _resolve_loss_pol_per_head(item, config=config, default=999.0)
+        for item in history
+    ]
+    medians = {
+        "loss_pol": statistics.median(loss_values),
+        "loss_pol_per_head": statistics.median(loss_per_head_values),
+        "root_mask_rate": statistics.median(root_mask_values),
+        "split_runner_capture_rate": statistics.median(split_runner_values),
+        "split_zone_capture_rate": statistics.median(split_zone_values),
+        "split_monetization_capture_rate": statistics.median(split_monetization_capture_values),
+        "split_monetization_window_count": statistics.median(split_monetization_window_values),
+        "runner_extension_capture_rate": statistics.median(runner_extension_values),
+        "runner_profit_hold_capture_rate": statistics.median(runner_profit_hold_capture_values),
+        "runner_profit_hold_window_count": statistics.median(runner_profit_hold_window_values),
+        "runner_giveback_ratio": statistics.median(runner_giveback_ratio_values),
+        "profit_peak_giveback_ratio": statistics.median(profit_peak_giveback_ratio_values),
+        "pyramid_exit_capture_rate": statistics.median(pyramid_exit_values),
+        "pyramid_add_capture_rate": statistics.median(pyramid_add_values),
+        "pyramid_monetization_capture_rate": statistics.median(pyramid_monetization_capture_values),
+        "pyramid_monetization_window_count": statistics.median(pyramid_monetization_window_values),
+        "close_quality_score": statistics.median(close_quality_values),
+        "slbe_capture_rate": statistics.median(slbe_capture_values),
+        "split_tp_zone_opportunity_count": statistics.median(split_tp_zone_opportunity_values),
+        "runner_extension_opportunity_count": statistics.median(runner_extension_opportunity_values),
+        "pyramid_add_opportunity_count": statistics.median(pyramid_add_opportunity_values),
+    }
+    trends = {
+        "loss_pol_trend": _compute_metric_trend("loss_pol", default=999.0),
+        "loss_pol_per_head_trend": (
+            statistics.median(loss_per_head_values[max(1, len(loss_per_head_values) // 2):])
+            - statistics.median(loss_per_head_values[:max(1, len(loss_per_head_values) // 2)])
+            if len(loss_per_head_values) >= 2
+            else 0.0
+        ),
+        "root_mask_rate_trend": _compute_metric_trend("root_mask_rate", default=1.0),
+        "split_runner_capture_trend": _compute_metric_trend("split_runner_capture_rate", default=0.0),
+        "split_zone_capture_trend": _compute_metric_trend("split_zone_capture_rate", default=0.0),
+        "split_monetization_capture_trend": _compute_metric_trend(
+            "split_monetization_capture_rate",
+            default=0.0,
+        ),
+        "runner_extension_capture_trend": _compute_metric_trend(
+            "runner_extension_capture_rate",
+            default=0.0,
+        ),
+        "runner_profit_hold_capture_trend": _compute_metric_trend(
+            "runner_profit_hold_capture_rate",
+            default=0.0,
+        ),
+        "pyramid_exit_capture_trend": _compute_metric_trend("pyramid_exit_capture_rate", default=0.0),
+        "pyramid_add_capture_trend": _compute_metric_trend("pyramid_add_capture_rate", default=0.0),
+        "pyramid_monetization_capture_trend": _compute_metric_trend(
+            "pyramid_monetization_capture_rate",
+            default=0.0,
+        ),
+    }
+    loss_pol_improvement = -float(trends["loss_pol_trend"])
+    zero_capture_with_opportunities = (
+        (
+            medians["split_monetization_window_count"]
+            + medians["runner_profit_hold_window_count"]
+            + medians["pyramid_monetization_window_count"]
+        )
+        > 0.0
+        and medians["split_monetization_capture_rate"] <= 0.0
+        and medians["runner_profit_hold_capture_rate"] <= 0.0
+        and medians["pyramid_monetization_capture_rate"] <= 0.0
+    )
+    if seed_stage == "offensive_bootstrap":
+        checks = {
+            "loss_pol_per_head": medians["loss_pol_per_head"] <= float(
+                getattr(config, "seed_bootstrap_max_loss_pol_per_head", 1.16) or 1.16
+            ),
+            "root_mask_rate": medians["root_mask_rate"] < float(
+                getattr(config, "seed_bootstrap_max_root_mask_rate", 0.01) or 0.01
+            ),
+            "split_monetization_window_count": medians["split_monetization_window_count"] >= float(
+                getattr(config, "seed_bootstrap_min_split_monetization_window_count", 1.0) or 1.0
+            ),
+            "runner_profit_hold_window_count": medians["runner_profit_hold_window_count"] >= float(
+                getattr(config, "seed_bootstrap_min_runner_profit_hold_window_count", 1.0) or 1.0
+            ),
+            "pyramid_monetization_window_count": medians["pyramid_monetization_window_count"] >= float(
+                getattr(config, "seed_bootstrap_min_pyramid_monetization_window_count", 1.0) or 1.0
+            ),
+            "profit_peak_giveback_ratio": medians["profit_peak_giveback_ratio"] < float(
+                getattr(config, "seed_bootstrap_max_profit_peak_giveback_ratio", 0.80) or 0.80
+            ),
+        }
+    else:
+        checks = {
+            "loss_pol_per_head": medians["loss_pol_per_head"] <= float(
+                getattr(config, "seed_mixed_max_loss_pol_per_head", 1.10) or 1.10
+            ),
+            "root_mask_rate": medians["root_mask_rate"] < float(
+                getattr(config, "seed_mixed_max_root_mask_rate", 0.06) or 0.06
+            ),
+            "split_capture": (
+                medians["split_runner_capture_rate"] > float(
+                    getattr(config, "seed_mixed_min_split_runner_capture_rate", 0.05) or 0.05
+                )
+                or medians["split_monetization_capture_rate"] > float(
+                    getattr(config, "seed_mixed_min_split_monetization_capture_rate", 0.12) or 0.12
+                )
+            ),
+            "pyramid_capture": (
+                medians["pyramid_exit_capture_rate"] > float(
+                    getattr(config, "seed_mixed_min_pyramid_exit_capture_rate", 0.03) or 0.03
+                )
+                or medians["pyramid_monetization_capture_rate"] > float(
+                    getattr(config, "seed_mixed_min_pyramid_monetization_capture_rate", 0.08) or 0.08
+                )
+            ),
+            "close_quality_score": medians["close_quality_score"] >= float(
+                getattr(config, "seed_mixed_min_close_quality_score", 0.40) or 0.40
+            ),
+            "slbe_capture_rate": medians["slbe_capture_rate"] >= float(
+                getattr(config, "seed_mixed_min_slbe_capture_rate", 0.45) or 0.45
+            ),
+        }
+    result.update(
+        {
+            "metrics": {
+                **medians,
+                "loss_pol_improvement": loss_pol_improvement,
+            },
+            "trends": trends,
+            "checks": checks,
+        }
+    )
+    if (
+        zero_capture_with_opportunities
+        and seed_stage != "offensive_bootstrap"
+        and step >= effective_min_step
+    ):
+        result.update(
+            {
+                "allowed": False,
+                "status": "seed_not_viable_for_v66",
+                "reason": "seed_not_viable_offensive_zero_capture",
+            }
+        )
+        return result
+    failed_check = next((name for name, passed in checks.items() if not passed), None)
+    if failed_check is not None and step >= effective_min_step:
+        result.update(
+            {
+                "allowed": False,
+                "status": "seed_not_viable_for_v66",
+                "reason": failed_check,
+            }
+        )
+        return result
+
+    if step >= effective_max_step or step >= training_steps:
+        result.update(
+            {
+                "status": "seed_viability_passed",
+                "reason": "seed_window_passed",
+            }
+        )
+        return result
+
+    if step >= effective_min_step:
+        result.update(
+            {
+                "status": "monitoring",
+                "reason": "within_seed_window",
+            }
+        )
+        return result
+
+    return result
+
+
+def _detect_arena_plateau(
+    *,
+    history: list[dict[str, object]],
+    config: MuZeroConfigV3,
+    step: int,
+) -> dict[str, object]:
+    """Detecte un plateau utile pour couper un run avant 40k steps.
+
+    Args:
+        history (list[dict[str, object]]): Historique recent des metriques.
+        config (MuZeroConfigV3): Configuration MuZero courante.
+        step (int): Etape courante d'optimisation.
+
+    Returns:
+        dict[str, object]: Verdict structure du detecteur de plateau.
+    """
+    min_step = int(getattr(config, "arena_plateau_min_step", 10000) or 10000)
+    window_size = int(getattr(config, "arena_plateau_window_size", 500) or 500)
+    if step < min_step or len(history) < max(4, window_size):
+        return {
+            "allowed": False,
+            "reason": "insufficient_history",
+            "step": step,
+        }
+
+    window = list(history[-window_size:])
+    pivot = max(1, len(window) // 2)
+
+    def _window_delta(metric_key: str, default: float = 0.0) -> float:
+        left = [_to_metric_float(item, metric_key, default=default) for item in window[:pivot]]
+        right = [_to_metric_float(item, metric_key, default=default) for item in window[pivot:]]
+        if not left or not right:
+            return 0.0
+        return statistics.median(left) - statistics.median(right)
+
+    loss_pol_improvement = _window_delta("loss_pol", default=999.0)
+    split_runner_improvement = _window_delta("split_runner_capture_rate", default=0.0)
+    pyramid_exit_improvement = _window_delta("pyramid_exit_capture_rate", default=0.0)
+    close_quality_improvement = _window_delta("close_quality_score", default=0.0)
+    checks = {
+        "loss_pol_plateau": loss_pol_improvement <= float(
+            getattr(config, "arena_plateau_max_loss_pol_improvement", 0.10) or 0.10
+        ),
+        "split_runner_plateau": split_runner_improvement <= float(
+            getattr(config, "arena_plateau_min_split_runner_improvement", 0.02) or 0.02
+        ),
+        "pyramid_exit_plateau": pyramid_exit_improvement <= float(
+            getattr(config, "arena_plateau_min_pyramid_exit_improvement", 0.02) or 0.02
+        ),
+        "close_quality_plateau": close_quality_improvement <= float(
+            getattr(config, "arena_plateau_min_close_quality_improvement", 0.02) or 0.02
+        ),
+    }
+    plateau_detected = all(checks.values())
+    return {
+        "allowed": plateau_detected,
+        "reason": "plateau_confirmed" if plateau_detected else "improving_or_noisy",
+        "step": step,
+        "window_size": len(window),
+        "checks": checks,
+        "metrics": {
+            "loss_pol_improvement": loss_pol_improvement,
+            "split_runner_capture_improvement": split_runner_improvement,
+            "pyramid_exit_capture_improvement": pyramid_exit_improvement,
+            "close_quality_score_improvement": close_quality_improvement,
+        },
     }
 
 
@@ -682,21 +1284,235 @@ def _evaluate_screen_winner_gate(
         dict[str, object]: Verdict intermediaire avant full Arena.
     """
     challenger_metrics = dict((dict(battle_report.get("challenger") or {})).get("metrics") or {})
+    mechanics_metrics = dict(challenger_metrics.get("metrics_by_position_mechanics") or {})
+    metrics_by_symbol = dict(challenger_metrics.get("metrics_by_symbol") or {})
+    split_opportunities = int(
+        mechanics_metrics.get(
+            "split_opportunity_count",
+            challenger_metrics.get("split_opportunity_count", 0),
+        )
+        or 0
+    )
+    pyramid_opportunities = int(
+        mechanics_metrics.get(
+            "pyramid_opportunity_count",
+            challenger_metrics.get("pyramid_opportunity_count", 0),
+        )
+        or 0
+    )
+    slbe_triggered = int(
+        mechanics_metrics.get(
+            "slbe_triggered",
+            challenger_metrics.get("slbe_triggered", 0),
+        )
+        or 0
+    )
+    profitable_symbols = 0
+    directional_collapse_detected = False
+    split_symbol_checks: list[bool] = []
+    split_runner_symbol_checks: list[bool] = []
+    pyramid_exit_symbol_checks: list[bool] = []
+    slbe_symbol_checks: list[bool] = []
+    close_symbol_checks: list[bool] = []
+    min_profitable_symbols = int(
+        getattr(config, "arena_screen_min_profitable_symbols", 5) or 5
+    )
+    min_symbol_profit_factor = float(
+        getattr(config, "arena_screen_min_symbol_profit_factor", 1.0) or 1.0
+    )
+    min_symbol_return_pct = float(
+        getattr(config, "arena_screen_min_symbol_return_pct", 0.0) or 0.0
+    )
+    min_symbol_split_efficiency = float(
+        getattr(config, "arena_screen_min_symbol_split_efficiency", 0.20) or 0.20
+    )
+    min_symbol_split_runner_capture_rate = float(
+        getattr(config, "arena_screen_min_symbol_split_runner_capture_rate", 0.20) or 0.20
+    )
+    min_symbol_pyramid_exit_capture_rate = float(
+        getattr(config, "arena_screen_min_symbol_pyramid_exit_capture_rate", 0.20) or 0.20
+    )
+    min_symbol_slbe_capture_rate = float(
+        getattr(config, "arena_screen_min_symbol_slbe_capture_rate", 0.25) or 0.25
+    )
+    min_symbol_close_quality_score = float(
+        getattr(config, "arena_screen_min_symbol_close_quality_score", 0.20) or 0.20
+    )
+    min_symbol_close_events = int(
+        getattr(config, "arena_screen_min_symbol_close_events", 6) or 6
+    )
+    for symbol_metrics_raw in metrics_by_symbol.values():
+        symbol_metrics = dict(symbol_metrics_raw or {})
+        symbol_mechanics = dict(symbol_metrics.get("metrics_by_position_mechanics") or {})
+        if (
+            _to_metric_float(symbol_metrics, "profit_factor") >= min_symbol_profit_factor
+            or _to_metric_float(symbol_metrics, "return_pct") > min_symbol_return_pct
+        ):
+            profitable_symbols += 1
+        if bool(symbol_metrics.get("directional_collapse", False)):
+            directional_collapse_detected = True
+        symbol_split_executed = int(
+            symbol_mechanics.get("split_executed", symbol_metrics.get("split_executed", 0)) or 0
+        )
+        if symbol_split_executed >= 3:
+            split_symbol_checks.append(
+                _to_metric_float(
+                    symbol_mechanics,
+                    "split_efficiency",
+                    default=_to_metric_float(symbol_metrics, "split_efficiency", default=0.0),
+                ) >= min_symbol_split_efficiency
+            )
+            split_runner_symbol_checks.append(
+                _to_metric_float(
+                    symbol_mechanics,
+                    "split_runner_capture_rate",
+                    default=_to_metric_float(
+                        symbol_metrics,
+                        "split_runner_capture_rate",
+                        default=0.0,
+                    ),
+                ) >= min_symbol_split_runner_capture_rate
+            )
+        symbol_pyramids_opened = int(
+            symbol_mechanics.get("pyramids_opened", symbol_metrics.get("pyramids_opened", 0)) or 0
+        )
+        if symbol_pyramids_opened >= 3:
+            pyramid_exit_symbol_checks.append(
+                _to_metric_float(
+                    symbol_mechanics,
+                    "pyramid_exit_capture_rate",
+                    default=_to_metric_float(
+                        symbol_metrics,
+                        "pyramid_exit_capture_rate",
+                        default=0.0,
+                    ),
+                ) >= min_symbol_pyramid_exit_capture_rate
+            )
+        symbol_slbe_triggered = int(
+            symbol_mechanics.get("slbe_triggered", symbol_metrics.get("slbe_triggered", 0)) or 0
+        )
+        if symbol_slbe_triggered >= 3:
+            slbe_symbol_checks.append(
+                _to_metric_float(
+                    symbol_mechanics,
+                    "slbe_capture_rate",
+                    default=_to_metric_float(symbol_metrics, "slbe_capture_rate", default=0.0),
+                ) >= min_symbol_slbe_capture_rate
+            )
+        symbol_close_events = int(
+            symbol_mechanics.get("close_winner_count", symbol_metrics.get("close_winner_count", 0)) or 0
+        ) + int(
+            symbol_mechanics.get("close_loser_count", symbol_metrics.get("close_loser_count", 0)) or 0
+        )
+        if symbol_close_events >= min_symbol_close_events:
+            close_symbol_checks.append(
+                _to_metric_float(
+                    symbol_mechanics,
+                    "close_quality_score",
+                    default=_to_metric_float(symbol_metrics, "close_quality_score", default=0.0),
+                ) >= min_symbol_close_quality_score
+            )
     checks = {
-        "profit_factor": _to_metric_float(challenger_metrics.get("profit_factor")) >= float(
+        "profit_factor": _to_metric_float(challenger_metrics, "profit_factor") >= float(
             getattr(config, "arena_screen_min_profit_factor", 1.20) or 1.20
         ),
-        "return_pct": _to_metric_float(challenger_metrics.get("return_pct")) > float(
+        "return_pct": _to_metric_float(challenger_metrics, "return_pct") > float(
             getattr(config, "arena_screen_min_return_pct", 0.0) or 0.0
         ),
-        "expectancy_pct": _to_metric_float(challenger_metrics.get("expectancy_pct")) > float(
+        "expectancy_pct": _to_metric_float(challenger_metrics, "expectancy_pct") > float(
             getattr(config, "arena_screen_min_expectancy_pct", 0.0) or 0.0
         ),
-        "positive_episode_rate": _to_metric_float(challenger_metrics.get("positive_episode_rate")) >= float(
+        "positive_episode_rate": _to_metric_float(challenger_metrics, "positive_episode_rate") >= float(
             getattr(config, "arena_screen_min_positive_episode_rate", 55.0) or 55.0
         ),
         "directional_bias": str(challenger_metrics.get("directional_bias") or "inactive").strip().lower()
         == "balanced",
+        "hold_drag_score": _to_metric_float(
+            mechanics_metrics,
+            "hold_drag_score",
+            default=_to_metric_float(challenger_metrics, "hold_drag_score"),
+        ) <= float(
+            getattr(config, "arena_screen_max_hold_drag_score", 0.80) or 0.80
+        ),
+        "close_quality_score": _to_metric_float(
+            mechanics_metrics,
+            "close_quality_score",
+            default=_to_metric_float(challenger_metrics, "close_quality_score"),
+        ) >= float(
+            getattr(config, "arena_screen_min_close_quality_score", 0.35) or 0.35
+        ),
+        "split_efficiency": (
+            True
+            if split_opportunities < int(getattr(config, "arena_screen_min_split_opportunities", 3) or 3)
+            else _to_metric_float(
+                mechanics_metrics,
+                "split_efficiency",
+                default=_to_metric_float(challenger_metrics, "split_efficiency"),
+            ) >= float(
+                getattr(config, "arena_screen_min_split_efficiency", 0.35) or 0.35
+            )
+        ),
+        "split_runner_capture_rate": (
+            True
+            if split_opportunities < int(getattr(config, "arena_screen_min_split_opportunities", 3) or 3)
+            else _to_metric_float(
+                mechanics_metrics,
+                "split_runner_capture_rate",
+                default=_to_metric_float(challenger_metrics, "split_runner_capture_rate"),
+            ) >= float(
+                getattr(config, "arena_screen_min_split_runner_capture_rate", 0.20) or 0.20
+            )
+        ),
+        "pyramid_efficiency": (
+            True
+            if pyramid_opportunities < int(getattr(config, "arena_screen_min_pyramid_opportunities", 3) or 3)
+            else _to_metric_float(
+                mechanics_metrics,
+                "pyramid_efficiency",
+                default=_to_metric_float(challenger_metrics, "pyramid_efficiency"),
+            ) >= float(
+                getattr(config, "arena_screen_min_pyramid_efficiency", 0.35) or 0.35
+            )
+        ),
+        "pyramid_exit_capture_rate": (
+            True
+            if pyramid_opportunities < int(getattr(config, "arena_screen_min_pyramid_opportunities", 3) or 3)
+            else _to_metric_float(
+                mechanics_metrics,
+                "pyramid_exit_capture_rate",
+                default=_to_metric_float(challenger_metrics, "pyramid_exit_capture_rate"),
+            ) >= float(
+                getattr(config, "arena_screen_min_pyramid_exit_capture_rate", 0.20) or 0.20
+            )
+        ),
+        "slbe_capture_rate": (
+            True
+            if slbe_triggered < int(getattr(config, "arena_screen_min_slbe_triggered", 3) or 3)
+            else _to_metric_float(
+                mechanics_metrics,
+                "slbe_capture_rate",
+                default=_to_metric_float(challenger_metrics, "slbe_capture_rate"),
+            ) >= float(
+                getattr(config, "arena_screen_min_slbe_capture_rate", 0.30) or 0.30
+            )
+        ),
+        "inverse_edge": (
+            True
+            if "edge_vs_inverse_pf" not in battle_report
+            else (
+                float(battle_report.get("edge_vs_inverse_pf", 0.0) or 0.0) > 0.0
+                and float(battle_report.get("edge_vs_inverse_return_pct", 0.0) or 0.0) > 0.0
+                and int(battle_report.get("edge_vs_inverse_profitable_symbols", 0) or 0)
+                >= int(getattr(config, "arena_inverse_min_profitable_symbols", 5) or 5)
+            )
+        ),
+        "profitable_symbols": profitable_symbols >= min_profitable_symbols,
+        "directional_collapse_by_symbol": not directional_collapse_detected,
+        "split_efficiency_by_symbol": all(split_symbol_checks) if split_symbol_checks else True,
+        "split_runner_capture_rate_by_symbol": all(split_runner_symbol_checks) if split_runner_symbol_checks else True,
+        "pyramid_exit_capture_rate_by_symbol": all(pyramid_exit_symbol_checks) if pyramid_exit_symbol_checks else True,
+        "slbe_capture_rate_by_symbol": all(slbe_symbol_checks) if slbe_symbol_checks else True,
+        "close_quality_score_by_symbol": all(close_symbol_checks) if close_symbol_checks else True,
     }
     failure_reason = next((name for name, passed in checks.items() if not passed), "eligible")
     return {
@@ -704,7 +1520,11 @@ def _evaluate_screen_winner_gate(
         "status": "eligible" if all(checks.values()) else "blocked",
         "reason": failure_reason,
         "checks": checks,
-        "metrics": challenger_metrics,
+        "metrics": {
+            **challenger_metrics,
+            "profitable_symbols": profitable_symbols,
+            "directional_collapse_detected": directional_collapse_detected,
+        },
     }
 
 
@@ -1176,6 +1996,10 @@ def main() -> dict[str, object]:
     directional_collapse_payload: dict[str, object] | None = None
     killed_after_directional_collapse = False
     killed_after_policy_precheck = False
+    seed_viability_payload: dict[str, object] | None = None
+    killed_after_seed_viability = False
+    plateau_payload: dict[str, object] | None = None
+    stopped_for_plateau = False
 
     if mechanics_only_mode:
         valid_symbols = [str(symbol).strip() for symbol in config.symbols if str(symbol).strip()]
@@ -1201,7 +2025,11 @@ def main() -> dict[str, object]:
     else:
         logger.info("Phase 1 - collecte historique par self-play guide")
         for symbol_index, symbol in enumerate(config.symbols, start=1):
-            env = build_environment(symbol, config)
+            env = build_environment(
+                symbol,
+                config,
+                training_progress_step=int(agent.training_step_count),
+            )
             if env is None:
                 continue
             valid_symbols.append(symbol)
@@ -1283,6 +2111,9 @@ def main() -> dict[str, object]:
                     replay_cache_source="memoire",
                     dataset_coverage=dataset_coverage,
                 )
+                # La collecte doit suivre l'etape reelle de reprise pour
+                # conserver un curriculum coherent avec le checkpoint seed.
+                env.training_progress_step = int(agent.training_step_count)
                 game = agent.play_game(
                     env,
                     exploration=True,
@@ -1437,6 +2268,79 @@ def main() -> dict[str, object]:
                     }
                 )
 
+                seed_viability_payload = _evaluate_seed_viability_window(
+                    history=list(policy_precheck_history),
+                    config=config,
+                    step=step,
+                    horizon=horizon,
+                    weights_dir=weights_dir,
+                    trial_mode=trial_mode,
+                )
+                seed_viability_metrics = dict(seed_viability_payload.get("metrics") or {})
+                merge_training_status(
+                    {
+                        "seed_viability_status": seed_viability_payload.get("status"),
+                        "seed_viability_reason": seed_viability_payload.get("reason"),
+                        "seed_stage": seed_viability_payload.get("seed_stage"),
+                        "recommended_seed_for_v66": seed_viability_payload.get("recommended_seed_for_v66"),
+                        "seed_selection_reason": seed_viability_payload.get("seed_selection_reason"),
+                        "seed_viability": dict(seed_viability_payload),
+                        "latest_metrics": {
+                            **dict(last_metrics),
+                            "seed_viability_status": seed_viability_payload.get("status"),
+                            "seed_viability_reason": seed_viability_payload.get("reason"),
+                            "seed_stage": seed_viability_payload.get("seed_stage"),
+                            "recommended_seed_for_v66": seed_viability_payload.get("recommended_seed_for_v66"),
+                            "seed_selection_reason": seed_viability_payload.get("seed_selection_reason"),
+                            "seed_loss_pol_improvement": seed_viability_metrics.get("loss_pol_improvement"),
+                        },
+                    }
+                )
+                if seed_viability_payload.get("status") == "seed_not_viable_for_v66":
+                    merge_training_status(
+                        {
+                            "status": "seed_not_viable_for_v66",
+                            "reason": "seed_not_viable_for_v66",
+                        }
+                    )
+                    append_training_log(
+                        (
+                            f"MuZero {horizon}: arret anticipe a l'etape {step} "
+                            "car le seed V6.10 est juge non productif "
+                            f"({seed_viability_payload.get('reason')})."
+                        ),
+                        level="WARNING",
+                        source="muzero",
+                    )
+                    killed_after_seed_viability = True
+                    break
+
+                plateau_payload = _detect_arena_plateau(
+                    history=list(policy_precheck_history),
+                    config=config,
+                    step=step,
+                )
+                if bool(plateau_payload.get("allowed")):
+                    merge_training_status(
+                        {
+                            "latest_metrics": {
+                                **dict(last_metrics),
+                                "plateau_detected": True,
+                            },
+                            "plateau_status": dict(plateau_payload),
+                        }
+                    )
+                    append_training_log(
+                        (
+                            f"MuZero {horizon}: plateau confirme a l'etape {step} "
+                            "-> bascule anticipee vers Arena."
+                        ),
+                        level="INFO",
+                        source="muzero",
+                    )
+                    stopped_for_plateau = True
+                    break
+
                 collapse_check_step = int(
                     getattr(config, "directional_collapse_check_step", 4000) or 4000
                 )
@@ -1475,6 +2379,12 @@ def main() -> dict[str, object]:
                                 **dict(last_metrics),
                                 "policy_precheck_passed": policy_precheck_payload.get("status") != "blocked",
                                 "policy_precheck_mode": policy_precheck_payload.get("status"),
+                                "root_mask_rate_trend": dict(
+                                    policy_precheck_payload.get("trends") or {}
+                                ).get("root_mask_rate_trend"),
+                                "loss_pol_trend": dict(
+                                    policy_precheck_payload.get("trends") or {}
+                                ).get("loss_pol_trend"),
                             },
                         }
                     )
@@ -1730,6 +2640,16 @@ def main() -> dict[str, object]:
         artifact_compatibility=challenger_compatibility,
         lineage=challenger_lineage,
     )
+    if seed_viability_payload:
+        training_metrics_payload.update(
+            {
+                "seed_viability_status": seed_viability_payload.get("status"),
+                "seed_viability_reason": seed_viability_payload.get("reason"),
+                "seed_stage": seed_viability_payload.get("seed_stage"),
+                "recommended_seed_for_v66": seed_viability_payload.get("recommended_seed_for_v66"),
+                "seed_selection_reason": seed_viability_payload.get("seed_selection_reason"),
+            }
+        )
     latest_checkpoint_reference = (
         str(ga_seed_checkpoint_path)
         if mechanics_only_mode and ga_seed_checkpoint_path
@@ -1743,6 +2663,7 @@ def main() -> dict[str, object]:
     if (
         not mechanics_only_mode
         and not killed_after_directional_collapse
+        and not killed_after_seed_viability
         and not killed_after_precheck
         and last_metrics is not None
     ):
@@ -1760,6 +2681,12 @@ def main() -> dict[str, object]:
                     **dict(last_metrics),
                     "policy_precheck_passed": policy_precheck_payload.get("status") != "blocked",
                     "policy_precheck_mode": policy_precheck_payload.get("status"),
+                    "root_mask_rate_trend": dict(
+                        policy_precheck_payload.get("trends") or {}
+                    ).get("root_mask_rate_trend"),
+                    "loss_pol_trend": dict(
+                        policy_precheck_payload.get("trends") or {}
+                    ).get("loss_pol_trend"),
                 },
             }
         )
@@ -1874,6 +2801,159 @@ def main() -> dict[str, object]:
         }
         terminal_summary_path = write_terminal_summary(terminal_summary)
         logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
+        return {
+            "engine": engine,
+            "horizon": horizon,
+            "timeframe": config.primary_timeframe,
+            "symbols": valid_symbols,
+            "family": family,
+            "feature_profile": feature_profile.get("profile_name"),
+            "mechanics_profile_version": mechanics_profile_version,
+            "dataset_id": dataset_id,
+            "dataset_source": dataset_source,
+            "focus_symbols": focus_symbols,
+            "gate_profile": gate_profile,
+            "dataset_descriptor": dataset_descriptor,
+            "dataset_coverage": dict(getattr(config, "dataset_coverage", {}) or {}),
+            "games_per_symbol": games_per_symbol,
+            "total_games": total_games,
+            "latest_checkpoint": latest_checkpoint_reference,
+            "challenger_path": str(challenger_path),
+            "training_metrics": training_metrics_payload,
+            "ga_status": ga_status,
+            "ga_generation": ga_generation,
+            "ga_trial": ga_trial,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_scope": ga_scope,
+            "ga_parent_champion_id": ga_parent_champion_id,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "trial_mode": trial_mode,
+            "trial_cost_profile": trial_cost_profile,
+            "resume_source": resume_source,
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "lineage": challenger_lineage,
+            "precheck": dict(gold_precheck_payload or {}),
+            "promotion": promotion_result,
+            "terminal_summary_path": str(terminal_summary_path),
+        }
+
+    if killed_after_seed_viability:
+        seed_metrics = dict((seed_viability_payload or {}).get("metrics") or {})
+        promotion_gate = {
+            "allowed": False,
+            "status": "blocked",
+            "reason": "seed_not_viable_for_v66",
+            "gate_profile": gate_profile,
+            "failure_mode": str((seed_viability_payload or {}).get("reason") or "seed_not_viable_for_v66"),
+            "checks": dict((seed_viability_payload or {}).get("checks") or {}),
+            "metrics": seed_metrics,
+        }
+        promotion_result = {
+            "status": "skipped",
+            "reason": "seed_not_viable_for_v66",
+            "engine": engine,
+            "horizon": horizon,
+            "source_path": str(challenger_path),
+            "champion_paths": [],
+            "promotion_gate": promotion_gate,
+            "artifact_compatibility": challenger_compatibility,
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "resume_source": resume_source,
+            "lineage": challenger_lineage,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_trial": ga_trial,
+            "ga_scope": ga_scope,
+            "seed_viability": dict(seed_viability_payload or {}),
+            "recommended_seed_for_v66": (seed_viability_payload or {}).get("recommended_seed_for_v66"),
+            "seed_selection_reason": (seed_viability_payload or {}).get("seed_selection_reason"),
+        }
+        promoter = ChampionPromoter(weights_dir=config.weights_path, results_dir=config.results_path)
+        promoter.persist_challenger_manifest(
+            engine=engine,
+            horizon=horizon,
+            status="blocked",
+            challenger_id=challenger_id,
+            challenger_path=str(challenger_path),
+            latest_checkpoint=str(latest_path),
+            battle_report=None,
+            training_metrics=training_metrics_payload,
+            promotion_gate=promotion_gate,
+            promotion_result=promotion_result,
+            artifact_compatibility=dict(promotion_result.get("artifact_compatibility") or {}),
+            checkpoint_schema_version=challenger_checkpoint_schema_version,
+            resume_source=resume_source,
+            lineage=challenger_lineage,
+        )
+        terminal_summary = {
+            "run_id": active_run_id,
+            "sequence_id": str(os.getenv("TRAINING_SEQUENCE_ID", "")).strip() or None,
+            "sequence_profile": str(os.getenv("TRAINING_SEQUENCE_PROFILE", "")).strip() or None,
+            "window_id": str(os.getenv("TRAINING_WINDOW_ID", "")).strip() or None,
+            "trial_id": str(os.getenv("TRAINING_TRIAL_ID", "")).strip() or ga_trial,
+            "engine": engine,
+            "horizon": horizon,
+            "family": family,
+            "feature_profile": feature_profile.get("profile_name"),
+            "mechanics_profile_version": mechanics_profile_version,
+            "ga_trial": ga_trial,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_scope": ga_scope,
+            "ga_parent_champion_id": ga_parent_champion_id,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "trial_mode": trial_mode,
+            "trial_cost_profile": trial_cost_profile,
+            "dataset_id": dataset_id,
+            "dataset_source": dataset_source,
+            "focus_symbols": focus_symbols,
+            "gate_profile": gate_profile,
+            "terminal_status": "completed",
+            "failed_step": (seed_viability_payload or {}).get("step"),
+            "failure_mode": promotion_gate.get("failure_mode"),
+            "arena_outcome": None,
+            "promotion_gate": promotion_gate,
+            "metrics": seed_metrics,
+            "metrics_by_symbol": {},
+            "metrics_by_position_mechanics": {},
+            "training_metrics": training_metrics_payload,
+            "resume_source": resume_source,
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "lineage": challenger_lineage,
+            "artifact_state": {
+                "precheck_report_present": False,
+                "arena_report_present": False,
+                "battle_report_present": False,
+                "promotion_present": True,
+                "candidate_checkpoint_present": challenger_path.exists(),
+                "latest_checkpoint_present": latest_checkpoint_present,
+            },
+            "challenger_path": str(challenger_path),
+            "latest_checkpoint": str(latest_path),
+            "latest_candidate": challenger_id,
+            "latest_verdict": {
+                "status": "seed_not_viable_for_v66",
+                "reason": promotion_gate.get("reason"),
+                "failure_mode": promotion_gate.get("failure_mode"),
+            },
+            "gold_precheck": dict(gold_precheck_payload or {}),
+            "precheck_status": (gold_precheck_payload or {}).get("status"),
+            "policy_precheck": dict(policy_precheck_payload or {}),
+            "seed_viability": dict(seed_viability_payload or {}),
+            "recommended_seed_for_v66": (seed_viability_payload or {}).get("recommended_seed_for_v66"),
+            "seed_selection_reason": (seed_viability_payload or {}).get("seed_selection_reason"),
+        }
+        terminal_summary_path = write_terminal_summary(terminal_summary)
+        logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
+        append_training_log(
+            (
+                f"MuZero {horizon}: arena annulee car le seed V6.10 est non viable "
+                f"({(seed_viability_payload or {}).get('reason')})."
+            ),
+            level="WARNING",
+            source="muzero",
+        )
         return {
             "engine": engine,
             "horizon": horizon,
@@ -2203,6 +3283,160 @@ def main() -> dict[str, object]:
             "terminal_summary_path": str(terminal_summary_path),
         }
 
+    bakeoff_no_arena = str(os.getenv("MUZERO_SKIP_ARENA_FOR_BAKEOFF", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if bakeoff_no_arena:
+        promotion_gate = {
+            "allowed": False,
+            "status": "skipped",
+            "reason": "bakeoff_no_arena",
+            "gate_profile": gate_profile,
+            "failure_mode": "bakeoff_no_arena",
+            "checks": {},
+            "metrics": dict(training_metrics_payload),
+        }
+        promotion_result = {
+            "status": "skipped",
+            "reason": "bakeoff_no_arena",
+            "engine": engine,
+            "horizon": horizon,
+            "source_path": str(challenger_path),
+            "champion_paths": [],
+            "promotion_gate": promotion_gate,
+            "artifact_compatibility": challenger_compatibility,
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "resume_source": resume_source,
+            "lineage": challenger_lineage,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_trial": ga_trial,
+            "ga_scope": ga_scope,
+            "recommended_seed_for_v66": (seed_viability_payload or {}).get("recommended_seed_for_v66"),
+            "seed_selection_reason": (seed_viability_payload or {}).get("seed_selection_reason"),
+        }
+        promoter = ChampionPromoter(weights_dir=config.weights_path, results_dir=config.results_path)
+        promoter.persist_challenger_manifest(
+            engine=engine,
+            horizon=horizon,
+            status="blocked",
+            challenger_id=challenger_id,
+            challenger_path=str(challenger_path),
+            latest_checkpoint=str(latest_path),
+            battle_report=None,
+            training_metrics=training_metrics_payload,
+            promotion_gate=promotion_gate,
+            promotion_result=promotion_result,
+            artifact_compatibility=dict(promotion_result.get("artifact_compatibility") or {}),
+            checkpoint_schema_version=challenger_checkpoint_schema_version,
+            resume_source=resume_source,
+            lineage=challenger_lineage,
+        )
+        terminal_summary = {
+            "run_id": active_run_id,
+            "sequence_id": str(os.getenv("TRAINING_SEQUENCE_ID", "")).strip() or None,
+            "sequence_profile": str(os.getenv("TRAINING_SEQUENCE_PROFILE", "")).strip() or None,
+            "window_id": str(os.getenv("TRAINING_WINDOW_ID", "")).strip() or None,
+            "trial_id": str(os.getenv("TRAINING_TRIAL_ID", "")).strip() or ga_trial,
+            "engine": engine,
+            "horizon": horizon,
+            "family": family,
+            "feature_profile": feature_profile.get("profile_name"),
+            "mechanics_profile_version": mechanics_profile_version,
+            "ga_trial": ga_trial,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_scope": ga_scope,
+            "ga_parent_champion_id": ga_parent_champion_id,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "trial_mode": trial_mode,
+            "trial_cost_profile": trial_cost_profile,
+            "dataset_id": dataset_id,
+            "dataset_source": dataset_source,
+            "focus_symbols": focus_symbols,
+            "gate_profile": gate_profile,
+            "terminal_status": "completed",
+            "failed_step": last_optimization_step,
+            "failure_mode": "bakeoff_no_arena",
+            "arena_outcome": None,
+            "promotion_gate": promotion_gate,
+            "metrics": dict(training_metrics_payload),
+            "metrics_by_symbol": {},
+            "metrics_by_position_mechanics": {},
+            "training_metrics": training_metrics_payload,
+            "resume_source": resume_source,
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "lineage": challenger_lineage,
+            "artifact_state": {
+                "precheck_report_present": bool((gold_precheck_payload or {}).get("path")),
+                "arena_report_present": False,
+                "battle_report_present": False,
+                "promotion_present": True,
+                "candidate_checkpoint_present": challenger_path.exists(),
+                "latest_checkpoint_present": latest_checkpoint_present,
+            },
+            "challenger_path": str(challenger_path),
+            "latest_checkpoint": str(latest_path),
+            "latest_candidate": challenger_id,
+            "latest_verdict": {
+                "status": "bakeoff_no_arena",
+                "reason": "bakeoff_no_arena",
+                "failure_mode": "bakeoff_no_arena",
+            },
+            "gold_precheck": dict(gold_precheck_payload or {}),
+            "precheck_status": (gold_precheck_payload or {}).get("status"),
+            "policy_precheck": dict(policy_precheck_payload or {}),
+            "seed_viability": dict(seed_viability_payload or {}),
+            "recommended_seed_for_v66": (seed_viability_payload or {}).get("recommended_seed_for_v66"),
+            "seed_selection_reason": (seed_viability_payload or {}).get("seed_selection_reason"),
+        }
+        terminal_summary_path = write_terminal_summary(terminal_summary)
+        logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
+        append_training_log(
+            f"MuZero {horizon}: run de bake-off termine sans Arena (MUZERO_SKIP_ARENA_FOR_BAKEOFF).",
+            level="WARNING",
+            source="muzero",
+        )
+        return {
+            "engine": engine,
+            "horizon": horizon,
+            "timeframe": config.primary_timeframe,
+            "symbols": valid_symbols,
+            "family": family,
+            "feature_profile": feature_profile.get("profile_name"),
+            "mechanics_profile_version": mechanics_profile_version,
+            "dataset_id": dataset_id,
+            "dataset_source": dataset_source,
+            "focus_symbols": focus_symbols,
+            "gate_profile": gate_profile,
+            "dataset_descriptor": dataset_descriptor,
+            "dataset_coverage": dict(getattr(config, "dataset_coverage", {}) or {}),
+            "games_per_symbol": games_per_symbol,
+            "total_games": total_games,
+            "latest_checkpoint": latest_checkpoint_reference,
+            "challenger_path": str(challenger_path),
+            "training_metrics": training_metrics_payload,
+            "ga_status": ga_status,
+            "ga_generation": ga_generation,
+            "ga_trial": ga_trial,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_scope": ga_scope,
+            "ga_parent_champion_id": ga_parent_champion_id,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "trial_mode": trial_mode,
+            "trial_cost_profile": trial_cost_profile,
+            "resume_source": resume_source,
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "lineage": challenger_lineage,
+            "precheck": dict(gold_precheck_payload or {}),
+            "promotion": promotion_result,
+            "terminal_summary_path": str(terminal_summary_path),
+        }
+
     logger.info("Phase 3 - arena ADN")
     append_training_log(
         f"MuZero {horizon}: lancement de l'arena ADN.",
@@ -2255,6 +3489,7 @@ def main() -> dict[str, object]:
     selected_challenger_lineage = dict(challenger_lineage)
     screen_results: list[dict[str, object]] = []
     screen_gate: dict[str, object] | None = None
+    family_probe_report: dict[str, object] | None = None
     policy_precheck_mode = str((policy_precheck_payload or {}).get("status") or "full_ready").strip().lower()
 
     if policy_precheck_mode == "screen_only":
@@ -2511,6 +3746,139 @@ def main() -> dict[str, object]:
         else latest_path
     )
     arena_lineage = dict(selected_challenger_lineage)
+    family_probe_report = arena.run_family_probes(
+        arena_candidate_id,
+        horizon=horizon,
+        engine=engine,
+        weights_path=arena_candidate_path,
+    )
+    merge_training_status(
+        {
+            "family_probe_status": dict(family_probe_report.get("family_probe_summary") or {}),
+        }
+    )
+    if not bool(dict(family_probe_report.get("family_probe_summary") or {}).get("allowed")):
+        family_probe_summary = dict(family_probe_report.get("family_probe_summary") or {})
+        promotion_gate = {
+            "allowed": False,
+            "status": "blocked",
+            "reason": str(family_probe_summary.get("reason") or "family_probe_failed"),
+            "gate_profile": gate_profile,
+            "failure_mode": str(family_probe_summary.get("reason") or "family_probe_failed"),
+            "checks": {},
+            "metrics": family_probe_summary,
+        }
+        promotion_result = {
+            "status": "skipped",
+            "reason": "family_probe_failed",
+            "engine": engine,
+            "horizon": horizon,
+            "source_path": str(arena_candidate_path),
+            "champion_paths": [],
+            "promotion_gate": promotion_gate,
+            "artifact_compatibility": challenger_compatibility,
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "resume_source": resume_source,
+            "lineage": arena_lineage,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_trial": ga_trial,
+            "ga_scope": ga_scope,
+            "policy_precheck": dict(policy_precheck_payload or {}),
+            "policy_precheck_mode": policy_precheck_mode,
+            "screen_results": list(screen_results),
+            "screen_gate": dict(screen_gate or {}),
+            "family_probe_report": dict(family_probe_report or {}),
+        }
+        promoter.persist_challenger_manifest(
+            engine=engine,
+            horizon=horizon,
+            status="blocked",
+            challenger_id=arena_candidate_id,
+            challenger_path=str(arena_candidate_path),
+            latest_checkpoint=str(arena_latest_checkpoint),
+            battle_report=None,
+            training_metrics=training_metrics_payload,
+            promotion_gate=promotion_gate,
+            promotion_result=promotion_result,
+            artifact_compatibility=dict(promotion_result.get("artifact_compatibility") or {}),
+            checkpoint_schema_version=challenger_checkpoint_schema_version,
+            resume_source=resume_source,
+            lineage=arena_lineage,
+        )
+        terminal_summary = {
+            "run_id": active_run_id,
+            "engine": engine,
+            "horizon": horizon,
+            "family": family,
+            "feature_profile": feature_profile.get("profile_name"),
+            "mechanics_profile_version": mechanics_profile_version,
+            "dataset_id": dataset_id,
+            "dataset_source": dataset_source,
+            "gate_profile": gate_profile,
+            "terminal_status": "completed",
+            "failure_mode": promotion_gate.get("failure_mode"),
+            "arena_outcome": None,
+            "promotion_gate": promotion_gate,
+            "training_metrics": training_metrics_payload,
+            "resume_source": resume_source,
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "lineage": arena_lineage,
+            "challenger_path": str(arena_candidate_path),
+            "latest_checkpoint": str(arena_latest_checkpoint),
+            "latest_candidate": arena_candidate_id,
+            "gold_precheck": dict(gold_precheck_payload or {}),
+            "precheck_status": (gold_precheck_payload or {}).get("status"),
+            "policy_precheck": dict(policy_precheck_payload or {}),
+            "policy_precheck_mode": policy_precheck_mode,
+            "screen_results": list(screen_results),
+            "screen_gate": dict(screen_gate or {}),
+            "family_probe_report": dict(family_probe_report or {}),
+        }
+        terminal_summary_path = write_terminal_summary(terminal_summary)
+        logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
+        return {
+            "engine": engine,
+            "horizon": horizon,
+            "timeframe": config.primary_timeframe,
+            "symbols": valid_symbols,
+            "family": family,
+            "feature_profile": feature_profile.get("profile_name"),
+            "mechanics_profile_version": mechanics_profile_version,
+            "dataset_id": dataset_id,
+            "dataset_source": dataset_source,
+            "focus_symbols": focus_symbols,
+            "gate_profile": gate_profile,
+            "dataset_descriptor": dataset_descriptor,
+            "dataset_coverage": dict(getattr(config, "dataset_coverage", {}) or {}),
+            "games_per_symbol": games_per_symbol,
+            "total_games": total_games,
+            "latest_checkpoint": str(arena_latest_checkpoint),
+            "challenger_path": str(arena_candidate_path),
+            "training_metrics": training_metrics_payload,
+            "ga_status": ga_status,
+            "ga_generation": ga_generation,
+            "ga_trial": ga_trial,
+            "ga_campaign_id": ga_campaign_id,
+            "ga_scope": ga_scope,
+            "ga_parent_champion_id": ga_parent_champion_id,
+            "seed_parent_champion_id": ga_parent_champion_id,
+            "trial_mode": trial_mode,
+            "trial_cost_profile": trial_cost_profile,
+            "resume_source": resume_source,
+            "artifact_compatibility": dict(promotion_result.get("artifact_compatibility") or {}),
+            "checkpoint_schema_version": challenger_checkpoint_schema_version,
+            "lineage": arena_lineage,
+            "precheck": dict(gold_precheck_payload or {}),
+            "policy_precheck": dict(policy_precheck_payload or {}),
+            "policy_precheck_mode": policy_precheck_mode,
+            "screen_results": list(screen_results),
+            "screen_gate": dict(screen_gate or {}),
+            "family_probe_report": dict(family_probe_report or {}),
+            "promotion": promotion_result,
+            "terminal_summary_path": str(terminal_summary_path),
+        }
 
     battle_report = arena.battle(str(arena_candidate_path), champion_reference, horizon=horizon)
     logger.info("Verdict ADN %s: %s", horizon, battle_report["outcome"])
@@ -2563,6 +3931,7 @@ def main() -> dict[str, object]:
             "policy_precheck_mode": policy_precheck_mode,
             "screen_results": list(screen_results),
             "screen_gate": dict(screen_gate or {}),
+            "family_probe_report": dict(family_probe_report or {}),
         }
     else:
         promotion_result = promoter.promote_muzero_challenger(
@@ -2584,12 +3953,14 @@ def main() -> dict[str, object]:
                 "policy_precheck_mode": policy_precheck_mode,
                 "screen_results": list(screen_results),
                 "screen_gate": dict(screen_gate or {}),
+                "family_probe_report": dict(family_probe_report or {}),
             },
         )
     promotion_result.setdefault("policy_precheck", dict(policy_precheck_payload or {}))
     promotion_result.setdefault("policy_precheck_mode", policy_precheck_mode)
     promotion_result.setdefault("screen_results", list(screen_results))
     promotion_result.setdefault("screen_gate", dict(screen_gate or {}))
+    promotion_result.setdefault("family_probe_report", dict(family_probe_report or {}))
     logger.info("Promotion live %s: %s", horizon, promotion_result.get("status"))
     append_training_log(
         "MuZero "
@@ -2685,6 +4056,7 @@ def main() -> dict[str, object]:
         "policy_precheck_mode": policy_precheck_mode,
         "screen_results": list(screen_results),
         "screen_gate": dict(screen_gate or {}),
+        "family_probe_report": dict(family_probe_report or {}),
         "selected_checkpoint_step": selected_checkpoint_step,
         "battle_report": battle_report,
         "promotion": promotion_result,
@@ -2763,6 +4135,7 @@ def main() -> dict[str, object]:
         "policy_precheck_mode": policy_precheck_mode,
         "screen_results": list(screen_results),
         "screen_gate": dict(screen_gate or {}),
+        "family_probe_report": dict(family_probe_report or {}),
         "selected_checkpoint_step": selected_checkpoint_step,
     }
     terminal_summary_path = write_terminal_summary(terminal_summary)

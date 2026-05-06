@@ -5,6 +5,7 @@ from __future__ import annotations
 import faulthandler
 import logging
 import os
+import re
 import signal
 from datetime import datetime
 from time import perf_counter
@@ -76,6 +77,24 @@ class JAXMuZeroAgent:
             config.hidden_state_size,
         )
 
+    @staticmethod
+    def _extract_training_step_from_checkpoint_path(path: str) -> int | None:
+        """Extrait l'etape numerique a partir du nom de checkpoint.
+
+        Args:
+            path (str): Chemin du checkpoint charge.
+
+        Returns:
+            int | None: Etape detectee si le suffixe ``_ckpt_<n>`` est present.
+        """
+        match = re.search(r"_ckpt_(\d+)", str(path or ""))
+        if match is None:
+            return None
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
     def _run_collection_step_with_timeout(
         self,
         step_callback: Callable[[], tuple[object, float, bool, float, float, int, np.ndarray]],
@@ -140,6 +159,7 @@ class JAXMuZeroAgent:
         env,
         exploration: bool = True,
         progress_callback: Callable[[dict[str, object]], None] | None = None,
+        action_transform: Callable[[int], int] | None = None,
     ) -> GameHistory:
         """Joue une partie complete dans l'environnement et alimente le replay buffer.
 
@@ -149,6 +169,8 @@ class JAXMuZeroAgent:
             progress_callback (Callable[[dict[str, object]], None] | None):
                 Callback appele periodiquement pour exposer un heartbeat
                 intra-partie pendant la collecte.
+            action_transform (Callable[[int], int] | None): Transformation
+                optionnelle appliquee a l'action choisie avant execution.
 
         Returns:
             GameHistory: Episode collecte, eventuellement tronque si un
@@ -203,6 +225,8 @@ class JAXMuZeroAgent:
                 mcts_elapsed_seconds = perf_counter() - mcts_started_at
 
                 action = self._select_action(root, exploration)
+                if action_transform is not None:
+                    action = int(action_transform(int(action)))
                 policy = self._get_policy_distribution(root)
                 value = float(root.value)
                 next_obs, reward, done_flag, _, _ = env.step(action)
@@ -312,6 +336,31 @@ class JAXMuZeroAgent:
             )
             episode_summary = {}
 
+        self._copy_episode_summary_to_game_metadata(game, episode_summary)
+        if len(game) > 0:
+            self.replay_buffer.save_game(game)
+        else:
+            logger.warning(
+                "Episode MuZero ignore car aucune transition n'a ete collectee pour %s.",
+                getattr(env, "symbol", "unknown"),
+            )
+        return game
+
+    @staticmethod
+    def _copy_episode_summary_to_game_metadata(
+        game: GameHistory,
+        episode_summary: dict[str, object],
+    ) -> None:
+        """Copie les metriques d'episode utiles vers le replay.
+
+        Les agrégations de replay et le ``training_status`` se basent sur
+        ``game.metadata``. Toute métrique offensive oubliée ici devient
+        invisible ensuite, même si l'environnement la calcule correctement.
+
+        Args:
+            game (GameHistory): Episode MuZero a enrichir.
+            episode_summary (dict[str, object]): Resume complet de l'episode.
+        """
         metadata_fields = (
             "symbol",
             "return_pct",
@@ -348,6 +397,10 @@ class JAXMuZeroAgent:
             "root_mask_blocked_buy_directional",
             "root_mask_blocked_sell_directional",
             "root_mask_rate",
+            "root_mask_ema200_share",
+            "root_mask_vwap_share",
+            "root_mask_adx_share",
+            "root_mask_directional_share",
             "soft_entry_penalty_count",
             "soft_entry_penalty_total",
             "soft_entry_bonus_count",
@@ -364,6 +417,32 @@ class JAXMuZeroAgent:
             "soft_penalty_vwap_rate",
             "soft_penalty_adx_rate",
             "soft_penalty_obv_rate",
+            "hold_drag_opportunity_count",
+            "hold_drag_penalized_count",
+            "hold_drag_score",
+            "split_opportunity_count",
+            "split_executed",
+            "split_profitable_count",
+            "split_efficiency",
+            "split_trade_value_delta",
+            "split_improved_total_trade_count",
+            "pyramid_opportunity_count",
+            "pyramids_opened",
+            "pyramid_profitable_count",
+            "pyramid_efficiency",
+            "pyramid_total_trade_improvement_pct",
+            "pyramid_failed_to_improve_count",
+            "slbe_triggered",
+            "slbe_profitable_exits",
+            "slbe_lock_profit_count",
+            "slbe_capture_rate",
+            "close_winner_count",
+            "close_loser_count",
+            "close_quality_score",
+            "tp_like_exit_count",
+            "tp_like_missed_count",
+            "defensive_close_count",
+            "early_close_noise_count",
             "blocked_buy_entries",
             "blocked_sell_entries",
             "blocked_buy_vwap",
@@ -378,18 +457,24 @@ class JAXMuZeroAgent:
             "net_return_short_pct",
             "post_veto_to_hold_rate",
             "episode_regime",
+            "nemesis_type",
+            "liquidity_trap_loss",
+            "range_entry_loss",
+            "bad_split",
+            "bad_runner_exit",
+            "bad_pyramid_exit",
+            "hard_stop_exit",
+            "runner_retained_profit_pct",
+            "runner_giveback_pct",
         )
         for field_name in metadata_fields:
             if field_name in episode_summary:
                 game.metadata[field_name] = episode_summary[field_name]
-        if len(game) > 0:
-            self.replay_buffer.save_game(game)
-        else:
-            logger.warning(
-                "Episode MuZero ignore car aucune transition n'a ete collectee pour %s.",
-                getattr(env, "symbol", "unknown"),
-            )
-        return game
+        mechanics_summary = dict(episode_summary.get("metrics_by_position_mechanics") or {})
+        for field_name, field_value in mechanics_summary.items():
+            if isinstance(field_value, (dict, list, tuple, set)):
+                continue
+            game.metadata[field_name] = field_value
 
     def prepare_training_step(self) -> PreparedTrainingStep | None:
         """Prepare un lot d'entrainement complet sans mettre a jour les poids.
@@ -776,11 +861,14 @@ class JAXMuZeroAgent:
             current_time = datetime.utcnow()
 
         volatility = min((high_price - low_price) / max(close_price, 1e-8) * 100.0, 1.0) if close_price > 0 else 0.0
+        position_state = float(observation.get("position_state", 0.0) or 0.0)
+        unrealized_return = float(observation.get("unrealized_return", 0.0) or 0.0)
+        slbe_state = float(observation.get("slbe_state", 0.0) or 0.0)
         obs_vec[26:] = np.array(
             [
-                0.0,
-                0.0,
-                0.0,
+                position_state,
+                unrealized_return,
+                slbe_state,
                 current_time.hour / 23.0 if 23 else 0.0,
                 current_time.weekday() / 6.0 if 6 else 0.0,
                 volatility,
@@ -866,6 +954,7 @@ class JAXMuZeroAgent:
             config=self.config,
             params=self.params,
             opt_state=self.opt_state,
+            training_step_count=int(self.training_step_count),
             artifact_kind=artifact_kind,
             lineage=dict(lineage or {}),
         )
@@ -911,5 +1000,12 @@ class JAXMuZeroAgent:
         checkpoint_payload = dict(payload or {})
         self.params = checkpoint_payload["params"]
         self.opt_state = checkpoint_payload.get("opt_state", self.opt_state)
+        raw_training_step_count = checkpoint_payload.get("training_step_count")
+        if raw_training_step_count is None:
+            raw_training_step_count = self._extract_training_step_from_checkpoint_path(path)
+        try:
+            self.training_step_count = max(0, int(raw_training_step_count or 0))
+        except (TypeError, ValueError):
+            self.training_step_count = 0
         logger.info("[JAXMuZeroAgent] Checkpoint charge: %s", path)
         return compatibility

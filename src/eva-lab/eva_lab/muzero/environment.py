@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional
@@ -593,25 +594,67 @@ class TradingEnvironment:
         self.hold_in_trend_count = 0
         self.hold_in_range_count = 0
         self.hold_under_trend_penalty_count = 0
+        self.hold_drag_opportunity_count = 0
+        self.hold_drag_penalized_count = 0
         self.hold_streak_total = 0
         self.hold_streak_count = 0
         self._current_hold_streak = 0
+        self._current_hold_drag_streak = 0
         self.pyramids_opened = 0
         self.pyramids_rejected = 0
         self.pyramid_profitable_count = 0
         self.pyramid_loss_count = 0
+        self.pyramid_good_add_count = 0
+        self.pyramid_bad_add_count = 0
+        self.pyramid_profitable_exit_count = 0
+        self.pyramid_opportunity_count = 0
         self.position_pyramids = 0
         self.split_executed = 0
         self.split_profitable_count = 0
+        self.split_runner_profitable_count = 0
+        self.split_runner_failed_count = 0
+        self.split_early_count = 0
+        self.split_decorative_count = 0
+        self.split_trade_value_delta = 0.0
+        self.split_improved_total_trade_count = 0
+        self.split_opportunity_count = 0
+        self.split_tp_zone_opportunity_count = 0
+        self.split_monetization_window_count = 0
+        self.split_monetization_capture_count = 0
+        self.split_missed_window_count = 0
         self.slbe_triggered = 0
         self.slbe_hit = 0
         self.slbe_profitable_exits = 0
+        self.slbe_lock_profit_count = 0
         self.position_had_slbe = False
+        self.slbe_profit_locked = False
         self.close_winner_count = 0
         self.close_loser_count = 0
         self.net_realized_long_pct = 0.0
         self.net_realized_short_pct = 0.0
         self.tp_like_exit_count = 0
+        self.tp_like_missed_count = 0
+        self.defensive_close_count = 0
+        self.early_close_noise_count = 0
+        self.hard_stop_exit_count = 0
+        self.soft_tp_hit_count = 0
+        self.full_tp_hit_count = 0
+        self.time_stop_trigger_count = 0
+        self.runner_extension_count = 0
+        self.runner_extension_opportunity_count = 0
+        self.runner_extension_capture_count = 0
+        self.runner_profit_hold_window_count = 0
+        self.runner_profit_hold_capture_count = 0
+        self.runner_missed_extension_count = 0
+        self.runner_managed_exit_count = 0
+        self.runner_exit_profitable_count = 0
+        self.runner_forced_stop_count = 0
+        self.runner_retained_profit_pct = 0.0
+        self.runner_giveback_pct = 0.0
+        self.profit_peak_reached_count = 0
+        self.profit_peak_giveback_ratio_total = 0.0
+        self.profit_peak_giveback_ratio_observations = 0
+        self.forced_stop_near_miss_count = 0
         self.split_rejected = 0
         self.split_rejected_no_value = 0
         self.inactive_episode_penalties = 0
@@ -620,6 +663,39 @@ class TradingEnvironment:
         self.realized_close_bonus_count = 0
         self.realized_split_bonus_count = 0
         self.slbe_exit_bonus_count = 0
+        self.hard_stop_price = 0.0
+        self.soft_tp_price = 0.0
+        self.full_tp_price = 0.0
+        self.time_stop_steps = 0
+        self.position_entry_step = 0
+        self.position_peak_return = 0.0
+        self.peak_profit_age_steps = 0
+        self.runner_extension_active = False
+        self.runner_active = False
+        self.runner_entry_price = 0.0
+        self.runner_target_price = 0.0
+        self.runner_protected = False
+        self.runner_origin_split_step = -1
+        self.runner_peak_profit_pct = 0.0
+        self.runner_entry_profit_pct = 0.0
+        self._last_runner_retained_profit_pct = 0.0
+        self._last_runner_giveback_pct = 0.0
+        self._last_runner_retention_ratio = 0.0
+        self.pyramid_total_trade_improvement_pct = 0.0
+        self.pyramid_failed_to_improve_count = 0
+        self.pyramid_add_opportunity_count = 0
+        self.pyramid_add_capture_count = 0
+        self.pyramid_monetization_window_count = 0
+        self.pyramid_monetization_capture_count = 0
+        self.pyramid_missed_add_count = 0
+        self._pyramid_baseline_active = False
+        self._pyramid_baseline_return = 0.0
+        self.soft_tp_hit_active = False
+        self.full_tp_hit_active = False
+        self.time_stop_recorded_current_trade = False
+        self._split_window_wait_steps = 0
+        self._runner_window_wait_steps = 0
+        self._pyramid_window_wait_steps = 0
         active_index = min(self.current_step, max(len(self.day_labels) - 1, 0))
         self.daily_net_return_pct_by_day: dict[str, float] = {}
         self.daily_drawdown_pct_by_day: dict[str, float] = {}
@@ -1118,6 +1194,69 @@ class TradingEnvironment:
             elif reason == "directional":
                 self.root_mask_blocked_sell_directional += 1
 
+    def _should_soften_training_root_veto(
+        self,
+        *,
+        action: int,
+        reason: str,
+        context: dict[str, float],
+        entry_filter: dict[str, float | bool | str],
+    ) -> bool:
+        """Determine si un veto racine peut devenir une penalite douce en train.
+
+        Args:
+            action (int): Action directionnelle evaluee.
+            reason (str): Raison du veto courant.
+            context (dict[str, float]): Contexte de marche courant.
+            entry_filter (dict[str, float | bool | str]): Filtre d'entree actif.
+
+        Returns:
+            bool: ``True`` si le veto doit etre converti en signal doux pour
+                l'entrainement, ``False`` sinon.
+        """
+        if not self.training_mode or action not in (BUY, SELL):
+            return False
+
+        if reason == "directional":
+            return bool(
+                getattr(self.config, "training_root_mask_soften_directional", False)
+            )
+
+        if reason == "vwap":
+            return bool(getattr(self.config, "training_root_mask_soften_vwap", True))
+
+        if reason == "adx":
+            if not bool(getattr(self.config, "training_root_mask_soften_adx", True)):
+                return False
+            min_adx = float(entry_filter.get("min_adx", 0.0) or 0.0)
+            adx = float(context.get("adx", 0.0) or 0.0)
+            if min_adx <= 0.0:
+                return True
+            extreme_ratio = float(
+                getattr(self.config, "training_root_mask_adx_extreme_ratio", 0.75) or 0.75
+            )
+            return adx >= (min_adx * extreme_ratio)
+
+        if reason == "ema200":
+            if not bool(getattr(self.config, "training_root_mask_soften_ema200", True)):
+                return False
+            ema_mode = str(entry_filter.get("ema_mode", "strict") or "strict").strip().lower()
+            if ema_mode == "strict":
+                return False
+            atr_pct = max(float(context.get("atr_pct", 0.0) or 0.0), 1e-5)
+            ema_gap_pct = abs(float(context.get("ema_gap_pct", 0.0) or 0.0))
+            price_vs_vwap = float(context.get("price_vs_vwap", 0.0) or 0.0)
+            momentum = float(context.get("momentum", 0.0) or 0.0)
+            direction_sign = 1.0 if action == BUY else -1.0
+            vwap_floor = max(atr_pct * 0.10, 0.00005)
+            momentum_floor = max(atr_pct * 0.35, 1e-5)
+            severe_gap = ema_gap_pct >= max(atr_pct * 1.5, 0.001)
+            vwap_support = (price_vs_vwap * direction_sign) >= -vwap_floor
+            momentum_support = (momentum * direction_sign) >= -momentum_floor
+            return vwap_support and momentum_support and not severe_gap
+
+        return False
+
     def _compute_rebalance_bonus(
         self,
         action: int,
@@ -1192,6 +1331,1102 @@ class TradingEnvironment:
             float(getattr(self.config, "soft_reward_penalty_scale_late", 0.85) or 0.85),
             float(getattr(self.config, "soft_reward_bonus_scale_late", 0.95) or 0.95),
         )
+
+    def _resolve_exit_reward_phase_scale(self) -> float:
+        """Retourne l'intensite du shaping V5 pour la phase courante.
+
+        Returns:
+            float: Multiplicateur global applique aux ajustements de sortie
+                implicites (`hard_stop`, `split`, `pyramid`, `SLBE`, `hold_drag`,
+                `time_stop`). Les signaux de PnL reel restent inchanges.
+        """
+        early_end_step = max(
+            0,
+            int(
+                getattr(
+                    self.config,
+                    "exit_reward_early_end_step",
+                    getattr(self.config, "soft_reward_early_end_step", 4000),
+                ) or 4000
+            ),
+        )
+        mid_end_step = max(
+            early_end_step,
+            int(
+                getattr(
+                    self.config,
+                    "exit_reward_mid_end_step",
+                    getattr(self.config, "soft_reward_mid_end_step", 10000),
+                ) or 10000
+            ),
+        )
+        current_step = max(0, int(self.training_progress_step or 0))
+        if current_step < early_end_step:
+            return float(getattr(self.config, "exit_reward_scale_early", 0.35) or 0.35)
+        if current_step < mid_end_step:
+            return float(getattr(self.config, "exit_reward_scale_mid", 0.55) or 0.55)
+        return float(getattr(self.config, "exit_reward_scale_late", 1.0) or 1.0)
+
+    @staticmethod
+    def _policy_float(policy: dict[str, float], key: str, default: float) -> float:
+        """Lit un flottant de profil sans ecraser un zero explicite.
+
+        Args:
+            policy (dict[str, float]): Bloc de configuration mecanique.
+            key (str): Cle a lire.
+            default (float): Valeur de secours si la cle est absente.
+
+        Returns:
+            float: Valeur resolue en conservant ``0`` comme valeur legitime.
+        """
+        value = policy.get(key, default)
+        if value is None:
+            return float(default)
+        return float(value)
+
+    @staticmethod
+    def _policy_int(policy: dict[str, float], key: str, default: int) -> int:
+        """Lit un entier de profil sans ecraser un zero explicite.
+
+        Args:
+            policy (dict[str, float]): Bloc de configuration mecanique.
+            key (str): Cle a lire.
+            default (int): Valeur de secours si la cle est absente.
+
+        Returns:
+            int: Valeur resolue en conservant ``0`` comme valeur legitime.
+        """
+        value = policy.get(key, default)
+        if value is None:
+            return int(default)
+        return int(value)
+
+    def _reset_exit_plan_state(self) -> None:
+        """Reinitialise le plan de sortie implicite de la position courante."""
+        self.hard_stop_price = 0.0
+        self.soft_tp_price = 0.0
+        self.full_tp_price = 0.0
+        self.time_stop_steps = 0
+        self.position_entry_step = int(self.current_step)
+        self.position_peak_return = 0.0
+        self.peak_profit_age_steps = 0
+        self.runner_extension_active = False
+        self.runner_active = False
+        self.runner_entry_price = 0.0
+        self.runner_target_price = 0.0
+        self.runner_protected = False
+        self.runner_origin_split_step = -1
+        self.runner_peak_profit_pct = 0.0
+        self.runner_entry_profit_pct = 0.0
+        self._last_runner_retained_profit_pct = 0.0
+        self._last_runner_giveback_pct = 0.0
+        self._last_runner_retention_ratio = 0.0
+        self.soft_tp_hit_active = False
+        self.full_tp_hit_active = False
+        self.time_stop_recorded_current_trade = False
+        self._split_window_wait_steps = 0
+        self._runner_window_wait_steps = 0
+        self._pyramid_window_wait_steps = 0
+
+    def _configure_exit_plan(
+        self,
+        *,
+        price: float,
+        context: dict[str, float],
+        hold_policy: dict[str, float],
+        close_policy: dict[str, float],
+        slbe_policy: dict[str, float],
+        exit_plan_policy: dict[str, float],
+        reset_progress: bool = True,
+    ) -> None:
+        """Initialise ou recalcule le plan de sortie implicite.
+
+        Args:
+            price (float): Prix courant de reference.
+            context (dict[str, float]): Contexte de marche du pas.
+            hold_policy (dict[str, float]): Regles HOLD actives.
+            close_policy (dict[str, float]): Regles CLOSE actives.
+            slbe_policy (dict[str, float]): Regles SLBE actives.
+            exit_plan_policy (dict[str, float]): Parametres implicites de TP/SL.
+            reset_progress (bool): Reinitialise les marqueurs de progression du
+                trade si ``True``.
+        """
+        if self.position_size == 0:
+            self._reset_exit_plan_state()
+            return
+
+        reference_price = max(float(price or 0.0), float(self.avg_entry_price or 0.0), 1e-8)
+        atr_pct = max(float(context.get("atr_pct", 0.0) or 0.0), 1e-5)
+        activation_return = self._policy_float(slbe_policy, "activation_return", 0.005)
+        tp_like_threshold = self._policy_float(
+            close_policy,
+            "tp_like_threshold",
+            self._policy_float(close_policy, "winner_threshold", 0.01),
+        )
+        strong_winner_threshold = self._policy_float(
+            close_policy,
+            "strong_winner_threshold",
+            max(tp_like_threshold, 0.01),
+        )
+        hard_stop_return = max(
+            activation_return * 0.75,
+            atr_pct * self._policy_float(exit_plan_policy, "hard_stop_atr_mult", 0.90),
+        )
+        soft_tp_return = max(
+            tp_like_threshold,
+            atr_pct * self._policy_float(exit_plan_policy, "soft_tp_atr_mult", 1.35),
+        )
+        full_tp_return = max(
+            strong_winner_threshold,
+            atr_pct * self._policy_float(exit_plan_policy, "full_tp_atr_mult", 2.10),
+        )
+        fallback_time_stop = max(
+            1,
+            int(
+                math.ceil(
+                    float(hold_policy.get("stale_penalty_after_steps", 48) or 48) * 0.5
+                )
+            ),
+        )
+        resolved_time_stop_steps = max(
+            1,
+            self._policy_int(exit_plan_policy, "time_stop_steps", fallback_time_stop),
+        )
+        if self.position_size > 0:
+            self.hard_stop_price = reference_price * (1.0 - hard_stop_return)
+            self.soft_tp_price = reference_price * (1.0 + soft_tp_return)
+            self.full_tp_price = reference_price * (1.0 + full_tp_return)
+        else:
+            self.hard_stop_price = reference_price * (1.0 + hard_stop_return)
+            self.soft_tp_price = reference_price * (1.0 - soft_tp_return)
+            self.full_tp_price = reference_price * (1.0 - full_tp_return)
+        self.time_stop_steps = resolved_time_stop_steps
+        if reset_progress:
+            self.position_entry_step = int(self.current_step)
+            self.position_peak_return = max(0.0, self._get_unrealized_return(price))
+            self.peak_profit_age_steps = 0
+            self.runner_extension_active = False
+            self.soft_tp_hit_active = False
+            self.full_tp_hit_active = False
+            self.time_stop_recorded_current_trade = False
+            self._split_window_wait_steps = 0
+            self._runner_window_wait_steps = 0
+            self._pyramid_window_wait_steps = 0
+
+    def _mark_exit_plan_hits(
+        self,
+        *,
+        price: float,
+    ) -> None:
+        """Met a jour les jalons de progression du plan de sortie implicite.
+
+        Args:
+            price (float): Prix courant observe.
+        """
+        if self.position_size == 0:
+            return
+        if self.slbe_active and self.slbe_price > 0.0:
+            if self.position_size > 0:
+                self.hard_stop_price = max(self.hard_stop_price, self.slbe_price)
+            else:
+                self.hard_stop_price = min(self.hard_stop_price, self.slbe_price)
+        if (
+            self.soft_tp_price > 0.0
+            and not self.soft_tp_hit_active
+            and (
+                (self.position_size > 0 and price >= self.soft_tp_price)
+                or (self.position_size < 0 and price <= self.soft_tp_price)
+            )
+        ):
+            self.soft_tp_hit_active = True
+            self.soft_tp_hit_count += 1
+        if (
+            self.full_tp_price > 0.0
+            and not self.full_tp_hit_active
+            and (
+                (self.position_size > 0 and price >= self.full_tp_price)
+                or (self.position_size < 0 and price <= self.full_tp_price)
+            )
+        ):
+            self.full_tp_hit_active = True
+            self.full_tp_hit_count += 1
+        if (
+            self.position_size != 0
+            and self.time_stop_steps > 0
+            and not self.time_stop_recorded_current_trade
+            and self._position_age_steps() >= self.time_stop_steps
+        ):
+            self.time_stop_recorded_current_trade = True
+            self.time_stop_trigger_count += 1
+
+    def _position_age_steps(self) -> int:
+        """Retourne l'age courant de la position en nombre de pas."""
+        if self.position_size == 0:
+            return 0
+        return max(0, int(self.current_step) - int(self.position_entry_step))
+
+    def _is_near_hard_stop(self, price: float) -> bool:
+        """Indique si le prix courant est proche du stop implicite courant.
+
+        Args:
+            price (float): Prix courant.
+
+        Returns:
+            bool: ``True`` si la position est a faible distance du stop.
+        """
+        if self.position_size == 0 or self.hard_stop_price <= 0.0:
+            return False
+        total_buffer = abs(float(self.avg_entry_price) - float(self.hard_stop_price))
+        if total_buffer <= 0.0:
+            return False
+        remaining_buffer = abs(float(price) - float(self.hard_stop_price))
+        return remaining_buffer <= max(total_buffer * 0.25, abs(float(self.avg_entry_price)) * 0.0002)
+
+    def _hard_stop_triggered(self, price: float) -> bool:
+        """Detecte si le stop implicite doit fermer la position.
+
+        Args:
+            price (float): Prix courant observe.
+
+        Returns:
+            bool: ``True`` si le stop implicite est touche.
+        """
+        if self.position_size == 0 or self.hard_stop_price <= 0.0:
+            return False
+        if self.position_size > 0:
+            return price <= self.hard_stop_price
+        return price >= self.hard_stop_price
+
+    def _activate_runner_extension(
+        self,
+        *,
+        price: float,
+        context: dict[str, float],
+        exit_plan_policy: dict[str, float],
+    ) -> None:
+        """Active l'extension du runner apres un split utile.
+
+        Args:
+            price (float): Prix courant du split.
+            context (dict[str, float]): Contexte de marche courant.
+            exit_plan_policy (dict[str, float]): Parametres implicites de TP/SL.
+        """
+        if self.position_size == 0:
+            return
+        atr_pct = max(float(context.get("atr_pct", 0.0) or 0.0), 1e-5)
+        extension_return = max(
+            atr_pct * self._policy_float(exit_plan_policy, "runner_extension_atr_mult", 0.80),
+            atr_pct,
+        )
+        if self.position_size > 0:
+            self.full_tp_price = max(self.full_tp_price, float(price) * (1.0 + extension_return))
+            if self.slbe_active and self.slbe_price > 0.0:
+                self.hard_stop_price = max(self.hard_stop_price, self.slbe_price)
+        else:
+            self.full_tp_price = min(self.full_tp_price, float(price) * (1.0 - extension_return))
+            if self.slbe_active and self.slbe_price > 0.0:
+                self.hard_stop_price = min(self.hard_stop_price, self.slbe_price)
+        if not self.runner_extension_active:
+            self.runner_extension_count += 1
+        self.runner_extension_active = True
+        self.runner_active = True
+        self.runner_protected = bool(self.slbe_active)
+        self.runner_target_price = float(self.full_tp_price or price)
+
+    def _build_position_management_snapshot(
+        self,
+        *,
+        price: float,
+        context: dict[str, float],
+        entry_filter: dict[str, float | bool | str],
+        hold_policy: dict[str, float],
+        split_policy: dict[str, float],
+        pyramiding_policy: dict[str, float],
+        close_policy: dict[str, float],
+        exit_plan_policy: dict[str, float],
+        trade_notional: float,
+    ) -> dict[str, float | bool]:
+        """Construit les signaux utiles au pilotage de position.
+
+        Args:
+            price (float): Prix courant.
+            context (dict[str, float]): Contexte de marche du pas courant.
+            entry_filter (dict[str, float | bool | str]): Filtre d'entree actif.
+            hold_policy (dict[str, float]): Regles de gestion HOLD.
+            split_policy (dict[str, float]): Regles de split.
+            pyramiding_policy (dict[str, float]): Regles de pyramiding.
+            close_policy (dict[str, float]): Regles de cloture.
+            exit_plan_policy (dict[str, float]): Parametres implicites de TP/SL.
+            trade_notional (float): Taille notionnelle d'un ordre unitaire.
+
+        Returns:
+            dict[str, float | bool]: Instantane des opportunites et signaux
+                de gestion de position.
+        """
+        if self.position_size == 0:
+            return {
+                "trade_ret": 0.0,
+                "peak_trade_return": 0.0,
+                "tp_like_threshold": float(
+                    close_policy.get(
+                        "tp_like_threshold",
+                        close_policy.get("winner_threshold", 0.0),
+                    )
+                    or 0.0
+                ),
+                "winner_threshold": float(close_policy.get("winner_threshold", 0.0) or 0.0),
+                "split_opportunity": False,
+                "split_tp_zone_opportunity": False,
+                "pyramid_opportunity": False,
+                "pyramid_add_opportunity": False,
+                "hold_drag_opportunity": False,
+                "reversal_context": False,
+                "offensive_reversal_context": False,
+                "clear_reversal_context": False,
+                "strong_trend_support": False,
+                "moderate_trend_support": False,
+                "continuation_support": False,
+                "offensive_continuation_support": False,
+                "soft_tp_zone_active": False,
+                "soft_tp_hit": False,
+                "full_tp_hit": False,
+                "time_stop_expired": False,
+                "time_stop_grace_expired": False,
+                "near_hard_stop": False,
+                "runner_extension_active": False,
+                "runner_extension_opportunity": False,
+                "split_monetization_window": False,
+                "runner_profit_hold_window": False,
+                "pyramid_monetization_window": False,
+                "profit_peak_reached": False,
+                "position_peak_giveback_ratio": 0.0,
+                "offensive_profit_floor": 0.0,
+            }
+
+        direction_sign = 1.0 if self.position_size > 0 else -1.0
+        trade_ret = self._get_unrealized_return(price)
+        winner_threshold = float(close_policy.get("winner_threshold", 0.01) or 0.01)
+        tp_like_threshold = float(close_policy.get("tp_like_threshold", winner_threshold) or winner_threshold)
+        trend_adx = float(
+            entry_filter.get(
+                "trend_adx",
+                entry_filter.get("min_adx", 20.0),
+            )
+            or 20.0
+        )
+        min_profit_to_add = float(pyramiding_policy.get("min_profit_to_add", 0.001) or 0.001)
+        max_additions = int(pyramiding_policy.get("max_additions", 1) or 1)
+        max_splits = int(split_policy.get("max_splits", 3) or 3)
+        min_trade_return = float(split_policy.get("min_trade_return", 0.01) or 0.01)
+        drag_profit_floor = self._policy_float(hold_policy, "drag_profit_floor", 0.0040)
+        recovery_grace_steps = self._policy_int(exit_plan_policy, "recovery_grace_steps", 0)
+
+        atr_pct = max(float(context.get("atr_pct", 0.0) or 0.0), 1e-5)
+        momentum = float(context.get("momentum", 0.0) or 0.0)
+        price_vs_vwap = float(context.get("price_vs_vwap", 0.0) or 0.0)
+        adx = float(context.get("adx", 0.0) or 0.0)
+        momentum_floor = max(atr_pct * 0.35, 1e-5)
+        vwap_reversal_floor = max(atr_pct * 0.10, 0.00005)
+        vwap_continuation_floor = max(atr_pct * 0.06, 0.00003)
+        vwap_clear_reversal_floor = max(atr_pct * 0.18, 0.00008)
+        continuation_adx_floor = max(trend_adx * 0.70, 12.0)
+        favorable_momentum = (
+            (direction_sign > 0 and momentum >= momentum_floor)
+            or (direction_sign < 0 and momentum <= -momentum_floor)
+        )
+        reversal_momentum = (
+            (direction_sign > 0 and momentum <= -momentum_floor)
+            or (direction_sign < 0 and momentum >= momentum_floor)
+        )
+        reversal_vwap = (
+            (direction_sign > 0 and price_vs_vwap <= -vwap_reversal_floor)
+            or (direction_sign < 0 and price_vs_vwap >= vwap_reversal_floor)
+        )
+        vwap_continuation = (
+            (direction_sign > 0 and price_vs_vwap >= -vwap_continuation_floor)
+            or (direction_sign < 0 and price_vs_vwap <= vwap_continuation_floor)
+        )
+        clear_reversal_vwap = (
+            (direction_sign > 0 and price_vs_vwap <= -vwap_clear_reversal_floor)
+            or (direction_sign < 0 and price_vs_vwap >= vwap_clear_reversal_floor)
+        )
+        adx_rollover = adx < trend_adx
+        reversal_context = reversal_momentum or reversal_vwap or adx_rollover
+        offensive_reversal_context = reversal_momentum or clear_reversal_vwap
+        strong_trend_support = adx >= trend_adx and favorable_momentum
+        moderate_trend_support = (
+            adx >= continuation_adx_floor
+            and (
+                favorable_momentum
+                or (
+                    trade_ret >= winner_threshold
+                    and vwap_continuation
+                )
+            )
+        )
+        soft_tp_zone_active = (
+            bool(self.soft_tp_hit_active)
+            or bool(self.full_tp_hit_active)
+            or trade_ret >= tp_like_threshold
+        )
+        continuation_retest_support = (
+            trade_ret >= max(min_trade_return, tp_like_threshold * 0.65)
+            and vwap_continuation
+            and adx >= max(continuation_adx_floor * 0.55, 8.0)
+        )
+        continuation_support = (
+            strong_trend_support
+            or moderate_trend_support
+            or continuation_retest_support
+        )
+        offensive_continuation_support = (
+            continuation_support
+            or (
+                soft_tp_zone_active
+                and vwap_continuation
+                and adx >= max(continuation_adx_floor * 0.45, 7.0)
+            )
+        )
+        clear_reversal_context = (
+            reversal_momentum
+            or clear_reversal_vwap
+            or adx < max(continuation_adx_floor * 0.60, 7.0)
+        )
+        offensive_profit_floor = max(
+            min_profit_to_add,
+            min(
+                max(min_trade_return * 0.40, min_profit_to_add),
+                tp_like_threshold * 0.40,
+                winner_threshold * 0.30,
+            ),
+        )
+        near_hard_stop = self._is_near_hard_stop(price)
+        current_positive_return = max(0.0, trade_ret)
+        peak_trade_return = max(float(self.position_peak_return or 0.0), current_positive_return)
+        monetization_return_floor = max(
+            min_trade_return * 0.60,
+            tp_like_threshold * 0.20,
+            min_profit_to_add * 0.80,
+            1e-6,
+        )
+        runner_hold_floor = max(
+            min_trade_return * 0.25,
+            tp_like_threshold * 0.20,
+            1e-6,
+        )
+        pyramid_window_floor = max(
+            min_profit_to_add * 0.75,
+            tp_like_threshold * 0.15,
+            1e-6,
+        )
+        position_peak_giveback_ratio = (
+            max(0.0, peak_trade_return - current_positive_return) / max(peak_trade_return, 1e-6)
+            if peak_trade_return > 0.0
+            else 0.0
+        )
+        profit_peak_reached = peak_trade_return >= monetization_return_floor
+        qualifying_profit = trade_ret >= max(winner_threshold, drag_profit_floor)
+        has_management_trigger = (
+            trade_ret >= tp_like_threshold
+            or self.slbe_active
+            or self.position_pyramids > 0
+        )
+
+        split_opportunity = (
+            abs(self.position_size) >= trade_notional * 0.75
+            and self.split_count < max_splits
+            and trade_ret >= min_trade_return
+        )
+        split_monetization_window = (
+            split_opportunity
+            and trade_ret >= monetization_return_floor
+            and peak_trade_return >= current_positive_return
+        )
+        split_tp_zone_opportunity = (
+            split_monetization_window
+            and (soft_tp_zone_active or peak_trade_return >= (tp_like_threshold * 0.75))
+        )
+        pyramid_opportunity = (
+            trade_ret >= min_profit_to_add
+            and self.position_pyramids < max_additions
+        )
+        pyramid_monetization_window = (
+            pyramid_opportunity
+            and trade_ret >= pyramid_window_floor
+            and current_positive_return > 0.0
+        )
+        pyramid_add_opportunity = (
+            pyramid_monetization_window
+        )
+        runner_profit_hold_window = (
+            self.runner_active
+            and peak_trade_return >= runner_hold_floor
+            and current_positive_return >= max(peak_trade_return * 0.35, 1e-6)
+        )
+        runner_extension_opportunity = (
+            runner_profit_hold_window
+        )
+        hold_drag_opportunity = qualifying_profit and has_management_trigger and reversal_context
+        position_age_steps = self._position_age_steps()
+        time_stop_expired = self.time_stop_steps > 0 and position_age_steps >= self.time_stop_steps
+        time_stop_grace_expired = (
+            self.time_stop_steps > 0
+            and position_age_steps >= (self.time_stop_steps + max(recovery_grace_steps, 0))
+        )
+
+        return {
+            "trade_ret": trade_ret,
+            "peak_trade_return": peak_trade_return,
+            "tp_like_threshold": tp_like_threshold,
+            "winner_threshold": winner_threshold,
+            "split_opportunity": split_opportunity,
+            "split_tp_zone_opportunity": split_tp_zone_opportunity,
+            "pyramid_opportunity": pyramid_opportunity,
+            "pyramid_add_opportunity": pyramid_add_opportunity,
+            "hold_drag_opportunity": hold_drag_opportunity,
+            "reversal_context": reversal_context,
+            "offensive_reversal_context": offensive_reversal_context,
+            "clear_reversal_context": clear_reversal_context,
+            "strong_trend_support": strong_trend_support,
+            "moderate_trend_support": moderate_trend_support,
+            "continuation_support": continuation_support,
+            "offensive_continuation_support": offensive_continuation_support,
+            "soft_tp_zone_active": soft_tp_zone_active,
+            "soft_tp_hit": bool(self.soft_tp_hit_active),
+            "full_tp_hit": bool(self.full_tp_hit_active),
+            "time_stop_expired": time_stop_expired,
+            "time_stop_grace_expired": time_stop_grace_expired,
+            "near_hard_stop": near_hard_stop,
+            "runner_extension_active": bool(self.runner_extension_active),
+            "runner_extension_opportunity": runner_extension_opportunity,
+            "split_monetization_window": split_monetization_window,
+            "runner_profit_hold_window": runner_profit_hold_window,
+            "pyramid_monetization_window": pyramid_monetization_window,
+            "profit_peak_reached": profit_peak_reached,
+            "position_peak_giveback_ratio": position_peak_giveback_ratio,
+            "offensive_profit_floor": offensive_profit_floor,
+        }
+
+    def _register_position_management_opportunities(
+        self,
+        snapshot: dict[str, float | bool],
+    ) -> None:
+        """Cumule les opportunites de gestion observees sur le pas courant.
+
+        Args:
+            snapshot (dict[str, float | bool]): Instantane des signaux de
+                gestion construit avant l'action.
+        """
+        if bool(snapshot.get("hold_drag_opportunity", False)):
+            self.hold_drag_opportunity_count += 1
+        if bool(snapshot.get("split_opportunity", False)):
+            self.split_opportunity_count += 1
+        if bool(snapshot.get("split_tp_zone_opportunity", False)):
+            self.split_tp_zone_opportunity_count += 1
+        if bool(snapshot.get("split_monetization_window", False)):
+            self.split_monetization_window_count += 1
+        if bool(snapshot.get("pyramid_opportunity", False)):
+            self.pyramid_opportunity_count += 1
+        if bool(snapshot.get("pyramid_add_opportunity", False)):
+            self.pyramid_add_opportunity_count += 1
+        if bool(snapshot.get("pyramid_monetization_window", False)):
+            self.pyramid_monetization_window_count += 1
+        if bool(snapshot.get("runner_extension_opportunity", False)):
+            self.runner_extension_opportunity_count += 1
+        if bool(snapshot.get("runner_profit_hold_window", False)):
+            self.runner_profit_hold_window_count += 1
+        if bool(snapshot.get("profit_peak_reached", False)):
+            self.profit_peak_reached_count += 1
+            self.profit_peak_giveback_ratio_total += float(
+                snapshot.get("position_peak_giveback_ratio", 0.0) or 0.0
+            )
+            self.profit_peak_giveback_ratio_observations += 1
+
+    def _update_offensive_window_wait_steps(
+        self,
+        *,
+        active: bool,
+        captured: bool,
+        current_wait_steps: int,
+    ) -> tuple[int, bool]:
+        """Met a jour l'attente avant de penaliser une fenetre offensive ratee.
+
+        Args:
+            active (bool): Indique si la fenetre offensive est ouverte au pas courant.
+            captured (bool): Indique si une action utile a ete executee.
+            current_wait_steps (int): Nombre de pas deja attendus sans action utile.
+
+        Returns:
+            tuple[int, bool]: Nouveau compteur d'attente et drapeau de fermeture
+                ratee si la fenetre vient de se refermer apres au moins trois pas.
+        """
+        if captured:
+            return 0, False
+        if active:
+            return current_wait_steps + 1, False
+        if current_wait_steps >= 3:
+            return 0, True
+        return 0, False
+
+    def _mark_runner_after_split(
+        self,
+        *,
+        price: float,
+        runner_protected: bool,
+        context: dict[str, float],
+        exit_plan_policy: dict[str, float],
+    ) -> None:
+        """Initialise l'etat interne du runner apres un split.
+
+        Args:
+            price (float): Prix courant du split.
+            runner_protected (bool): Indique si le runner est deja protege.
+            context (dict[str, float]): Contexte de marche du pas courant.
+            exit_plan_policy (dict[str, float]): Parametres du plan de sortie.
+        """
+        if self.position_size == 0:
+            return
+
+        self.runner_active = True
+        self.runner_entry_price = float(price)
+        self.runner_origin_split_step = int(self.current_step)
+        self.runner_protected = bool(runner_protected)
+        self.runner_target_price = float(self.full_tp_price or price)
+        self.runner_entry_profit_pct = max(0.0, self._get_unrealized_pnl_pct(price))
+        self.runner_peak_profit_pct = self.runner_entry_profit_pct
+        if bool(self.runner_extension_active):
+            self.runner_target_price = float(self.full_tp_price or self.runner_target_price)
+        elif bool(context.get("momentum", 0.0) or 0.0) and float(context.get("adx", 0.0) or 0.0) > 0.0:
+            self.runner_target_price = float(self.full_tp_price or self.runner_target_price)
+
+        if self.runner_target_price <= 0.0:
+            self.runner_target_price = float(price)
+
+    def _capture_runner_exit_context(self) -> dict[str, float | bool | int | None]:
+        """Capture l'etat du runner avant une cloture potentielle.
+
+        Returns:
+            dict[str, float | bool | int | None]: Contexte minimum utile
+                pour evaluer la monétisation offensive du runner apres
+                la realise de position.
+        """
+        steps_since_split: int | None = None
+        if self.runner_active and self.runner_origin_split_step >= 0:
+            steps_since_split = max(0, int(self.current_step) - int(self.runner_origin_split_step))
+        return {
+            "active": bool(self.runner_active),
+            "protected": bool(self.runner_protected),
+            "steps_since_split": steps_since_split,
+            "peak_profit_pct": float(self.runner_peak_profit_pct),
+            "entry_profit_pct": float(self.runner_entry_profit_pct),
+        }
+
+    def _register_runner_exit_outcome(
+        self,
+        *,
+        realized_trade: float,
+        forced_exit: bool,
+        runner_was_active: bool | None = None,
+        runner_peak_profit_pct: float | None = None,
+        runner_entry_profit_pct: float | None = None,
+    ) -> float:
+        """Enregistre le resultat final du runner apres un split.
+
+        Args:
+            realized_trade (float): PnL realise sur la cloture finale.
+            forced_exit (bool): Indique si la sortie a ete subie.
+            runner_was_active (bool | None): Etat runner capture avant la
+                cloture, pour ne pas perdre l'information apres reset.
+            runner_peak_profit_pct (float | None): Pic de profit enregistre
+                avant la cloture du runner.
+            runner_entry_profit_pct (float | None): Profit disponible lors du
+                split initial, deja normalise en pourcentage du capital.
+
+        Returns:
+            float: Delta de valeur apporte par le runner sur le trade complet,
+                exprime en pourcentage du capital initial.
+        """
+        if runner_was_active is None:
+            runner_was_active = bool(self.runner_active)
+        if not runner_was_active:
+            return 0.0
+
+        peak_profit_pct = max(
+            0.0,
+            float(
+                self.runner_peak_profit_pct
+                if runner_peak_profit_pct is None
+                else runner_peak_profit_pct
+            ),
+        )
+        entry_profit_pct = max(
+            0.0,
+            float(
+                self.runner_entry_profit_pct
+                if runner_entry_profit_pct is None
+                else runner_entry_profit_pct
+            ),
+        )
+        realized_pct = (realized_trade / self.spec.initial_balance) * 100.0
+        retained_profit_pct = max(0.0, realized_pct)
+        if peak_profit_pct <= 0.0 and retained_profit_pct > 0.0:
+            peak_profit_pct = retained_profit_pct
+        giveback_pct = max(0.0, peak_profit_pct - retained_profit_pct)
+        retention_ratio = (
+            retained_profit_pct / peak_profit_pct
+            if peak_profit_pct > 1e-8
+            else 0.0
+        )
+
+        self.runner_managed_exit_count += 1
+        self.split_trade_value_delta += realized_pct
+        self._last_runner_retained_profit_pct = retained_profit_pct
+        self._last_runner_giveback_pct = giveback_pct
+        self._last_runner_retention_ratio = retention_ratio
+
+        if realized_trade > 0.0:
+            self.runner_exit_profitable_count += 1
+            self.split_runner_profitable_count += 1
+            self.split_improved_total_trade_count += 1
+            self.runner_retained_profit_pct += retained_profit_pct
+        else:
+            self.split_runner_failed_count += 1
+            if forced_exit:
+                self.runner_forced_stop_count += 1
+        if giveback_pct > 0.0:
+            self.runner_giveback_pct += giveback_pct
+        elif realized_pct < 0.0 and peak_profit_pct <= 0.0 and entry_profit_pct <= 0.0:
+            self.runner_giveback_pct += abs(realized_pct)
+        elif entry_profit_pct > 0.0 and retained_profit_pct <= 0.0:
+            self.runner_giveback_pct += entry_profit_pct
+        return realized_pct
+
+    def _register_pyramid_exit_outcome(
+        self,
+        *,
+        had_pyramids: bool,
+        realized_trade: float,
+        trade_ret: float,
+        close_policy: dict[str, float],
+        baseline_trade_return: float | None = None,
+    ) -> float:
+        """Enregistre la qualite de sortie d'un trade pyramide.
+
+        Args:
+            had_pyramids (bool): Indique si le trade etait pyramide.
+            realized_trade (float): PnL final realise.
+            trade_ret (float): Rendement global du trade.
+            close_policy (dict[str, float]): Regles CLOSE utilisees.
+            baseline_trade_return (float | None): Rendement latent present avant
+                le premier ajout pyramidal du trade.
+
+        Returns:
+            float: Amelioration totale du trade attribuable au pyramiding,
+                exprimee en points de rendement.
+        """
+        if not had_pyramids:
+            return 0.0
+
+        baseline_return = (
+            float(baseline_trade_return)
+            if baseline_trade_return is not None
+            else float(self._pyramid_baseline_return if self._pyramid_baseline_active else 0.0)
+        )
+        trade_improvement_pct = max(0.0, (float(trade_ret) - baseline_return) * 100.0)
+        self.pyramid_total_trade_improvement_pct += trade_improvement_pct
+        if trade_improvement_pct <= 0.0:
+            self.pyramid_failed_to_improve_count += 1
+        if realized_trade > 0.0 and trade_ret > 0.0 and trade_improvement_pct > 0.0:
+            self.pyramid_profitable_exit_count += 1
+        self._pyramid_baseline_active = False
+        self._pyramid_baseline_return = 0.0
+        return trade_improvement_pct
+
+    def _compute_hold_drag_penalty(
+        self,
+        profitable_return: float,
+        hold_policy: dict[str, float],
+        hold_drag_multiplier: float,
+    ) -> float:
+        """Calcule une penalite HOLD bornee sur une opportunite de gestion.
+
+        Args:
+            profitable_return (float): Rendement latent positif du trade.
+            hold_policy (dict[str, float]): Regles HOLD actives.
+            hold_drag_multiplier (float): Multiplicateur de penalite issu du
+                profil de reward.
+
+        Returns:
+            float: Penalite a soustraire a la reward.
+        """
+        raw_penalty = max(0.0, profitable_return) * 100.0 * max(hold_drag_multiplier, 0.0)
+        penalty_cap = self._policy_float(hold_policy, "drag_penalty_cap", 1.25)
+        return min(raw_penalty, max(penalty_cap, 0.0))
+
+    def _compute_close_management_reward(
+        self,
+        *,
+        realized_trade: float,
+        trade_ret: float,
+        snapshot: dict[str, float | bool],
+        close_policy: dict[str, float],
+        pyramiding_policy: dict[str, float],
+        slbe_policy: dict[str, float],
+        reward_terms: dict[str, float],
+        close_realized_multiplier: float,
+        had_pyramids: bool,
+        pyramid_count_before_close: int,
+        had_locked_profit: bool,
+        runner_active_before_close: bool,
+        runner_protected_before_close: bool,
+        runner_steps_since_split: int | None,
+        split_trade_value_delta_pct: float,
+        runner_retained_profit_pct: float,
+        runner_giveback_pct: float,
+        runner_retention_ratio: float,
+        runner_giveback_ratio: float,
+        pyramid_trade_improvement_pct: float,
+        phase_scale: float,
+    ) -> float:
+        """Calcule la reward de pilotage sur une sortie choisie par l'agent.
+
+        Args:
+            realized_trade (float): PnL realise de la sortie.
+            trade_ret (float): Rendement du trade clos.
+            snapshot (dict[str, float | bool]): Instantane de gestion construit
+                avant l'action.
+            close_policy (dict[str, float]): Regles CLOSE.
+            pyramiding_policy (dict[str, float]): Regles de pyramiding.
+            slbe_policy (dict[str, float]): Regles SLBE.
+            reward_terms (dict[str, float]): Parametres de reward resolves.
+            close_realized_multiplier (float): Multiplicateur de reward sur
+                les sorties gagnantes.
+            had_pyramids (bool): Indique si la position avait ete pyramidée.
+            pyramid_count_before_close (int): Nombre d'ajouts avant la sortie.
+            had_locked_profit (bool): Indique si le SLBE etait deja en phase
+                de verrouillage de profit.
+            runner_active_before_close (bool): Indique si un runner issu d'un
+                split etait encore vivant.
+            runner_protected_before_close (bool): Indique si le runner etait
+                protege au moment de la sortie.
+            runner_steps_since_split (int | None): Age du runner depuis le
+                split initial.
+            split_trade_value_delta_pct (float): Valeur additionnelle apportee
+                par le runner sur le trade complet.
+            runner_retained_profit_pct (float): Profit effectivement retenu
+                par le runner au moment de la sortie.
+            runner_giveback_pct (float): Profit rendu au marche apres le pic
+                du runner.
+            runner_retention_ratio (float): Part du pic de profit finalement
+                conservee par le runner.
+            runner_giveback_ratio (float): Part du pic de profit rendue au
+                marche par le runner.
+            pyramid_trade_improvement_pct (float): Gain de sortie attribuable
+                au pyramiding sur le trade complet.
+            phase_scale (float): Intensite du shaping V5 pour la phase
+                d'entrainement courante.
+
+        Returns:
+            float: Ajustement de reward a appliquer.
+        """
+        phase_scale = max(0.0, float(phase_scale or 0.0))
+        core_reward = 0.0
+        management_adjustment = 0.0
+        strong_winner_threshold = float(close_policy.get("strong_winner_threshold", 0.02) or 0.02)
+        winner_threshold = float(close_policy.get("winner_threshold", 0.01) or 0.01)
+        tp_like_threshold = float(close_policy.get("tp_like_threshold", winner_threshold) or winner_threshold)
+        reversal_close_bonus = self._policy_float(close_policy, "reversal_close_bonus", 0.35)
+        early_profit_close_penalty = self._policy_float(
+            close_policy,
+            "early_profit_close_penalty",
+            0.20,
+        )
+        split_decorative_penalty = float(reward_terms.get("split_decorative_penalty", 0.15) or 0.15)
+        pyramid_exit_capture_bonus = float(reward_terms.get("pyramid_exit_capture_bonus", 0.35) or 0.35)
+        pyramid_trade_completion_bonus = float(
+            reward_terms.get("pyramid_trade_completion_bonus", 0.30) or 0.30
+        )
+        pyramid_stagnant_exit_penalty = float(
+            reward_terms.get("pyramid_stagnant_exit_penalty", 0.25) or 0.25
+        )
+        runner_protected_exit_bonus = float(
+            reward_terms.get("runner_protected_exit_bonus", 0.30) or 0.30
+        )
+        runner_retained_profit_bonus = float(
+            reward_terms.get("runner_retained_profit_bonus", 0.25) or 0.25
+        )
+        runner_trade_completion_bonus = float(
+            reward_terms.get("runner_trade_completion_bonus", 0.40) or 0.40
+        )
+        runner_giveback_penalty = float(
+            reward_terms.get("runner_giveback_penalty", 0.45) or 0.45
+        )
+        runner_giveback_ratio_penalty = float(
+            reward_terms.get("runner_giveback_ratio_penalty", 0.35) or 0.35
+        )
+        split_zone_capture_bonus = float(
+            reward_terms.get("split_zone_capture_bonus", 0.18) or 0.18
+        )
+        pyramid_add_capture_bonus = float(
+            reward_terms.get("pyramid_add_capture_bonus", 0.18) or 0.18
+        )
+        realized_pct = (realized_trade / self.spec.initial_balance) * 100.0
+        defensive_close = trade_ret > 0.0 and bool(snapshot.get("reversal_context", False))
+        offensive_close_zone = (
+            realized_trade > 0.0
+            and trade_ret > 0.0
+            and not defensive_close
+            and (
+                bool(snapshot.get("split_tp_zone_opportunity", False))
+                or bool(snapshot.get("runner_extension_opportunity", False))
+                or bool(snapshot.get("pyramid_add_opportunity", False))
+            )
+        )
+        early_close_noise = (
+            realized_trade > 0.0
+            and trade_ret > 0.0
+            and trade_ret < winner_threshold
+            and not defensive_close
+        )
+        near_hard_stop = bool(snapshot.get("near_hard_stop", False))
+        time_stop_expired = bool(snapshot.get("time_stop_expired", False))
+
+        if trade_ret > strong_winner_threshold:
+            core_reward += self.quality_mult * 1.5 + (realized_pct * close_realized_multiplier)
+            self.realized_close_bonus_count += 1
+        elif trade_ret > winner_threshold:
+            core_reward += self.quality_mult + (realized_pct * close_realized_multiplier)
+            self.realized_close_bonus_count += 1
+        elif defensive_close:
+            core_reward += max(realized_pct, -reversal_close_bonus * 0.5)
+            management_adjustment += reversal_close_bonus
+        elif realized_trade > 0:
+            core_reward += max(0.25, realized_pct * close_realized_multiplier)
+        else:
+            core_reward += realized_pct
+
+        if defensive_close:
+            self.defensive_close_count += 1
+            self.close_winner_count += 1
+        elif realized_trade > 0:
+            self.close_winner_count += 1
+        elif realized_trade < 0:
+            self.close_loser_count += 1
+
+        if trade_ret >= tp_like_threshold and realized_trade > 0:
+            self.tp_like_exit_count += 1
+
+        if early_close_noise:
+            self.early_close_noise_count += 1
+            management_adjustment -= early_profit_close_penalty
+        elif offensive_close_zone:
+            management_adjustment -= early_profit_close_penalty * 0.35
+
+        if near_hard_stop and bool(snapshot.get("reversal_context", False)):
+            self.forced_stop_near_miss_count += 1
+            management_adjustment += min(0.35, reversal_close_bonus)
+
+        if time_stop_expired and realized_trade > 0:
+            management_adjustment += 0.15
+
+        if had_pyramids and realized_trade > 0:
+            continuation_bonus = float(
+                pyramiding_policy.get("strong_trend_reward_bonus", 0.20) or 0.20
+            )
+            if pyramid_trade_improvement_pct > 0.0:
+                management_adjustment += continuation_bonus * max(1, min(pyramid_count_before_close, 2))
+                if trade_ret >= winner_threshold:
+                    management_adjustment += min(
+                        pyramid_trade_completion_bonus,
+                        max(0.10, pyramid_trade_improvement_pct * 0.25),
+                    )
+                    management_adjustment += min(
+                        pyramid_exit_capture_bonus,
+                        max(0.08, pyramid_trade_improvement_pct * 0.15),
+                    )
+                    management_adjustment += min(
+                        pyramid_add_capture_bonus,
+                        max(0.05, pyramid_trade_improvement_pct * 0.12),
+                    )
+            else:
+                management_adjustment -= max(
+                    float(reward_terms.get("pyramid_bad_add_penalty", 0.35) or 0.35) * 0.50,
+                    pyramid_stagnant_exit_penalty,
+                )
+
+        if had_locked_profit and realized_trade > 0:
+            management_adjustment += min(
+                1.0,
+                float(slbe_policy.get("exit_bonus", 0.0) or 0.0) * 0.35,
+            )
+
+        if runner_active_before_close:
+            if (
+                runner_steps_since_split is not None
+                and runner_steps_since_split <= 1
+                and not bool(snapshot.get("reversal_context", False))
+            ):
+                management_adjustment -= split_decorative_penalty
+            elif split_trade_value_delta_pct > 0.0:
+                management_adjustment += min(
+                    float(reward_terms.get("split_runner_profit_bonus", 0.45) or 0.45),
+                    max(0.10, split_trade_value_delta_pct * 0.25),
+                )
+                management_adjustment += min(
+                    split_zone_capture_bonus,
+                    max(0.05, split_trade_value_delta_pct * 0.15),
+                )
+                if runner_retained_profit_pct > 0.0:
+                    management_adjustment += min(
+                        runner_retained_profit_bonus,
+                        max(0.05, runner_retained_profit_pct * 0.20),
+                    )
+                if runner_retention_ratio > 0.0:
+                    management_adjustment += min(
+                        runner_trade_completion_bonus,
+                        max(0.05, runner_retention_ratio * runner_trade_completion_bonus),
+                    )
+                if runner_protected_before_close:
+                    management_adjustment += runner_protected_exit_bonus
+                if runner_giveback_pct > 0.0:
+                    management_adjustment -= min(
+                        runner_giveback_penalty,
+                        max(0.05, runner_giveback_pct * 0.25),
+                    )
+                if runner_giveback_ratio > 0.0:
+                    management_adjustment -= min(
+                        runner_giveback_ratio_penalty,
+                        max(0.05, runner_giveback_ratio * runner_giveback_ratio_penalty),
+                    )
+            elif split_trade_value_delta_pct < 0.0:
+                management_adjustment -= max(
+                    split_decorative_penalty * 0.5,
+                    abs(split_trade_value_delta_pct) * 0.40,
+                )
+                if runner_giveback_pct > 0.0:
+                    management_adjustment -= min(
+                        runner_giveback_penalty,
+                        max(0.05, runner_giveback_pct * 0.30),
+                    )
+                if runner_giveback_ratio > 0.0:
+                    management_adjustment -= min(
+                        runner_giveback_ratio_penalty,
+                        max(0.05, runner_giveback_ratio * runner_giveback_ratio_penalty),
+                    )
+            elif realized_trade <= 0.0 and not runner_protected_before_close:
+                management_adjustment -= split_decorative_penalty * 0.5
+                if runner_giveback_pct > 0.0:
+                    management_adjustment -= min(
+                        runner_giveback_penalty,
+                        max(0.05, runner_giveback_pct * 0.25),
+                    )
+                if runner_giveback_ratio > 0.0:
+                    management_adjustment -= min(
+                        runner_giveback_ratio_penalty,
+                        max(0.05, runner_giveback_ratio * runner_giveback_ratio_penalty),
+                    )
+
+        return core_reward + (management_adjustment * phase_scale)
 
     def _compute_soft_entry_quality_adjustment(
         self,
@@ -1341,6 +2576,13 @@ class TradingEnvironment:
         )
         if veto_reason is None:
             return action, None
+        if self._should_soften_training_root_veto(
+            action=action,
+            reason=veto_reason,
+            context=context,
+            entry_filter=self._get_active_entry_filter(),
+        ):
+            return action, None
 
         if veto_reason == "adx":
             self.entry_blocked_adx += 1
@@ -1385,6 +2627,52 @@ class TradingEnvironment:
             return 0.0
         return self._price_return(self.avg_entry_price, price, self.position_size)
 
+    def _get_unrealized_pnl_pct(self, price: float) -> float:
+        """Calcule la valeur latente de la position en pourcentage du capital.
+
+        Args:
+            price (float): Prix de marche courant.
+
+        Returns:
+            float: PnL latent normalise en pourcentage du capital initial.
+        """
+        if self.position_size == 0:
+            return 0.0
+        trade_ret = self._get_unrealized_return(price)
+        unrealized_trade = (trade_ret * abs(self.position_size)) - (
+            abs(self.position_size) * self.commission_rate
+        )
+        return (unrealized_trade / self.spec.initial_balance) * 100.0
+
+    def _update_runner_progress(self, price: float) -> None:
+        """Met a jour le pic de profit atteint par le runner actif.
+
+        Args:
+            price (float): Prix de marche courant.
+        """
+        if not self.runner_active or self.position_size == 0:
+            return
+        current_profit_pct = max(0.0, self._get_unrealized_pnl_pct(price))
+        self.runner_peak_profit_pct = max(self.runner_peak_profit_pct, current_profit_pct)
+
+    def _update_position_peak_progress(self, price: float) -> None:
+        """Met a jour le pic latent de profit de la position courante.
+
+        Args:
+            price (float): Prix de marche courant.
+        """
+        if self.position_size == 0:
+            self.position_peak_return = 0.0
+            self.peak_profit_age_steps = 0
+            return
+
+        current_trade_return = max(0.0, self._get_unrealized_return(price))
+        if current_trade_return > (self.position_peak_return + 1e-8):
+            self.position_peak_return = current_trade_return
+            self.peak_profit_age_steps = 0
+        elif self.position_peak_return > 0.0:
+            self.peak_profit_age_steps += 1
+
     def _realize_position(self, price: float, close_size: float | None = None) -> tuple[float, float]:
         """Réalise tout ou partie d'une position ouverte.
 
@@ -1426,8 +2714,10 @@ class TradingEnvironment:
             self.avg_entry_price = 0.0
             self.slbe_active = False
             self.slbe_price = 0.0
+            self.slbe_profit_locked = False
             self.position_pyramids = 0
             self.position_had_slbe = False
+            self._reset_exit_plan_state()
         elif self.position_size > 0:
             self.position_size -= realized_notional
         else:
@@ -1518,6 +2808,14 @@ class TradingEnvironment:
                 include_directional_hard_veto=True,
             )
             if veto_reason is None:
+                legal_actions.append(action)
+                continue
+            if self._should_soften_training_root_veto(
+                action=action,
+                reason=veto_reason,
+                context=context,
+                entry_filter=entry_filter,
+            ):
                 legal_actions.append(action)
                 continue
             self._register_root_mask_block(action, veto_reason)
@@ -1687,6 +2985,78 @@ class TradingEnvironment:
             "pyramid_negative_exit_penalty": float(
                 reward_policy.get("pyramid_negative_exit_penalty", 0.0) or 0.0
             ),
+            "split_runner_profit_bonus": float(
+                reward_policy.get("split_runner_profit_bonus", 0.45) or 0.45
+            ),
+            "split_early_zone_penalty": float(
+                reward_policy.get("split_early_zone_penalty", 0.25) or 0.25
+            ),
+            "split_decorative_penalty": float(
+                reward_policy.get("split_decorative_penalty", 0.15) or 0.15
+            ),
+            "pyramid_exit_capture_bonus": float(
+                reward_policy.get("pyramid_exit_capture_bonus", 0.35) or 0.35
+            ),
+            "pyramid_bad_add_penalty": float(
+                reward_policy.get("pyramid_bad_add_penalty", 0.35) or 0.35
+            ),
+            "runner_protected_exit_bonus": float(
+                reward_policy.get("runner_protected_exit_bonus", 0.30) or 0.30
+            ),
+            "runner_hold_capture_bonus": float(
+                reward_policy.get("runner_hold_capture_bonus", 0.10) or 0.10
+            ),
+            "split_zone_capture_bonus": float(
+                reward_policy.get("split_zone_capture_bonus", 0.18) or 0.18
+            ),
+            "split_window_activation_bonus": float(
+                reward_policy.get("split_window_activation_bonus", 0.14) or 0.14
+            ),
+            "runner_extension_capture_bonus": float(
+                reward_policy.get("runner_extension_capture_bonus", 0.22) or 0.22
+            ),
+            "runner_missed_extension_penalty": float(
+                reward_policy.get("runner_missed_extension_penalty", 0.10) or 0.10
+            ),
+            "runner_trade_completion_bonus": float(
+                reward_policy.get("runner_trade_completion_bonus", 0.40) or 0.40
+            ),
+            "runner_giveback_penalty": float(
+                reward_policy.get("runner_giveback_penalty", 0.45) or 0.45
+            ),
+            "runner_giveback_ratio_penalty": float(
+                reward_policy.get("runner_giveback_ratio_penalty", 0.35) or 0.35
+            ),
+            "runner_giveback_soft_penalty": float(
+                reward_policy.get("runner_giveback_soft_penalty", 0.10) or 0.10
+            ),
+            "runner_giveback_hard_penalty": float(
+                reward_policy.get("runner_giveback_hard_penalty", 0.22) or 0.22
+            ),
+            "runner_retained_profit_bonus": float(
+                reward_policy.get("runner_retained_profit_bonus", 0.25) or 0.25
+            ),
+            "pyramid_trade_completion_bonus": float(
+                reward_policy.get("pyramid_trade_completion_bonus", 0.30) or 0.30
+            ),
+            "pyramid_stagnant_exit_penalty": float(
+                reward_policy.get("pyramid_stagnant_exit_penalty", 0.25) or 0.25
+            ),
+            "pyramid_hold_capture_bonus": float(
+                reward_policy.get("pyramid_hold_capture_bonus", 0.10) or 0.10
+            ),
+            "pyramid_window_activation_bonus": float(
+                reward_policy.get("pyramid_window_activation_bonus", 0.12) or 0.12
+            ),
+            "pyramid_add_capture_bonus": float(
+                reward_policy.get("pyramid_add_capture_bonus", 0.18) or 0.18
+            ),
+            "pyramid_missed_add_penalty": float(
+                reward_policy.get("pyramid_missed_add_penalty", 0.12) or 0.12
+            ),
+            "missed_window_penalty": float(
+                reward_policy.get("missed_window_penalty", 0.05) or 0.05
+            ),
             "soft_countertrend_ema_penalty": float(
                 reward_policy.get("soft_countertrend_ema_penalty", 0.0) or 0.0
             ),
@@ -1804,11 +3174,13 @@ class TradingEnvironment:
         split_policy = dict(self.position_mechanics_profile.get("split_policy") or {})
         slbe_policy = dict(self.position_mechanics_profile.get("slbe_policy") or {})
         close_policy = dict(self.position_mechanics_profile.get("close_policy") or {})
+        exit_plan_policy = dict(self.position_mechanics_profile.get("exit_plan_policy") or {})
         hold_policy = dict(self.position_mechanics_profile.get("hold_policy") or {})
         activity_policy = dict(self.position_mechanics_profile.get("activity_policy") or {})
         directional_policy = dict(self.position_mechanics_profile.get("directional_policy") or {})
         reward_policy = dict(self.position_mechanics_profile.get("reward_policy") or {})
         reward_terms = self._resolve_reward_policy_terms(reward_policy)
+        exit_reward_phase_scale = self._resolve_exit_reward_phase_scale()
         realized_reward_multiplier = reward_terms["realized_reward_multiplier"]
         close_realized_multiplier = reward_terms["close_realized_multiplier"]
         split_realized_multiplier = reward_terms["split_realized_multiplier"]
@@ -1818,19 +3190,6 @@ class TradingEnvironment:
         max_position = (1 + int(pyramiding_policy.get("max_additions", 1))) * trade_notional
         active_entry_filter = self._get_active_entry_filter()
 
-        if self.slbe_active and self.position_size != 0:
-            hit = False
-            if self.position_size > 0 and price <= self.slbe_price:
-                hit = True
-            elif self.position_size < 0 and price >= self.slbe_price:
-                hit = True
-            if hit:
-                realized_trade, _ = self._realize_position(price)
-                realized_pnl += realized_trade
-                reward += 1.0 + float(slbe_policy.get("exit_bonus", 0.0) or 0.0)
-                if realized_trade > 0:
-                    self.slbe_exit_bonus_count += 1
-
         if not self.slbe_active and self.position_size != 0:
             unr = self._get_unrealized_return(price)
             activation_return = float(slbe_policy.get("activation_return", 0.005) or 0.005)
@@ -1838,11 +3197,142 @@ class TradingEnvironment:
                 self.slbe_active = True
                 self.slbe_price = self.avg_entry_price
                 self.position_had_slbe = True
+                self.slbe_profit_locked = False
+                if self.runner_active:
+                    self.runner_protected = True
                 self.slbe_triggered += 1
                 self.secured_count += 1
-                reward += float(slbe_policy.get("bonus", self.slbe_bonus) or self.slbe_bonus)
+                reward += (
+                    float(slbe_policy.get("bonus", self.slbe_bonus) or self.slbe_bonus)
+                    * exit_reward_phase_scale
+                )
 
-        requested_action = action
+        if self.slbe_active and self.position_size != 0:
+            lock_profit_return = self._policy_float(slbe_policy, "lock_profit_return", 0.0075)
+            lock_profit_buffer = self._policy_float(slbe_policy, "lock_profit_buffer", 0.0010)
+            unr = self._get_unrealized_return(price)
+            if not self.slbe_profit_locked and unr >= lock_profit_return:
+                if self.position_size > 0:
+                    self.slbe_price = max(
+                        self.slbe_price,
+                        self.avg_entry_price * (1.0 + lock_profit_buffer),
+                    )
+                else:
+                    self.slbe_price = min(
+                        self.slbe_price,
+                        self.avg_entry_price * (1.0 - lock_profit_buffer),
+                    )
+                self.slbe_profit_locked = True
+                if self.runner_active:
+                    self.runner_protected = True
+                self.slbe_lock_profit_count += 1
+
+            hit = False
+            if self.position_size > 0 and price <= self.slbe_price:
+                hit = True
+            elif self.position_size < 0 and price >= self.slbe_price:
+                hit = True
+            if hit:
+                had_locked_profit = self.slbe_profit_locked
+                runner_exit_context = self._capture_runner_exit_context()
+                had_runner = bool(runner_exit_context.get("active"))
+                realized_trade, _ = self._realize_position(price)
+                realized_pnl += realized_trade
+                _ = self._register_runner_exit_outcome(
+                    realized_trade=realized_trade,
+                    forced_exit=had_runner,
+                    runner_was_active=had_runner,
+                    runner_peak_profit_pct=float(runner_exit_context.get("peak_profit_pct") or 0.0),
+                    runner_entry_profit_pct=float(runner_exit_context.get("entry_profit_pct") or 0.0),
+                )
+                reward += 1.0 + float(slbe_policy.get("exit_bonus", 0.0) or 0.0)
+                if realized_trade > 0:
+                    self.slbe_exit_bonus_count += 1
+                    if had_locked_profit:
+                        reward += (
+                            min(
+                                1.0,
+                                float(slbe_policy.get("exit_bonus", 0.0) or 0.0) * 0.35,
+                            )
+                            * exit_reward_phase_scale
+                        )
+
+        if self.position_size != 0:
+            self._update_position_peak_progress(price)
+            self._update_runner_progress(price)
+            self._mark_exit_plan_hits(price=price)
+
+        forced_hard_stop = False
+        if self.position_size != 0 and self._hard_stop_triggered(price):
+            forced_hard_stop = True
+            stop_price = float(self.hard_stop_price or price)
+            runner_exit_context = self._capture_runner_exit_context()
+            had_runner = bool(runner_exit_context.get("active"))
+            realized_trade, trade_ret = self._realize_position(stop_price)
+            realized_pnl += realized_trade
+            self._register_runner_exit_outcome(
+                realized_trade=realized_trade,
+                forced_exit=had_runner,
+                runner_was_active=had_runner,
+                runner_peak_profit_pct=float(runner_exit_context.get("peak_profit_pct") or 0.0),
+                runner_entry_profit_pct=float(runner_exit_context.get("entry_profit_pct") or 0.0),
+            )
+            self.hard_stop_exit_count += 1
+            self.close_loser_count += 1
+            reward += (
+                min(
+                    -0.10,
+                    (realized_trade / self.spec.initial_balance) * 100.0 - 0.10,
+                )
+                * exit_reward_phase_scale
+            )
+
+        management_snapshot = self._build_position_management_snapshot(
+            price=price,
+            context=context,
+            entry_filter=active_entry_filter,
+            hold_policy=hold_policy,
+            split_policy=split_policy,
+            pyramiding_policy=pyramiding_policy,
+            close_policy=close_policy,
+            exit_plan_policy=exit_plan_policy,
+            trade_notional=trade_notional,
+        )
+        self._register_position_management_opportunities(management_snapshot)
+        position_before_action = float(self.position_size)
+        split_tp_zone_opportunity = bool(
+            management_snapshot.get("split_tp_zone_opportunity", False)
+        )
+        split_monetization_window = bool(
+            management_snapshot.get("split_monetization_window", False)
+        )
+        runner_extension_opportunity = bool(
+            management_snapshot.get("runner_extension_opportunity", False)
+        )
+        runner_profit_hold_window = bool(
+            management_snapshot.get("runner_profit_hold_window", False)
+        )
+        pyramid_add_opportunity = bool(
+            management_snapshot.get("pyramid_add_opportunity", False)
+        )
+        pyramid_monetization_window = bool(
+            management_snapshot.get("pyramid_monetization_window", False)
+        )
+        if bool(management_snapshot.get("near_hard_stop", False)) and (
+            split_monetization_window
+            or runner_profit_hold_window
+            or pyramid_monetization_window
+        ):
+            # Une fenetre offensive peut rester exploitable pres du stop, mais
+            # elle doit couter un peu plus cher pour pousser le modele a
+            # monetiser vite.
+            reward -= 0.03 * exit_reward_phase_scale
+        runner_extension_captured = False
+        pyramid_add_captured = False
+
+        requested_action = HOLD if forced_hard_stop else action
+        if forced_hard_stop:
+            action = HOLD
         if requested_action == BUY:
             self.requested_buy_actions += 1
         elif requested_action == SELL:
@@ -1868,12 +3358,61 @@ class TradingEnvironment:
 
         if action == BUY:
             self._flush_hold_streak()
+            self._current_hold_drag_streak = 0
             if self.position_size < 0:
                 had_pyramids = self.position_pyramids > 0
-                realized_trade, _ = self._realize_position(price)
+                pyramid_count_before_close = self.position_pyramids
+                pyramid_baseline_return = (
+                    float(self._pyramid_baseline_return)
+                    if self._pyramid_baseline_active
+                    else None
+                )
+                had_locked_profit = self.slbe_profit_locked
+                runner_exit_context = self._capture_runner_exit_context()
+                runner_active_before_close = bool(runner_exit_context.get("active"))
+                runner_protected_before_close = bool(runner_exit_context.get("protected"))
+                runner_steps_since_split = runner_exit_context.get("steps_since_split")
+                realized_trade, trade_ret = self._realize_position(price)
                 realized_pnl += realized_trade
+                split_trade_value_delta_pct = self._register_runner_exit_outcome(
+                    realized_trade=realized_trade,
+                    forced_exit=False,
+                    runner_was_active=runner_active_before_close,
+                    runner_peak_profit_pct=float(runner_exit_context.get("peak_profit_pct") or 0.0),
+                    runner_entry_profit_pct=float(runner_exit_context.get("entry_profit_pct") or 0.0),
+                )
+                pyramid_trade_improvement_pct = self._register_pyramid_exit_outcome(
+                    had_pyramids=had_pyramids,
+                    realized_trade=realized_trade,
+                    trade_ret=trade_ret,
+                    close_policy=close_policy,
+                    baseline_trade_return=pyramid_baseline_return,
+                )
+                reward += self._compute_close_management_reward(
+                    realized_trade=realized_trade,
+                    trade_ret=trade_ret,
+                    snapshot=management_snapshot,
+                    close_policy=close_policy,
+                    pyramiding_policy=pyramiding_policy,
+                    slbe_policy=slbe_policy,
+                    reward_terms=reward_terms,
+                    close_realized_multiplier=close_realized_multiplier,
+                    had_pyramids=had_pyramids,
+                    pyramid_count_before_close=pyramid_count_before_close,
+                    had_locked_profit=had_locked_profit,
+                    runner_active_before_close=runner_active_before_close,
+                    runner_protected_before_close=runner_protected_before_close,
+                    runner_steps_since_split=runner_steps_since_split,
+                    split_trade_value_delta_pct=split_trade_value_delta_pct,
+                    runner_retained_profit_pct=self._last_runner_retained_profit_pct,
+                    runner_giveback_pct=self._last_runner_giveback_pct,
+                    runner_retention_ratio=self._last_runner_retention_ratio,
+                    runner_giveback_ratio=max(0.0, 1.0 - self._last_runner_retention_ratio),
+                    pyramid_trade_improvement_pct=pyramid_trade_improvement_pct,
+                    phase_scale=exit_reward_phase_scale,
+                )
                 if realized_trade < 0 and had_pyramids and pyramid_negative_exit_penalty > 0:
-                    reward -= pyramid_negative_exit_penalty
+                    reward -= pyramid_negative_exit_penalty * exit_reward_phase_scale
 
             if self.position_size == 0:
                 self.balance -= trade_notional * self.commission_rate
@@ -1882,6 +3421,16 @@ class TradingEnvironment:
                 self.split_count = 0
                 self.position_pyramids = 0
                 self.position_had_slbe = False
+                self.slbe_profit_locked = False
+                self._configure_exit_plan(
+                    price=price,
+                    context=context,
+                    hold_policy=hold_policy,
+                    close_policy=close_policy,
+                    slbe_policy=slbe_policy,
+                    exit_plan_policy=exit_plan_policy,
+                    reset_progress=True,
+                )
                 reward += self._compute_soft_entry_quality_adjustment(
                     BUY,
                     context,
@@ -1900,27 +3449,127 @@ class TradingEnvironment:
                     total_value = (self.position_size * self.avg_entry_price) + (trade_notional * price)
                     self.position_size += trade_notional
                     self.avg_entry_price = total_value / self.position_size
+                    if not self._pyramid_baseline_active:
+                        self._pyramid_baseline_active = True
+                        self._pyramid_baseline_return = float(curr_pnl)
                     self.position_pyramids += 1
                     self.pyramids_opened += 1
-                    reward += 0.5 * self._compute_soft_entry_quality_adjustment(
+                    if pyramid_monetization_window or bool(
+                        management_snapshot.get("offensive_continuation_support", False)
+                    ):
+                        self.pyramid_good_add_count += 1
+                    else:
+                        self.pyramid_bad_add_count += 1
+                    self._configure_exit_plan(
+                        price=price,
+                        context=context,
+                        hold_policy=hold_policy,
+                        close_policy=close_policy,
+                        slbe_policy=slbe_policy,
+                        exit_plan_policy=exit_plan_policy,
+                        reset_progress=True,
+                    )
+                    reward += 0.35 * self._compute_soft_entry_quality_adjustment(
                         BUY,
                         context,
                         active_entry_filter,
                         reward_terms,
                     )
-                    reward += float(pyramiding_policy.get("reward_bonus", 0.1) or 0.1)
+                    reward += (
+                        float(pyramiding_policy.get("reward_bonus", 0.1) or 0.1)
+                        * 0.25
+                        * exit_reward_phase_scale
+                    )
+                    if bool(management_snapshot.get("strong_trend_support", False)):
+                        reward += (
+                            self._policy_float(
+                                pyramiding_policy,
+                                "strong_trend_reward_bonus",
+                                0.20,
+                            )
+                            * 0.25
+                            * exit_reward_phase_scale
+                        )
+                    elif bool(management_snapshot.get("offensive_continuation_support", False)):
+                        reward += (
+                            self._policy_float(
+                                pyramiding_policy,
+                                "strong_trend_reward_bonus",
+                                0.20,
+                            )
+                            * 0.12
+                            * exit_reward_phase_scale
+                        )
+                    if pyramid_add_opportunity:
+                        self.pyramid_add_capture_count += 1
+                        if pyramid_monetization_window:
+                            self.pyramid_monetization_capture_count += 1
+                        pyramid_add_captured = True
+                        reward += reward_terms["pyramid_window_activation_bonus"] * exit_reward_phase_scale
+                        reward += reward_terms["pyramid_add_capture_bonus"] * exit_reward_phase_scale
+                    else:
+                        reward -= reward_terms["pyramid_bad_add_penalty"] * exit_reward_phase_scale
                 else:
                     self.pyramids_rejected += 1
-                    reward -= pyramid_reject_penalty
+                    reward -= pyramid_reject_penalty * exit_reward_phase_scale
 
         elif action == SELL:
             self._flush_hold_streak()
+            self._current_hold_drag_streak = 0
             if self.position_size > 0:
                 had_pyramids = self.position_pyramids > 0
-                realized_trade, _ = self._realize_position(price)
+                pyramid_count_before_close = self.position_pyramids
+                pyramid_baseline_return = (
+                    float(self._pyramid_baseline_return)
+                    if self._pyramid_baseline_active
+                    else None
+                )
+                had_locked_profit = self.slbe_profit_locked
+                runner_exit_context = self._capture_runner_exit_context()
+                runner_active_before_close = bool(runner_exit_context.get("active"))
+                runner_protected_before_close = bool(runner_exit_context.get("protected"))
+                runner_steps_since_split = runner_exit_context.get("steps_since_split")
+                realized_trade, trade_ret = self._realize_position(price)
                 realized_pnl += realized_trade
+                split_trade_value_delta_pct = self._register_runner_exit_outcome(
+                    realized_trade=realized_trade,
+                    forced_exit=False,
+                    runner_was_active=runner_active_before_close,
+                    runner_peak_profit_pct=float(runner_exit_context.get("peak_profit_pct") or 0.0),
+                    runner_entry_profit_pct=float(runner_exit_context.get("entry_profit_pct") or 0.0),
+                )
+                pyramid_trade_improvement_pct = self._register_pyramid_exit_outcome(
+                    had_pyramids=had_pyramids,
+                    realized_trade=realized_trade,
+                    trade_ret=trade_ret,
+                    close_policy=close_policy,
+                    baseline_trade_return=pyramid_baseline_return,
+                )
+                reward += self._compute_close_management_reward(
+                    realized_trade=realized_trade,
+                    trade_ret=trade_ret,
+                    snapshot=management_snapshot,
+                    close_policy=close_policy,
+                    pyramiding_policy=pyramiding_policy,
+                    slbe_policy=slbe_policy,
+                    reward_terms=reward_terms,
+                    close_realized_multiplier=close_realized_multiplier,
+                    had_pyramids=had_pyramids,
+                    pyramid_count_before_close=pyramid_count_before_close,
+                    had_locked_profit=had_locked_profit,
+                    runner_active_before_close=runner_active_before_close,
+                    runner_protected_before_close=runner_protected_before_close,
+                    runner_steps_since_split=runner_steps_since_split,
+                    split_trade_value_delta_pct=split_trade_value_delta_pct,
+                    runner_retained_profit_pct=self._last_runner_retained_profit_pct,
+                    runner_giveback_pct=self._last_runner_giveback_pct,
+                    runner_retention_ratio=self._last_runner_retention_ratio,
+                    runner_giveback_ratio=max(0.0, 1.0 - self._last_runner_retention_ratio),
+                    pyramid_trade_improvement_pct=pyramid_trade_improvement_pct,
+                    phase_scale=exit_reward_phase_scale,
+                )
                 if realized_trade < 0 and had_pyramids and pyramid_negative_exit_penalty > 0:
-                    reward -= pyramid_negative_exit_penalty
+                    reward -= pyramid_negative_exit_penalty * exit_reward_phase_scale
 
             if self.position_size == 0:
                 self.balance -= trade_notional * self.commission_rate
@@ -1929,6 +3578,16 @@ class TradingEnvironment:
                 self.split_count = 0
                 self.position_pyramids = 0
                 self.position_had_slbe = False
+                self.slbe_profit_locked = False
+                self._configure_exit_plan(
+                    price=price,
+                    context=context,
+                    hold_policy=hold_policy,
+                    close_policy=close_policy,
+                    slbe_policy=slbe_policy,
+                    exit_plan_policy=exit_plan_policy,
+                    reset_progress=True,
+                )
                 reward += self._compute_soft_entry_quality_adjustment(
                     SELL,
                     context,
@@ -1947,84 +3606,264 @@ class TradingEnvironment:
                     total_value = (abs(self.position_size) * self.avg_entry_price) + (trade_notional * price)
                     self.position_size -= trade_notional
                     self.avg_entry_price = total_value / abs(self.position_size)
+                    if not self._pyramid_baseline_active:
+                        self._pyramid_baseline_active = True
+                        self._pyramid_baseline_return = float(curr_pnl)
                     self.position_pyramids += 1
                     self.pyramids_opened += 1
-                    reward += 0.5 * self._compute_soft_entry_quality_adjustment(
+                    if pyramid_monetization_window or bool(
+                        management_snapshot.get("offensive_continuation_support", False)
+                    ):
+                        self.pyramid_good_add_count += 1
+                    else:
+                        self.pyramid_bad_add_count += 1
+                    self._configure_exit_plan(
+                        price=price,
+                        context=context,
+                        hold_policy=hold_policy,
+                        close_policy=close_policy,
+                        slbe_policy=slbe_policy,
+                        exit_plan_policy=exit_plan_policy,
+                        reset_progress=True,
+                    )
+                    reward += 0.35 * self._compute_soft_entry_quality_adjustment(
                         SELL,
                         context,
                         active_entry_filter,
                         reward_terms,
                     )
-                    reward += float(pyramiding_policy.get("reward_bonus", 0.1) or 0.1)
+                    reward += (
+                        float(pyramiding_policy.get("reward_bonus", 0.1) or 0.1)
+                        * 0.25
+                        * exit_reward_phase_scale
+                    )
+                    if bool(management_snapshot.get("strong_trend_support", False)):
+                        reward += (
+                            self._policy_float(
+                                pyramiding_policy,
+                                "strong_trend_reward_bonus",
+                                0.20,
+                            )
+                            * 0.25
+                            * exit_reward_phase_scale
+                        )
+                    elif bool(management_snapshot.get("offensive_continuation_support", False)):
+                        reward += (
+                            self._policy_float(
+                                pyramiding_policy,
+                                "strong_trend_reward_bonus",
+                                0.20,
+                            )
+                            * 0.12
+                            * exit_reward_phase_scale
+                        )
+                    if pyramid_add_opportunity:
+                        self.pyramid_add_capture_count += 1
+                        if pyramid_monetization_window:
+                            self.pyramid_monetization_capture_count += 1
+                        pyramid_add_captured = True
+                        reward += reward_terms["pyramid_window_activation_bonus"] * exit_reward_phase_scale
+                        reward += reward_terms["pyramid_add_capture_bonus"] * exit_reward_phase_scale
+                    else:
+                        reward -= reward_terms["pyramid_bad_add_penalty"] * exit_reward_phase_scale
                 else:
                     self.pyramids_rejected += 1
-                    reward -= pyramid_reject_penalty
+                    reward -= pyramid_reject_penalty * exit_reward_phase_scale
 
         elif action == SPLIT and abs(self.position_size) > 0:
             self._flush_hold_streak()
+            self._current_hold_drag_streak = 0
             max_splits = int(split_policy.get("max_splits", 3) or 3)
             min_trade_return = float(split_policy.get("min_trade_return", 0.01) or 0.01)
             min_realized_pct = float(split_policy.get("min_realized_pct", 0.0) or 0.0)
+            soft_partial_value_floor = self._policy_float(
+                split_policy,
+                "soft_partial_value_floor",
+                0.010,
+            )
             current_trade_return = self._get_unrealized_return(price)
+            runner_protected = bool(self.slbe_active)
+            split_performed = False
+            split_realized_trade = 0.0
+            split_realized_pct = 0.0
+            split_useful = False
+            split_neutral = False
+            split_destructive = False
+            split_early = False
+            in_tp_zone = bool(
+                management_snapshot.get("soft_tp_hit", False)
+                or management_snapshot.get("full_tp_hit", False)
+                or current_trade_return >= float(management_snapshot.get("tp_like_threshold", 0.0) or 0.0)
+            )
             if self.split_count < max_splits and current_trade_return >= min_trade_return:
                 realized_trade, trade_ret = self._realize_position(price, abs(self.position_size) * 0.5)
                 realized_pnl += realized_trade
-                realized_pct = (realized_trade / self.spec.initial_balance) * 100.0
+                split_realized_trade = realized_trade
+                split_realized_pct = (realized_trade / self.spec.initial_balance) * 100.0
                 self.split_count += 1
                 self.split_executed += 1
-                if realized_pct >= min_realized_pct:
-                    reward += self.quality_mult + (realized_pct * split_realized_multiplier)
+                split_performed = True
+                if split_realized_pct >= min_realized_pct and in_tp_zone and realized_trade > 0.0:
+                    reward += (
+                        self.quality_mult * 0.35 * exit_reward_phase_scale
+                    ) + (split_realized_pct * split_realized_multiplier * 0.35)
                     self.split_profitable_count += 1
                     self.realized_split_bonus_count += 1
+                    split_useful = True
+                    if split_monetization_window:
+                        self.split_monetization_capture_count += 1
+                        reward += reward_terms["split_window_activation_bonus"] * exit_reward_phase_scale
+                    if split_tp_zone_opportunity or split_monetization_window:
+                        reward += reward_terms["split_zone_capture_bonus"] * exit_reward_phase_scale
                 elif realized_trade > 0:
-                    reward += max(0.25, realized_pct * split_realized_multiplier)
+                    if split_realized_pct >= soft_partial_value_floor:
+                        reward += (
+                            max(0.05, split_realized_pct * split_realized_multiplier * 0.35)
+                            * exit_reward_phase_scale
+                        )
+                        split_neutral = True
+                    else:
+                        reward += 0.02 * exit_reward_phase_scale
+                        split_neutral = True
+                    if split_monetization_window:
+                        self.split_monetization_capture_count += 1
+                        reward += reward_terms["split_window_activation_bonus"] * exit_reward_phase_scale
                 else:
                     self.split_rejected_no_value += 1
-                    reward -= float(split_policy.get("failure_penalty", 0.25) or 0.25)
+                    split_destructive = True
+                    reward -= (
+                        float(split_policy.get("failure_penalty", 0.25) or 0.25)
+                        * exit_reward_phase_scale
+                    )
             else:
                 self.split_rejected += 1
                 self.split_rejected_no_value += 1
-                reward -= float(split_policy.get("failure_penalty", 0.25) or 0.25)
+                split_destructive = True
+                reward -= (
+                    float(split_policy.get("failure_penalty", 0.25) or 0.25)
+                    * exit_reward_phase_scale
+                )
 
             if (
-                self.position_size != 0
+                split_performed
+                and self.position_size != 0
                 and not self.slbe_active
                 and bool(split_policy.get("slbe_after_split", True))
             ):
                 self.slbe_active = True
                 self.slbe_price = self.avg_entry_price
                 self.position_had_slbe = True
+                self.slbe_profit_locked = False
                 self.slbe_triggered += 1
-                reward += 2.0
+                reward += 0.50 * exit_reward_phase_scale
+                runner_protected = True
+                self.runner_protected = True
+
+            if (
+                split_realized_trade > 0.0
+                and runner_protected
+                and in_tp_zone
+                and bool(split_policy.get("slbe_after_split", True))
+            ):
+                reward += (
+                    self._policy_float(split_policy, "post_split_slbe_bonus", 0.60)
+                    * exit_reward_phase_scale
+                )
+                if bool(
+                    management_snapshot.get("soft_tp_hit", False)
+                    or management_snapshot.get("full_tp_hit", False)
+                ):
+                    self._activate_runner_extension(
+                        price=price,
+                        context=context,
+                        exit_plan_policy=exit_plan_policy,
+                    )
+                    reward += 0.20 * exit_reward_phase_scale
+
+            if split_performed and self.position_size != 0:
+                self._mark_runner_after_split(
+                    price=price,
+                    runner_protected=runner_protected,
+                    context=context,
+                    exit_plan_policy=exit_plan_policy,
+                )
+
+            if split_performed:
+                split_early = not in_tp_zone
+                if split_neutral:
+                    self.split_decorative_count += 1
+                    reward -= reward_terms["split_decorative_penalty"] * exit_reward_phase_scale
+                    if split_early:
+                        self.split_early_count += 1
+                        reward -= reward_terms["split_early_zone_penalty"] * exit_reward_phase_scale
+                else:
+                    split_destructive = True
+
+                if split_destructive:
+                    self.split_runner_failed_count += 1
+                    if split_early:
+                        self.split_early_count += 1
+                        reward -= reward_terms["split_early_zone_penalty"] * exit_reward_phase_scale
+                    else:
+                        self.split_decorative_count += 1
+                        reward -= reward_terms["split_decorative_penalty"] * exit_reward_phase_scale
 
         elif action == CLOSE and abs(self.position_size) > 0:
             self._flush_hold_streak()
+            self._current_hold_drag_streak = 0
             had_pyramids = self.position_pyramids > 0
+            pyramid_count_before_close = self.position_pyramids
+            pyramid_baseline_return = (
+                float(self._pyramid_baseline_return)
+                if self._pyramid_baseline_active
+                else None
+            )
+            had_locked_profit = self.slbe_profit_locked
+            runner_exit_context = self._capture_runner_exit_context()
+            runner_active_before_close = bool(runner_exit_context.get("active"))
+            runner_protected_before_close = bool(runner_exit_context.get("protected"))
+            runner_steps_since_split = runner_exit_context.get("steps_since_split")
             realized_trade, trade_ret = self._realize_position(price)
             realized_pnl += realized_trade
-
-            strong_winner_threshold = float(close_policy.get("strong_winner_threshold", 0.02) or 0.02)
-            winner_threshold = float(close_policy.get("winner_threshold", 0.01) or 0.01)
-            tp_like_threshold = float(close_policy.get("tp_like_threshold", winner_threshold) or winner_threshold)
-            realized_pct = (realized_trade / self.spec.initial_balance) * 100.0
-            if trade_ret > strong_winner_threshold:
-                reward += self.quality_mult * 1.5 + (realized_pct * close_realized_multiplier)
-                self.realized_close_bonus_count += 1
-            elif trade_ret > winner_threshold:
-                reward += self.quality_mult + (realized_pct * close_realized_multiplier)
-                self.realized_close_bonus_count += 1
-            elif realized_trade > 0:
-                reward += max(0.25, realized_pct * close_realized_multiplier)
-            else:
-                reward += realized_pct
-            if realized_trade > 0:
-                self.close_winner_count += 1
-                if trade_ret >= tp_like_threshold:
-                    self.tp_like_exit_count += 1
-            elif realized_trade < 0:
-                self.close_loser_count += 1
-                if had_pyramids and pyramid_negative_exit_penalty > 0:
-                    reward -= pyramid_negative_exit_penalty
+            split_trade_value_delta_pct = self._register_runner_exit_outcome(
+                realized_trade=realized_trade,
+                forced_exit=False,
+                runner_was_active=runner_active_before_close,
+                runner_peak_profit_pct=float(runner_exit_context.get("peak_profit_pct") or 0.0),
+                runner_entry_profit_pct=float(runner_exit_context.get("entry_profit_pct") or 0.0),
+            )
+            pyramid_trade_improvement_pct = self._register_pyramid_exit_outcome(
+                had_pyramids=had_pyramids,
+                realized_trade=realized_trade,
+                trade_ret=trade_ret,
+                close_policy=close_policy,
+                baseline_trade_return=pyramid_baseline_return,
+            )
+            reward += self._compute_close_management_reward(
+                realized_trade=realized_trade,
+                trade_ret=trade_ret,
+                snapshot=management_snapshot,
+                close_policy=close_policy,
+                pyramiding_policy=pyramiding_policy,
+                slbe_policy=slbe_policy,
+                reward_terms=reward_terms,
+                close_realized_multiplier=close_realized_multiplier,
+                had_pyramids=had_pyramids,
+                pyramid_count_before_close=pyramid_count_before_close,
+                had_locked_profit=had_locked_profit,
+                runner_active_before_close=runner_active_before_close,
+                runner_protected_before_close=runner_protected_before_close,
+                runner_steps_since_split=runner_steps_since_split,
+                split_trade_value_delta_pct=split_trade_value_delta_pct,
+                runner_retained_profit_pct=self._last_runner_retained_profit_pct,
+                runner_giveback_pct=self._last_runner_giveback_pct,
+                runner_retention_ratio=self._last_runner_retention_ratio,
+                runner_giveback_ratio=max(0.0, 1.0 - self._last_runner_retention_ratio),
+                pyramid_trade_improvement_pct=pyramid_trade_improvement_pct,
+                phase_scale=exit_reward_phase_scale,
+            )
+            if realized_trade < 0 and had_pyramids and pyramid_negative_exit_penalty > 0:
+                reward -= pyramid_negative_exit_penalty * exit_reward_phase_scale
 
         else:
             self._current_hold_streak += 1
@@ -2043,13 +3882,155 @@ class TradingEnvironment:
                 reward -= stale_penalty
             if context["adx"] >= trend_adx:
                 reward -= trend_penalty
-                self.hold_under_trend_penalty_count += 1
-                if self.position_size != 0:
-                    profitable_return = max(0.0, self._get_unrealized_return(price))
-                    if profitable_return > 0:
-                        reward -= profitable_return * 100.0 * hold_drag_multiplier
             else:
                 reward -= range_penalty
+            if runner_profit_hold_window:
+                trade_ret = max(0.0, float(management_snapshot.get("trade_ret", 0.0) or 0.0))
+                peak_trade_return = max(
+                    trade_ret,
+                    float(management_snapshot.get("peak_trade_return", 0.0) or 0.0),
+                )
+                peak_giveback_ratio = max(
+                    0.0,
+                    float(management_snapshot.get("position_peak_giveback_ratio", 0.0) or 0.0),
+                )
+                retained_ratio = (
+                    trade_ret / max(peak_trade_return, 1e-6)
+                    if peak_trade_return > 0.0
+                    else 0.0
+                )
+                self.runner_profit_hold_capture_count += 1
+                reward += min(
+                    reward_terms["runner_hold_capture_bonus"],
+                    max(0.03, retained_ratio * reward_terms["runner_hold_capture_bonus"]),
+                ) * exit_reward_phase_scale
+                if peak_giveback_ratio > 0.75:
+                    reward -= reward_terms["runner_giveback_hard_penalty"] * exit_reward_phase_scale
+                elif peak_giveback_ratio > 0.55:
+                    reward -= reward_terms["runner_giveback_soft_penalty"] * exit_reward_phase_scale
+            if runner_extension_opportunity:
+                self.runner_extension_capture_count += 1
+                runner_extension_captured = True
+                reward += reward_terms["runner_extension_capture_bonus"] * exit_reward_phase_scale
+            if (
+                self.position_pyramids > 0
+                and pyramid_monetization_window
+            ):
+                trade_ret = max(0.0, float(management_snapshot.get("trade_ret", 0.0) or 0.0))
+                offensive_profit_floor = max(
+                    1e-6,
+                    float(management_snapshot.get("offensive_profit_floor", 0.0) or 0.0),
+                )
+                if trade_ret >= offensive_profit_floor:
+                    reward += min(
+                        reward_terms["pyramid_hold_capture_bonus"],
+                        max(0.02, (trade_ret - offensive_profit_floor) * 8.0),
+                    ) * exit_reward_phase_scale
+            if (
+                bool(management_snapshot.get("soft_tp_hit", False))
+                and not bool(management_snapshot.get("offensive_continuation_support", False))
+            ):
+                reward -= 0.20 * exit_reward_phase_scale
+                if bool(management_snapshot.get("reversal_context", False)):
+                    self.tp_like_missed_count += 1
+            if bool(management_snapshot.get("full_tp_hit", False)) and not bool(
+                management_snapshot.get("offensive_continuation_support", False)
+            ):
+                reward -= 0.30 * exit_reward_phase_scale
+            if bool(management_snapshot.get("profit_peak_reached", False)):
+                peak_giveback_ratio = max(
+                    0.0,
+                    float(management_snapshot.get("position_peak_giveback_ratio", 0.0) or 0.0),
+                )
+                if peak_giveback_ratio > 0.75:
+                    reward -= (
+                        reward_terms["runner_giveback_hard_penalty"]
+                        * min(1.0, 0.50 + ((peak_giveback_ratio - 0.75) / 0.25))
+                        * exit_reward_phase_scale
+                    )
+                elif peak_giveback_ratio > 0.55:
+                    reward -= reward_terms["runner_giveback_soft_penalty"] * exit_reward_phase_scale
+            if bool(management_snapshot.get("time_stop_expired", False)) and (
+                not bool(management_snapshot.get("offensive_continuation_support", False))
+                or bool(management_snapshot.get("time_stop_grace_expired", False))
+            ):
+                reward -= 0.25 * exit_reward_phase_scale
+            if (
+                self.runner_active
+                and bool(management_snapshot.get("reversal_context", False))
+                and not bool(self.runner_protected)
+            ):
+                reward -= reward_terms["split_decorative_penalty"] * 0.5 * exit_reward_phase_scale
+            if bool(management_snapshot.get("hold_drag_opportunity", False)):
+                drag_grace_steps = self._policy_int(hold_policy, "drag_grace_steps", 3)
+                self._current_hold_drag_streak += 1
+                profitable_return = max(
+                    0.0,
+                    float(management_snapshot.get("trade_ret", 0.0) or 0.0),
+                )
+                if profitable_return >= self._policy_float(
+                    hold_policy,
+                    "drag_profit_floor",
+                    0.0040,
+                ):
+                    if self._current_hold_drag_streak > drag_grace_steps:
+                        reward -= (
+                            self._compute_hold_drag_penalty(
+                                profitable_return,
+                                hold_policy,
+                                hold_drag_multiplier,
+                            )
+                            * exit_reward_phase_scale
+                        )
+                        self.hold_drag_penalized_count += 1
+                        self.hold_under_trend_penalty_count += 1
+                    if profitable_return >= float(
+                        management_snapshot.get("tp_like_threshold", 0.0) or 0.0
+                    ):
+                        self.tp_like_missed_count += 1
+                else:
+                    self._current_hold_drag_streak = 0
+            else:
+                self._current_hold_drag_streak = 0
+
+        split_window_captured = bool(
+            split_monetization_window and action == SPLIT and split_performed and split_realized_trade > 0.0
+        )
+        runner_window_captured = bool(runner_profit_hold_window and action == HOLD)
+        pyramid_window_captured = bool(
+            pyramid_monetization_window
+            and (
+                (position_before_action > 0.0 and action == BUY)
+                or (position_before_action < 0.0 and action == SELL)
+            )
+            and pyramid_add_captured
+        )
+
+        self._split_window_wait_steps, split_window_missed = self._update_offensive_window_wait_steps(
+            active=split_monetization_window,
+            captured=split_window_captured,
+            current_wait_steps=self._split_window_wait_steps,
+        )
+        self._runner_window_wait_steps, runner_window_missed = self._update_offensive_window_wait_steps(
+            active=runner_profit_hold_window,
+            captured=runner_window_captured,
+            current_wait_steps=self._runner_window_wait_steps,
+        )
+        self._pyramid_window_wait_steps, pyramid_window_missed = self._update_offensive_window_wait_steps(
+            active=pyramid_monetization_window,
+            captured=pyramid_window_captured,
+            current_wait_steps=self._pyramid_window_wait_steps,
+        )
+
+        if split_window_missed:
+            self.split_missed_window_count += 1
+            reward -= reward_terms["missed_window_penalty"] * exit_reward_phase_scale
+        if runner_window_missed:
+            self.runner_missed_extension_count += 1
+            reward -= reward_terms["missed_window_penalty"] * exit_reward_phase_scale
+        if pyramid_window_missed:
+            self.pyramid_missed_add_count += 1
+            reward -= reward_terms["missed_window_penalty"] * exit_reward_phase_scale
 
         unrealized = 0.0
         if self.position_size != 0:
@@ -2090,8 +4071,29 @@ class TradingEnvironment:
 
         if done and self.position_size != 0:
             had_pyramids = self.position_pyramids > 0
-            final_realized, _ = self._realize_position(price)
+            runner_exit_context = self._capture_runner_exit_context()
+            had_runner = bool(runner_exit_context.get("active"))
+            pyramid_baseline_return = (
+                float(self._pyramid_baseline_return)
+                if self._pyramid_baseline_active
+                else None
+            )
+            final_realized, final_trade_ret = self._realize_position(price)
             realized_pnl += final_realized
+            _ = self._register_runner_exit_outcome(
+                realized_trade=final_realized,
+                forced_exit=had_runner,
+                runner_was_active=had_runner,
+                runner_peak_profit_pct=float(runner_exit_context.get("peak_profit_pct") or 0.0),
+                runner_entry_profit_pct=float(runner_exit_context.get("entry_profit_pct") or 0.0),
+            )
+            _ = self._register_pyramid_exit_outcome(
+                had_pyramids=had_pyramids,
+                realized_trade=final_realized,
+                trade_ret=final_trade_ret,
+                close_policy=close_policy,
+                baseline_trade_return=pyramid_baseline_return,
+            )
             if final_realized > 0:
                 reward += (final_realized / self.spec.initial_balance) * 100.0
             elif final_realized < 0:
@@ -2140,6 +4142,23 @@ class TradingEnvironment:
             finalize=done,
         )
         self.equity_curve.append(equity)
+        root_mask_block_total = self.root_mask_blocked_buy_total + self.root_mask_blocked_sell_total
+        root_mask_ema200_share = (
+            (self.root_mask_blocked_buy_ema200 + self.root_mask_blocked_sell_ema200)
+            / max(root_mask_block_total, 1)
+        )
+        root_mask_vwap_share = (
+            (self.root_mask_blocked_buy_vwap + self.root_mask_blocked_sell_vwap)
+            / max(root_mask_block_total, 1)
+        )
+        root_mask_adx_share = (
+            (self.root_mask_blocked_buy_adx + self.root_mask_blocked_sell_adx)
+            / max(root_mask_block_total, 1)
+        )
+        root_mask_directional_share = (
+            (self.root_mask_blocked_buy_directional + self.root_mask_blocked_sell_directional)
+            / max(root_mask_block_total, 1)
+        )
         info = {
             "balance": self.balance,
             "equity": equity,
@@ -2157,9 +4176,13 @@ class TradingEnvironment:
             "final_action": final_action_name,
             "veto_reason": veto_reason,
             "root_mask_rate": (
-                (self.root_mask_blocked_buy_total + self.root_mask_blocked_sell_total)
+                root_mask_block_total
                 / max(self.root_mask_directional_candidates_total, 1)
             ),
+            "root_mask_ema200_share": root_mask_ema200_share,
+            "root_mask_vwap_share": root_mask_vwap_share,
+            "root_mask_adx_share": root_mask_adx_share,
+            "root_mask_directional_share": root_mask_directional_share,
             "post_veto_to_hold_rate": (
                 self.entry_veto_to_hold
                 / max(self.requested_buy_actions + self.requested_sell_actions, 1)
@@ -2194,6 +4217,127 @@ class TradingEnvironment:
                 self.soft_penalty_obv_count
                 / max(self.long_entries + self.short_entries + self.pyramids_opened, 1)
             ),
+            "hold_drag_score": (
+                self.hold_drag_penalized_count / max(self.hold_drag_opportunity_count, 1)
+            ),
+            "split_efficiency": (
+                self.split_profitable_count / max(self.split_executed, 1)
+                if self.split_executed > 0
+                else 0.0
+            ),
+            "split_runner_capture_rate": (
+                self.split_runner_profitable_count / max(self.split_executed, 1)
+                if self.split_executed > 0
+                else 0.0
+            ),
+            "split_zone_capture_rate": (
+                self.split_profitable_count / max(self.split_tp_zone_opportunity_count, 1)
+                if self.split_tp_zone_opportunity_count > 0
+                else 0.0
+            ),
+            "split_monetization_capture_rate": (
+                self.split_monetization_capture_count / max(self.split_monetization_window_count, 1)
+                if self.split_monetization_window_count > 0
+                else 0.0
+            ),
+            "pyramid_efficiency": (
+                self.pyramid_profitable_count / max(self.pyramids_opened, 1)
+                if self.pyramids_opened > 0
+                else 0.0
+            ),
+            "pyramid_entry_quality_score": (
+                self.pyramid_good_add_count / max(self.pyramids_opened, 1)
+                if self.pyramids_opened > 0
+                else 0.0
+            ),
+            "pyramid_exit_capture_rate": (
+                self.pyramid_profitable_exit_count / max(self.pyramids_opened, 1)
+                if self.pyramids_opened > 0
+                else 0.0
+            ),
+            "pyramid_add_capture_rate": (
+                self.pyramid_add_capture_count / max(self.pyramid_add_opportunity_count, 1)
+                if self.pyramid_add_opportunity_count > 0
+                else 0.0
+            ),
+            "pyramid_monetization_capture_rate": (
+                self.pyramid_monetization_capture_count / max(self.pyramid_monetization_window_count, 1)
+                if self.pyramid_monetization_window_count > 0
+                else 0.0
+            ),
+            "slbe_capture_rate": (
+                self.slbe_profitable_exits / max(self.slbe_triggered, 1)
+                if self.slbe_triggered > 0
+                else 0.0
+            ),
+            "close_quality_score": (
+                self.close_winner_count / max(self.close_winner_count + self.close_loser_count, 1)
+                if (self.close_winner_count + self.close_loser_count) > 0
+                else 0.0
+            ),
+            "hold_drag_opportunity_count": self.hold_drag_opportunity_count,
+            "hold_drag_penalized_count": self.hold_drag_penalized_count,
+            "split_opportunity_count": self.split_opportunity_count,
+            "split_tp_zone_opportunity_count": self.split_tp_zone_opportunity_count,
+            "split_runner_profitable_count": self.split_runner_profitable_count,
+            "split_runner_failed_count": self.split_runner_failed_count,
+            "split_early_count": self.split_early_count,
+            "split_decorative_count": self.split_decorative_count,
+            "split_trade_value_delta": self.split_trade_value_delta,
+            "split_improved_total_trade_count": self.split_improved_total_trade_count,
+            "split_missed_window_count": self.split_missed_window_count,
+            "pyramid_opportunity_count": self.pyramid_opportunity_count,
+            "pyramid_add_opportunity_count": self.pyramid_add_opportunity_count,
+            "pyramid_add_capture_count": self.pyramid_add_capture_count,
+            "pyramid_missed_add_count": self.pyramid_missed_add_count,
+            "pyramid_good_add_count": self.pyramid_good_add_count,
+            "pyramid_bad_add_count": self.pyramid_bad_add_count,
+            "pyramid_profitable_exit_count": self.pyramid_profitable_exit_count,
+            "pyramid_total_trade_improvement_pct": self.pyramid_total_trade_improvement_pct,
+            "pyramid_failed_to_improve_count": self.pyramid_failed_to_improve_count,
+            "slbe_lock_profit_count": self.slbe_lock_profit_count,
+            "tp_like_missed_count": self.tp_like_missed_count,
+            "defensive_close_count": self.defensive_close_count,
+            "early_close_noise_count": self.early_close_noise_count,
+            "hard_stop_exit_count": self.hard_stop_exit_count,
+            "soft_tp_hit_count": self.soft_tp_hit_count,
+            "full_tp_hit_count": self.full_tp_hit_count,
+            "time_stop_trigger_count": self.time_stop_trigger_count,
+            "runner_extension_count": self.runner_extension_count,
+            "runner_extension_opportunity_count": self.runner_extension_opportunity_count,
+            "runner_extension_capture_rate": (
+                self.runner_extension_capture_count / max(self.runner_extension_opportunity_count, 1)
+                if self.runner_extension_opportunity_count > 0
+                else 0.0
+            ),
+            "runner_profit_hold_capture_rate": (
+                self.runner_profit_hold_capture_count / max(self.runner_profit_hold_window_count, 1)
+                if self.runner_profit_hold_window_count > 0
+                else 0.0
+            ),
+            "runner_missed_extension_count": self.runner_missed_extension_count,
+            "runner_managed_exit_count": self.runner_managed_exit_count,
+            "runner_exit_profitable_count": self.runner_exit_profitable_count,
+            "runner_forced_stop_count": self.runner_forced_stop_count,
+            "runner_retained_profit_pct": self.runner_retained_profit_pct,
+            "runner_giveback_pct": self.runner_giveback_pct,
+            "runner_giveback_ratio": (
+                self.runner_giveback_pct
+                / max(self.runner_retained_profit_pct + self.runner_giveback_pct, 1e-6)
+                if (self.runner_retained_profit_pct + self.runner_giveback_pct) > 0.0
+                else 0.0
+            ),
+            "profit_peak_giveback_ratio": (
+                self.profit_peak_giveback_ratio_total
+                / max(self.profit_peak_giveback_ratio_observations, 1)
+                if self.profit_peak_giveback_ratio_observations > 0
+                else 0.0
+            ),
+            "forced_stop_near_miss_count": self.forced_stop_near_miss_count,
+            "profit_peak_reached_count": self.profit_peak_reached_count,
+            "split_monetization_window_count": self.split_monetization_window_count,
+            "runner_profit_hold_window_count": self.runner_profit_hold_window_count,
+            "pyramid_monetization_window_count": self.pyramid_monetization_window_count,
             "family": self.family,
             "feature_profile": self.feature_profile.get("profile_name"),
         }
@@ -2214,9 +4358,44 @@ class TradingEnvironment:
             if self.split_executed > 0
             else 0.0
         )
+        split_runner_capture_rate = (
+            self.split_runner_profitable_count / self.split_executed
+            if self.split_executed > 0
+            else 0.0
+        )
+        split_zone_capture_rate = (
+            self.split_profitable_count / self.split_tp_zone_opportunity_count
+            if self.split_tp_zone_opportunity_count > 0
+            else 0.0
+        )
+        split_monetization_capture_rate = (
+            self.split_monetization_capture_count / self.split_monetization_window_count
+            if self.split_monetization_window_count > 0
+            else 0.0
+        )
         pyramid_efficiency = (
             self.pyramid_profitable_count / self.pyramids_opened
             if self.pyramids_opened > 0
+            else 0.0
+        )
+        pyramid_entry_quality_score = (
+            self.pyramid_good_add_count / self.pyramids_opened
+            if self.pyramids_opened > 0
+            else 0.0
+        )
+        pyramid_exit_capture_rate = (
+            self.pyramid_profitable_exit_count / self.pyramids_opened
+            if self.pyramids_opened > 0
+            else 0.0
+        )
+        pyramid_add_capture_rate = (
+            self.pyramid_add_capture_count / self.pyramid_add_opportunity_count
+            if self.pyramid_add_opportunity_count > 0
+            else 0.0
+        )
+        pyramid_monetization_capture_rate = (
+            self.pyramid_monetization_capture_count / self.pyramid_monetization_window_count
+            if self.pyramid_monetization_window_count > 0
             else 0.0
         )
         slbe_capture_rate = (
@@ -2225,11 +4404,31 @@ class TradingEnvironment:
             else 0.0
         )
         hold_drag_score = (
-            self.hold_under_trend_penalty_count / max(self.current_step - self.start_step, 1)
+            self.hold_drag_penalized_count / max(self.hold_drag_opportunity_count, 1)
         )
         close_quality_score = (
             self.close_winner_count / max(self.close_winner_count + self.close_loser_count, 1)
             if (self.close_winner_count + self.close_loser_count) > 0
+            else 0.0
+        )
+        runner_extension_capture_rate = (
+            self.runner_extension_capture_count / self.runner_extension_opportunity_count
+            if self.runner_extension_opportunity_count > 0
+            else 0.0
+        )
+        runner_profit_hold_capture_rate = (
+            self.runner_profit_hold_capture_count / self.runner_profit_hold_window_count
+            if self.runner_profit_hold_window_count > 0
+            else 0.0
+        )
+        runner_giveback_ratio = (
+            self.runner_giveback_pct / max(self.runner_retained_profit_pct + self.runner_giveback_pct, 1e-6)
+            if (self.runner_retained_profit_pct + self.runner_giveback_pct) > 0.0
+            else 0.0
+        )
+        profit_peak_giveback_ratio = (
+            self.profit_peak_giveback_ratio_total / max(self.profit_peak_giveback_ratio_observations, 1)
+            if self.profit_peak_giveback_ratio_observations > 0
             else 0.0
         )
         hold_streak_mean = (
@@ -2237,25 +4436,102 @@ class TradingEnvironment:
             if self.hold_streak_count > 0
             else 0.0
         )
+        root_mask_block_total = self.root_mask_blocked_buy_total + self.root_mask_blocked_sell_total
+        root_mask_ema200_share = (
+            (self.root_mask_blocked_buy_ema200 + self.root_mask_blocked_sell_ema200)
+            / max(root_mask_block_total, 1)
+        )
+        root_mask_vwap_share = (
+            (self.root_mask_blocked_buy_vwap + self.root_mask_blocked_sell_vwap)
+            / max(root_mask_block_total, 1)
+        )
+        root_mask_adx_share = (
+            (self.root_mask_blocked_buy_adx + self.root_mask_blocked_sell_adx)
+            / max(root_mask_block_total, 1)
+        )
+        root_mask_directional_share = (
+            (self.root_mask_blocked_buy_directional + self.root_mask_blocked_sell_directional)
+            / max(root_mask_block_total, 1)
+        )
         mechanics_metrics = {
             "split_efficiency": split_efficiency,
+            "split_runner_capture_rate": split_runner_capture_rate,
+            "split_zone_capture_rate": split_zone_capture_rate,
+            "split_monetization_capture_rate": split_monetization_capture_rate,
             "pyramid_efficiency": pyramid_efficiency,
+            "pyramid_entry_quality_score": pyramid_entry_quality_score,
+            "pyramid_exit_capture_rate": pyramid_exit_capture_rate,
+            "pyramid_add_capture_rate": pyramid_add_capture_rate,
+            "pyramid_monetization_capture_rate": pyramid_monetization_capture_rate,
             "slbe_capture_rate": slbe_capture_rate,
             "hold_drag_score": hold_drag_score,
             "close_quality_score": close_quality_score,
+            "root_mask_ema200_share": root_mask_ema200_share,
+            "root_mask_vwap_share": root_mask_vwap_share,
+            "root_mask_adx_share": root_mask_adx_share,
+            "root_mask_directional_share": root_mask_directional_share,
             "mechanics_profile_version": self.mechanics_profile_version,
             "pyramids_opened": self.pyramids_opened,
             "pyramids_rejected": self.pyramids_rejected,
+            "pyramid_profitable_count": self.pyramid_profitable_count,
+            "pyramid_good_add_count": self.pyramid_good_add_count,
+            "pyramid_bad_add_count": self.pyramid_bad_add_count,
+            "pyramid_profitable_exit_count": self.pyramid_profitable_exit_count,
+            "pyramid_total_trade_improvement_pct": self.pyramid_total_trade_improvement_pct,
+            "pyramid_failed_to_improve_count": self.pyramid_failed_to_improve_count,
+            "pyramid_loss_count": self.pyramid_loss_count,
+            "pyramid_opportunity_count": self.pyramid_opportunity_count,
+            "pyramid_add_opportunity_count": self.pyramid_add_opportunity_count,
+            "pyramid_monetization_window_count": self.pyramid_monetization_window_count,
+            "pyramid_add_capture_count": self.pyramid_add_capture_count,
+            "pyramid_missed_add_count": self.pyramid_missed_add_count,
             "slbe_triggered": self.slbe_triggered,
             "slbe_hit": self.slbe_hit,
+            "slbe_profitable_exits": self.slbe_profitable_exits,
+            "slbe_lock_profit_count": self.slbe_lock_profit_count,
             "split_executed": self.split_executed,
+            "split_profitable_count": self.split_profitable_count,
+            "split_runner_profitable_count": self.split_runner_profitable_count,
+            "split_runner_failed_count": self.split_runner_failed_count,
+            "split_early_count": self.split_early_count,
+            "split_decorative_count": self.split_decorative_count,
+            "split_trade_value_delta": self.split_trade_value_delta,
+            "split_improved_total_trade_count": self.split_improved_total_trade_count,
+            "split_missed_window_count": self.split_missed_window_count,
+            "split_opportunity_count": self.split_opportunity_count,
+            "split_tp_zone_opportunity_count": self.split_tp_zone_opportunity_count,
+            "split_monetization_window_count": self.split_monetization_window_count,
             "split_rejected": self.split_rejected,
             "split_rejected_no_value": self.split_rejected_no_value,
+            "hard_stop_exit_count": self.hard_stop_exit_count,
+            "soft_tp_hit_count": self.soft_tp_hit_count,
+            "full_tp_hit_count": self.full_tp_hit_count,
+            "time_stop_trigger_count": self.time_stop_trigger_count,
+            "runner_extension_count": self.runner_extension_count,
+            "runner_extension_opportunity_count": self.runner_extension_opportunity_count,
+            "runner_extension_capture_rate": runner_extension_capture_rate,
+            "runner_profit_hold_window_count": self.runner_profit_hold_window_count,
+            "runner_profit_hold_capture_rate": runner_profit_hold_capture_rate,
+            "runner_missed_extension_count": self.runner_missed_extension_count,
+            "runner_managed_exit_count": self.runner_managed_exit_count,
+            "runner_exit_profitable_count": self.runner_exit_profitable_count,
+            "runner_forced_stop_count": self.runner_forced_stop_count,
+            "runner_retained_profit_pct": self.runner_retained_profit_pct,
+            "runner_giveback_pct": self.runner_giveback_pct,
+            "runner_giveback_ratio": runner_giveback_ratio,
+            "profit_peak_reached_count": self.profit_peak_reached_count,
+            "profit_peak_giveback_ratio": profit_peak_giveback_ratio,
+            "forced_stop_near_miss_count": self.forced_stop_near_miss_count,
             "close_winner_count": self.close_winner_count,
             "close_loser_count": self.close_loser_count,
+            "defensive_close_count": self.defensive_close_count,
+            "early_close_noise_count": self.early_close_noise_count,
             "hold_streak_mean": hold_streak_mean,
             "hold_under_trend_penalty_count": self.hold_under_trend_penalty_count,
+            "hold_drag_opportunity_count": self.hold_drag_opportunity_count,
+            "hold_drag_penalized_count": self.hold_drag_penalized_count,
             "tp_like_exit_count": self.tp_like_exit_count,
+            "tp_like_missed_count": self.tp_like_missed_count,
             "inactive_episode_penalties": self.inactive_episode_penalties,
             "insufficient_entry_penalties": self.insufficient_entry_penalties,
             "directional_imbalance_penalties": self.directional_imbalance_penalties,
@@ -2338,9 +4614,42 @@ class TradingEnvironment:
             else 0.0
         )
         root_mask_rate = (
-            (self.root_mask_blocked_buy_total + self.root_mask_blocked_sell_total)
+            root_mask_block_total
             / max(self.root_mask_directional_candidates_total, 1)
         )
+        episode_return_pct = (
+            (equity - self.spec.initial_balance) / self.spec.initial_balance * 100.0
+        )
+        hard_stop_exit = self.hard_stop_exit_count > 0
+        bad_runner_exit = self.runner_forced_stop_count > 0 or (
+            self.runner_managed_exit_count > 0
+            and self.runner_giveback_pct > max(self.runner_retained_profit_pct, 0.0)
+        )
+        bad_pyramid_exit = (
+            self.pyramids_opened > 0 and self.pyramid_profitable_exit_count <= 0
+        )
+        bad_split = self.split_executed > 0 and self.split_runner_profitable_count <= 0
+        range_entry_loss = (
+            str(self._episode_regime or "").strip().lower() == "range"
+            and episode_return_pct < 0.0
+        )
+        liquidity_trap_loss = range_entry_loss and (
+            hard_stop_exit or close_quality_score < 0.35
+        )
+        if liquidity_trap_loss:
+            nemesis_type = "LIQUIDITY_TRAP"
+        elif bad_runner_exit:
+            nemesis_type = "BAD_RUNNER_EXIT"
+        elif bad_pyramid_exit:
+            nemesis_type = "BAD_PYRAMID_EXIT"
+        elif hard_stop_exit:
+            nemesis_type = "HARD_STOP_EXIT"
+        elif range_entry_loss:
+            nemesis_type = "RANGE_ENTRY_LOSS"
+        elif bad_split:
+            nemesis_type = "BAD_SPLIT"
+        else:
+            nemesis_type = "NONE"
         return {
             "symbol": self.symbol,
             "horizon": self.horizon,
@@ -2352,7 +4661,7 @@ class TradingEnvironment:
             "profitable_trades": self.total_profitable,
             "win_rate": self.total_profitable / max(self.total_trades, 1),
             "final_equity": equity,
-            "return_pct": (equity - self.spec.initial_balance) / self.spec.initial_balance * 100.0,
+            "return_pct": episode_return_pct,
             "daily_net_return_pct_by_day": dict(self.daily_net_return_pct_by_day),
             "best_day_net_return_pct": (
                 self.best_day_net_return_pct if self.best_day_net_return_pct != float("-inf") else 0.0
@@ -2386,6 +4695,10 @@ class TradingEnvironment:
             "root_mask_blocked_buy_directional": self.root_mask_blocked_buy_directional,
             "root_mask_blocked_sell_directional": self.root_mask_blocked_sell_directional,
             "root_mask_rate": root_mask_rate,
+            "root_mask_ema200_share": root_mask_ema200_share,
+            "root_mask_vwap_share": root_mask_vwap_share,
+            "root_mask_adx_share": root_mask_adx_share,
+            "root_mask_directional_share": root_mask_directional_share,
             "long_entries": self.long_entries,
             "short_entries": self.short_entries,
             "long_present": self.long_entries > 0,
@@ -2435,8 +4748,53 @@ class TradingEnvironment:
             "obv_divergent_actions": self.obv_divergent_actions,
             "hold_in_trend_count": self.hold_in_trend_count,
             "hold_in_range_count": self.hold_in_range_count,
+            "hold_drag_opportunity_count": self.hold_drag_opportunity_count,
+            "hold_drag_penalized_count": self.hold_drag_penalized_count,
+            "hold_drag_score": hold_drag_score,
+            "split_opportunity_count": self.split_opportunity_count,
+            "split_efficiency": split_efficiency,
+            "split_runner_capture_rate": split_runner_capture_rate,
+            "split_runner_profitable_count": self.split_runner_profitable_count,
+            "split_runner_failed_count": self.split_runner_failed_count,
+            "split_early_count": self.split_early_count,
+            "split_decorative_count": self.split_decorative_count,
+            "split_trade_value_delta": self.split_trade_value_delta,
+            "split_improved_total_trade_count": self.split_improved_total_trade_count,
+            "pyramid_opportunity_count": self.pyramid_opportunity_count,
+            "pyramid_efficiency": pyramid_efficiency,
+            "pyramid_entry_quality_score": pyramid_entry_quality_score,
+            "pyramid_exit_capture_rate": pyramid_exit_capture_rate,
+            "pyramid_good_add_count": self.pyramid_good_add_count,
+            "pyramid_bad_add_count": self.pyramid_bad_add_count,
+            "pyramid_profitable_exit_count": self.pyramid_profitable_exit_count,
+            "pyramid_total_trade_improvement_pct": self.pyramid_total_trade_improvement_pct,
+            "pyramid_failed_to_improve_count": self.pyramid_failed_to_improve_count,
+            "slbe_lock_profit_count": self.slbe_lock_profit_count,
+            "slbe_capture_rate": slbe_capture_rate,
+            "close_quality_score": close_quality_score,
+            "tp_like_missed_count": self.tp_like_missed_count,
+            "defensive_close_count": self.defensive_close_count,
+            "early_close_noise_count": self.early_close_noise_count,
+            "hard_stop_exit_count": self.hard_stop_exit_count,
+            "soft_tp_hit_count": self.soft_tp_hit_count,
+            "full_tp_hit_count": self.full_tp_hit_count,
+            "time_stop_trigger_count": self.time_stop_trigger_count,
+            "runner_extension_count": self.runner_extension_count,
+            "runner_managed_exit_count": self.runner_managed_exit_count,
+            "runner_exit_profitable_count": self.runner_exit_profitable_count,
+            "runner_forced_stop_count": self.runner_forced_stop_count,
+            "runner_retained_profit_pct": self.runner_retained_profit_pct,
+            "runner_giveback_pct": self.runner_giveback_pct,
+            "forced_stop_near_miss_count": self.forced_stop_near_miss_count,
             "net_return_long_pct": self.net_realized_long_pct,
             "net_return_short_pct": self.net_realized_short_pct,
             "episode_regime": self._episode_regime,
+            "nemesis_type": nemesis_type,
+            "liquidity_trap_loss": liquidity_trap_loss,
+            "range_entry_loss": range_entry_loss,
+            "bad_split": bad_split,
+            "bad_runner_exit": bad_runner_exit,
+            "bad_pyramid_exit": bad_pyramid_exit,
+            "hard_stop_exit": hard_stop_exit,
             "metrics_by_position_mechanics": mechanics_metrics,
         }

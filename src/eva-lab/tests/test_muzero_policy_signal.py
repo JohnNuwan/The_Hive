@@ -48,6 +48,98 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    @staticmethod
+    def _load_jax_trainer_module():
+        """Charge le trainer JAX sans dependre de l'import package global."""
+
+        module_path = (
+            Path(__file__).resolve().parents[1]
+            / "eva_lab"
+            / "muzero"
+            / "jax_trainer.py"
+        )
+        spec = importlib.util.spec_from_file_location("test_jax_trainer", module_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Impossible de charger jax_trainer.py pour les tests.")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _build_scalp_mechanics_profile() -> dict[str, object]:
+        """Construit un profil minimal pour tester les mecaniques scalp."""
+
+        return {
+            "entry_filter": {
+                "ema_mode": "moderate",
+                "require_vwap_alignment": False,
+                "require_obv_confirmation": False,
+                "allow_trend_fallback": True,
+                "min_adx": 12.0,
+                "trend_adx": 18.0,
+            },
+            "hold_policy": {
+                "stale_penalty_after_steps": 100,
+                "stale_penalty": 0.0,
+                "trend_penalty": 0.0,
+                "range_penalty": 0.0,
+                "drag_profit_floor": 0.0040,
+                "drag_grace_steps": 0,
+                "drag_penalty_cap": 1.25,
+            },
+            "pyramiding_policy": {
+                "max_additions": 2,
+                "min_profit_to_add": 0.0006,
+                "reward_bonus": 0.16,
+                "strong_trend_reward_bonus": 0.20,
+            },
+            "split_policy": {
+                "max_splits": 3,
+                "min_trade_return": 0.0038,
+                "min_realized_pct": 0.025,
+                "slbe_after_split": True,
+                "failure_penalty": 0.85,
+                "post_split_slbe_bonus": 0.60,
+                "soft_partial_value_floor": 0.010,
+            },
+            "slbe_policy": {
+                "activation_return": 0.0024,
+                "bonus": 7.5,
+                "exit_bonus": 1.75,
+                "lock_profit_return": 0.0075,
+                "lock_profit_buffer": 0.0010,
+            },
+            "close_policy": {
+                "winner_threshold": 0.0055,
+                "strong_winner_threshold": 0.0095,
+                "tp_like_threshold": 0.0042,
+                "reversal_close_bonus": 0.35,
+                "early_profit_close_penalty": 0.20,
+            },
+            "activity_policy": {},
+            "directional_policy": {},
+            "reward_policy": {
+                "realized_reward_multiplier": 1.0,
+                "close_realized_bonus_multiplier": 1.0,
+                "split_realized_bonus_multiplier": 1.0,
+                "hold_drag_penalty_multiplier": 0.4,
+                "pyramid_failure_penalty": 0.1,
+                "pyramid_negative_exit_penalty": 0.0,
+                "split_runner_profit_bonus": 0.45,
+                "split_early_zone_penalty": 0.25,
+                "split_decorative_penalty": 0.15,
+                "pyramid_exit_capture_bonus": 0.35,
+                "pyramid_bad_add_penalty": 0.35,
+                "runner_protected_exit_bonus": 0.30,
+                "soft_countertrend_ema_penalty": 0.0,
+                "soft_countertrend_vwap_penalty": 0.0,
+                "soft_low_adx_penalty": 0.0,
+                "soft_obv_divergence_penalty": 0.0,
+                "soft_trend_alignment_bonus": 0.0,
+                "soft_strong_alignment_bonus": 0.0,
+            },
+        }
+
     def test_root_without_position_masks_split_and_close(self) -> None:
         """Masque `SPLIT` et `CLOSE` a la racine sans position ouverte."""
 
@@ -106,6 +198,64 @@ class MuZeroPolicySignalTests(unittest.TestCase):
 
         self.assertIn(HOLD, legal_actions)
         self.assertNotIn(BUY, legal_actions)
+        self.assertIn(SELL, legal_actions)
+
+    def test_training_root_mask_softens_vwap_veto_during_learning(self) -> None:
+        """Conserve `BUY` en apprentissage si seul le veto VWAP est assoupli."""
+
+        data = np.zeros((8, 26), dtype=np.float32)
+        data[:, 0] = 100.0
+        data[:, 1] = 101.0
+        data[:, 2] = 99.0
+        data[:, 3] = 100.0
+        data[:, 4] = 1000.0
+        data[:, 5] = 95.0
+        data[:, 8] = 105.0
+        data[:, 10] = 1.0
+        data[:, 15] = 20.0
+        config = SimpleNamespace(
+            quality_trade_bonus=10.0,
+            final_growth_bonus=50.0,
+            final_growth_threshold=0.10,
+            drawdown_time_penalty_rate=0.2,
+            max_drawdown_penalty=10.0,
+            loss_penalty_multiplier=2.0,
+            slbe_activation_bonus=6.0,
+            horizon="scalp",
+            primary_timeframe="M15",
+            model_family=None,
+            training_root_mask_soften_vwap=True,
+            training_root_mask_soften_adx=False,
+            training_root_mask_soften_ema200=False,
+            training_root_mask_soften_directional=False,
+            directional_curriculum_soft_end_step=8000,
+            directional_curriculum_end_step=15000,
+        )
+
+        env = TradingEnvironment(
+            data=data,
+            symbol="XAUUSD",
+            max_steps=4,
+            config=config,
+            training_mode=True,
+            training_progress_step=6500,
+        )
+        env.position_mechanics_profile = {
+            "entry_filter": {
+                "ema_mode": "moderate",
+                "require_vwap_alignment": True,
+                "require_obv_confirmation": False,
+                "allow_trend_fallback": False,
+                "min_adx": 5.0,
+                "trend_adx": 10.0,
+            },
+            "directional_policy": {},
+        }
+        env.reset()
+
+        legal_actions = env.get_root_policy_actions()
+
+        self.assertIn(BUY, legal_actions)
         self.assertIn(SELL, legal_actions)
 
     def test_observation_only_root_policy_mask_reconstructs_entry_veto(self) -> None:
@@ -466,6 +616,61 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertGreater(late_adjustment, 0.0)
         self.assertGreater(early_adjustment, late_adjustment)
 
+    def test_v5_exit_shaping_is_weaker_early_for_hold_drag(self) -> None:
+        """Reduit la penalite `hold_drag` en debut de curriculum V5."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        data[:, 0] = 101.0
+        data[:, 1] = 101.2
+        data[:, 2] = 100.8
+        data[:, 3] = 101.0
+        shaping_config = SimpleNamespace(
+            exit_reward_early_end_step=4000,
+            exit_reward_mid_end_step=10000,
+            exit_reward_scale_early=0.25,
+            exit_reward_scale_mid=0.60,
+            exit_reward_scale_late=1.00,
+        )
+
+        def build_env(training_progress_step: int) -> TradingEnvironment:
+            env = TradingEnvironment(data=data.copy(), symbol="XAUUSD", max_steps=4)
+            env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+            env.config = shaping_config
+            env.training_progress_step = training_progress_step
+            env.reset()
+            env.current_step = 0
+            env.start_step = 0
+            env.position_size = env.spec.trade_size
+            env.avg_entry_price = 100.0
+            env.slbe_active = True
+            env.slbe_price = 100.0
+            env._get_market_context = lambda: {
+                "close": 101.0,
+                "ema_200": 100.0,
+                "ema_gap_pct": 0.01,
+                "vwap": 102.0,
+                "price_vs_vwap": -0.01,
+                "obv": 1.0,
+                "obv_slope": -1.0,
+                "obv_divergence": 1.0,
+                "adx": 10.0,
+                "atr": 0.5,
+                "atr_pct": 0.01,
+                "bb_width_proxy": 0.0,
+                "momentum": -0.03,
+            }
+            return env
+
+        early_env = build_env(training_progress_step=1000)
+        late_env = build_env(training_progress_step=12000)
+
+        _early_obs, early_reward, _early_done, _early_truncated, _early_info = early_env.step(HOLD)
+        _late_obs, late_reward, _late_done, _late_truncated, _late_info = late_env.step(HOLD)
+
+        self.assertLess(early_reward, 0.0)
+        self.assertLess(late_reward, 0.0)
+        self.assertLess(abs(float(early_reward)), abs(float(late_reward)))
+
     def test_directional_policy_aliases_support_v2_keys(self) -> None:
         """Lit bien `max_directional_imbalance` depuis les profils V2."""
 
@@ -480,6 +685,691 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertAlmostEqual(resolved["min_entry_share"], 0.2)
         self.assertAlmostEqual(resolved["max_directional_imbalance"], 0.6)
         self.assertAlmostEqual(resolved["imbalance_penalty"], 8.0)
+
+    def test_hold_drag_ignores_hold_without_management_opportunity(self) -> None:
+        """N'incremente pas `hold_drag` sans vrai signal de gestion."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        data[:, 0] = 101.0
+        data[:, 1] = 101.2
+        data[:, 2] = 100.8
+        data[:, 3] = 101.0
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env._get_market_context = lambda: {
+            "close": 101.0,
+            "ema_200": 100.0,
+            "ema_gap_pct": 0.01,
+            "vwap": 100.8,
+            "price_vs_vwap": 0.002,
+            "obv": 1.0,
+            "obv_slope": 1.0,
+            "obv_divergence": 0.0,
+            "adx": 24.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": 0.02,
+        }
+
+        _, reward, _, _, info = env.step(HOLD)
+
+        self.assertEqual(env.hold_drag_opportunity_count, 0)
+        self.assertEqual(env.hold_drag_penalized_count, 0)
+        self.assertAlmostEqual(float(info["hold_drag_score"]), 0.0, places=6)
+        self.assertGreaterEqual(reward, -0.5)
+
+    def test_hold_drag_penalizes_passive_hold_on_reversal_signal(self) -> None:
+        """Penalise `HOLD` si un trade gagnant ignore un signal de sortie."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        data[:, 0] = 101.0
+        data[:, 1] = 101.2
+        data[:, 2] = 100.8
+        data[:, 3] = 101.0
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env.slbe_active = True
+        env.slbe_price = 100.0
+        env._get_market_context = lambda: {
+            "close": 101.0,
+            "ema_200": 100.0,
+            "ema_gap_pct": 0.01,
+            "vwap": 102.0,
+            "price_vs_vwap": -0.01,
+            "obv": 1.0,
+            "obv_slope": -1.0,
+            "obv_divergence": 1.0,
+            "adx": 10.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": -0.03,
+        }
+
+        _, reward, _, _, info = env.step(HOLD)
+
+        self.assertEqual(env.hold_drag_opportunity_count, 1)
+        self.assertEqual(env.hold_drag_penalized_count, 1)
+        self.assertEqual(env.tp_like_missed_count, 1)
+        self.assertAlmostEqual(float(info["hold_drag_score"]), 1.0, places=6)
+        self.assertLess(reward, 0.0)
+
+    def test_close_defensif_improves_close_quality(self) -> None:
+        """Compte un `CLOSE` defensif propre comme une sortie de qualite."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        data[:, 0] = 100.8
+        data[:, 1] = 101.0
+        data[:, 2] = 100.5
+        data[:, 3] = 100.8
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env._get_market_context = lambda: {
+            "close": 100.8,
+            "ema_200": 100.0,
+            "ema_gap_pct": 0.008,
+            "vwap": 101.4,
+            "price_vs_vwap": -0.006,
+            "obv": 1.0,
+            "obv_slope": -1.0,
+            "obv_divergence": 1.0,
+            "adx": 9.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": -0.02,
+        }
+
+        _, reward, _, _, info = env.step(CLOSE)
+
+        self.assertEqual(env.defensive_close_count, 1)
+        self.assertEqual(env.close_winner_count, 1)
+        self.assertEqual(env.close_loser_count, 0)
+        self.assertGreater(float(info["close_quality_score"]), 0.0)
+        self.assertGreater(reward, 0.0)
+
+    def test_slbe_lock_profit_phase_updates_stop(self) -> None:
+        """Active la phase 2 du `SLBE` quand le trade depasse le seuil de verrouillage."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        data[:, 0] = 101.0
+        data[:, 1] = 101.2
+        data[:, 2] = 100.8
+        data[:, 3] = 101.0
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env.slbe_active = True
+        env.slbe_price = 100.0
+        env.slbe_profit_locked = False
+        env._get_market_context = lambda: {
+            "close": 101.0,
+            "ema_200": 100.0,
+            "ema_gap_pct": 0.01,
+            "vwap": 100.6,
+            "price_vs_vwap": 0.004,
+            "obv": 1.0,
+            "obv_slope": 1.0,
+            "obv_divergence": 0.0,
+            "adx": 24.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": 0.03,
+        }
+
+        env.step(HOLD)
+
+        self.assertTrue(env.slbe_profit_locked)
+        self.assertEqual(env.slbe_lock_profit_count, 1)
+        self.assertGreater(env.slbe_price, 100.0)
+
+    def test_hard_stop_forces_exit_and_counts_bad_stop(self) -> None:
+        """Force une sortie immediate quand le prix touche le stop implicite."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        data[:, 0] = 99.2
+        data[:, 1] = 99.4
+        data[:, 2] = 98.8
+        data[:, 3] = 99.0
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env.hard_stop_price = 99.5
+        env.soft_tp_price = 101.0
+        env.full_tp_price = 102.0
+        env.position_entry_step = 0
+        env._get_market_context = lambda: {
+            "close": 99.0,
+            "ema_200": 100.0,
+            "ema_gap_pct": -0.01,
+            "vwap": 99.4,
+            "price_vs_vwap": -0.004,
+            "obv": -1.0,
+            "obv_slope": -1.0,
+            "obv_divergence": 1.0,
+            "adx": 18.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": -0.02,
+        }
+
+        _, reward, _, _, info = env.step(HOLD)
+
+        self.assertEqual(env.position_size, 0.0)
+        self.assertEqual(env.hard_stop_exit_count, 1)
+        self.assertEqual(env.close_loser_count, 1)
+        self.assertEqual(info["requested_action"], "HOLD")
+        self.assertEqual(info["final_action"], "HOLD")
+        self.assertLess(reward, 0.0)
+
+    def test_split_utile_runner_profitable_increments_v6_metrics(self) -> None:
+        """Compte un split utile seulement si le runner ajoute de la valeur."""
+
+        data = np.ones((10, 26), dtype=np.float32)
+        data[:, 0] = 101.0
+        data[:, 1] = 101.2
+        data[:, 2] = 100.8
+        data[:, 3] = 101.0
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=6)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env.soft_tp_price = 100.5
+        env.full_tp_price = 101.4
+        env.position_entry_step = 0
+        env.slbe_active = True
+        env.slbe_price = 100.0
+        env._get_market_context = lambda: {
+            "close": 101.0,
+            "ema_200": 100.0,
+            "ema_gap_pct": 0.01,
+            "vwap": 100.7,
+            "price_vs_vwap": 0.003,
+            "obv": 1.0,
+            "obv_slope": 1.0,
+            "obv_divergence": 0.0,
+            "adx": 24.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": 0.03,
+        }
+
+        _, split_reward, _, _, split_info = env.step(SPLIT)
+
+        self.assertGreater(split_reward, 0.0)
+        self.assertTrue(env.runner_active)
+        self.assertEqual(env.split_executed, 1)
+        self.assertEqual(env.split_profitable_count, 1)
+        self.assertEqual(env.split_tp_zone_opportunity_count, 1)
+        self.assertEqual(env.split_monetization_window_count, 1)
+        self.assertEqual(env.split_monetization_capture_count, 1)
+        self.assertEqual(env.split_runner_profitable_count, 0)
+        self.assertAlmostEqual(float(split_info["split_runner_capture_rate"]), 0.0, places=6)
+        self.assertAlmostEqual(float(split_info["split_zone_capture_rate"]), 1.0, places=6)
+        self.assertAlmostEqual(float(split_info["split_monetization_capture_rate"]), 1.0, places=6)
+
+        _, close_reward, _, _, close_info = env.step(CLOSE)
+
+        self.assertGreater(close_reward, 0.0)
+        self.assertEqual(env.runner_managed_exit_count, 1)
+        self.assertEqual(env.runner_exit_profitable_count, 1)
+        self.assertEqual(env.split_runner_profitable_count, 1)
+        self.assertGreater(env.split_trade_value_delta, 0.0)
+        self.assertGreater(env.runner_retained_profit_pct, 0.0)
+        self.assertEqual(env.runner_giveback_pct, 0.0)
+        self.assertEqual(env.split_improved_total_trade_count, 1)
+        self.assertAlmostEqual(float(close_info["split_runner_capture_rate"]), 1.0, places=6)
+        self.assertGreater(float(close_info["split_trade_value_delta"]), 0.0)
+
+    def test_split_premature_is_marked_early_and_non_profitable(self) -> None:
+        """Marque un split trop precoce comme decoratif ou destructeur."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        data[:, 0] = 100.2
+        data[:, 1] = 100.3
+        data[:, 2] = 100.1
+        data[:, 3] = 100.2
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        profile = self._build_scalp_mechanics_profile()
+        profile["split_policy"]["min_trade_return"] = 0.0005
+        profile["split_policy"]["min_realized_pct"] = 0.05
+        env.position_mechanics_profile = profile
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env.slbe_active = True
+        env.slbe_price = 100.0
+        env._get_market_context = lambda: {
+            "close": 100.2,
+            "ema_200": 100.0,
+            "ema_gap_pct": 0.002,
+            "vwap": 100.15,
+            "price_vs_vwap": 0.0005,
+            "obv": 1.0,
+            "obv_slope": 1.0,
+            "obv_divergence": 0.0,
+            "adx": 13.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": 0.005,
+        }
+
+        _, reward, _, _, info = env.step(SPLIT)
+
+        self.assertLess(reward, 0.0)
+        self.assertEqual(env.split_executed, 1)
+        self.assertEqual(env.split_profitable_count, 0)
+        self.assertGreaterEqual(env.split_early_count, 1)
+        self.assertGreaterEqual(env.split_decorative_count + env.split_runner_failed_count, 1)
+        self.assertAlmostEqual(float(info["split_runner_capture_rate"]), 0.0, places=6)
+
+    def test_runner_giveback_metric_tracks_failed_runner_exit(self) -> None:
+        """Cumule un `giveback` quand le runner rend le gain au marche."""
+
+        env = TradingEnvironment(symbol="XAUUSD")
+        env.reset()
+        env.runner_active = True
+        env.runner_protected = False
+
+        realized_pct = env._register_runner_exit_outcome(
+            realized_trade=-15.0,
+            forced_exit=True,
+        )
+
+        self.assertLess(realized_pct, 0.0)
+        self.assertEqual(env.split_runner_failed_count, 1)
+        self.assertEqual(env.runner_forced_stop_count, 1)
+        self.assertGreater(env.runner_giveback_pct, 0.0)
+        self.assertEqual(env.runner_retained_profit_pct, 0.0)
+
+    def test_runner_giveback_metric_tracks_positive_exit_below_peak(self) -> None:
+        """Compte un `giveback` meme si le runner finit encore legerement gagnant."""
+
+        env = TradingEnvironment(symbol="XAUUSD")
+        env.reset()
+        env.runner_active = True
+        env.runner_protected = True
+
+        realized_pct = env._register_runner_exit_outcome(
+            realized_trade=8.0,
+            forced_exit=False,
+            runner_peak_profit_pct=0.30,
+            runner_entry_profit_pct=0.10,
+        )
+
+        self.assertGreater(realized_pct, 0.0)
+        self.assertEqual(env.split_runner_profitable_count, 1)
+        self.assertGreater(env.runner_retained_profit_pct, 0.0)
+        self.assertGreater(env.runner_giveback_pct, 0.0)
+        self.assertLess(env._last_runner_retention_ratio, 1.0)
+
+    def test_pyramid_good_add_and_profitable_exit_feed_v6_metrics(self) -> None:
+        """Compte separement la qualite d'ajout et la capture a la sortie."""
+
+        data = np.ones((10, 26), dtype=np.float32)
+        data[:, 0] = 101.0
+        data[:, 1] = 101.3
+        data[:, 2] = 100.9
+        data[:, 3] = 101.0
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=6)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env._get_market_context = lambda: {
+            "close": 101.0,
+            "ema_200": 100.0,
+            "ema_gap_pct": 0.01,
+            "vwap": 100.5,
+            "price_vs_vwap": 0.005,
+            "obv": 1.0,
+            "obv_slope": 1.0,
+            "obv_divergence": 0.0,
+            "adx": 25.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": 0.03,
+        }
+
+        _, buy_reward, _, _, buy_info = env.step(BUY)
+
+        self.assertGreater(buy_reward, 0.0)
+        self.assertEqual(env.pyramids_opened, 1)
+        self.assertEqual(env.pyramid_good_add_count, 1)
+        self.assertEqual(env.pyramid_bad_add_count, 0)
+        self.assertEqual(env.pyramid_monetization_window_count, 1)
+        self.assertEqual(env.pyramid_monetization_capture_count, 1)
+        self.assertEqual(env.pyramid_add_capture_count, 1)
+        self.assertAlmostEqual(float(buy_info["pyramid_add_capture_rate"]), 1.0, places=6)
+        self.assertAlmostEqual(float(buy_info["pyramid_monetization_capture_rate"]), 1.0, places=6)
+        next_index = min(env.current_step + 1, len(env.data) - 1)
+        env.data[next_index, 0] = 102.2
+        env.data[next_index, 1] = 102.4
+        env.data[next_index, 2] = 101.8
+        env.data[next_index, 3] = 102.2
+        env._get_market_context = lambda: {
+            "close": 102.2,
+            "ema_200": 100.3,
+            "ema_gap_pct": 0.018,
+            "vwap": 101.1,
+            "price_vs_vwap": 0.010,
+            "obv": 1.0,
+            "obv_slope": 1.0,
+            "obv_divergence": 0.0,
+            "adx": 27.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": 0.04,
+        }
+
+        _, reward, _, _, info = env.step(CLOSE)
+
+        self.assertGreater(reward, 0.0)
+        self.assertEqual(env.pyramid_profitable_exit_count, 1)
+        self.assertGreater(env.pyramid_total_trade_improvement_pct, 0.0)
+        self.assertEqual(env.pyramid_failed_to_improve_count, 0)
+        self.assertAlmostEqual(float(info["pyramid_entry_quality_score"]), 1.0, places=6)
+        self.assertAlmostEqual(float(info["pyramid_exit_capture_rate"]), 1.0, places=6)
+        self.assertGreater(float(info["pyramid_total_trade_improvement_pct"]), 0.0)
+
+    def test_hold_runner_extension_window_counts_offensive_capture(self) -> None:
+        """Compte un HOLD offensif quand le runner peut encore etre etendu."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        data[:, 0] = 101.2
+        data[:, 1] = 101.4
+        data[:, 2] = 101.0
+        data[:, 3] = 101.2
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env.runner_active = True
+        env.runner_protected = True
+        env.soft_tp_hit_active = True
+        env.full_tp_hit_active = False
+        env._get_market_context = lambda: {
+            "close": 101.2,
+            "ema_200": 100.4,
+            "ema_gap_pct": 0.008,
+            "vwap": 100.8,
+            "price_vs_vwap": 0.004,
+            "obv": 1.0,
+            "obv_slope": 1.0,
+            "obv_divergence": 0.0,
+            "adx": 26.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": 0.03,
+        }
+
+        _, reward, _, _, info = env.step(HOLD)
+
+        self.assertGreater(reward, 0.0)
+        self.assertEqual(env.runner_extension_opportunity_count, 1)
+        self.assertEqual(env.runner_profit_hold_window_count, 1)
+        self.assertEqual(env.runner_profit_hold_capture_count, 1)
+        self.assertEqual(env.runner_missed_extension_count, 0)
+        self.assertAlmostEqual(float(info["runner_extension_capture_rate"]), 1.0, places=6)
+        self.assertAlmostEqual(float(info["runner_profit_hold_capture_rate"]), 1.0, places=6)
+
+    def test_split_tp_zone_opportunity_tolere_un_adx_en_repli_apres_soft_tp(self) -> None:
+        """Active le split offensif apres `soft_tp` sans exiger un ADX encore fort."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        data[:, 0] = 101.0
+        data[:, 1] = 101.1
+        data[:, 2] = 100.9
+        data[:, 3] = 101.0
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env.soft_tp_price = 100.5
+        env.full_tp_price = 101.4
+        env.slbe_active = True
+        env.slbe_price = 100.0
+        env.soft_tp_hit_active = True
+        env._get_market_context = lambda: {
+            "close": 101.0,
+            "ema_200": 100.2,
+            "ema_gap_pct": 0.006,
+            "vwap": 100.85,
+            "price_vs_vwap": 0.0006,
+            "obv": 1.0,
+            "obv_slope": 0.6,
+            "obv_divergence": 0.0,
+            "adx": 9.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": 0.0010,
+        }
+
+        _, reward, _, _, info = env.step(SPLIT)
+
+        self.assertGreater(reward, 0.0)
+        self.assertEqual(env.split_tp_zone_opportunity_count, 1)
+        self.assertEqual(env.split_monetization_window_count, 1)
+        self.assertAlmostEqual(float(info["split_zone_capture_rate"]), 1.0, places=6)
+        self.assertAlmostEqual(float(info["split_monetization_capture_rate"]), 1.0, places=6)
+
+    def test_pyramid_add_opportunity_aligne_le_plancher_sur_le_vrai_seuil_d_ajout(self) -> None:
+        """Compte un ajout offensif avant `winner_threshold` si le vrai seuil d'ajout est atteint."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        data[:, 0] = 100.17
+        data[:, 1] = 100.25
+        data[:, 2] = 100.10
+        data[:, 3] = 100.17
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env._get_market_context = lambda: {
+            "close": 100.17,
+            "ema_200": 100.3,
+            "ema_gap_pct": 0.007,
+            "vwap": 100.12,
+            "price_vs_vwap": 0.0005,
+            "obv": 1.0,
+            "obv_slope": 0.5,
+            "obv_divergence": 0.0,
+            "adx": 14.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": 0.010,
+        }
+
+        _, reward, _, _, info = env.step(BUY)
+
+        self.assertGreater(reward, 0.0)
+        self.assertEqual(env.pyramid_good_add_count, 1)
+        self.assertEqual(env.pyramid_add_opportunity_count, 1)
+        self.assertEqual(env.pyramid_monetization_window_count, 1)
+        self.assertEqual(env.pyramid_add_capture_count, 1)
+        self.assertAlmostEqual(float(info["pyramid_add_capture_rate"]), 1.0, places=6)
+        self.assertAlmostEqual(float(info["pyramid_monetization_capture_rate"]), 1.0, places=6)
+
+    def test_runner_extension_opportunity_tolere_un_runner_protege_en_continuation(self) -> None:
+        """Compte une extension de runner protege meme si l'ADX a deja commence a se detendre."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        data[:, 0] = 101.15
+        data[:, 1] = 101.25
+        data[:, 2] = 101.0
+        data[:, 3] = 101.15
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env.runner_active = True
+        env.runner_protected = True
+        env.soft_tp_hit_active = True
+        env._get_market_context = lambda: {
+            "close": 101.15,
+            "ema_200": 100.25,
+            "ema_gap_pct": 0.007,
+            "vwap": 101.05,
+            "price_vs_vwap": 0.0004,
+            "obv": 1.0,
+            "obv_slope": 0.5,
+            "obv_divergence": 0.0,
+            "adx": 9.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": 0.0010,
+        }
+
+        _, reward, _, _, info = env.step(HOLD)
+
+        self.assertGreater(reward, 0.0)
+        self.assertEqual(env.runner_extension_opportunity_count, 1)
+        self.assertEqual(env.runner_profit_hold_window_count, 1)
+        self.assertEqual(env.runner_missed_extension_count, 0)
+        self.assertAlmostEqual(float(info["runner_extension_capture_rate"]), 1.0, places=6)
+        self.assertAlmostEqual(float(info["runner_profit_hold_capture_rate"]), 1.0, places=6)
+
+    def test_split_window_manquee_est_penalisee_apres_trois_pas_inactifs(self) -> None:
+        """Applique une penalite si une fenetre de split reste ouverte puis se ferme sans action."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        closes = (100.55, 100.55, 100.55, 100.55, 100.30, 100.30, 100.30, 100.30)
+        for index, close in enumerate(closes):
+            data[index, 0] = close
+            data[index, 1] = close + 0.08
+            data[index, 2] = close - 0.08
+            data[index, 3] = close
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=6)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 0
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env.soft_tp_price = 100.5
+        env.full_tp_price = 101.4
+        env.position_entry_step = 0
+        env.time_stop_steps = 100
+        env._get_market_context = lambda: {
+            "close": float(env.data[min(env.current_step, len(env.data) - 1), 3]),
+            "ema_200": 100.0,
+            "ema_gap_pct": 0.01,
+            "vwap": 100.20,
+            "price_vs_vwap": 0.003,
+            "obv": 1.0,
+            "obv_slope": 1.0,
+            "obv_divergence": 0.0,
+            "adx": 22.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": 0.02,
+        }
+
+        env.step(HOLD)
+        env.step(HOLD)
+        env.step(HOLD)
+        env.step(HOLD)
+        env.step(HOLD)
+
+        self.assertEqual(env.split_missed_window_count, 1)
+
+    def test_hold_after_soft_tp_and_time_stop_is_penalized(self) -> None:
+        """Penalise `HOLD` si le trade stagne apres zone TP et `time stop`."""
+
+        data = np.ones((8, 26), dtype=np.float32)
+        data[:, 0] = 101.0
+        data[:, 1] = 101.2
+        data[:, 2] = 100.8
+        data[:, 3] = 101.0
+        env = TradingEnvironment(data=data, symbol="XAUUSD", max_steps=4)
+        env.position_mechanics_profile = self._build_scalp_mechanics_profile()
+        env.reset()
+        env.current_step = 5
+        env.start_step = 0
+        env.position_size = env.spec.trade_size
+        env.avg_entry_price = 100.0
+        env.soft_tp_price = 100.5
+        env.full_tp_price = 101.5
+        env.time_stop_steps = 3
+        env.position_entry_step = 0
+        env.soft_tp_hit_active = True
+        env.slbe_active = True
+        env.slbe_price = 100.0
+        env.slbe_profit_locked = True
+        env._get_market_context = lambda: {
+            "close": 101.0,
+            "ema_200": 100.0,
+            "ema_gap_pct": 0.01,
+            "vwap": 101.8,
+            "price_vs_vwap": -0.008,
+            "obv": 1.0,
+            "obv_slope": -1.0,
+            "obv_divergence": 1.0,
+            "adx": 7.0,
+            "atr": 0.5,
+            "atr_pct": 0.01,
+            "bb_width_proxy": 0.0,
+            "momentum": -0.02,
+        }
+
+        _, reward, _, _, _ = env.step(HOLD)
+
+        self.assertEqual(env.time_stop_trigger_count, 1)
+        self.assertLess(reward, 0.0)
 
     def test_directional_entry_feedback_penalizes_extreme_one_sided_flow(self) -> None:
         """Penalise un flux d'entrees trop unilateral avant la fin d'episode."""
@@ -887,6 +1777,48 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertLessEqual(sell_only_count, 3)
         self.assertGreaterEqual(balanced_count, 4)
 
+    def test_replay_sampling_caps_symbol_concentration(self) -> None:
+        """Empeche un symbole de depasser 25 % du batch si l'univers est large."""
+
+        random_seed = 7
+        np.random.seed(random_seed)
+        import random
+
+        random.seed(random_seed)
+        buffer = PrioritizedReplayBuffer(max_games=64)
+        symbols = ["XAUUSD", "US30.cash", "US100.cash", "BTCUSD"]
+
+        for index in range(32):
+            game = GameHistory()
+            game.store(
+                np.array([index], dtype=np.float32),
+                HOLD,
+                0.0,
+                np.ones(5, dtype=np.float32) / 5.0,
+                float(index),
+            )
+            symbol = symbols[index % len(symbols)]
+            game.metadata.update(
+                {
+                    "symbol": symbol,
+                    "long_entries": 2,
+                    "short_entries": 2,
+                    "long_present": True,
+                    "short_present": True,
+                    "balanced_episode": True,
+                }
+            )
+            buffer.save_game(game)
+
+        sampled = buffer.sample(batch_size=12)
+        symbol_counts: dict[str, int] = {}
+        for game, _start_idx, _tree_idx in sampled:
+            symbol = str(game.metadata.get("symbol") or "")
+            symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
+
+        self.assertTrue(symbol_counts)
+        self.assertLessEqual(max(symbol_counts.values()), 3)
+
     def test_replay_diversity_stats_expose_root_mask_and_post_veto_rates(self) -> None:
         """Expose les nouvelles metriques de friction policy/environnement."""
 
@@ -896,6 +1828,7 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         game.metadata.update(
             {
                 "balanced_episode": True,
+                "symbol": "XAUUSD",
                 "long_present": True,
                 "short_present": True,
                 "long_entries": 3,
@@ -909,8 +1842,51 @@ class MuZeroPolicySignalTests(unittest.TestCase):
                 "root_mask_blocked_buy_vwap": 1,
                 "root_mask_blocked_sell_adx": 1,
                 "root_mask_blocked_buy_directional": 1,
+                "root_mask_ema200_share": 0.0,
+                "root_mask_vwap_share": 1.0 / 3.0,
+                "root_mask_adx_share": 1.0 / 3.0,
+                "root_mask_directional_share": 1.0 / 3.0,
                 "blocked_buy_entries": 1,
                 "blocked_sell_entries": 0,
+                "hold_drag_opportunity_count": 5,
+                "hold_drag_penalized_count": 2,
+                "split_executed": 4,
+                "split_profitable_count": 2,
+                "split_runner_profitable_count": 1,
+                "split_runner_failed_count": 1,
+                "split_early_count": 1,
+                "split_decorative_count": 1,
+                "split_trade_value_delta": 0.75,
+                "split_improved_total_trade_count": 1,
+                "split_opportunity_count": 6,
+                "split_tp_zone_opportunity_count": 4,
+                "pyramids_opened": 3,
+                "pyramid_profitable_count": 2,
+                "pyramid_good_add_count": 2,
+                "pyramid_bad_add_count": 1,
+                "pyramid_add_opportunity_count": 4,
+                "pyramid_add_capture_count": 1,
+                "pyramid_missed_add_count": 2,
+                "pyramid_profitable_exit_count": 1,
+                "pyramid_total_trade_improvement_pct": 1.5,
+                "pyramid_failed_to_improve_count": 1,
+                "pyramid_opportunity_count": 5,
+                "slbe_triggered": 4,
+                "slbe_profitable_exits": 2,
+                "slbe_lock_profit_count": 1,
+                "close_winner_count": 3,
+                "close_loser_count": 1,
+                "tp_like_missed_count": 2,
+                "defensive_close_count": 1,
+                "early_close_noise_count": 1,
+                "runner_managed_exit_count": 2,
+                "runner_exit_profitable_count": 1,
+                "runner_forced_stop_count": 1,
+                "runner_extension_opportunity_count": 3,
+                "runner_extension_capture_rate": 2.0 / 3.0,
+                "runner_missed_extension_count": 1,
+                "runner_retained_profit_pct": 0.75,
+                "runner_giveback_pct": 0.25,
             }
         )
         buffer.save_game(game)
@@ -922,6 +1898,66 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertAlmostEqual(float(stats["veto_to_hold_rate"]), 0.1, places=6)
         self.assertEqual(float(stats["root_mask_blocked_buy_total"]), 2.0)
         self.assertEqual(float(stats["root_mask_blocked_sell_total"]), 1.0)
+        self.assertAlmostEqual(float(stats["root_mask_ema200_share"]), 0.0, places=6)
+        self.assertAlmostEqual(float(stats["root_mask_vwap_share"]), 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["root_mask_adx_share"]), 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["root_mask_directional_share"]), 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["hold_drag_score"]), 0.4, places=6)
+        self.assertAlmostEqual(float(stats["split_efficiency"]), 0.5, places=6)
+        self.assertAlmostEqual(float(stats["split_runner_capture_rate"]), 0.25, places=6)
+        self.assertAlmostEqual(float(stats["split_zone_capture_rate"]), 0.5, places=6)
+        self.assertAlmostEqual(float(stats["split_trade_value_delta"]), 0.75 / 4.0, places=6)
+        self.assertEqual(float(stats["split_improved_total_trade_count"]), 1.0)
+        self.assertAlmostEqual(float(stats["pyramid_efficiency"]), 2.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["pyramid_entry_quality_score"]), 2.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["pyramid_exit_capture_rate"]), 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["pyramid_add_capture_rate"]), 0.25, places=6)
+        self.assertAlmostEqual(float(stats["pyramid_total_trade_improvement_pct"]), 1.5 / 3.0, places=6)
+        self.assertEqual(float(stats["pyramid_failed_to_improve_count"]), 1.0)
+        self.assertAlmostEqual(float(stats["slbe_capture_rate"]), 0.5, places=6)
+        self.assertAlmostEqual(float(stats["close_quality_score"]), 0.75, places=6)
+        self.assertAlmostEqual(float(stats["runner_extension_capture_rate"]), 2.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["runner_retained_profit_pct"]), 0.75, places=6)
+        self.assertAlmostEqual(float(stats["runner_giveback_pct"]), 0.25, places=6)
+        self.assertAlmostEqual(float(stats["runner_giveback_ratio"]), 0.25, places=6)
+        self.assertEqual(int(stats["close_events_by_symbol"]["XAUUSD"]), 4)
+        self.assertAlmostEqual(float(stats["close_quality_by_symbol"]["XAUUSD"]), 0.75, places=6)
+        self.assertAlmostEqual(float(stats["split_efficiency_by_symbol"]["XAUUSD"]), 0.5, places=6)
+        self.assertAlmostEqual(float(stats["split_runner_capture_rate_by_symbol"]["XAUUSD"]), 0.25, places=6)
+        self.assertAlmostEqual(float(stats["root_mask_share_by_symbol"]["XAUUSD"]), 0.3, places=6)
+        self.assertAlmostEqual(float(stats["root_mask_vwap_share_by_symbol"]["XAUUSD"]), 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["root_mask_adx_share_by_symbol"]["XAUUSD"]), 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["root_mask_directional_share_by_symbol"]["XAUUSD"]), 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["pyramid_efficiency_by_symbol"]["XAUUSD"]), 2.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["pyramid_entry_quality_score_by_symbol"]["XAUUSD"]), 2.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["pyramid_exit_capture_rate_by_symbol"]["XAUUSD"]), 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(stats["slbe_capture_rate_by_symbol"]["XAUUSD"]), 0.5, places=6)
+        self.assertAlmostEqual(float(stats["hold_drag_score_by_symbol"]["XAUUSD"]), 0.4, places=6)
+        self.assertAlmostEqual(float(stats["liquidity_trap_share"]), 0.0, places=6)
+
+    def test_replay_diversity_stats_include_hard_negative_mix(self) -> None:
+        """Expose le mix hard-negative derive des tags d'echec."""
+
+        buffer = PrioritizedReplayBuffer(max_games=4)
+        game = GameHistory()
+        game.store(np.zeros(4, dtype=np.float32), HOLD, 0.0, np.ones(5, dtype=np.float32) / 5.0, 0.0)
+        game.metadata.update(
+            {
+                "balanced_episode": True,
+                "symbol": "US30.cash",
+                "long_present": True,
+                "short_present": True,
+                "liquidity_trap_loss": True,
+                "nemesis_type": "LIQUIDITY_TRAP",
+            }
+        )
+        buffer.save_game(game)
+
+        stats = buffer.diversity_stats()
+
+        self.assertAlmostEqual(float(stats["liquidity_trap_share"]), 1.0, places=6)
+        self.assertIn("LIQUIDITY_TRAP", stats["hard_negative_mix"])
+        self.assertIn("LIQUIDITY_TRAP", stats["nemesis_mix"])
 
     def test_arena_score_penalizes_sell_heavy_candidate(self) -> None:
         """Degrade le score Arena d'un candidat unidirectionnel."""
@@ -960,6 +1996,58 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertGreater(
             Arena._score_metrics(balanced_metrics),
             Arena._score_metrics(sell_heavy_metrics),
+        )
+
+    def test_arena_score_rewards_stronger_exit_mechanics(self) -> None:
+        """Favorise les candidats avec meilleures mecaniques de sortie a perf brute egale."""
+
+        self._require_jax_stack()
+
+        from eva_lab.arena import Arena
+
+        base_metrics = {
+            "return_pct": 0.12,
+            "profit_factor": 1.28,
+            "expectancy_pct": 0.02,
+            "win_rate": 33.0,
+            "positive_episode_rate": 58.0,
+            "max_drawdown_pct": 0.30,
+            "directional_bias": "balanced",
+            "directional_imbalance": 0.08,
+            "long_entries": 20,
+            "short_entries": 18,
+            "directional_by_symbol": {"XAUUSD": {"directional_bias": "balanced"}},
+        }
+        weak_mechanics = {
+            **base_metrics,
+            "metrics_by_position_mechanics": {
+                "close_quality_score": 0.20,
+                "hold_drag_score": 0.90,
+                "split_efficiency": 0.20,
+                "split_executed": 4,
+                "pyramid_efficiency": 0.15,
+                "pyramids_opened": 4,
+                "slbe_capture_rate": 0.10,
+                "slbe_triggered": 4,
+            },
+        }
+        strong_mechanics = {
+            **base_metrics,
+            "metrics_by_position_mechanics": {
+                "close_quality_score": 0.72,
+                "hold_drag_score": 0.12,
+                "split_efficiency": 0.70,
+                "split_executed": 4,
+                "pyramid_efficiency": 0.65,
+                "pyramids_opened": 4,
+                "slbe_capture_rate": 0.75,
+                "slbe_triggered": 4,
+            },
+        }
+
+        self.assertGreater(
+            Arena._score_metrics(strong_mechanics),
+            Arena._score_metrics(weak_mechanics),
         )
 
     def test_promotion_gate_blocks_missing_direction(self) -> None:
@@ -1206,6 +2294,109 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertAlmostEqual(float(np.sum(game.policies[0])), 1.0, places=5)
         self.assertNotAlmostEqual(float(game.values[0]), 123.456, places=3)
 
+    def test_live_observation_preserves_position_state_without_changing_shape(self) -> None:
+        """Injecte l'etat live de position dans le vecteur sans changer `[32]`."""
+
+        self._require_jax_stack()
+
+        from eva_lab.muzero.jax_agent import JAXMuZeroAgent
+
+        agent = JAXMuZeroAgent.__new__(JAXMuZeroAgent)
+        agent.config = SimpleNamespace(observation_shape=(32,))
+        obs_vec = agent.process_observation(
+            {
+                "symbol": "XAUUSD",
+                "price": 101.0,
+                "latest_candle": {
+                    "open": 100.5,
+                    "high": 101.2,
+                    "low": 100.4,
+                    "close": 101.0,
+                    "tick_volume": 1000.0,
+                    "spread": 12.0,
+                },
+                "indicators": {
+                    "EMA_200": 100.0,
+                    "RSI": 55.0,
+                    "MACD_Hist": 0.2,
+                    "VWAP": 100.8,
+                    "OBV": 42.0,
+                    "Momentum": 0.03,
+                    "TRIX": 0.01,
+                    "Stoch_K": 65.0,
+                    "Stoch_D": 60.0,
+                    "CCI": 45.0,
+                    "ADX": 22.0,
+                    "ADX_Plus_DI": 24.0,
+                    "ADX_Minus_DI": 18.0,
+                    "Ichi_Tenkan": 100.7,
+                    "Ichi_Kijun": 100.6,
+                    "Ichi_Senkou_A": 100.8,
+                    "Ichi_Senkou_B": 100.4,
+                    "ATR": 0.6,
+                    "BB_Pct": 0.55,
+                },
+                "position_state": 1.0,
+                "unrealized_return": 0.012,
+                "slbe_state": 1.0,
+            }
+        )
+
+        self.assertEqual(obs_vec.shape[0], 32)
+        self.assertAlmostEqual(float(obs_vec[26]), 1.0, places=6)
+        self.assertAlmostEqual(float(obs_vec[27]), 0.012, places=6)
+        self.assertAlmostEqual(float(obs_vec[28]), 1.0, places=6)
+        legal_actions = TradingEnvironment.infer_legal_root_actions_from_observation(obs_vec)
+        self.assertIn(SPLIT, legal_actions)
+        self.assertIn(CLOSE, legal_actions)
+
+    def test_checkpoint_payload_preserves_training_step_count(self) -> None:
+        """Serialise l'etape de training dans le payload de checkpoint."""
+
+        from eva_lab.muzero.checkpoint_utils import build_muzero_checkpoint_payload
+
+        config = SimpleNamespace(
+            horizon="scalp",
+            observation_shape=(32,),
+            action_space_size=5,
+            hidden_state_size=256,
+            network_hidden_dims=[512, 512, 512],
+            support_size=100,
+            dataset_descriptor={},
+            feature_profile={},
+            mechanics_profile_version="v5",
+            dataset_id="dataset-test",
+            symbols=["XAUUSD"],
+        )
+
+        payload = build_muzero_checkpoint_payload(
+            config=config,
+            params={"weights": np.zeros((2,), dtype=np.float32)},
+            opt_state={"step": 1},
+            training_step_count=5000,
+        )
+
+        self.assertEqual(int(payload["training_step_count"]), 5000)
+
+    def test_checkpoint_path_step_parser_reads_ckpt_suffix(self) -> None:
+        """Recupere l'etape depuis le suffixe de nom de fichier legacy."""
+
+        self._require_jax_stack()
+
+        from eva_lab.muzero.jax_agent import JAXMuZeroAgent
+
+        self.assertEqual(
+            JAXMuZeroAgent._extract_training_step_from_checkpoint_path(
+                "C:/tmp/muzero_scalp_ckpt_5000.pkl"
+            ),
+            5000,
+        )
+        self.assertIsNone(
+            JAXMuZeroAgent._extract_training_step_from_checkpoint_path(
+                "C:/tmp/muzero_scalp_latest.pkl"
+            )
+        )
+
     def test_policy_precheck_window_blocks_high_friction_profile(self) -> None:
         """Refuse une fenetre si la friction masque/veto reste trop elevee."""
 
@@ -1254,6 +2445,260 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertEqual(verdict["status"], "blocked")
         self.assertEqual(verdict["reason"], "root_mask_rate")
 
+    def test_seed_viability_window_marks_non_productive_seed(self) -> None:
+        """Bloque un bootstrap offensif si le `root_mask` reste trop haut."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            training_steps=3500,
+            seed_viability_min_step=2000,
+            seed_viability_max_step=3500,
+            seed_viability_max_root_mask_rate=0.08,
+            seed_viability_min_split_runner_capture_rate=0.0,
+            seed_viability_min_pyramid_exit_capture_rate=0.0,
+            seed_viability_min_loss_pol_improvement=0.10,
+        )
+        history = [
+            {
+                "loss_pol": 5.85,
+                "loss_pol_per_head": 1.12,
+                "root_mask_rate": 0.11,
+                "split_monetization_window_count": 3.0,
+                "runner_profit_hold_window_count": 2.0,
+                "pyramid_monetization_window_count": 2.0,
+                "split_monetization_capture_rate": 0.15,
+                "runner_profit_hold_capture_rate": 0.10,
+                "pyramid_monetization_capture_rate": 0.12,
+                "profit_peak_giveback_ratio": 0.20,
+                "split_runner_capture_rate": 0.0,
+                "pyramid_exit_capture_rate": 0.0,
+            }
+            for _ in range(500)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            weights_dir = Path(tmp_dir)
+            (weights_dir / "muzero_scalp_ckpt_23000.pkl").write_text("stub", encoding="utf-8")
+            verdict = module._evaluate_seed_viability_window(
+                history=history,
+                config=config,
+                step=2500,
+                horizon="scalp",
+                weights_dir=weights_dir,
+                trial_mode="offensive_bootstrap",
+            )
+
+        self.assertFalse(bool(verdict["allowed"]))
+        self.assertEqual(verdict["status"], "seed_not_viable_for_v66")
+        self.assertEqual(verdict["reason"], "root_mask_rate")
+        self.assertEqual(verdict["seed_stage"], "offensive_bootstrap")
+        self.assertTrue(str(verdict["recommended_seed_for_v66"]).endswith("muzero_scalp_ckpt_23000.pkl"))
+
+    def test_seed_viability_window_finalizes_short_run_at_last_step(self) -> None:
+        """Valide proprement un `seed-short` a la derniere etape disponible."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            training_steps=5000,
+            seed_viability_min_step=3000,
+            seed_viability_max_step=5000,
+            seed_viability_max_root_mask_rate=0.08,
+            seed_viability_min_split_runner_capture_rate=0.0,
+            seed_viability_min_pyramid_exit_capture_rate=0.0,
+            seed_viability_min_loss_pol_improvement=0.10,
+        )
+        history = [
+            {
+                "loss_pol": value,
+                "loss_pol_per_head": per_head,
+                "root_mask_rate": 0.05,
+                "split_runner_capture_rate": 0.18,
+                "split_monetization_capture_rate": 0.18,
+                "pyramid_exit_capture_rate": 0.22,
+                "pyramid_monetization_capture_rate": 0.11,
+                "close_quality_score": 0.46,
+                "slbe_capture_rate": 0.52,
+            }
+            for value, per_head in (
+                (5.40, 0.95),
+                (5.34, 0.94),
+                (5.20, 0.92),
+                (5.05, 0.90),
+            )
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            weights_dir = Path(tmp_dir)
+            (weights_dir / "muzero_scalp_ckpt_23000.pkl").write_text("stub", encoding="utf-8")
+            verdict = module._evaluate_seed_viability_window(
+                history=history,
+                config=config,
+                step=5000,
+                horizon="scalp",
+                weights_dir=weights_dir,
+                trial_mode="seed_short_mixed",
+            )
+
+        self.assertTrue(bool(verdict["allowed"]))
+        self.assertEqual(verdict["status"], "seed_viability_passed")
+        self.assertEqual(verdict["reason"], "seed_window_passed")
+        self.assertEqual(int(verdict["window_max_step"]), 5000)
+        self.assertEqual(verdict["seed_stage"], "seed_short_mixed")
+
+    def test_seed_viability_window_bootstrap_tolere_zero_capture_si_fenetres_ouvertes(self) -> None:
+        """N'invalide pas le bootstrap si les fenetres existent mais que la capture est encore nulle."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            training_steps=3000,
+            seed_viability_min_step=2000,
+            seed_viability_max_step=3000,
+        )
+        history = [
+            {
+                "loss_pol": 5.10,
+                "loss_pol_per_head": 0.94,
+                "root_mask_rate": 0.005,
+                "split_monetization_capture_rate": 0.0,
+                "runner_profit_hold_capture_rate": 0.0,
+                "pyramid_monetization_capture_rate": 0.0,
+                "profit_peak_giveback_ratio": 0.10,
+                "split_monetization_window_count": 2.0,
+                "runner_profit_hold_window_count": 3.0,
+                "pyramid_monetization_window_count": 2.0,
+            }
+            for _ in range(120)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            weights_dir = Path(tmp_dir)
+            (weights_dir / "muzero_scalp_ckpt_23000.pkl").write_text("stub", encoding="utf-8")
+            verdict = module._evaluate_seed_viability_window(
+                history=history,
+                config=config,
+                step=2500,
+                horizon="scalp",
+                weights_dir=weights_dir,
+                trial_mode="offensive_bootstrap",
+            )
+
+        self.assertTrue(bool(verdict["allowed"]))
+        self.assertEqual(verdict["status"], "monitoring")
+        self.assertEqual(verdict["reason"], "within_seed_window")
+
+    def test_policy_target_smoothing_conserve_une_distribution_legale(self) -> None:
+        """Construit une cible lissee normalisee sans rouvrir les actions illegales."""
+
+        self._require_jax_stack()
+        import jax.numpy as jnp
+
+        module = self._load_jax_trainer_module()
+        trainer = module.MuZeroTrainerJAX.__new__(module.MuZeroTrainerJAX)
+        trainer.config = SimpleNamespace(
+            action_space_size=5,
+            policy_target_smoothing_temperature=1.15,
+        )
+        target_policy = jnp.asarray(
+            [
+                [0.0, 1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0, 0.0],
+            ],
+            dtype=jnp.float32,
+        )
+        uniform_root = trainer._build_root_legal_policy(jnp.asarray([False, True]))
+        smoothed = trainer._smooth_target_policy(target_policy, uniform_root, 0.10)
+
+        self.assertAlmostEqual(float(jnp.sum(smoothed[0])), 1.0, places=6)
+        self.assertAlmostEqual(float(jnp.sum(smoothed[1])), 1.0, places=6)
+        self.assertAlmostEqual(float(smoothed[0, 3]), 0.0, places=6)
+        self.assertAlmostEqual(float(smoothed[0, 4]), 0.0, places=6)
+        self.assertGreater(float(smoothed[1, 4]), 0.0)
+
+    def test_policy_target_smoothing_reduit_la_cross_entropy_synthetique(self) -> None:
+        """Reduit la loss policy si les logits suivent deja une cible lissee."""
+
+        self._require_jax_stack()
+        import jax.numpy as jnp
+        import optax
+
+        module = self._load_jax_trainer_module()
+        trainer = module.MuZeroTrainerJAX.__new__(module.MuZeroTrainerJAX)
+        trainer.config = SimpleNamespace(
+            action_space_size=5,
+            policy_target_smoothing_temperature=1.15,
+        )
+        target_policy = jnp.asarray([[0.0, 1.0, 0.0, 0.0, 0.0]], dtype=jnp.float32)
+        uniform_root = trainer._build_root_legal_policy(jnp.asarray([False]))
+        smoothed = trainer._smooth_target_policy(target_policy, uniform_root, 0.10)
+        logits = jnp.log(jnp.clip(smoothed, 1e-8, 1.0))
+        sharp_loss = optax.softmax_cross_entropy(logits, target_policy)
+        smooth_loss = optax.softmax_cross_entropy(logits, smoothed)
+
+        self.assertLess(float(smooth_loss[0]), float(sharp_loss[0]))
+
+    def test_loss_pol_per_head_divise_la_loss_par_nombre_de_tetes(self) -> None:
+        """Normalise correctement la loss policy par tete racine plus unroll."""
+
+        self._require_jax_stack()
+
+        module = self._load_jax_trainer_module()
+        per_head = module.MuZeroTrainerJAX._compute_loss_pol_per_head(7.2, 5)
+        self.assertAlmostEqual(float(per_head), 1.2, places=6)
+
+    def test_weighted_loss_pol_per_head_reflete_les_poids_root_et_unroll(self) -> None:
+        """Calcule la moyenne par tete en respectant les poids policy."""
+
+        self._require_jax_stack()
+
+        module = self._load_jax_trainer_module()
+        per_head = module.MuZeroTrainerJAX._compute_weighted_loss_pol_per_head(
+            1.8,
+            5.0,
+            5,
+            0.95,
+            0.70,
+        )
+
+        self.assertAlmostEqual(float(per_head), float(((0.95 * 1.8) + (0.70 * 5.0)) / 4.45), places=6)
+
+    def test_copy_episode_summary_to_game_metadata_conserve_les_metriques_offensives(self) -> None:
+        """Copie les nouvelles metriques offensives vers `game.metadata`."""
+
+        self._require_jax_stack()
+
+        from eva_lab.muzero.jax_agent import JAXMuZeroAgent
+
+        game = GameHistory()
+        episode_summary = {
+            "symbol": "XAUUSD",
+            "return_pct": 1.25,
+            "metrics_by_position_mechanics": {
+                "split_monetization_window_count": 4.0,
+                "split_monetization_capture_rate": 0.25,
+                "split_missed_window_count": 1.0,
+                "runner_profit_hold_window_count": 3.0,
+                "runner_profit_hold_capture_rate": 0.20,
+                "runner_missed_extension_count": 2.0,
+                "pyramid_monetization_window_count": 5.0,
+                "pyramid_monetization_capture_rate": 0.40,
+                "pyramid_missed_add_count": 1.0,
+                "profit_peak_reached_count": 6.0,
+                "profit_peak_giveback_ratio": 0.33,
+            },
+        }
+
+        JAXMuZeroAgent._copy_episode_summary_to_game_metadata(game, episode_summary)
+
+        self.assertEqual(game.metadata["symbol"], "XAUUSD")
+        self.assertEqual(game.metadata["split_monetization_window_count"], 4.0)
+        self.assertEqual(game.metadata["runner_profit_hold_window_count"], 3.0)
+        self.assertEqual(game.metadata["pyramid_monetization_window_count"], 5.0)
+        self.assertEqual(game.metadata["profit_peak_reached_count"], 6.0)
+        self.assertAlmostEqual(float(game.metadata["profit_peak_giveback_ratio"]), 0.33, places=6)
+
     def test_policy_precheck_window_accepts_balanced_five_x_profile(self) -> None:
         """Valide une fenetre `5.x` stable avec friction faible et flux equilibre."""
 
@@ -1261,6 +2706,7 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         module = self._load_train_global_models_module()
         config = SimpleNamespace(
             policy_precheck_max_loss_pol=5.8,
+            policy_precheck_max_loss_pol_per_head=0.98,
             policy_precheck_min_top1_share=0.75,
             policy_precheck_max_policy_entropy=1.0,
             policy_precheck_max_root_mask_rate=0.05,
@@ -1269,6 +2715,7 @@ class MuZeroPolicySignalTests(unittest.TestCase):
             policy_precheck_min_long_entry_share=0.35,
             policy_precheck_min_short_entry_share=0.35,
             policy_screen_max_loss_pol=6.6,
+            policy_screen_max_loss_pol_per_head=1.08,
             policy_screen_min_top1_share=0.88,
             policy_screen_max_policy_entropy=0.45,
             policy_screen_max_root_mask_rate=0.05,
@@ -1280,6 +2727,7 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         history = [
             {
                 "loss_pol": 5.35,
+                "loss_pol_per_head": 0.92,
                 "policy_top1_share": 0.79,
                 "policy_entropy": 0.36,
                 "root_mask_rate": 0.03,
@@ -1302,6 +2750,82 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertEqual(verdict["status"], "full_ready")
         self.assertEqual(verdict["reason"], "eligible_full")
 
+    def test_policy_precheck_window_blocks_when_too_few_symbols_have_clean_closes(self) -> None:
+        """Bloque `full_ready` si trop peu de symboles ont une sortie exploitable."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            policy_precheck_max_loss_pol=4.8,
+            policy_precheck_max_loss_pol_per_head=0.98,
+            policy_precheck_min_top1_share=0.75,
+            policy_precheck_max_policy_entropy=1.0,
+            policy_precheck_max_root_mask_rate=0.02,
+            policy_precheck_max_post_veto_rate=0.01,
+            policy_precheck_min_balanced_episode_rate=0.85,
+            policy_precheck_min_long_entry_share=0.35,
+            policy_precheck_min_short_entry_share=0.35,
+            policy_precheck_min_close_quality_score=0.40,
+            policy_precheck_min_split_efficiency=0.35,
+            policy_precheck_min_pyramid_efficiency=0.35,
+            policy_precheck_min_slbe_capture_rate=0.45,
+            policy_precheck_max_hold_drag_score=0.10,
+            policy_precheck_min_good_close_symbols=5,
+            policy_precheck_min_symbol_close_quality_score=0.25,
+            policy_precheck_min_symbol_close_events=6,
+            policy_screen_max_loss_pol=6.6,
+            policy_screen_max_loss_pol_per_head=1.08,
+            policy_screen_min_top1_share=0.88,
+            policy_screen_max_policy_entropy=0.45,
+            policy_screen_max_root_mask_rate=0.05,
+            policy_screen_max_post_veto_rate=0.01,
+            policy_screen_min_balanced_episode_rate=0.85,
+            policy_screen_min_long_entry_share=0.35,
+            policy_screen_min_short_entry_share=0.35,
+        )
+        history = [
+            {
+                "loss_pol": 4.2,
+                "loss_pol_per_head": 0.74,
+                "policy_top1_share": 0.92,
+                "policy_entropy": 0.31,
+                "root_mask_rate": 0.01,
+                "post_veto_to_hold_rate": 0.002,
+                "soft_penalty_to_bonus_ratio": 1.0,
+                "balanced_episode_rate": 0.94,
+                "long_entry_share": 0.51,
+                "short_entry_share": 0.49,
+                "close_quality_score": 0.55,
+                "split_efficiency": 0.42,
+                "pyramid_efficiency": 0.44,
+                "slbe_capture_rate": 0.50,
+                "hold_drag_score": 0.02,
+                "close_quality_by_symbol": {
+                    "XAUUSD": 0.35,
+                    "US30.cash": 0.31,
+                    "US100.cash": 0.29,
+                    "US500.cash": 0.10,
+                },
+                "close_events_by_symbol": {
+                    "XAUUSD": 8,
+                    "US30.cash": 8,
+                    "US100.cash": 6,
+                    "US500.cash": 7,
+                },
+            }
+            for _ in range(500)
+        ]
+
+        verdict = module._evaluate_policy_precheck_window(
+            history=history,
+            config=config,
+            step=12000,
+            stage="pre_arena",
+        )
+
+        self.assertEqual(verdict["status"], "blocked")
+        self.assertEqual(verdict["reason"], "good_close_symbols")
+
     def test_policy_precheck_window_allows_screen_only_profile(self) -> None:
         """Autorise le screen si la policy est proche de la cible sans etre `full_ready`."""
 
@@ -1309,6 +2833,7 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         module = self._load_train_global_models_module()
         config = SimpleNamespace(
             policy_precheck_max_loss_pol=5.8,
+            policy_precheck_max_loss_pol_per_head=0.98,
             policy_precheck_min_top1_share=0.75,
             policy_precheck_max_policy_entropy=1.0,
             policy_precheck_max_root_mask_rate=0.05,
@@ -1317,6 +2842,7 @@ class MuZeroPolicySignalTests(unittest.TestCase):
             policy_precheck_min_long_entry_share=0.35,
             policy_precheck_min_short_entry_share=0.35,
             policy_screen_max_loss_pol=6.6,
+            policy_screen_max_loss_pol_per_head=1.08,
             policy_screen_min_top1_share=0.88,
             policy_screen_max_policy_entropy=0.45,
             policy_screen_max_root_mask_rate=0.05,
@@ -1328,6 +2854,7 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         history = [
             {
                 "loss_pol": 6.25,
+                "loss_pol_per_head": 1.04,
                 "policy_top1_share": 0.91,
                 "policy_entropy": 0.39,
                 "root_mask_rate": 0.02,
@@ -1411,6 +2938,14 @@ class MuZeroPolicySignalTests(unittest.TestCase):
             arena_screen_min_return_pct=0.0,
             arena_screen_min_expectancy_pct=0.0,
             arena_screen_min_positive_episode_rate=55.0,
+            arena_screen_max_hold_drag_score=0.80,
+            arena_screen_min_close_quality_score=0.35,
+            arena_screen_min_split_opportunities=3,
+            arena_screen_min_split_efficiency=0.35,
+            arena_screen_min_pyramid_opportunities=3,
+            arena_screen_min_pyramid_efficiency=0.35,
+            arena_screen_min_slbe_triggered=3,
+            arena_screen_min_slbe_capture_rate=0.30,
         )
         verdict = module._evaluate_screen_winner_gate(
             {
@@ -1421,6 +2956,16 @@ class MuZeroPolicySignalTests(unittest.TestCase):
                         "expectancy_pct": 0.01,
                         "positive_episode_rate": 61.0,
                         "directional_bias": "balanced",
+                        "metrics_by_position_mechanics": {
+                            "hold_drag_score": 0.25,
+                            "close_quality_score": 0.62,
+                            "split_opportunity_count": 2,
+                            "split_efficiency": 0.10,
+                            "pyramid_opportunity_count": 1,
+                            "pyramid_efficiency": 0.10,
+                            "slbe_triggered": 2,
+                            "slbe_capture_rate": 0.10,
+                        },
                     }
                 }
             },
@@ -1429,6 +2974,58 @@ class MuZeroPolicySignalTests(unittest.TestCase):
 
         self.assertTrue(verdict["allowed"])
         self.assertEqual(verdict["status"], "eligible")
+
+    def test_screen_winner_gate_blocks_low_split_runner_capture_rate(self) -> None:
+        """Bloque un candidat si le split ne se transforme pas en valeur finale."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            arena_screen_min_profit_factor=1.20,
+            arena_screen_min_return_pct=0.0,
+            arena_screen_min_expectancy_pct=0.0,
+            arena_screen_min_positive_episode_rate=55.0,
+            arena_screen_max_hold_drag_score=0.80,
+            arena_screen_min_close_quality_score=0.35,
+            arena_screen_min_split_opportunities=3,
+            arena_screen_min_split_efficiency=0.35,
+            arena_screen_min_split_runner_capture_rate=0.20,
+            arena_screen_min_pyramid_opportunities=3,
+            arena_screen_min_pyramid_efficiency=0.35,
+            arena_screen_min_pyramid_exit_capture_rate=0.20,
+            arena_screen_min_slbe_triggered=3,
+            arena_screen_min_slbe_capture_rate=0.30,
+        )
+        verdict = module._evaluate_screen_winner_gate(
+            {
+                "challenger": {
+                    "metrics": {
+                        "profit_factor": 1.55,
+                        "return_pct": 0.12,
+                        "expectancy_pct": 0.02,
+                        "positive_episode_rate": 60.0,
+                        "directional_bias": "balanced",
+                        "metrics_by_position_mechanics": {
+                            "hold_drag_score": 0.12,
+                            "close_quality_score": 0.58,
+                            "split_opportunity_count": 5,
+                            "split_efficiency": 0.52,
+                            "split_runner_capture_rate": 0.10,
+                            "pyramid_opportunity_count": 4,
+                            "pyramid_efficiency": 0.48,
+                            "pyramid_exit_capture_rate": 0.42,
+                            "slbe_triggered": 4,
+                            "slbe_capture_rate": 0.42,
+                        },
+                    }
+                }
+            },
+            config,
+        )
+
+        self.assertFalse(verdict["allowed"])
+        self.assertEqual(verdict["status"], "blocked")
+        self.assertEqual(verdict["reason"], "split_runner_capture_rate")
 
     def test_screen_winner_gate_blocks_negative_expectancy_candidate(self) -> None:
         """Refuse la full Arena si le gagnant du screen reste negatif en expectancy."""
@@ -1440,6 +3037,14 @@ class MuZeroPolicySignalTests(unittest.TestCase):
             arena_screen_min_return_pct=0.0,
             arena_screen_min_expectancy_pct=0.0,
             arena_screen_min_positive_episode_rate=55.0,
+            arena_screen_max_hold_drag_score=0.80,
+            arena_screen_min_close_quality_score=0.35,
+            arena_screen_min_split_opportunities=3,
+            arena_screen_min_split_efficiency=0.35,
+            arena_screen_min_pyramid_opportunities=3,
+            arena_screen_min_pyramid_efficiency=0.35,
+            arena_screen_min_slbe_triggered=3,
+            arena_screen_min_slbe_capture_rate=0.30,
         )
         verdict = module._evaluate_screen_winner_gate(
             {
@@ -1450,6 +3055,16 @@ class MuZeroPolicySignalTests(unittest.TestCase):
                         "expectancy_pct": 0.0,
                         "positive_episode_rate": 58.0,
                         "directional_bias": "balanced",
+                        "metrics_by_position_mechanics": {
+                            "hold_drag_score": 0.20,
+                            "close_quality_score": 0.61,
+                            "split_opportunity_count": 2,
+                            "split_efficiency": 0.10,
+                            "pyramid_opportunity_count": 2,
+                            "pyramid_efficiency": 0.10,
+                            "slbe_triggered": 2,
+                            "slbe_capture_rate": 0.10,
+                        },
                     }
                 }
             },
@@ -1459,6 +3074,247 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertFalse(verdict["allowed"])
         self.assertEqual(verdict["status"], "blocked")
         self.assertEqual(verdict["reason"], "expectancy_pct")
+
+    def test_screen_winner_gate_blocks_high_hold_drag_candidate(self) -> None:
+        """Refuse un gagnant de screen qui garde trop de sorties passives."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            arena_screen_min_profit_factor=1.20,
+            arena_screen_min_return_pct=0.0,
+            arena_screen_min_expectancy_pct=0.0,
+            arena_screen_min_positive_episode_rate=55.0,
+            arena_screen_max_hold_drag_score=0.80,
+            arena_screen_min_close_quality_score=0.35,
+            arena_screen_min_split_opportunities=3,
+            arena_screen_min_split_efficiency=0.35,
+            arena_screen_min_pyramid_opportunities=3,
+            arena_screen_min_pyramid_efficiency=0.35,
+            arena_screen_min_slbe_triggered=3,
+            arena_screen_min_slbe_capture_rate=0.30,
+        )
+        verdict = module._evaluate_screen_winner_gate(
+            {
+                "challenger": {
+                    "metrics": {
+                        "profit_factor": 1.42,
+                        "return_pct": 0.08,
+                        "expectancy_pct": 0.01,
+                        "positive_episode_rate": 60.0,
+                        "directional_bias": "balanced",
+                        "metrics_by_position_mechanics": {
+                            "hold_drag_score": 0.95,
+                            "close_quality_score": 0.65,
+                            "split_opportunity_count": 4,
+                            "split_efficiency": 0.60,
+                            "pyramid_opportunity_count": 4,
+                            "pyramid_efficiency": 0.60,
+                            "slbe_triggered": 4,
+                            "slbe_capture_rate": 0.60,
+                        },
+                    }
+                }
+            },
+            config,
+        )
+
+        self.assertFalse(verdict["allowed"])
+        self.assertEqual(verdict["reason"], "hold_drag_score")
+
+    def test_screen_winner_gate_blocks_candidate_with_too_few_profitable_symbols(self) -> None:
+        """Refuse la full Arena si le screen masque encore trop de symboles faibles."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            arena_screen_min_profit_factor=1.20,
+            arena_screen_min_return_pct=0.0,
+            arena_screen_min_expectancy_pct=0.0,
+            arena_screen_min_positive_episode_rate=55.0,
+            arena_screen_max_hold_drag_score=0.80,
+            arena_screen_min_close_quality_score=0.35,
+            arena_screen_min_split_opportunities=3,
+            arena_screen_min_split_efficiency=0.35,
+            arena_screen_min_pyramid_opportunities=3,
+            arena_screen_min_pyramid_efficiency=0.35,
+            arena_screen_min_slbe_triggered=3,
+            arena_screen_min_slbe_capture_rate=0.30,
+            arena_screen_min_profitable_symbols=5,
+            arena_screen_min_symbol_profit_factor=1.0,
+            arena_screen_min_symbol_return_pct=0.0,
+            arena_screen_min_symbol_split_efficiency=0.20,
+            arena_screen_min_symbol_slbe_capture_rate=0.25,
+            arena_screen_min_symbol_close_quality_score=0.20,
+            arena_screen_min_symbol_close_events=6,
+        )
+        verdict = module._evaluate_screen_winner_gate(
+            {
+                "challenger": {
+                    "metrics": {
+                        "profit_factor": 1.45,
+                        "return_pct": 0.06,
+                        "expectancy_pct": 0.01,
+                        "positive_episode_rate": 60.0,
+                        "directional_bias": "balanced",
+                        "metrics_by_position_mechanics": {
+                            "hold_drag_score": 0.10,
+                            "close_quality_score": 0.55,
+                            "split_opportunity_count": 4,
+                            "split_efficiency": 0.42,
+                            "pyramid_opportunity_count": 4,
+                            "pyramid_efficiency": 0.45,
+                            "slbe_triggered": 4,
+                            "slbe_capture_rate": 0.46,
+                        },
+                        "metrics_by_symbol": {
+                            "XAUUSD": {"profit_factor": 1.2, "return_pct": 0.01},
+                            "US30.cash": {"profit_factor": 1.1, "return_pct": 0.01},
+                            "US100.cash": {"profit_factor": 1.0, "return_pct": 0.01},
+                            "US500.cash": {"profit_factor": 0.9, "return_pct": -0.01},
+                        },
+                    }
+                }
+            },
+            config,
+        )
+
+        self.assertFalse(verdict["allowed"])
+        self.assertEqual(verdict["reason"], "profitable_symbols")
+
+    def test_screen_winner_gate_blocks_candidate_beaten_by_inverse(self) -> None:
+        """Refuse la full Arena si le miroir directionnel fait mieux."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            arena_screen_min_profit_factor=1.20,
+            arena_screen_min_return_pct=0.0,
+            arena_screen_min_expectancy_pct=0.0,
+            arena_screen_min_positive_episode_rate=55.0,
+            arena_screen_max_hold_drag_score=0.80,
+            arena_screen_min_close_quality_score=0.35,
+            arena_screen_min_split_opportunities=3,
+            arena_screen_min_split_efficiency=0.35,
+            arena_screen_min_split_runner_capture_rate=0.20,
+            arena_screen_min_pyramid_opportunities=3,
+            arena_screen_min_pyramid_efficiency=0.35,
+            arena_screen_min_pyramid_exit_capture_rate=0.20,
+            arena_screen_min_slbe_triggered=3,
+            arena_screen_min_slbe_capture_rate=0.30,
+            arena_inverse_min_profitable_symbols=5,
+        )
+        verdict = module._evaluate_screen_winner_gate(
+            {
+                "edge_vs_inverse_pf": -0.10,
+                "edge_vs_inverse_return_pct": -0.02,
+                "edge_vs_inverse_profitable_symbols": 3,
+                "challenger": {
+                    "metrics": {
+                        "profit_factor": 1.42,
+                        "return_pct": 0.08,
+                        "expectancy_pct": 0.01,
+                        "positive_episode_rate": 60.0,
+                        "directional_bias": "balanced",
+                        "metrics_by_position_mechanics": {
+                            "hold_drag_score": 0.12,
+                            "close_quality_score": 0.58,
+                            "split_opportunity_count": 4,
+                            "split_efficiency": 0.52,
+                            "split_runner_capture_rate": 0.24,
+                            "pyramid_opportunity_count": 4,
+                            "pyramid_efficiency": 0.48,
+                            "pyramid_exit_capture_rate": 0.42,
+                            "slbe_triggered": 4,
+                            "slbe_capture_rate": 0.42,
+                        },
+                    }
+                },
+            },
+            config,
+        )
+
+        self.assertFalse(verdict["allowed"])
+        self.assertEqual(verdict["reason"], "inverse_edge")
+
+    def test_policy_precheck_blocks_rising_root_mask_trend(self) -> None:
+        """Bloque le precheck si le root mask se degrade dans la fenetre."""
+
+        self._require_jax_stack()
+        module = self._load_train_global_models_module()
+        config = SimpleNamespace(
+            policy_precheck_max_loss_pol=4.8,
+            policy_precheck_min_top1_share=0.75,
+            policy_precheck_max_policy_entropy=1.0,
+            policy_precheck_max_root_mask_rate=0.05,
+            policy_precheck_max_root_mask_rate_trend=0.02,
+            policy_precheck_max_post_veto_rate=0.01,
+            policy_precheck_min_balanced_episode_rate=0.85,
+            policy_precheck_min_long_entry_share=0.35,
+            policy_precheck_min_short_entry_share=0.35,
+            policy_precheck_min_close_quality_score=0.40,
+            policy_precheck_min_split_efficiency=0.35,
+            policy_precheck_min_pyramid_efficiency=0.35,
+            policy_precheck_min_slbe_capture_rate=0.45,
+            policy_precheck_max_hold_drag_score=0.10,
+            policy_precheck_min_good_close_symbols=5,
+            policy_precheck_min_symbol_close_quality_score=0.25,
+            policy_precheck_min_symbol_close_events=6,
+            policy_screen_max_loss_pol=6.6,
+            policy_screen_min_top1_share=0.88,
+            policy_screen_max_policy_entropy=0.45,
+            policy_screen_max_root_mask_rate=0.05,
+            policy_screen_max_post_veto_rate=0.01,
+            policy_screen_min_balanced_episode_rate=0.85,
+            policy_screen_min_long_entry_share=0.35,
+            policy_screen_min_short_entry_share=0.35,
+        )
+        history = []
+        for root_mask_rate in (0.01, 0.02, 0.05, 0.07):
+            history.append(
+                {
+                    "loss_pol": 4.2,
+                    "policy_top1_share": 0.90,
+                    "policy_entropy": 0.30,
+                    "root_mask_rate": root_mask_rate,
+                    "post_veto_to_hold_rate": 0.0,
+                    "soft_penalty_to_bonus_ratio": 0.4,
+                    "close_quality_score": 0.50,
+                    "split_efficiency": 0.50,
+                    "split_runner_capture_rate": 0.24,
+                    "pyramid_efficiency": 0.45,
+                    "pyramid_exit_capture_rate": 0.30,
+                    "slbe_capture_rate": 0.55,
+                    "hold_drag_score": 0.0,
+                    "balanced_episode_rate": 0.95,
+                    "long_entry_share": 0.48,
+                    "short_entry_share": 0.52,
+                    "close_quality_by_symbol": {
+                        "XAUUSD": 0.40,
+                        "US30.cash": 0.40,
+                        "GER40.cash": 0.40,
+                        "EURUSD": 0.40,
+                        "US100.cash": 0.40,
+                    },
+                    "close_events_by_symbol": {
+                        "XAUUSD": 6,
+                        "US30.cash": 6,
+                        "GER40.cash": 6,
+                        "EURUSD": 6,
+                        "US100.cash": 6,
+                    },
+                }
+            )
+
+        verdict = module._evaluate_policy_precheck_window(
+            history=history,
+            config=config,
+            step=12000,
+            stage="mid_run",
+        )
+
+        self.assertEqual(verdict["status"], "blocked")
+        self.assertEqual(verdict["reason"], "root_mask_rate_trend")
 
 
 if __name__ == "__main__":

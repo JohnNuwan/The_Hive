@@ -34,6 +34,7 @@ from eva_lab.gnn_registry import (
     persist_market_gnn_refresh_state,
     update_market_gnn_registry,
 )
+from eva_lab.live_trade_review import LiveTradeReviewService
 from eva_lab.live_inference_models import LivePredictRequest
 from eva_lab.shadow_learning import ShadowLearningService
 from eva_lab.dreamer_gate import DreamerGate
@@ -741,6 +742,9 @@ async def lifespan(app: FastAPI):
             buffer_size=settings.shadow_learning_buffer_size,
             dreamer_enabled=settings.enable_dreamer_training,
         )
+        app.state.live_trade_review = LiveTradeReviewService(
+            data_dir="data/live_trade_reviews",
+        )
         # Lancer le flush automatique en tÃ¢che de fond
         asyncio.create_task(
             app.state.shadow.start_auto_flush(
@@ -748,8 +752,10 @@ async def lifespan(app: FastAPI):
             )
         )
         logger.info("ðŸ“¡ Shadow Learning actif â€” collecte passive DreamerV3")
+        logger.info("Revue live activee pour scorer les trades fermes.")
     else:
         app.state.shadow = None
+        app.state.live_trade_review = None
         logger.info("ðŸ’¤ Shadow Learning dÃ©sactivÃ©")
 
     # â”€â”€â”€ GNN / Hydra (MTF Omni-Architecture) â”€â”€â”€
@@ -1073,10 +1079,26 @@ async def record_trade_feedback(request: TradeRecordRequest):
         timestamp=request.timestamp,
         done=True,
     )
+    review_service: LiveTradeReviewService | None = getattr(app.state, "live_trade_review", None)
+    review_payload = None
+    if review_service is not None:
+        review_payload = review_service.record_closed_trade(
+            symbol=request.symbol,
+            action=request.action,
+            price=request.price,
+            volume=request.volume,
+            pnl=request.pnl,
+            indicators=request.indicators,
+            observation=request.observation,
+            next_observation=request.next_observation,
+            metadata=metadata,
+            timestamp=request.timestamp,
+        )
     return {
         "status": "feedback_recorded",
         "buffer_size": shadow.buffer.size,
         "wm_loss": None,
+        "trade_review": review_payload,
     }
 
 
@@ -1106,7 +1128,25 @@ async def shadow_stats():
     shadow: ShadowLearningService = app.state.shadow
     if not shadow:
         return {"status": "disabled"}
-    return shadow.get_stats()
+    review_service: LiveTradeReviewService | None = getattr(app.state, "live_trade_review", None)
+    payload = shadow.get_stats()
+    if review_service is not None:
+        payload["live_trade_review"] = review_service.get_stats()
+    return payload
+
+
+@app.get("/shadow/live-review")
+async def shadow_live_review():
+    """
+    Retourne la synthese glissante des trades live fermes.
+
+    Returns:
+        dict: Revue metier exploitable pour le replay et le runtime.
+    """
+    review_service: LiveTradeReviewService | None = getattr(app.state, "live_trade_review", None)
+    if review_service is None:
+        return {"status": "disabled"}
+    return review_service.get_summary()
 
 
 @app.get("/dreamer/status")

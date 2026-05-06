@@ -374,6 +374,7 @@ def build_muzero_checkpoint_payload(
     config: Any,
     params: Any,
     opt_state: Any,
+    training_step_count: int | None = None,
     artifact_kind: str = "checkpoint",
     lineage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -403,6 +404,11 @@ def build_muzero_checkpoint_payload(
         "created_at": _now_iso(),
         "params": params,
         "opt_state": opt_state,
+        "training_step_count": (
+            int(training_step_count)
+            if training_step_count is not None
+            else None
+        ),
         "config_snapshot": config_snapshot,
         "config_fingerprint": build_muzero_config_fingerprint(config_snapshot),
         "dataset_descriptor": dataset_descriptor,
@@ -594,6 +600,7 @@ def save_muzero_checkpoint(
     config: Any,
     params: Any,
     opt_state: Any,
+    training_step_count: int | None = None,
     artifact_kind: str = "checkpoint",
     lineage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -605,6 +612,7 @@ def save_muzero_checkpoint(
         config=config,
         params=params,
         opt_state=opt_state,
+        training_step_count=training_step_count,
         artifact_kind=artifact_kind,
         lineage=lineage,
     )
@@ -662,3 +670,184 @@ def archive_muzero_artifacts(
     )
     report["metadata_path"] = str(metadata_path)
     return report
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    """Convertit une valeur libre en flottant robuste.
+
+    Args:
+        value (Any): Valeur brute a convertir.
+        default (float): Valeur de repli si la conversion echoue.
+
+    Returns:
+        float: Valeur numerique exploitable.
+    """
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _extract_seed_metrics(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Extrait un bloc de metriques seed depuis une structure heterogene.
+
+    Args:
+        candidate (dict[str, Any]): Structure candidate provenant d'un screen,
+            d'un rapport Arena ou d'un manifeste de relance.
+
+    Returns:
+        dict[str, Any]: Bloc de metriques le plus pertinent trouve.
+    """
+
+    direct_metrics = dict(candidate.get("metrics") or {})
+    if direct_metrics:
+        return direct_metrics
+    battle_report = dict(candidate.get("battle_report") or {})
+    challenger = dict(battle_report.get("challenger") or {})
+    nested_metrics = dict(challenger.get("metrics") or {})
+    if nested_metrics:
+        return nested_metrics
+    return {}
+
+
+def _score_seed_for_v66(metrics: dict[str, Any]) -> tuple[float, str]:
+    """Construit un score d'apprentissage V6.6 pour un seed MuZero.
+
+    Args:
+        metrics (dict[str, Any]): Metriques de training ou Arena associees
+            au checkpoint.
+
+    Returns:
+        tuple[float, str]: Score plus eleve = meilleur seed probable et
+            raison compacte de la decision.
+    """
+
+    loss_pol = _to_float(metrics.get("loss_pol"), default=9.99)
+    loss_pol_per_head = _to_float(metrics.get("loss_pol_per_head"), default=loss_pol)
+    root_mask_rate = _to_float(metrics.get("root_mask_rate"), default=1.0)
+    policy_top1_share = _to_float(metrics.get("policy_top1_share"), default=0.0)
+    close_quality_score = _to_float(metrics.get("close_quality_score"), default=0.0)
+    split_opportunity_count = _to_float(metrics.get("split_opportunity_count"), default=0.0)
+    pyramid_opportunity_count = _to_float(metrics.get("pyramid_opportunity_count"), default=0.0)
+    directional_imbalance = _to_float(metrics.get("directional_imbalance"), default=1.0)
+
+    mechanics_readiness = (
+        min(split_opportunity_count, 6.0) * 0.20
+        + min(pyramid_opportunity_count, 6.0) * 0.20
+    )
+    score = (
+        (policy_top1_share * 10.0)
+        + (close_quality_score * 6.0)
+        + mechanics_readiness
+        - (loss_pol_per_head * 6.5)
+        - (root_mask_rate * 18.0)
+        - (directional_imbalance * 4.0)
+    )
+    reason = (
+        "score_seed_v66="
+        f"top1={policy_top1_share:.2f}, close_q={close_quality_score:.2f}, "
+        f"loss={loss_pol:.2f}, loss_head={loss_pol_per_head:.2f}, root_mask={root_mask_rate:.3f}, "
+        f"split_opp={split_opportunity_count:.0f}, pyramid_opp={pyramid_opportunity_count:.0f}, "
+        f"dir_imb={directional_imbalance:.3f}"
+    )
+    return score, reason
+
+
+def recommend_muzero_seed_for_v66(
+    *,
+    weights_dir: str | Path,
+    horizon: str,
+    candidate_reports: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Recommande un seed V6.6 oriente apprentissage plutot que score court.
+
+    Args:
+        weights_dir (str | Path): Dossier local des checkpoints MuZero.
+        horizon (str): Horizon concerne, par exemple ``scalp``.
+        candidate_reports (list[dict[str, Any]] | None): Rapports candidats
+            optionnels deja charges par l'orchestrateur.
+
+    Returns:
+        dict[str, Any]: Charge utile contenant le chemin recommande et la
+            raison associee.
+    """
+
+    normalized_horizon = str(horizon or "scalp").strip().lower() or "scalp"
+    weights_root = Path(weights_dir)
+    ranked_candidates: list[dict[str, Any]] = []
+    for raw_candidate in list(candidate_reports or []):
+        candidate = dict(raw_candidate or {})
+        checkpoint_step = int(candidate.get("checkpoint_step") or 0)
+        checkpoint_path = str(candidate.get("checkpoint_path") or "").strip()
+        if not checkpoint_path and checkpoint_step > 0:
+            checkpoint_path = str(
+                weights_root / f"muzero_{normalized_horizon}_ckpt_{checkpoint_step}.pkl"
+            )
+        path_obj = Path(checkpoint_path) if checkpoint_path else None
+        if path_obj is None or not path_obj.exists():
+            continue
+        metrics = _extract_seed_metrics(candidate)
+        if not metrics:
+            continue
+        score, reason = _score_seed_for_v66(metrics)
+        ranked_candidates.append(
+            {
+                "checkpoint_path": str(path_obj),
+                "checkpoint_step": checkpoint_step,
+                "seed_score": score,
+                "seed_selection_reason": reason,
+            }
+        )
+
+    if ranked_candidates:
+        ranked_candidates.sort(
+            key=lambda item: (
+                _to_float(item.get("seed_score"), default=-999.0),
+                int(item.get("checkpoint_step") or 0),
+            ),
+            reverse=True,
+        )
+        selected = dict(ranked_candidates[0])
+        selected["seed_source"] = "metrics"
+        return {
+            "recommended_seed_for_v66": selected["checkpoint_path"],
+            "seed_selection_reason": str(selected["seed_selection_reason"]),
+            "seed_score": float(selected["seed_score"]),
+            "seed_source": "metrics",
+            "candidates_considered": len(ranked_candidates),
+        }
+
+    fallback_steps = (23000, 6000, 10500)
+    for fallback_step in fallback_steps:
+        fallback_path = weights_root / f"muzero_{normalized_horizon}_ckpt_{int(fallback_step)}.pkl"
+        if fallback_path.exists():
+            return {
+                "recommended_seed_for_v66": str(fallback_path),
+                "seed_selection_reason": f"repli_v66_sur_ckpt{int(fallback_step)}",
+                "seed_score": None,
+                "seed_source": "fallback",
+                "candidates_considered": len(ranked_candidates),
+            }
+
+    available_checkpoints = sorted(
+        weights_root.glob(f"muzero_{normalized_horizon}_ckpt_*.pkl"),
+        key=lambda path: int(str(path.stem).split("_ckpt_")[-1] or 0),
+        reverse=True,
+    )
+    if available_checkpoints:
+        return {
+            "recommended_seed_for_v66": str(available_checkpoints[0]),
+            "seed_selection_reason": "repli_v66_sur_checkpoint_disponible_le_plus_recent",
+            "seed_score": None,
+            "seed_source": "latest_available",
+            "candidates_considered": len(ranked_candidates),
+        }
+
+    return {
+        "recommended_seed_for_v66": None,
+        "seed_selection_reason": "aucun_checkpoint_seed_disponible_pour_v66",
+        "seed_score": None,
+        "seed_source": "missing",
+        "candidates_considered": len(ranked_candidates),
+    }

@@ -143,32 +143,62 @@ class MT5Service:
         self._server = server
         self._terminal_path = str(terminal_path or "").strip()
         self._terminal_portable = bool(terminal_portable)
+        self._try_alternate_portable_mode = bool(
+            getattr(settings, "mt5_try_alternate_portable_mode", True)
+        )
         self._terminal_timeout_ms = max(1000, int(terminal_timeout_ms or 60000))
         logger.info(
-            "MT5Service initialise (mock_explicite=%s, mock_actif=%s, login=%s, server=%s, terminal=%s, portable=%s)",
+            "MT5Service initialise (mock_explicite=%s, mock_actif=%s, login=%s, server=%s, terminal=%s, portable=%s, alternance_portable=%s)",
             self._explicit_mock_mode,
             self.mock_mode,
             login,
             server,
             self._terminal_path or "<terminal-auto>",
             self._terminal_portable,
+            self._try_alternate_portable_mode,
         )
 
-    def _build_initialize_kwargs(self) -> dict[str, Any]:
+    def _build_initialize_kwargs(self, portable_override: bool | None = None) -> dict[str, Any]:
         """
         Construit les parametres d'initialisation du terminal MT5.
+
+        Args:
+            portable_override (bool | None): Force temporairement le mode
+                portable si renseigne.
 
         Returns:
             dict[str, Any]: Parametres compatibles avec `MetaTrader5.initialize`.
         """
+        portable_mode = self._terminal_portable if portable_override is None else bool(portable_override)
         init_kwargs: dict[str, Any] = {
             "timeout": self._terminal_timeout_ms,
         }
         if self._terminal_path:
             init_kwargs["path"] = self._terminal_path
-        if self._terminal_portable:
+        if portable_mode:
             init_kwargs["portable"] = True
         return init_kwargs
+
+    def _build_initialize_attempts(self) -> list[dict[str, Any]]:
+        """
+        Construit la sequence de tentatives d'initialisation du terminal MT5.
+
+        Certains brokers ne repondent via le bridge Python qu'en mode
+        portable, alors que d'autres exigent le profil AppData classique.
+        On tente donc le mode configure, puis l'alternative une seule fois si
+        un chemin de terminal explicite existe.
+
+        Returns:
+            list[dict[str, Any]]: Parametres tries dans l'ordre de tentative.
+        """
+        attempts: list[dict[str, Any]] = [self._build_initialize_kwargs()]
+        if self._terminal_path and self._try_alternate_portable_mode:
+            alternate_kwargs = self._build_initialize_kwargs(
+                portable_override=not self._terminal_portable
+            )
+            if alternate_kwargs != attempts[0]:
+                attempts.append(alternate_kwargs)
+        return attempts
 
     def _live_mode_requested(self) -> bool:
         """
@@ -372,10 +402,37 @@ class MT5Service:
             return False
 
         try:
-            # Initialisation MT5
-            init_kwargs = self._build_initialize_kwargs()
-            if not await asyncio.to_thread(mt5.initialize, **init_kwargs):
-                self._mark_live_disconnected(f"Echec d'initialisation MT5: {mt5.last_error()}")
+            # Certains terminaux brokers n'exposent le bridge IPC qu'en mode
+            # portable (ou l'inverse). On tente donc les deux profils avant
+            # de declarer le terminal hors ligne.
+            initialize_attempts = self._build_initialize_attempts()
+            last_initialize_error: Any = None
+            initialized = False
+
+            for attempt_index, init_kwargs in enumerate(initialize_attempts, start=1):
+                try:
+                    await asyncio.to_thread(mt5.shutdown)
+                except Exception:
+                    pass
+
+                if await asyncio.to_thread(mt5.initialize, **init_kwargs):
+                    initialized = True
+                    break
+
+                last_initialize_error = mt5.last_error()
+                logger.warning(
+                    "Initialisation MT5 echouee (tentative %s/%s, portable=%s, terminal=%s): %s",
+                    attempt_index,
+                    len(initialize_attempts),
+                    bool(init_kwargs.get("portable", False)),
+                    init_kwargs.get("path", self._terminal_path or "<terminal-auto>"),
+                    last_initialize_error,
+                )
+
+            if not initialized:
+                self._mark_live_disconnected(
+                    f"Echec d'initialisation MT5: {last_initialize_error}"
+                )
                 return False
 
             # Verifier si le terminal est deja connecte au bon compte
@@ -395,13 +452,28 @@ class MT5Service:
                     account_info = await asyncio.to_thread(mt5.account_info)
                     logger.info(f"MT5 login reussi: compte {self._login} sur {self._server}")
                 else:
-                    # Le terminal est peut-etre deja connecte mais login() echoue
+                    # Certains terminaux restent connectes a un ancien compte.
+                    # On n'accepte ce repli que si la session deja ouverte est
+                    # exactement celle demandee par la configuration.
                     account_info = await asyncio.to_thread(mt5.account_info)
-                    if account_info:
-                        logger.info(f"MT5 terminal deja actif: compte {account_info.login} sur {account_info.server} "
-                                   f"(Balance: {account_info.balance})")
+                    if (
+                        account_info
+                        and account_info.login == self._login
+                        and (not self._server or account_info.server == self._server)
+                    ):
+                        logger.info(
+                            "MT5 terminal deja actif sur le compte attendu: %s sur %s (Balance: %s)",
+                            account_info.login,
+                            account_info.server,
+                            account_info.balance,
+                        )
                     else:
-                        logger.error(f"MT5 login echoue pour {self._login}@{self._server}: {mt5.last_error()}")
+                        logger.error(
+                            "MT5 login echoue pour %s@%s: %s",
+                            self._login,
+                            self._server,
+                            mt5.last_error(),
+                        )
                         await asyncio.to_thread(mt5.shutdown)
                         self._mark_live_disconnected(
                             f"Impossible d'ouvrir la session MT5 {self._login}@{self._server}."
@@ -833,11 +905,33 @@ class MT5Service:
         if not self.is_connected and not await self._ensure_live_connection(f"lecture du tick {symbol}"):
             return {"success": False, "message": f"MT5 hors ligne pour {symbol}"}
 
+        await self.ensure_symbol_selected(symbol)
         tick = await asyncio.to_thread(mt5.symbol_info_tick, symbol)
-        if tick is None:
+        tick_invalid = (
+            tick is None
+            or (
+                float(getattr(tick, "bid", 0.0) or 0.0) <= 0.0
+                and float(getattr(tick, "ask", 0.0) or 0.0) <= 0.0
+            )
+        )
+        if tick_invalid:
             self.is_connected = False
-            await self._ensure_live_connection(f"lecture du tick {symbol} apres echec", force=True)
-            return {"success": False, "message": f"Dernier tick non disponible pour {symbol}"}
+            reconnected = await self._ensure_live_connection(
+                f"lecture du tick {symbol} apres echec",
+                force=True,
+            )
+            if reconnected:
+                await self.ensure_symbol_selected(symbol)
+                tick = await asyncio.to_thread(mt5.symbol_info_tick, symbol)
+                tick_invalid = (
+                    tick is None
+                    or (
+                        float(getattr(tick, "bid", 0.0) or 0.0) <= 0.0
+                        and float(getattr(tick, "ask", 0.0) or 0.0) <= 0.0
+                    )
+                )
+            if tick_invalid:
+                return {"success": False, "message": f"Dernier tick non disponible pour {symbol}"}
 
         return {
             "symbol": symbol,
@@ -896,11 +990,101 @@ class MT5Service:
             "max": volume_max,
         }
 
+    async def get_symbol_risk_sizing_hint(self, symbol: str) -> dict[str, Decimal]:
+        """
+        Retourne les metadonnees MT5 utiles au sizing base sur le risque.
+
+        Args:
+            symbol (str): Symbole MT5 a inspecter.
+
+        Returns:
+            dict[str, Decimal]: Parametres `tick_size`, `tick_value`,
+            `contract_size`, `volume_min`, `volume_step` et `volume_max`.
+        """
+        fallback = {
+            "tick_size": Decimal("0"),
+            "tick_value": Decimal("0"),
+            "contract_size": Decimal("0"),
+            "volume_min": Decimal("0.01"),
+            "volume_step": Decimal("0.01"),
+            "volume_max": Decimal("1.00"),
+        }
+
+        if self.mock_mode:
+            return fallback
+        if not self.is_connected and not await self._ensure_live_connection(f"lecture du sizing {symbol}"):
+            return fallback
+
+        symbol_info = await asyncio.to_thread(mt5.symbol_info, symbol)
+        if symbol_info is None:
+            logger.warning(
+                "MT5: metadonnees de sizing indisponibles pour %s, repli heuristique.",
+                symbol,
+            )
+            return fallback
+
+        point = Decimal(str(getattr(symbol_info, "point", 0.0) or 0.0))
+        tick_size = Decimal(str(getattr(symbol_info, "trade_tick_size", 0.0) or 0.0))
+        if tick_size <= 0:
+            tick_size = point if point > 0 else Decimal("0")
+
+        tick_value = max(
+            abs(Decimal(str(getattr(symbol_info, "trade_tick_value_profit", 0.0) or 0.0))),
+            abs(Decimal(str(getattr(symbol_info, "trade_tick_value_loss", 0.0) or 0.0))),
+            abs(Decimal(str(getattr(symbol_info, "trade_tick_value", 0.0) or 0.0))),
+        )
+        contract_size = Decimal(str(getattr(symbol_info, "trade_contract_size", 0.0) or 0.0))
+
+        volume_min = Decimal(str(getattr(symbol_info, "volume_min", 0.01) or 0.01))
+        volume_step = Decimal(str(getattr(symbol_info, "volume_step", 0.01) or 0.01))
+        volume_max = Decimal(str(getattr(symbol_info, "volume_max", volume_min) or volume_min))
+
+        if volume_step <= 0:
+            volume_step = Decimal("0.01")
+        if volume_max < volume_min:
+            volume_max = volume_min
+
+        return {
+            "tick_size": tick_size,
+            "tick_value": tick_value,
+            "contract_size": contract_size,
+            "volume_min": volume_min,
+            "volume_step": volume_step,
+            "volume_max": volume_max,
+        }
+
     def _get_deviation(self, symbol: str) -> int:
-        """Retourne la dÃ©viation (slippage) recommandÃ©e selon la volatilitÃ© de l'actif."""
-        if any(v in symbol.upper() for v in ["XAU", "BTC", "US30", "US100", "GER40"]):
+        """Retourne la déviation recommandée selon la volatilité de l'actif."""
+        normalized_symbol = symbol.upper()
+        if "XAU" in normalized_symbol or "BTC" in normalized_symbol or self._is_index_symbol(normalized_symbol):
             return 50  # 5 pips pour les actifs volatils
-        return 20  # 2 pips par dÃ©faut pour le Forex
+        return 20  # 2 pips par défaut pour le Forex
+
+    @staticmethod
+    def _is_index_symbol(symbol: str) -> bool:
+        """Détecte les indices CFD et leurs alias broker les plus fréquents.
+
+        Args:
+            symbol (str): Symbole MT5 à classifier.
+
+        Returns:
+            bool: True si le symbole doit être traité comme un indice CFD.
+        """
+        normalized_symbol = str(symbol or "").upper()
+        index_tokens = (
+            ".CASH",
+            "US30",
+            "US100",
+            "GER40",
+            "DE40",
+            "USTEC",
+            "UT100",
+            "US500",
+            "SPX500",
+            "NAS100",
+            "UK100",
+        )
+        return any(token in normalized_symbol for token in index_tokens)
 
     @staticmethod
     def _resolve_filling_mode(symbol_info: Any) -> int:
@@ -1051,8 +1235,8 @@ class MT5Service:
                     max_spread = 60
                 elif "BTC" in sym or "ETH" in sym:
                     max_spread = 1500
-                elif "US30" in sym or "US100" in sym or "GER40" in sym:
-                    max_spread = 150
+                elif self._is_index_symbol(sym):
+                    max_spread = 350
 
                 if current_spread > max_spread:
                     logger.warning(
@@ -1159,22 +1343,53 @@ class MT5Service:
         finally:
             await self._release_order_attempt(signature, remember_execution=order_executed)
 
-    async def close_position(self, ticket: int) -> dict[str, Any]:
-        """Ferme une position par son ticket"""
+    async def close_position(self, ticket: int, volume: Decimal | None = None) -> dict[str, Any]:
+        """
+        Ferme une position, totalement ou partiellement, via son ticket.
+
+        Args:
+            ticket (int): Ticket MT5 de la position a cloturer.
+            volume (Decimal | None): Volume a fermer. Si `None`, la position
+                complete est cloturee.
+
+        Returns:
+            dict[str, Any]: Resultat de cloture enrichi avec le volume ferme,
+            le volume restant et le prix d'entree utile pour un passage au BE.
+        """
         if self.mock_mode:
             pos = next((p for p in self._mock_positions if p.ticket == ticket), None)
             if not pos:
-                return {"success": False, "message": f"Position {ticket} non trouvÃ©e"}
-            
-            self._mock_positions = [p for p in self._mock_positions if p.ticket != ticket]
+                return {"success": False, "message": f"Position {ticket} non trouvee"}
+
+            requested_volume = Decimal(str(volume)) if volume is not None else pos.volume
+            close_volume = min(max(requested_volume, Decimal("0.01")), pos.volume)
+            remaining_volume = pos.volume - close_volume
+
+            if remaining_volume > 0:
+                updated_positions: list[Position] = []
+                for current_pos in self._mock_positions:
+                    if current_pos.ticket != ticket:
+                        updated_positions.append(current_pos)
+                        continue
+                    updated_positions.append(
+                        current_pos.model_copy(update={"volume": remaining_volume})
+                    )
+                self._mock_positions = updated_positions
+            else:
+                self._mock_positions = [p for p in self._mock_positions if p.ticket != ticket]
+
             # Simulation de profit pour le mock (entre -50 et +150)
             import random
             profit = Decimal(str(random.uniform(-50, 150)))
             return {
-                "success": True, 
-                "message": f"Position {ticket} fermÃ©e (mock)",
+                "success": True,
+                "message": f"Position {ticket} fermee (mock)",
                 "profit": float(profit),
-                "symbol": pos.symbol
+                "symbol": pos.symbol,
+                "volume_closed": float(close_volume),
+                "volume_remaining": float(max(remaining_volume, Decimal("0"))),
+                "open_price": float(pos.open_price),
+                "partial_close": remaining_volume > 0,
             }
 
         if not self.is_connected and not await self._ensure_live_connection(f"fermeture position {ticket}"):
@@ -1189,7 +1404,24 @@ class MT5Service:
         deviation = self._get_deviation(pos.symbol)
         symbol_info = await asyncio.to_thread(mt5.symbol_info, pos.symbol)
         filling_mode = self._resolve_filling_mode(symbol_info) if symbol_info else getattr(mt5, "ORDER_FILLING_IOC", 1)
-        
+        current_volume = Decimal(str(pos.volume))
+        requested_volume = current_volume if volume is None else Decimal(str(volume))
+        requested_volume = max(requested_volume, Decimal("0"))
+
+        if symbol_info is None:
+            return {"success": False, "message": f"Symbole {pos.symbol} introuvable pour la cloture."}
+
+        close_volume = self._normalize_volume(symbol_info, requested_volume)
+        if close_volume > current_volume:
+            close_volume = current_volume
+
+        volume_min = Decimal(str(getattr(symbol_info, "volume_min", 0.01) or 0.01))
+        remaining_volume = current_volume - close_volume
+        if remaining_volume > 0 and remaining_volume < volume_min:
+            # On evite de laisser un reliquat invalide chez le broker.
+            close_volume = current_volume
+            remaining_volume = Decimal("0")
+
         for attempt in range(3):
             price = await asyncio.to_thread(mt5.symbol_info_tick, pos.symbol)
             if price is None:
@@ -1201,7 +1433,7 @@ class MT5Service:
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": pos.symbol,
-                "volume": pos.volume,
+                "volume": float(close_volume),
                 "type": close_type,
                 "position": ticket,
                 "price": close_price,
@@ -1215,11 +1447,15 @@ class MT5Service:
             result = await asyncio.to_thread(mt5.order_send, request)
             if result.retcode == mt5.TRADE_RETCODE_DONE:
                 return {
-                    "success": True, 
-                    "ticket": ticket, 
-                    "message": f"Position fermÃ©e (Att: {attempt+1})",
+                    "success": True,
+                    "ticket": ticket,
+                    "message": f"Position fermee (Att: {attempt+1})",
                     "profit": pos.profit,
-                    "symbol": pos.symbol
+                    "symbol": pos.symbol,
+                    "volume_closed": float(close_volume),
+                    "volume_remaining": float(max(remaining_volume, Decimal("0"))),
+                    "open_price": float(getattr(pos, "price_open", 0.0) or 0.0),
+                    "partial_close": remaining_volume > 0,
                 }
             
             if result.retcode in [10004, 10006, 10021]:

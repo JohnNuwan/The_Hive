@@ -825,6 +825,8 @@ class ChampionPromoter:
 
         normalized_engine = self.normalize_engine_name(engine)
         normalized_horizon = str(horizon or "intraday").strip().lower() or "intraday"
+        manifest_path = self.get_manifest_path(normalized_horizon, engine=normalized_engine)
+        existing_manifest = self.load_manifest(normalized_horizon, engine=normalized_engine) or {}
         result_payload = dict(promotion_result or {})
         candidate_metrics = dict(((battle_report or {}).get("challenger") or {}).get("metrics") or {})
         training_payload = dict(training_metrics or {})
@@ -910,7 +912,51 @@ class ChampionPromoter:
             if value is not None:
                 manifest[key] = value
 
-        manifest_path = self.get_manifest_path(normalized_horizon, engine=normalized_engine)
+        incoming_status = str(status or "").strip().lower()
+        existing_status = str((existing_manifest or {}).get("status") or "").strip().lower()
+        manual_live_lock = bool((existing_manifest or {}).get("manual_live_lock", False))
+        if (
+            incoming_status in {"blocked", "candidate_only"}
+            and existing_status == "promoted"
+            and manual_live_lock
+        ):
+            preserved_manifest = dict(existing_manifest)
+            preserved_manifest["last_live_guard_at"] = datetime.now().isoformat()
+            preserved_manifest["last_rejected_candidate"] = {
+                "status": incoming_status,
+                "challenger_id": str(challenger_id or "").strip() or None,
+                "source_path": str(challenger_path) if challenger_path else None,
+                "latest_checkpoint": str(latest_checkpoint) if latest_checkpoint else None,
+                "promotion_gate": gate_payload,
+                "battle_report": battle_report,
+                "training_metrics": training_payload,
+                "artifact_compatibility": dict(artifact_compatibility or {}),
+                "checkpoint_schema_version": checkpoint_schema_version,
+                "resume_source": resume_source,
+                "lineage": lineage_payload,
+                "updated_at": datetime.now().isoformat(),
+            }
+            for key, value in dict(promotion_metadata or {}).items():
+                if value is not None and key not in {
+                    "status",
+                    "challenger_id",
+                    "source_path",
+                    "champion_path",
+                    "promotion_gate",
+                }:
+                    preserved_manifest[key] = value
+            manifest_path.write_text(
+                json.dumps(preserved_manifest, indent=2, ensure_ascii=False, default=float),
+                encoding="utf-8",
+            )
+            logger.warning(
+                "Champion live manuel preserve pour %s/%s malgre un verdict %s.",
+                normalized_engine,
+                normalized_horizon,
+                incoming_status,
+            )
+            return preserved_manifest
+
         manifest_path.write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False, default=float),
             encoding="utf-8",
@@ -1344,11 +1390,14 @@ class ChampionPromoter:
             + self._to_float(metrics.get("win_rate")) * 0.06
             + self._to_float(mechanics.get("close_quality_score")) * 6.0
             + self._to_float(mechanics.get("split_efficiency")) * 4.0
+            + self._to_float(mechanics.get("split_runner_capture_rate")) * 5.0
             + self._to_float(mechanics.get("pyramid_efficiency")) * 4.0
+            + self._to_float(mechanics.get("pyramid_exit_capture_rate")) * 5.0
             + self._to_float(mechanics.get("slbe_capture_rate")) * 4.0
             - self._to_float(metrics.get("max_drawdown_pct")) * 1.8
             - self._to_float(metrics.get("directional_imbalance"), default=1.0) * 10.0
             - self._to_float(mechanics.get("hold_drag_score")) * 10.0
+            - (15.0 if bool(metrics.get("directional_collapse", False)) else 0.0)
         )
 
     def rank_live_symbols(
@@ -1432,6 +1481,12 @@ class ChampionPromoter:
                     close_events <= 0
                     or self._to_float(mechanics.get("close_quality_score"))
                     >= promotion_thresholds["min_close_quality_score"]
+                ),
+                "weak_symbol_tripwire": not (
+                    close_events >= 6
+                    and self._to_float(metrics.get("profit_factor")) < 0.95
+                    and self._to_float(metrics.get("return_pct")) <= 0.0
+                    and self._to_float(mechanics.get("close_quality_score")) < 0.25
                 ),
             }
             verdict = {

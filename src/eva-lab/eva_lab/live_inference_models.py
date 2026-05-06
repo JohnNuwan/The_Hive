@@ -22,6 +22,12 @@ class LivePredictRequest(BaseModel):
         training_compat_mode (str | None): Mode runtime du banker, a titre informatif.
         cortex_required (bool | None): Indique si le banker attend encore le Cortex.
         gnn_mode (str | None): Mode d'usage du GNN cote banker.
+        position_state (float | None): Etat de position live normalise
+            (-1.0, 0.0, 1.0).
+        unrealized_return (float | None): Rendement latent signe de la
+            position live si elle existe.
+        slbe_state (float | None): Indique si la protection type
+            break-even / lock-profit est deja activee.
     """
 
     symbol: str = Field(..., min_length=1)
@@ -34,3 +40,6 @@ class LivePredictRequest(BaseModel):
     training_compat_mode: str | None = Field(default=None)
     cortex_required: bool | None = Field(default=None)
     gnn_mode: str | None = Field(default=None)
+    position_state: float | None = Field(default=None)
+    unrealized_return: float | None = Field(default=None)
+    slbe_state: float | None = Field(default=None)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import os
 import random
 from dataclasses import dataclass, field
 from typing import List, Tuple
@@ -153,6 +155,12 @@ class PrioritizedReplayBuffer:
         except (TypeError, ValueError):
             return 0.0
 
+    @staticmethod
+    def _metadata_str(game: GameHistory, key: str) -> str:
+        """Retourne une chaine de metadata avec repli robuste."""
+
+        return str((game.metadata or {}).get(key, "") or "").strip()
+
     def _iter_entries(self) -> list[tuple[int, float, GameHistory]]:
         """Retourne les episodes actuellement presents avec leurs priorites."""
 
@@ -218,6 +226,47 @@ class PrioritizedReplayBuffer:
             return "sell_only"
         return None
 
+    @staticmethod
+    def _hard_negative_type(game: GameHistory) -> str | None:
+        """Retourne le type d'echec prioritaire d'un episode si applicable.
+
+        Args:
+            game (GameHistory): Episode MuZero analyse.
+
+        Returns:
+            str | None: Type d'echec retenu, ou ``None`` si l'episode n'est
+                pas considere comme hard-negative.
+        """
+        metadata = dict(game.metadata or {})
+        nemesis_type = str(metadata.get("nemesis_type") or "").strip().upper()
+        if nemesis_type and nemesis_type != "NONE":
+            return nemesis_type
+        if bool(metadata.get("liquidity_trap_loss", False)):
+            return "LIQUIDITY_TRAP"
+        if bool(metadata.get("bad_runner_exit", False)):
+            return "BAD_RUNNER_EXIT"
+        if bool(metadata.get("bad_pyramid_exit", False)):
+            return "BAD_PYRAMID_EXIT"
+        if bool(metadata.get("range_entry_loss", False)):
+            return "RANGE_ENTRY_LOSS"
+        if bool(metadata.get("hard_stop_exit", False)):
+            return "HARD_STOP_EXIT"
+        if bool(metadata.get("bad_split", False)):
+            return "BAD_SPLIT"
+        return None
+
+    @classmethod
+    def _is_hard_negative(cls, game: GameHistory) -> bool:
+        """Indique si un episode fait partie du replay correctif prioritaire.
+
+        Args:
+            game (GameHistory): Episode MuZero analyse.
+
+        Returns:
+            bool: ``True`` si l'episode porte un tag d'echec cible.
+        """
+        return cls._hard_negative_type(game) is not None
+
     def save_game(self, game: GameHistory) -> None:
         """Persiste un episode complet dans l'arbre de priorites.
 
@@ -259,10 +308,82 @@ class PrioritizedReplayBuffer:
         long_target = int(batch_size * 0.30)
         short_target = int(batch_size * 0.30)
         one_sided_cap = max(1, int(batch_size * 0.35))
+        hard_negative_ratio = min(
+            0.50,
+            max(0.0, float(os.getenv("MUZERO_REPLAY_HARD_NEGATIVE_RATIO", "0.20"))),
+        )
+        hard_negative_type_cap_ratio = min(
+            hard_negative_ratio,
+            max(0.0, float(os.getenv("MUZERO_REPLAY_HARD_NEGATIVE_TYPE_CAP", "0.08"))),
+        )
+        hard_negative_target = max(
+            0,
+            min(batch_size, int(math.ceil(batch_size * hard_negative_ratio))),
+        )
+        hard_negative_type_cap = max(
+            1,
+            int(math.ceil(batch_size * hard_negative_type_cap_ratio)),
+        )
+        symbols = sorted(
+            {
+                self._metadata_str(game, "symbol")
+                for _, _, game in entries
+                if self._metadata_str(game, "symbol")
+            }
+        )
+        symbol_cap = (
+            batch_size
+            if len(symbols) < 4
+            else max(1, int(math.ceil(batch_size * 0.25)))
+        )
 
         selected_tree_indices: set[int] = set()
         selected_entries: list[tuple[int, float, GameHistory]] = []
         one_sided_counts = {"buy_only": 0, "sell_only": 0}
+        symbol_counts: dict[str, int] = {}
+        hard_negative_counts: dict[str, int] = {}
+
+        def can_accept(
+            game: GameHistory,
+            *,
+            enforce_symbol_cap: bool = True,
+            enforce_hard_negative_cap: bool = True,
+        ) -> bool:
+            bucket = self._one_sided_bucket(game)
+            if bucket and one_sided_counts[bucket] >= one_sided_cap:
+                return False
+            symbol = self._metadata_str(game, "symbol")
+            if enforce_symbol_cap and symbol and len(symbols) >= 4:
+                if symbol_counts.get(symbol, 0) >= symbol_cap:
+                    return False
+            hard_negative_type = self._hard_negative_type(game)
+            if (
+                enforce_hard_negative_cap
+                and hard_negative_type
+                and hard_negative_counts.get(hard_negative_type, 0) >= hard_negative_type_cap
+            ):
+                return False
+            return True
+
+        def register_entry(tree_idx: int, priority: float, game: GameHistory) -> bool:
+            if tree_idx in selected_tree_indices:
+                return False
+            if not can_accept(game):
+                return False
+            selected_tree_indices.add(tree_idx)
+            selected_entries.append((tree_idx, priority, game))
+            bucket = self._one_sided_bucket(game)
+            if bucket:
+                one_sided_counts[bucket] += 1
+            symbol = self._metadata_str(game, "symbol")
+            if symbol:
+                symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
+            hard_negative_type = self._hard_negative_type(game)
+            if hard_negative_type:
+                hard_negative_counts[hard_negative_type] = (
+                    hard_negative_counts.get(hard_negative_type, 0) + 1
+                )
+            return True
 
         def add_from_bucket(
             candidates: list[tuple[int, float, GameHistory]],
@@ -276,13 +397,7 @@ class PrioritizedReplayBuffer:
                 if item[0] not in selected_tree_indices
             ]
             for tree_idx, priority, game in self._weighted_pick_without_replacement(filtered, target_count):
-                bucket = self._one_sided_bucket(game)
-                if bucket and one_sided_counts[bucket] >= one_sided_cap:
-                    continue
-                selected_tree_indices.add(tree_idx)
-                selected_entries.append((tree_idx, priority, game))
-                if bucket:
-                    one_sided_counts[bucket] += 1
+                register_entry(tree_idx, priority, game)
 
         balanced_entries = [
             item
@@ -299,6 +414,37 @@ class PrioritizedReplayBuffer:
             for item in entries
             if self._metadata_bool(item[2], "short_present")
         ]
+
+        if symbols and batch_size > 0:
+            symbol_buckets: dict[str, list[tuple[int, float, GameHistory]]] = {}
+            for entry in entries:
+                symbol = self._metadata_str(entry[2], "symbol")
+                if not symbol:
+                    continue
+                symbol_buckets.setdefault(symbol, []).append(entry)
+            for symbol in symbols:
+                if len(selected_entries) >= batch_size:
+                    break
+                bucket_entries = list(symbol_buckets.get(symbol) or [])
+                if not bucket_entries:
+                    continue
+                for tree_idx, priority, game in self._weighted_pick_without_replacement(bucket_entries, 1):
+                    register_entry(tree_idx, priority, game)
+
+        hard_negative_selected = 0
+        hard_negative_candidates = [
+            item
+            for item in entries
+            if item[0] not in selected_tree_indices and self._is_hard_negative(item[2])
+        ]
+        for tree_idx, priority, game in self._weighted_pick_without_replacement(
+            hard_negative_candidates,
+            len(hard_negative_candidates),
+        ):
+            if len(selected_entries) >= batch_size or hard_negative_selected >= hard_negative_target:
+                break
+            if register_entry(tree_idx, priority, game):
+                hard_negative_selected += 1
 
         add_from_bucket(balanced_entries, balanced_target)
         add_from_bucket(long_entries, long_target)
@@ -317,13 +463,35 @@ class PrioritizedReplayBuffer:
             ):
                 if len(selected_entries) >= batch_size:
                     break
-                bucket = self._one_sided_bucket(game)
-                if bucket and one_sided_counts[bucket] >= one_sided_cap:
+                register_entry(tree_idx, priority, game)
+
+        if len(selected_entries) < batch_size:
+            fallback_candidates = [
+                item
+                for item in entries
+                if item[0] not in selected_tree_indices
+            ]
+            for tree_idx, priority, game in self._weighted_pick_without_replacement(
+                fallback_candidates,
+                len(fallback_candidates),
+            ):
+                if len(selected_entries) >= batch_size:
+                    break
+                if not can_accept(game, enforce_symbol_cap=False, enforce_hard_negative_cap=False):
                     continue
                 selected_tree_indices.add(tree_idx)
                 selected_entries.append((tree_idx, priority, game))
+                bucket = self._one_sided_bucket(game)
                 if bucket:
                     one_sided_counts[bucket] += 1
+                symbol = self._metadata_str(game, "symbol")
+                if symbol:
+                    symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
+                hard_negative_type = self._hard_negative_type(game)
+                if hard_negative_type:
+                    hard_negative_counts[hard_negative_type] = (
+                        hard_negative_counts.get(hard_negative_type, 0) + 1
+                    )
 
         batch: list[tuple[GameHistory, int, float]] = []
         for tree_idx, _priority, game in selected_entries:
@@ -399,6 +567,10 @@ class PrioritizedReplayBuffer:
                 "root_mask_blocked_sell_obv": 0.0,
                 "root_mask_blocked_buy_directional": 0.0,
                 "root_mask_blocked_sell_directional": 0.0,
+                "root_mask_ema200_share": 0.0,
+                "root_mask_vwap_share": 0.0,
+                "root_mask_adx_share": 0.0,
+                "root_mask_directional_share": 0.0,
                 "blocked_buy_total": 0.0,
                 "blocked_sell_total": 0.0,
                 "soft_entry_penalty_rate": 0.0,
@@ -415,6 +587,89 @@ class PrioritizedReplayBuffer:
                 "soft_penalty_vwap_rate": 0.0,
                 "soft_penalty_adx_rate": 0.0,
                 "soft_penalty_obv_rate": 0.0,
+                "hold_drag_opportunity_count": 0.0,
+                "hold_drag_penalized_count": 0.0,
+                "hold_drag_score": 0.0,
+                "split_opportunity_count": 0.0,
+                "split_executed": 0.0,
+                "split_profitable_count": 0.0,
+                "split_efficiency": 0.0,
+                "pyramid_opportunity_count": 0.0,
+                "pyramids_opened": 0.0,
+                "pyramid_profitable_count": 0.0,
+                "pyramid_efficiency": 0.0,
+                "slbe_triggered": 0.0,
+                "slbe_profitable_exits": 0.0,
+                "slbe_lock_profit_count": 0.0,
+                "slbe_capture_rate": 0.0,
+                "close_winner_count": 0.0,
+                "close_loser_count": 0.0,
+                "close_quality_score": 0.0,
+                "tp_like_exit_count": 0.0,
+                "tp_like_missed_count": 0.0,
+                "defensive_close_count": 0.0,
+                "early_close_noise_count": 0.0,
+                "hard_stop_exit_count": 0.0,
+                "soft_tp_hit_count": 0.0,
+                "full_tp_hit_count": 0.0,
+                "time_stop_trigger_count": 0.0,
+                "runner_extension_count": 0.0,
+                "runner_managed_exit_count": 0.0,
+                "runner_exit_profitable_count": 0.0,
+                "runner_forced_stop_count": 0.0,
+                "forced_stop_near_miss_count": 0.0,
+                "split_runner_capture_rate": 0.0,
+                "split_zone_capture_rate": 0.0,
+                "split_monetization_capture_rate": 0.0,
+                "split_runner_profitable_count": 0.0,
+                "split_runner_failed_count": 0.0,
+                "split_early_count": 0.0,
+                "split_decorative_count": 0.0,
+                "split_trade_value_delta": 0.0,
+                "split_improved_total_trade_count": 0.0,
+                "split_tp_zone_opportunity_count": 0.0,
+                "split_monetization_window_count": 0.0,
+                "pyramid_entry_quality_score": 0.0,
+                "pyramid_exit_capture_rate": 0.0,
+                "pyramid_add_capture_rate": 0.0,
+                "pyramid_monetization_capture_rate": 0.0,
+                "pyramid_good_add_count": 0.0,
+                "pyramid_bad_add_count": 0.0,
+                "pyramid_profitable_exit_count": 0.0,
+                "pyramid_total_trade_improvement_pct": 0.0,
+                "pyramid_failed_to_improve_count": 0.0,
+                "pyramid_add_opportunity_count": 0.0,
+                "pyramid_monetization_window_count": 0.0,
+                "pyramid_missed_add_count": 0.0,
+                "runner_extension_capture_rate": 0.0,
+                "runner_extension_opportunity_count": 0.0,
+                "runner_profit_hold_capture_rate": 0.0,
+                "runner_profit_hold_window_count": 0.0,
+                "runner_missed_extension_count": 0.0,
+                "runner_retained_profit_pct": 0.0,
+                "runner_giveback_pct": 0.0,
+                "runner_giveback_ratio": 0.0,
+                "profit_peak_reached_count": 0.0,
+                "profit_peak_giveback_ratio": 0.0,
+                "close_quality_by_symbol": {},
+                "close_events_by_symbol": {},
+                "split_efficiency_by_symbol": {},
+                "split_runner_capture_rate_by_symbol": {},
+                "pyramid_efficiency_by_symbol": {},
+                "pyramid_entry_quality_score_by_symbol": {},
+                "pyramid_exit_capture_rate_by_symbol": {},
+                "slbe_capture_rate_by_symbol": {},
+                "hold_drag_score_by_symbol": {},
+                "root_mask_share_by_symbol": {},
+                "root_mask_ema200_share_by_symbol": {},
+                "root_mask_vwap_share_by_symbol": {},
+                "root_mask_adx_share_by_symbol": {},
+                "root_mask_directional_share_by_symbol": {},
+                "hard_negative_mix": {},
+                "nemesis_mix": {},
+                "liquidity_trap_share": 0.0,
+                "bad_runner_share": 0.0,
+                "bad_pyramid_share": 0.0,
                 "directional_collapse": True,
                 "long_entry_share": 0.0,
                 "short_entry_share": 0.0,
@@ -450,13 +705,113 @@ class PrioritizedReplayBuffer:
         soft_penalty_vwap_count = 0.0
         soft_penalty_adx_count = 0.0
         soft_penalty_obv_count = 0.0
+        hold_drag_opportunity_count = 0.0
+        hold_drag_penalized_count = 0.0
+        split_opportunity_count = 0.0
+        split_executed = 0.0
+        split_profitable_count = 0.0
+        split_runner_profitable_count = 0.0
+        split_runner_failed_count = 0.0
+        split_early_count = 0.0
+        split_decorative_count = 0.0
+        split_trade_value_delta_total = 0.0
+        split_improved_total_trade_count = 0.0
+        split_tp_zone_opportunity_count = 0.0
+        split_monetization_window_count = 0.0
+        split_monetization_capture_count = 0.0
+        pyramid_opportunity_count = 0.0
+        pyramid_add_opportunity_count = 0.0
+        pyramid_add_capture_count = 0.0
+        pyramid_monetization_window_count = 0.0
+        pyramid_monetization_capture_count = 0.0
+        pyramid_missed_add_count = 0.0
+        pyramids_opened = 0.0
+        pyramid_profitable_count = 0.0
+        pyramid_good_add_count = 0.0
+        pyramid_bad_add_count = 0.0
+        pyramid_profitable_exit_count = 0.0
+        pyramid_total_trade_improvement_total = 0.0
+        pyramid_failed_to_improve_count = 0.0
+        slbe_triggered = 0.0
+        slbe_profitable_exits = 0.0
+        slbe_lock_profit_count = 0.0
+        close_winner_count = 0.0
+        close_loser_count = 0.0
+        tp_like_exit_count = 0.0
+        tp_like_missed_count = 0.0
+        defensive_close_count = 0.0
+        early_close_noise_count = 0.0
+        hard_stop_exit_count = 0.0
+        soft_tp_hit_count = 0.0
+        full_tp_hit_count = 0.0
+        time_stop_trigger_count = 0.0
+        runner_extension_count = 0.0
+        runner_extension_opportunity_count = 0.0
+        runner_extension_capture_count = 0.0
+        runner_profit_hold_window_count = 0.0
+        runner_profit_hold_capture_count = 0.0
+        runner_missed_extension_count = 0.0
+        runner_managed_exit_count = 0.0
+        runner_exit_profitable_count = 0.0
+        runner_forced_stop_count = 0.0
+        runner_retained_profit_total = 0.0
+        runner_giveback_total = 0.0
+        profit_peak_reached_count = 0.0
+        profit_peak_giveback_ratio_total = 0.0
+        profit_peak_giveback_ratio_observations = 0.0
+        forced_stop_near_miss_count = 0.0
         long_return_sum = 0.0
         short_return_sum = 0.0
         long_return_games = 0
         short_return_games = 0
+        hard_negative_total = 0
+        hard_negative_counts: dict[str, int] = {}
+        nemesis_counts: dict[str, int] = {}
+        symbol_counters: dict[str, dict[str, float]] = {}
 
         for _, _priority, game in entries:
             metadata = dict(game.metadata or {})
+            symbol = self._metadata_str(game, "symbol") or "unknown"
+            hard_negative_type = self._hard_negative_type(game)
+            if hard_negative_type:
+                hard_negative_total += 1
+                hard_negative_counts[hard_negative_type] = (
+                    hard_negative_counts.get(hard_negative_type, 0) + 1
+                )
+            nemesis_type = str(metadata.get("nemesis_type") or "").strip().upper()
+            if nemesis_type and nemesis_type != "NONE":
+                nemesis_counts[nemesis_type] = nemesis_counts.get(nemesis_type, 0) + 1
+            symbol_counter = symbol_counters.setdefault(
+                symbol,
+                {
+                    "close_winner_count": 0.0,
+                    "close_loser_count": 0.0,
+                    "root_mask_directional_candidates_total": 0.0,
+                    "root_mask_blocked_buy_total": 0.0,
+                    "root_mask_blocked_sell_total": 0.0,
+                    "root_mask_blocked_buy_ema200": 0.0,
+                    "root_mask_blocked_sell_ema200": 0.0,
+                    "root_mask_blocked_buy_vwap": 0.0,
+                    "root_mask_blocked_sell_vwap": 0.0,
+                    "root_mask_blocked_buy_adx": 0.0,
+                    "root_mask_blocked_sell_adx": 0.0,
+                    "root_mask_blocked_buy_directional": 0.0,
+                    "root_mask_blocked_sell_directional": 0.0,
+                    "split_executed": 0.0,
+                    "split_profitable_count": 0.0,
+                    "split_runner_profitable_count": 0.0,
+                    "split_trade_value_delta": 0.0,
+                    "pyramids_opened": 0.0,
+                    "pyramid_profitable_count": 0.0,
+                    "pyramid_good_add_count": 0.0,
+                    "pyramid_profitable_exit_count": 0.0,
+                    "pyramid_total_trade_improvement_pct": 0.0,
+                    "slbe_triggered": 0.0,
+                    "slbe_profitable_exits": 0.0,
+                    "hold_drag_opportunity_count": 0.0,
+                    "hold_drag_penalized_count": 0.0,
+                },
+            )
             if bool(metadata.get("balanced_episode", False)):
                 balanced_games += 1
             if bool(metadata.get("long_present", False)):
@@ -499,6 +854,151 @@ class PrioritizedReplayBuffer:
             soft_penalty_vwap_count += self._metadata_float(game, "soft_penalty_vwap_count")
             soft_penalty_adx_count += self._metadata_float(game, "soft_penalty_adx_count")
             soft_penalty_obv_count += self._metadata_float(game, "soft_penalty_obv_count")
+            hold_drag_opportunity_count += self._metadata_float(game, "hold_drag_opportunity_count")
+            hold_drag_penalized_count += self._metadata_float(game, "hold_drag_penalized_count")
+            split_opportunity_count += self._metadata_float(game, "split_opportunity_count")
+            split_executed += self._metadata_float(game, "split_executed")
+            split_profitable_count += self._metadata_float(game, "split_profitable_count")
+            split_runner_profitable_count += self._metadata_float(game, "split_runner_profitable_count")
+            split_runner_failed_count += self._metadata_float(game, "split_runner_failed_count")
+            split_early_count += self._metadata_float(game, "split_early_count")
+            split_decorative_count += self._metadata_float(game, "split_decorative_count")
+            split_trade_value_delta_total += self._metadata_float(game, "split_trade_value_delta")
+            split_improved_total_trade_count += self._metadata_float(
+                game,
+                "split_improved_total_trade_count",
+            )
+            split_tp_zone_opportunity_count += self._metadata_float(
+                game,
+                "split_tp_zone_opportunity_count",
+            )
+            split_monetization_window_count += self._metadata_float(
+                game,
+                "split_monetization_window_count",
+            )
+            split_monetization_capture_count += self._metadata_float(
+                game,
+                "split_monetization_capture_rate",
+            ) * self._metadata_float(game, "split_monetization_window_count")
+            pyramid_opportunity_count += self._metadata_float(game, "pyramid_opportunity_count")
+            pyramid_add_opportunity_count += self._metadata_float(
+                game,
+                "pyramid_add_opportunity_count",
+            )
+            pyramid_add_capture_count += self._metadata_float(game, "pyramid_add_capture_count")
+            pyramid_monetization_window_count += self._metadata_float(
+                game,
+                "pyramid_monetization_window_count",
+            )
+            pyramid_monetization_capture_count += self._metadata_float(
+                game,
+                "pyramid_monetization_capture_rate",
+            ) * self._metadata_float(game, "pyramid_monetization_window_count")
+            pyramid_missed_add_count += self._metadata_float(game, "pyramid_missed_add_count")
+            pyramids_opened += self._metadata_float(game, "pyramids_opened")
+            pyramid_profitable_count += self._metadata_float(game, "pyramid_profitable_count")
+            pyramid_good_add_count += self._metadata_float(game, "pyramid_good_add_count")
+            pyramid_bad_add_count += self._metadata_float(game, "pyramid_bad_add_count")
+            pyramid_profitable_exit_count += self._metadata_float(game, "pyramid_profitable_exit_count")
+            pyramid_total_trade_improvement_total += self._metadata_float(
+                game,
+                "pyramid_total_trade_improvement_pct",
+            )
+            pyramid_failed_to_improve_count += self._metadata_float(
+                game,
+                "pyramid_failed_to_improve_count",
+            )
+            slbe_triggered += self._metadata_float(game, "slbe_triggered")
+            slbe_profitable_exits += self._metadata_float(game, "slbe_profitable_exits")
+            slbe_lock_profit_count += self._metadata_float(game, "slbe_lock_profit_count")
+            close_winner_count += self._metadata_float(game, "close_winner_count")
+            close_loser_count += self._metadata_float(game, "close_loser_count")
+            tp_like_exit_count += self._metadata_float(game, "tp_like_exit_count")
+            tp_like_missed_count += self._metadata_float(game, "tp_like_missed_count")
+            defensive_close_count += self._metadata_float(game, "defensive_close_count")
+            early_close_noise_count += self._metadata_float(game, "early_close_noise_count")
+            hard_stop_exit_count += self._metadata_float(game, "hard_stop_exit_count")
+            soft_tp_hit_count += self._metadata_float(game, "soft_tp_hit_count")
+            full_tp_hit_count += self._metadata_float(game, "full_tp_hit_count")
+            time_stop_trigger_count += self._metadata_float(game, "time_stop_trigger_count")
+            runner_extension_count += self._metadata_float(game, "runner_extension_count")
+            runner_extension_opportunity_count += self._metadata_float(
+                game,
+                "runner_extension_opportunity_count",
+            )
+            runner_extension_capture_count += self._metadata_float(
+                game,
+                "runner_extension_capture_rate",
+            ) * self._metadata_float(game, "runner_extension_opportunity_count")
+            runner_profit_hold_window_count += self._metadata_float(
+                game,
+                "runner_profit_hold_window_count",
+            )
+            runner_profit_hold_capture_count += self._metadata_float(
+                game,
+                "runner_profit_hold_capture_rate",
+            ) * self._metadata_float(game, "runner_profit_hold_window_count")
+            runner_missed_extension_count += self._metadata_float(game, "runner_missed_extension_count")
+            runner_managed_exit_count += self._metadata_float(game, "runner_managed_exit_count")
+            runner_exit_profitable_count += self._metadata_float(game, "runner_exit_profitable_count")
+            runner_forced_stop_count += self._metadata_float(game, "runner_forced_stop_count")
+            runner_retained_profit_total += self._metadata_float(game, "runner_retained_profit_pct")
+            runner_giveback_total += self._metadata_float(game, "runner_giveback_pct")
+            profit_peak_reached_count += self._metadata_float(game, "profit_peak_reached_count")
+            profit_peak_giveback_ratio_total += self._metadata_float(
+                game,
+                "profit_peak_giveback_ratio",
+            ) * self._metadata_float(game, "profit_peak_reached_count")
+            profit_peak_giveback_ratio_observations += self._metadata_float(
+                game,
+                "profit_peak_reached_count",
+            )
+            forced_stop_near_miss_count += self._metadata_float(game, "forced_stop_near_miss_count")
+
+            symbol_counter["root_mask_directional_candidates_total"] += self._metadata_float(
+                game,
+                "root_mask_directional_candidates_total",
+            )
+            symbol_counter["root_mask_blocked_buy_total"] += self._metadata_float(game, "root_mask_blocked_buy_total")
+            symbol_counter["root_mask_blocked_sell_total"] += self._metadata_float(game, "root_mask_blocked_sell_total")
+            symbol_counter["root_mask_blocked_buy_ema200"] += self._metadata_float(
+                game,
+                "root_mask_blocked_buy_ema200",
+            )
+            symbol_counter["root_mask_blocked_sell_ema200"] += self._metadata_float(
+                game,
+                "root_mask_blocked_sell_ema200",
+            )
+            symbol_counter["root_mask_blocked_buy_vwap"] += self._metadata_float(game, "root_mask_blocked_buy_vwap")
+            symbol_counter["root_mask_blocked_sell_vwap"] += self._metadata_float(game, "root_mask_blocked_sell_vwap")
+            symbol_counter["root_mask_blocked_buy_adx"] += self._metadata_float(game, "root_mask_blocked_buy_adx")
+            symbol_counter["root_mask_blocked_sell_adx"] += self._metadata_float(game, "root_mask_blocked_sell_adx")
+            symbol_counter["root_mask_blocked_buy_directional"] += self._metadata_float(
+                game,
+                "root_mask_blocked_buy_directional",
+            )
+            symbol_counter["root_mask_blocked_sell_directional"] += self._metadata_float(
+                game,
+                "root_mask_blocked_sell_directional",
+            )
+            symbol_counter["close_winner_count"] += self._metadata_float(game, "close_winner_count")
+            symbol_counter["close_loser_count"] += self._metadata_float(game, "close_loser_count")
+            symbol_counter["split_executed"] += self._metadata_float(game, "split_executed")
+            symbol_counter["split_profitable_count"] += self._metadata_float(game, "split_profitable_count")
+            symbol_counter["split_runner_profitable_count"] += self._metadata_float(game, "split_runner_profitable_count")
+            symbol_counter["split_trade_value_delta"] += self._metadata_float(game, "split_trade_value_delta")
+            symbol_counter["pyramids_opened"] += self._metadata_float(game, "pyramids_opened")
+            symbol_counter["pyramid_profitable_count"] += self._metadata_float(game, "pyramid_profitable_count")
+            symbol_counter["pyramid_good_add_count"] += self._metadata_float(game, "pyramid_good_add_count")
+            symbol_counter["pyramid_profitable_exit_count"] += self._metadata_float(game, "pyramid_profitable_exit_count")
+            symbol_counter["pyramid_total_trade_improvement_pct"] += self._metadata_float(
+                game,
+                "pyramid_total_trade_improvement_pct",
+            )
+            symbol_counter["slbe_triggered"] += self._metadata_float(game, "slbe_triggered")
+            symbol_counter["slbe_profitable_exits"] += self._metadata_float(game, "slbe_profitable_exits")
+            symbol_counter["hold_drag_opportunity_count"] += self._metadata_float(game, "hold_drag_opportunity_count")
+            symbol_counter["hold_drag_penalized_count"] += self._metadata_float(game, "hold_drag_penalized_count")
 
         directional_entries = total_long_entries + total_short_entries
         executed_long_entry_share = total_long_entries / max(directional_entries, 1.0)
@@ -508,6 +1008,116 @@ class PrioritizedReplayBuffer:
             if directional_entries > 0.0
             else 1.0
         )
+        close_quality_by_symbol = {
+            symbol: (
+                counters["close_winner_count"]
+                / max(counters["close_winner_count"] + counters["close_loser_count"], 1.0)
+                if (counters["close_winner_count"] + counters["close_loser_count"]) > 0.0
+                else 0.0
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        close_events_by_symbol = {
+            symbol: int(counters["close_winner_count"] + counters["close_loser_count"])
+            for symbol, counters in symbol_counters.items()
+        }
+        split_efficiency_by_symbol = {
+            symbol: (
+                counters["split_profitable_count"] / max(counters["split_executed"], 1.0)
+                if counters["split_executed"] > 0.0
+                else 0.0
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        split_runner_capture_rate_by_symbol = {
+            symbol: (
+                counters["split_runner_profitable_count"] / max(counters["split_executed"], 1.0)
+                if counters["split_executed"] > 0.0
+                else 0.0
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        pyramid_efficiency_by_symbol = {
+            symbol: (
+                counters["pyramid_profitable_count"] / max(counters["pyramids_opened"], 1.0)
+                if counters["pyramids_opened"] > 0.0
+                else 0.0
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        pyramid_entry_quality_score_by_symbol = {
+            symbol: (
+                counters["pyramid_good_add_count"] / max(counters["pyramids_opened"], 1.0)
+                if counters["pyramids_opened"] > 0.0
+                else 0.0
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        pyramid_exit_capture_rate_by_symbol = {
+            symbol: (
+                counters["pyramid_profitable_exit_count"] / max(counters["pyramids_opened"], 1.0)
+                if counters["pyramids_opened"] > 0.0
+                else 0.0
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        slbe_capture_rate_by_symbol = {
+            symbol: (
+                counters["slbe_profitable_exits"] / max(counters["slbe_triggered"], 1.0)
+                if counters["slbe_triggered"] > 0.0
+                else 0.0
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        hold_drag_score_by_symbol = {
+            symbol: (
+                counters["hold_drag_penalized_count"] / max(counters["hold_drag_opportunity_count"], 1.0)
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        root_mask_share_by_symbol = {
+            symbol: (
+                (counters["root_mask_blocked_buy_total"] + counters["root_mask_blocked_sell_total"])
+                / max(counters["root_mask_directional_candidates_total"], 1.0)
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        root_mask_ema200_share_by_symbol = {
+            symbol: (
+                (counters["root_mask_blocked_buy_ema200"] + counters["root_mask_blocked_sell_ema200"])
+                / max(counters["root_mask_blocked_buy_total"] + counters["root_mask_blocked_sell_total"], 1.0)
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        root_mask_vwap_share_by_symbol = {
+            symbol: (
+                (counters["root_mask_blocked_buy_vwap"] + counters["root_mask_blocked_sell_vwap"])
+                / max(counters["root_mask_blocked_buy_total"] + counters["root_mask_blocked_sell_total"], 1.0)
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        root_mask_adx_share_by_symbol = {
+            symbol: (
+                (counters["root_mask_blocked_buy_adx"] + counters["root_mask_blocked_sell_adx"])
+                / max(counters["root_mask_blocked_buy_total"] + counters["root_mask_blocked_sell_total"], 1.0)
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        root_mask_directional_share_by_symbol = {
+            symbol: (
+                (counters["root_mask_blocked_buy_directional"] + counters["root_mask_blocked_sell_directional"])
+                / max(counters["root_mask_blocked_buy_total"] + counters["root_mask_blocked_sell_total"], 1.0)
+            )
+            for symbol, counters in symbol_counters.items()
+        }
+        hard_negative_mix = {
+            hard_negative_type: count / max(hard_negative_total, 1)
+            for hard_negative_type, count in sorted(hard_negative_counts.items())
+        }
+        nemesis_mix = {
+            nemesis_type: count / max(total_games, 1)
+            for nemesis_type, count in sorted(nemesis_counts.items())
+        }
         return {
             "balanced_episode_rate": (balanced_games / total_games) * 100.0,
             "episodes_long_present_rate": (long_present_games / total_games) * 100.0,
@@ -518,6 +1128,22 @@ class PrioritizedReplayBuffer:
             "root_mask_rate": (
                 (root_mask_blocked_buy_total + root_mask_blocked_sell_total)
                 / max(root_mask_directional_candidates_total, 1.0)
+            ),
+            "root_mask_ema200_share": (
+                (root_mask_blocked_buy_ema200 + root_mask_blocked_sell_ema200)
+                / max(root_mask_blocked_buy_total + root_mask_blocked_sell_total, 1.0)
+            ),
+            "root_mask_vwap_share": (
+                (root_mask_blocked_buy_vwap + root_mask_blocked_sell_vwap)
+                / max(root_mask_blocked_buy_total + root_mask_blocked_sell_total, 1.0)
+            ),
+            "root_mask_adx_share": (
+                (root_mask_blocked_buy_adx + root_mask_blocked_sell_adx)
+                / max(root_mask_blocked_buy_total + root_mask_blocked_sell_total, 1.0)
+            ),
+            "root_mask_directional_share": (
+                (root_mask_blocked_buy_directional + root_mask_blocked_sell_directional)
+                / max(root_mask_blocked_buy_total + root_mask_blocked_sell_total, 1.0)
             ),
             "veto_to_hold_rate": entry_veto_total / max(requested_directional_total, 1.0),
             "post_veto_to_hold_rate": entry_veto_total / max(requested_directional_total, 1.0),
@@ -555,6 +1181,167 @@ class PrioritizedReplayBuffer:
             "soft_penalty_vwap_rate": soft_penalty_vwap_count / max(directional_entries, 1.0),
             "soft_penalty_adx_rate": soft_penalty_adx_count / max(directional_entries, 1.0),
             "soft_penalty_obv_rate": soft_penalty_obv_count / max(directional_entries, 1.0),
+            "hold_drag_opportunity_count": hold_drag_opportunity_count,
+            "hold_drag_penalized_count": hold_drag_penalized_count,
+            "hold_drag_score": (
+                hold_drag_penalized_count / max(hold_drag_opportunity_count, 1.0)
+            ),
+            "split_opportunity_count": split_opportunity_count,
+            "split_executed": split_executed,
+            "split_profitable_count": split_profitable_count,
+            "split_efficiency": (
+                split_profitable_count / max(split_executed, 1.0)
+                if split_executed > 0.0
+                else 0.0
+            ),
+            "split_runner_profitable_count": split_runner_profitable_count,
+            "split_runner_failed_count": split_runner_failed_count,
+            "split_early_count": split_early_count,
+            "split_decorative_count": split_decorative_count,
+            "split_trade_value_delta": (
+                split_trade_value_delta_total / max(split_executed, 1.0)
+                if split_executed > 0.0
+                else 0.0
+            ),
+            "split_improved_total_trade_count": split_improved_total_trade_count,
+            "split_tp_zone_opportunity_count": split_tp_zone_opportunity_count,
+            "split_monetization_window_count": split_monetization_window_count,
+            "split_zone_capture_rate": (
+                split_profitable_count / max(split_tp_zone_opportunity_count, 1.0)
+                if split_tp_zone_opportunity_count > 0.0
+                else 0.0
+            ),
+            "split_monetization_capture_rate": (
+                split_monetization_capture_count / max(split_monetization_window_count, 1.0)
+                if split_monetization_window_count > 0.0
+                else 0.0
+            ),
+            "split_runner_capture_rate": (
+                split_runner_profitable_count / max(split_executed, 1.0)
+                if split_executed > 0.0
+                else 0.0
+            ),
+            "pyramid_opportunity_count": pyramid_opportunity_count,
+            "pyramid_add_opportunity_count": pyramid_add_opportunity_count,
+            "pyramid_monetization_window_count": pyramid_monetization_window_count,
+            "pyramids_opened": pyramids_opened,
+            "pyramid_profitable_count": pyramid_profitable_count,
+            "pyramid_efficiency": (
+                pyramid_profitable_count / max(pyramids_opened, 1.0)
+                if pyramids_opened > 0.0
+                else 0.0
+            ),
+            "pyramid_good_add_count": pyramid_good_add_count,
+            "pyramid_bad_add_count": pyramid_bad_add_count,
+            "pyramid_profitable_exit_count": pyramid_profitable_exit_count,
+            "pyramid_total_trade_improvement_pct": (
+                pyramid_total_trade_improvement_total / max(pyramids_opened, 1.0)
+                if pyramids_opened > 0.0
+                else 0.0
+            ),
+            "pyramid_failed_to_improve_count": pyramid_failed_to_improve_count,
+            "pyramid_entry_quality_score": (
+                pyramid_good_add_count / max(pyramids_opened, 1.0)
+                if pyramids_opened > 0.0
+                else 0.0
+            ),
+            "pyramid_exit_capture_rate": (
+                pyramid_profitable_exit_count / max(pyramids_opened, 1.0)
+                if pyramids_opened > 0.0
+                else 0.0
+            ),
+            "pyramid_add_capture_rate": (
+                pyramid_add_capture_count / max(pyramid_add_opportunity_count, 1.0)
+                if pyramid_add_opportunity_count > 0.0
+                else 0.0
+            ),
+            "pyramid_monetization_capture_rate": (
+                pyramid_monetization_capture_count / max(pyramid_monetization_window_count, 1.0)
+                if pyramid_monetization_window_count > 0.0
+                else 0.0
+            ),
+            "pyramid_missed_add_count": pyramid_missed_add_count,
+            "slbe_triggered": slbe_triggered,
+            "slbe_profitable_exits": slbe_profitable_exits,
+            "slbe_lock_profit_count": slbe_lock_profit_count,
+            "slbe_capture_rate": (
+                slbe_profitable_exits / max(slbe_triggered, 1.0)
+                if slbe_triggered > 0.0
+                else 0.0
+            ),
+            "close_winner_count": close_winner_count,
+            "close_loser_count": close_loser_count,
+            "close_quality_score": (
+                close_winner_count / max(close_winner_count + close_loser_count, 1.0)
+                if (close_winner_count + close_loser_count) > 0.0
+                else 0.0
+            ),
+            "tp_like_exit_count": tp_like_exit_count,
+            "tp_like_missed_count": tp_like_missed_count,
+            "defensive_close_count": defensive_close_count,
+            "early_close_noise_count": early_close_noise_count,
+            "hard_stop_exit_count": hard_stop_exit_count,
+            "soft_tp_hit_count": soft_tp_hit_count,
+            "full_tp_hit_count": full_tp_hit_count,
+            "time_stop_trigger_count": time_stop_trigger_count,
+            "runner_extension_count": runner_extension_count,
+            "runner_extension_opportunity_count": runner_extension_opportunity_count,
+            "runner_extension_capture_rate": (
+                runner_extension_capture_count / max(runner_extension_opportunity_count, 1.0)
+                if runner_extension_opportunity_count > 0.0
+                else 0.0
+            ),
+            "runner_profit_hold_window_count": runner_profit_hold_window_count,
+            "runner_profit_hold_capture_rate": (
+                runner_profit_hold_capture_count / max(runner_profit_hold_window_count, 1.0)
+                if runner_profit_hold_window_count > 0.0
+                else 0.0
+            ),
+            "runner_missed_extension_count": runner_missed_extension_count,
+            "runner_managed_exit_count": runner_managed_exit_count,
+            "runner_exit_profitable_count": runner_exit_profitable_count,
+            "runner_forced_stop_count": runner_forced_stop_count,
+            "runner_retained_profit_pct": (
+                runner_retained_profit_total / max(split_runner_profitable_count, 1.0)
+                if split_runner_profitable_count > 0.0
+                else 0.0
+            ),
+            "runner_giveback_pct": (
+                runner_giveback_total / max(split_runner_failed_count, 1.0)
+                if split_runner_failed_count > 0.0
+                else 0.0
+            ),
+            "runner_giveback_ratio": (
+                runner_giveback_total / max(runner_retained_profit_total + runner_giveback_total, 1e-6)
+                if (runner_retained_profit_total + runner_giveback_total) > 0.0
+                else 0.0
+            ),
+            "profit_peak_reached_count": profit_peak_reached_count,
+            "profit_peak_giveback_ratio": (
+                profit_peak_giveback_ratio_total / max(profit_peak_giveback_ratio_observations, 1.0)
+                if profit_peak_giveback_ratio_observations > 0.0
+                else 0.0
+            ),
+            "forced_stop_near_miss_count": forced_stop_near_miss_count,
+            "close_quality_by_symbol": close_quality_by_symbol,
+            "close_events_by_symbol": close_events_by_symbol,
+            "split_efficiency_by_symbol": split_efficiency_by_symbol,
+            "split_runner_capture_rate_by_symbol": split_runner_capture_rate_by_symbol,
+            "pyramid_efficiency_by_symbol": pyramid_efficiency_by_symbol,
+            "pyramid_entry_quality_score_by_symbol": pyramid_entry_quality_score_by_symbol,
+            "pyramid_exit_capture_rate_by_symbol": pyramid_exit_capture_rate_by_symbol,
+            "slbe_capture_rate_by_symbol": slbe_capture_rate_by_symbol,
+            "hold_drag_score_by_symbol": hold_drag_score_by_symbol,
+            "root_mask_share_by_symbol": root_mask_share_by_symbol,
+            "root_mask_ema200_share_by_symbol": root_mask_ema200_share_by_symbol,
+            "root_mask_vwap_share_by_symbol": root_mask_vwap_share_by_symbol,
+            "root_mask_adx_share_by_symbol": root_mask_adx_share_by_symbol,
+            "root_mask_directional_share_by_symbol": root_mask_directional_share_by_symbol,
+            "hard_negative_mix": hard_negative_mix,
+            "nemesis_mix": nemesis_mix,
+            "liquidity_trap_share": hard_negative_counts.get("LIQUIDITY_TRAP", 0) / max(total_games, 1),
+            "bad_runner_share": hard_negative_counts.get("BAD_RUNNER_EXIT", 0) / max(total_games, 1),
+            "bad_pyramid_share": hard_negative_counts.get("BAD_PYRAMID_EXIT", 0) / max(total_games, 1),
             "directional_collapse": bool(total_long_entries <= 0.0 or total_short_entries <= 0.0),
             "long_entry_share": executed_long_entry_share,
             "short_entry_share": executed_short_entry_share,

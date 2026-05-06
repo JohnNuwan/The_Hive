@@ -42,6 +42,20 @@ CANONICAL_SCALP_MULTI_UNIVERSE = [
     "US500.cash",
     "BTCUSD",
 ]
+SEED_QUALIF_SHORT_CORE_SYMBOLS = [
+    "XAUUSD",
+    "US100.cash",
+    "US500.cash",
+    "GER40.cash",
+    "EURUSD",
+    "US30.cash",
+]
+OFFENSIVE_BOOTSTRAP_SYMBOLS = [
+    "XAUUSD",
+    "US100.cash",
+    "US500.cash",
+    "GER40.cash",
+]
 MANUAL_ARENA_CUTOVER_STEP = 9000
 MANUAL_ARENA_SCREEN_STEPS = (7000, 7500, 8000, 9000)
 MANUAL_ARENA_RESULTS_DIR = f"{REMOTE_DIR}/data/checkpoints/manual_checkpoint_selection"
@@ -156,9 +170,15 @@ PASSTHROUGH_VARS = [
     "MUZERO_SOFT_REWARD_BONUS_SCALE_EARLY",
     "MUZERO_SOFT_REWARD_BONUS_SCALE_MID",
     "MUZERO_SOFT_REWARD_BONUS_SCALE_LATE",
+    "MUZERO_EXIT_REWARD_EARLY_END_STEP",
+    "MUZERO_EXIT_REWARD_MID_END_STEP",
+    "MUZERO_EXIT_REWARD_SCALE_EARLY",
+    "MUZERO_EXIT_REWARD_SCALE_MID",
+    "MUZERO_EXIT_REWARD_SCALE_LATE",
     "MUZERO_POLICY_PRECHECK_STEP",
     "MUZERO_POLICY_PRECHECK_WINDOW_SIZE",
     "MUZERO_POLICY_PRECHECK_MAX_LOSS_POL",
+    "MUZERO_POLICY_PRECHECK_MAX_LOSS_POL_PER_HEAD",
     "MUZERO_POLICY_PRECHECK_MIN_TOP1_SHARE",
     "MUZERO_POLICY_PRECHECK_MAX_POLICY_ENTROPY",
     "MUZERO_POLICY_PRECHECK_MAX_ROOT_MASK_RATE",
@@ -166,7 +186,17 @@ PASSTHROUGH_VARS = [
     "MUZERO_POLICY_PRECHECK_MIN_BALANCED_EPISODE_RATE",
     "MUZERO_POLICY_PRECHECK_MIN_LONG_ENTRY_SHARE",
     "MUZERO_POLICY_PRECHECK_MIN_SHORT_ENTRY_SHARE",
+    "MUZERO_POLICY_PRECHECK_MIN_CLOSE_QUALITY_SCORE",
+    "MUZERO_POLICY_PRECHECK_MIN_SPLIT_EFFICIENCY",
+    "MUZERO_POLICY_PRECHECK_MIN_PYRAMID_EFFICIENCY",
+    "MUZERO_POLICY_PRECHECK_MIN_SLBE_CAPTURE_RATE",
+    "MUZERO_POLICY_PRECHECK_MAX_HOLD_DRAG_SCORE",
+    "MUZERO_POLICY_PRECHECK_MIN_GOOD_CLOSE_SYMBOLS",
+    "MUZERO_POLICY_PRECHECK_MIN_SYMBOL_CLOSE_QUALITY_SCORE",
+    "MUZERO_POLICY_PRECHECK_MIN_SYMBOL_CLOSE_EVENTS",
+    "MUZERO_POLICY_PRECHECK_MAX_ROOT_MASK_RATE_TREND",
     "MUZERO_POLICY_SCREEN_MAX_LOSS_POL",
+    "MUZERO_POLICY_SCREEN_MAX_LOSS_POL_PER_HEAD",
     "MUZERO_POLICY_SCREEN_MIN_TOP1_SHARE",
     "MUZERO_POLICY_SCREEN_MAX_POLICY_ENTROPY",
     "MUZERO_POLICY_SCREEN_MAX_ROOT_MASK_RATE",
@@ -184,6 +214,128 @@ PASSTHROUGH_VARS = [
     "MUZERO_ARENA_SCREEN_MIN_RETURN_PCT",
     "MUZERO_ARENA_SCREEN_MIN_EXPECTANCY_PCT",
     "MUZERO_ARENA_SCREEN_MIN_POSITIVE_EPISODE_RATE",
+    "MUZERO_ARENA_SCREEN_MAX_HOLD_DRAG_SCORE",
+    "MUZERO_ARENA_SCREEN_MIN_CLOSE_QUALITY_SCORE",
+    "MUZERO_ARENA_SCREEN_MIN_SPLIT_OPPORTUNITIES",
+    "MUZERO_ARENA_SCREEN_MIN_SPLIT_EFFICIENCY",
+    "MUZERO_ARENA_SCREEN_MIN_SPLIT_RUNNER_CAPTURE_RATE",
+    "MUZERO_ARENA_SCREEN_MIN_PYRAMID_OPPORTUNITIES",
+    "MUZERO_ARENA_SCREEN_MIN_PYRAMID_EFFICIENCY",
+    "MUZERO_ARENA_SCREEN_MIN_PYRAMID_EXIT_CAPTURE_RATE",
+    "MUZERO_ARENA_SCREEN_MIN_SLBE_TRIGGERED",
+    "MUZERO_ARENA_SCREEN_MIN_SLBE_CAPTURE_RATE",
+    "MUZERO_ARENA_SCREEN_MIN_PROFITABLE_SYMBOLS",
+    "MUZERO_ARENA_SCREEN_MIN_SYMBOL_PROFIT_FACTOR",
+    "MUZERO_ARENA_SCREEN_MIN_SYMBOL_RETURN_PCT",
+    "MUZERO_ARENA_SCREEN_MIN_SYMBOL_SPLIT_EFFICIENCY",
+    "MUZERO_ARENA_SCREEN_MIN_SYMBOL_SPLIT_RUNNER_CAPTURE_RATE",
+    "MUZERO_ARENA_SCREEN_MIN_SYMBOL_PYRAMID_EXIT_CAPTURE_RATE",
+    "MUZERO_ARENA_SCREEN_MIN_SYMBOL_SLBE_CAPTURE_RATE",
+    "MUZERO_ARENA_SCREEN_MIN_SYMBOL_CLOSE_QUALITY_SCORE",
+    "MUZERO_ARENA_SCREEN_MIN_SYMBOL_CLOSE_EVENTS",
+    "MUZERO_SKIP_ARENA_FOR_BAKEOFF",
+    "MUZERO_ARENA_INVERSE_MIN_PROFITABLE_SYMBOLS",
+    "MUZERO_ARENA_FAMILY_PROBE_GAMES_PER_SYMBOL",
+    "MUZERO_ARENA_FAMILY_PROBE_MIN_READY_FAMILIES",
+    "MUZERO_ARENA_FAMILY_PROBE_MIN_POSITIVE_FAMILIES",
+    "MUZERO_ARENA_FAMILY_PROBE_MAX_INVERSE_PF_GAP",
+    "MUZERO_HOLD_DRAG_PROFIT_FLOOR",
+    "MUZERO_HOLD_DRAG_GRACE_STEPS",
+    "MUZERO_HOLD_DRAG_PENALTY_CAP",
+    "MUZERO_PYRAMID_STRONG_TREND_REWARD_BONUS",
+    "MUZERO_SPLIT_POST_SPLIT_SLBE_BONUS",
+    "MUZERO_SPLIT_SOFT_PARTIAL_VALUE_FLOOR",
+    "MUZERO_SLBE_LOCK_PROFIT_RETURN",
+    "MUZERO_SLBE_LOCK_PROFIT_BUFFER",
+    "MUZERO_CLOSE_REVERSAL_CLOSE_BONUS",
+    "MUZERO_CLOSE_EARLY_PROFIT_CLOSE_PENALTY",
+    "MUZERO_EXIT_PLAN_HARD_STOP_ATR_MULT",
+    "MUZERO_EXIT_PLAN_SOFT_TP_ATR_MULT",
+    "MUZERO_EXIT_PLAN_FULL_TP_ATR_MULT",
+    "MUZERO_EXIT_PLAN_TIME_STOP_STEPS",
+    "MUZERO_EXIT_PLAN_RUNNER_EXTENSION_ATR_MULT",
+    "MUZERO_EXIT_PLAN_RECOVERY_GRACE_STEPS",
+    "MUZERO_SPLIT_RUNNER_PROFIT_BONUS",
+    "MUZERO_SPLIT_EARLY_ZONE_PENALTY",
+    "MUZERO_SPLIT_DECORATIVE_PENALTY",
+    "MUZERO_PYRAMID_EXIT_CAPTURE_BONUS",
+    "MUZERO_PYRAMID_BAD_ADD_PENALTY",
+    "MUZERO_RUNNER_PROTECTED_EXIT_BONUS",
+    "MUZERO_RUNNER_HOLD_CAPTURE_BONUS",
+    "MUZERO_SPLIT_ZONE_CAPTURE_BONUS",
+    "MUZERO_RUNNER_EXTENSION_CAPTURE_BONUS",
+    "MUZERO_RUNNER_MISSED_EXTENSION_PENALTY",
+    "MUZERO_RUNNER_TRADE_COMPLETION_BONUS",
+    "MUZERO_RUNNER_GIVEBACK_PENALTY",
+    "MUZERO_RUNNER_GIVEBACK_RATIO_PENALTY",
+    "MUZERO_RUNNER_RETAINED_PROFIT_BONUS",
+    "MUZERO_RUNNER_GIVEBACK_SOFT_PENALTY",
+    "MUZERO_RUNNER_GIVEBACK_HARD_PENALTY",
+    "MUZERO_PYRAMID_TRADE_COMPLETION_BONUS",
+    "MUZERO_PYRAMID_STAGNANT_EXIT_PENALTY",
+    "MUZERO_PYRAMID_HOLD_CAPTURE_BONUS",
+    "MUZERO_PYRAMID_ADD_CAPTURE_BONUS",
+    "MUZERO_PYRAMID_MISSED_ADD_PENALTY",
+    "MUZERO_SPLIT_WINDOW_ACTIVATION_BONUS",
+    "MUZERO_PYRAMID_WINDOW_ACTIVATION_BONUS",
+    "MUZERO_MISSED_WINDOW_PENALTY",
+    "MUZERO_POLICY_TARGET_SMOOTHING_ALPHA_ROOT",
+    "MUZERO_POLICY_TARGET_SMOOTHING_ALPHA_UNROLL",
+    "MUZERO_POLICY_TARGET_SMOOTHING_TEMPERATURE",
+    "MUZERO_POLICY_LOSS_ROOT_WEIGHT",
+    "MUZERO_POLICY_LOSS_UNROLL_WEIGHT",
+    "MUZERO_REPLAY_HARD_NEGATIVE_RATIO",
+    "MUZERO_REPLAY_HARD_NEGATIVE_TYPE_CAP",
+    "MUZERO_ARENA_PLATEAU_MIN_STEP",
+    "MUZERO_ARENA_PLATEAU_WINDOW_SIZE",
+    "MUZERO_ARENA_PLATEAU_MAX_LOSS_POL_IMPROVEMENT",
+    "MUZERO_ARENA_PLATEAU_MIN_SPLIT_RUNNER_IMPROVEMENT",
+    "MUZERO_ARENA_PLATEAU_MIN_PYRAMID_EXIT_IMPROVEMENT",
+    "MUZERO_ARENA_PLATEAU_MIN_CLOSE_QUALITY_IMPROVEMENT",
+    "MUZERO_SEED_VIABILITY_MIN_STEP",
+    "MUZERO_SEED_VIABILITY_MAX_STEP",
+    "MUZERO_SEED_VIABILITY_MAX_ROOT_MASK_RATE",
+    "MUZERO_SEED_VIABILITY_MIN_SPLIT_RUNNER_CAPTURE_RATE",
+    "MUZERO_SEED_VIABILITY_MIN_PYRAMID_EXIT_CAPTURE_RATE",
+    "MUZERO_SEED_VIABILITY_MIN_LOSS_POL_IMPROVEMENT",
+    "MUZERO_OFFENSIVE_BOOTSTRAP_SYMBOLS",
+    "MUZERO_SEED_SHORT_MIXED_SYMBOLS",
+    "MUZERO_SEED_SHORT_STAGE",
+    "MUZERO_SEED_BOOTSTRAP_GAMES_PER_SYMBOL",
+    "MUZERO_SEED_BOOTSTRAP_TRAINING_STEPS",
+    "MUZERO_SEED_BOOTSTRAP_MIN_STEP",
+    "MUZERO_SEED_BOOTSTRAP_MAX_STEP",
+    "MUZERO_SEED_SHORT_MIXED_GAMES_PER_SYMBOL",
+    "MUZERO_SEED_SHORT_MIXED_TRAINING_STEPS",
+    "MUZERO_SEED_SHORT_MIXED_MIN_STEP",
+    "MUZERO_SEED_SHORT_MIXED_MAX_STEP",
+    "MUZERO_SEED_BOOTSTRAP_MAX_LOSS_POL",
+    "MUZERO_SEED_BOOTSTRAP_MAX_LOSS_POL_PER_HEAD",
+    "MUZERO_SEED_BOOTSTRAP_MAX_ROOT_MASK_RATE",
+    "MUZERO_SEED_BOOTSTRAP_MIN_SPLIT_MONETIZATION_WINDOW_COUNT",
+    "MUZERO_SEED_BOOTSTRAP_MIN_RUNNER_PROFIT_HOLD_WINDOW_COUNT",
+    "MUZERO_SEED_BOOTSTRAP_MIN_PYRAMID_MONETIZATION_WINDOW_COUNT",
+    "MUZERO_SEED_BOOTSTRAP_MAX_PROFIT_PEAK_GIVEBACK_RATIO",
+    "MUZERO_SEED_BOOTSTRAP_MIN_SPLIT_ZONE_CAPTURE_RATE",
+    "MUZERO_SEED_BOOTSTRAP_MIN_RUNNER_EXTENSION_CAPTURE_RATE",
+    "MUZERO_SEED_BOOTSTRAP_MIN_PYRAMID_ADD_CAPTURE_RATE",
+    "MUZERO_SEED_BOOTSTRAP_MAX_RUNNER_GIVEBACK_RATIO",
+    "MUZERO_SEED_MIXED_MAX_LOSS_POL",
+    "MUZERO_SEED_MIXED_MAX_LOSS_POL_PER_HEAD",
+    "MUZERO_SEED_MIXED_MAX_ROOT_MASK_RATE",
+    "MUZERO_SEED_MIXED_MIN_SPLIT_RUNNER_CAPTURE_RATE",
+    "MUZERO_SEED_MIXED_MIN_SPLIT_ZONE_CAPTURE_RATE",
+    "MUZERO_SEED_MIXED_MIN_SPLIT_MONETIZATION_CAPTURE_RATE",
+    "MUZERO_SEED_MIXED_MIN_PYRAMID_EXIT_CAPTURE_RATE",
+    "MUZERO_SEED_MIXED_MIN_PYRAMID_ADD_CAPTURE_RATE",
+    "MUZERO_SEED_MIXED_MIN_PYRAMID_MONETIZATION_CAPTURE_RATE",
+    "MUZERO_SEED_MIXED_MIN_CLOSE_QUALITY_SCORE",
+    "MUZERO_SEED_MIXED_MIN_SLBE_CAPTURE_RATE",
+    "MUZERO_TRAINING_ROOT_MASK_SOFTEN_VWAP",
+    "MUZERO_TRAINING_ROOT_MASK_SOFTEN_ADX",
+    "MUZERO_TRAINING_ROOT_MASK_SOFTEN_EMA200",
+    "MUZERO_TRAINING_ROOT_MASK_SOFTEN_DIRECTIONAL",
+    "MUZERO_TRAINING_ROOT_MASK_ADX_EXTREME_RATIO",
     "MUZERO_MAX_SYMBOLS",
     "MUZERO_MODEL_FAMILY",
     "MUZERO_DATASET_SOURCE",
@@ -259,25 +411,66 @@ PASSTHROUGH_VARS = [
     "MUZERO_HOLD_STALE_PENALTY",
     "MUZERO_HOLD_TREND_PENALTY",
     "MUZERO_HOLD_RANGE_PENALTY",
+    "MUZERO_HOLD_DRAG_PROFIT_FLOOR",
+    "MUZERO_HOLD_DRAG_GRACE_STEPS",
+    "MUZERO_HOLD_DRAG_PENALTY_CAP",
     "MUZERO_PYRAMID_MAX_ADDITIONS",
     "MUZERO_PYRAMID_MIN_PROFIT_TO_ADD",
     "MUZERO_PYRAMID_REWARD_BONUS",
+    "MUZERO_PYRAMID_STRONG_TREND_REWARD_BONUS",
     "MUZERO_REWARD_PYRAMID_FAILURE_PENALTY",
     "MUZERO_REWARD_PYRAMID_NEGATIVE_EXIT_PENALTY",
     "MUZERO_SPLIT_MAX_SPLITS",
     "MUZERO_SPLIT_MIN_TRADE_RETURN",
     "MUZERO_SPLIT_MIN_REALIZED_PCT",
     "MUZERO_SPLIT_FAILURE_PENALTY",
+    "MUZERO_SPLIT_POST_SPLIT_SLBE_BONUS",
+    "MUZERO_SPLIT_SOFT_PARTIAL_VALUE_FLOOR",
     "MUZERO_SLBE_ACTIVATION_RETURN",
     "MUZERO_SLBE_BONUS",
     "MUZERO_SLBE_EXIT_BONUS",
+    "MUZERO_SLBE_LOCK_PROFIT_RETURN",
+    "MUZERO_SLBE_LOCK_PROFIT_BUFFER",
     "MUZERO_CLOSE_WINNER_THRESHOLD",
     "MUZERO_CLOSE_STRONG_WINNER_THRESHOLD",
     "MUZERO_CLOSE_TP_LIKE_THRESHOLD",
+    "MUZERO_CLOSE_REVERSAL_CLOSE_BONUS",
+    "MUZERO_CLOSE_EARLY_PROFIT_CLOSE_PENALTY",
     "MUZERO_REWARD_REALIZED_PNL_MULTIPLIER",
     "MUZERO_REWARD_CLOSE_REALIZED_MULTIPLIER",
     "MUZERO_REWARD_SPLIT_REALIZED_MULTIPLIER",
     "MUZERO_REWARD_HOLD_DRAG_MULTIPLIER",
+    "MUZERO_ARENA_SCREEN_MAX_HOLD_DRAG_SCORE",
+    "MUZERO_ARENA_SCREEN_MIN_CLOSE_QUALITY_SCORE",
+    "MUZERO_ARENA_SCREEN_MIN_SPLIT_OPPORTUNITIES",
+    "MUZERO_ARENA_SCREEN_MIN_SPLIT_EFFICIENCY",
+    "MUZERO_ARENA_SCREEN_MIN_SPLIT_RUNNER_CAPTURE_RATE",
+    "MUZERO_ARENA_SCREEN_MIN_PYRAMID_OPPORTUNITIES",
+    "MUZERO_ARENA_SCREEN_MIN_PYRAMID_EFFICIENCY",
+    "MUZERO_ARENA_SCREEN_MIN_PYRAMID_EXIT_CAPTURE_RATE",
+    "MUZERO_ARENA_SCREEN_MIN_SLBE_TRIGGERED",
+    "MUZERO_ARENA_SCREEN_MIN_SLBE_CAPTURE_RATE",
+    "MUZERO_ARENA_SCREEN_MIN_SYMBOL_SPLIT_RUNNER_CAPTURE_RATE",
+    "MUZERO_ARENA_SCREEN_MIN_SYMBOL_PYRAMID_EXIT_CAPTURE_RATE",
+    "MUZERO_SPLIT_RUNNER_PROFIT_BONUS",
+    "MUZERO_SPLIT_EARLY_ZONE_PENALTY",
+    "MUZERO_SPLIT_DECORATIVE_PENALTY",
+    "MUZERO_PYRAMID_EXIT_CAPTURE_BONUS",
+    "MUZERO_PYRAMID_BAD_ADD_PENALTY",
+    "MUZERO_RUNNER_PROTECTED_EXIT_BONUS",
+    "MUZERO_RUNNER_HOLD_CAPTURE_BONUS",
+    "MUZERO_SPLIT_ZONE_CAPTURE_BONUS",
+    "MUZERO_RUNNER_EXTENSION_CAPTURE_BONUS",
+    "MUZERO_RUNNER_MISSED_EXTENSION_PENALTY",
+    "MUZERO_RUNNER_TRADE_COMPLETION_BONUS",
+    "MUZERO_RUNNER_GIVEBACK_PENALTY",
+    "MUZERO_RUNNER_GIVEBACK_RATIO_PENALTY",
+    "MUZERO_RUNNER_RETAINED_PROFIT_BONUS",
+    "MUZERO_PYRAMID_TRADE_COMPLETION_BONUS",
+    "MUZERO_PYRAMID_STAGNANT_EXIT_PENALTY",
+    "MUZERO_PYRAMID_HOLD_CAPTURE_BONUS",
+    "MUZERO_PYRAMID_ADD_CAPTURE_BONUS",
+    "MUZERO_PYRAMID_MISSED_ADD_PENALTY",
     "TRAINING_TIMESCALE_ENABLED",
     "TRAINING_TIMESCALE_HOST",
     "TRAINING_TIMESCALE_PORT",
@@ -734,17 +927,32 @@ export MUZERO_SOFT_REWARD_PENALTY_SCALE_LATE=\"${MUZERO_SOFT_REWARD_PENALTY_SCAL
 export MUZERO_SOFT_REWARD_BONUS_SCALE_EARLY=\"${MUZERO_SOFT_REWARD_BONUS_SCALE_EARLY:-1.15}\"
 export MUZERO_SOFT_REWARD_BONUS_SCALE_MID=\"${MUZERO_SOFT_REWARD_BONUS_SCALE_MID:-1.00}\"
 export MUZERO_SOFT_REWARD_BONUS_SCALE_LATE=\"${MUZERO_SOFT_REWARD_BONUS_SCALE_LATE:-0.95}\"
+export MUZERO_EXIT_REWARD_EARLY_END_STEP=\"${MUZERO_EXIT_REWARD_EARLY_END_STEP:-4000}\"
+export MUZERO_EXIT_REWARD_MID_END_STEP=\"${MUZERO_EXIT_REWARD_MID_END_STEP:-10000}\"
+export MUZERO_EXIT_REWARD_SCALE_EARLY=\"${MUZERO_EXIT_REWARD_SCALE_EARLY:-0.35}\"
+export MUZERO_EXIT_REWARD_SCALE_MID=\"${MUZERO_EXIT_REWARD_SCALE_MID:-0.55}\"
+export MUZERO_EXIT_REWARD_SCALE_LATE=\"${MUZERO_EXIT_REWARD_SCALE_LATE:-1.00}\"
 export MUZERO_POLICY_PRECHECK_STEP=\"${MUZERO_POLICY_PRECHECK_STEP:-12000}\"
 export MUZERO_POLICY_PRECHECK_WINDOW_SIZE=\"${MUZERO_POLICY_PRECHECK_WINDOW_SIZE:-500}\"
 export MUZERO_POLICY_PRECHECK_MAX_LOSS_POL=\"${MUZERO_POLICY_PRECHECK_MAX_LOSS_POL:-5.8}\"
+export MUZERO_POLICY_PRECHECK_MAX_LOSS_POL_PER_HEAD=\"${MUZERO_POLICY_PRECHECK_MAX_LOSS_POL_PER_HEAD:-1.08}\"
 export MUZERO_POLICY_PRECHECK_MIN_TOP1_SHARE=\"${MUZERO_POLICY_PRECHECK_MIN_TOP1_SHARE:-0.75}\"
 export MUZERO_POLICY_PRECHECK_MAX_POLICY_ENTROPY=\"${MUZERO_POLICY_PRECHECK_MAX_POLICY_ENTROPY:-1.0}\"
-export MUZERO_POLICY_PRECHECK_MAX_ROOT_MASK_RATE=\"${MUZERO_POLICY_PRECHECK_MAX_ROOT_MASK_RATE:-0.05}\"
+export MUZERO_POLICY_PRECHECK_MAX_ROOT_MASK_RATE=\"${MUZERO_POLICY_PRECHECK_MAX_ROOT_MASK_RATE:-0.02}\"
 export MUZERO_POLICY_PRECHECK_MAX_POST_VETO_RATE=\"${MUZERO_POLICY_PRECHECK_MAX_POST_VETO_RATE:-0.01}\"
 export MUZERO_POLICY_PRECHECK_MIN_BALANCED_EPISODE_RATE=\"${MUZERO_POLICY_PRECHECK_MIN_BALANCED_EPISODE_RATE:-0.85}\"
 export MUZERO_POLICY_PRECHECK_MIN_LONG_ENTRY_SHARE=\"${MUZERO_POLICY_PRECHECK_MIN_LONG_ENTRY_SHARE:-0.35}\"
 export MUZERO_POLICY_PRECHECK_MIN_SHORT_ENTRY_SHARE=\"${MUZERO_POLICY_PRECHECK_MIN_SHORT_ENTRY_SHARE:-0.35}\"
+export MUZERO_POLICY_PRECHECK_MIN_CLOSE_QUALITY_SCORE=\"${MUZERO_POLICY_PRECHECK_MIN_CLOSE_QUALITY_SCORE:-0.40}\"
+export MUZERO_POLICY_PRECHECK_MIN_SPLIT_EFFICIENCY=\"${MUZERO_POLICY_PRECHECK_MIN_SPLIT_EFFICIENCY:-0.35}\"
+export MUZERO_POLICY_PRECHECK_MIN_PYRAMID_EFFICIENCY=\"${MUZERO_POLICY_PRECHECK_MIN_PYRAMID_EFFICIENCY:-0.35}\"
+export MUZERO_POLICY_PRECHECK_MIN_SLBE_CAPTURE_RATE=\"${MUZERO_POLICY_PRECHECK_MIN_SLBE_CAPTURE_RATE:-0.45}\"
+export MUZERO_POLICY_PRECHECK_MAX_HOLD_DRAG_SCORE=\"${MUZERO_POLICY_PRECHECK_MAX_HOLD_DRAG_SCORE:-0.10}\"
+export MUZERO_POLICY_PRECHECK_MIN_GOOD_CLOSE_SYMBOLS=\"${MUZERO_POLICY_PRECHECK_MIN_GOOD_CLOSE_SYMBOLS:-5}\"
+export MUZERO_POLICY_PRECHECK_MIN_SYMBOL_CLOSE_QUALITY_SCORE=\"${MUZERO_POLICY_PRECHECK_MIN_SYMBOL_CLOSE_QUALITY_SCORE:-0.25}\"
+export MUZERO_POLICY_PRECHECK_MIN_SYMBOL_CLOSE_EVENTS=\"${MUZERO_POLICY_PRECHECK_MIN_SYMBOL_CLOSE_EVENTS:-6}\"
 export MUZERO_POLICY_SCREEN_MAX_LOSS_POL=\"${MUZERO_POLICY_SCREEN_MAX_LOSS_POL:-6.6}\"
+export MUZERO_POLICY_SCREEN_MAX_LOSS_POL_PER_HEAD=\"${MUZERO_POLICY_SCREEN_MAX_LOSS_POL_PER_HEAD:-1.20}\"
 export MUZERO_POLICY_SCREEN_MIN_TOP1_SHARE=\"${MUZERO_POLICY_SCREEN_MIN_TOP1_SHARE:-0.88}\"
 export MUZERO_POLICY_SCREEN_MAX_POLICY_ENTROPY=\"${MUZERO_POLICY_SCREEN_MAX_POLICY_ENTROPY:-0.45}\"
 export MUZERO_POLICY_SCREEN_MAX_ROOT_MASK_RATE=\"${MUZERO_POLICY_SCREEN_MAX_ROOT_MASK_RATE:-0.05}\"
@@ -762,6 +970,60 @@ export MUZERO_ARENA_SCREEN_MIN_PROFIT_FACTOR=\"${MUZERO_ARENA_SCREEN_MIN_PROFIT_
 export MUZERO_ARENA_SCREEN_MIN_RETURN_PCT=\"${MUZERO_ARENA_SCREEN_MIN_RETURN_PCT:-0.0}\"
 export MUZERO_ARENA_SCREEN_MIN_EXPECTANCY_PCT=\"${MUZERO_ARENA_SCREEN_MIN_EXPECTANCY_PCT:-0.0}\"
 export MUZERO_ARENA_SCREEN_MIN_POSITIVE_EPISODE_RATE=\"${MUZERO_ARENA_SCREEN_MIN_POSITIVE_EPISODE_RATE:-55.0}\"
+export MUZERO_ARENA_SCREEN_MAX_HOLD_DRAG_SCORE=\"${MUZERO_ARENA_SCREEN_MAX_HOLD_DRAG_SCORE:-0.80}\"
+export MUZERO_ARENA_SCREEN_MIN_CLOSE_QUALITY_SCORE=\"${MUZERO_ARENA_SCREEN_MIN_CLOSE_QUALITY_SCORE:-0.35}\"
+export MUZERO_ARENA_SCREEN_MIN_SPLIT_OPPORTUNITIES=\"${MUZERO_ARENA_SCREEN_MIN_SPLIT_OPPORTUNITIES:-3}\"
+export MUZERO_ARENA_SCREEN_MIN_SPLIT_EFFICIENCY=\"${MUZERO_ARENA_SCREEN_MIN_SPLIT_EFFICIENCY:-0.35}\"
+export MUZERO_ARENA_SCREEN_MIN_SPLIT_RUNNER_CAPTURE_RATE=\"${MUZERO_ARENA_SCREEN_MIN_SPLIT_RUNNER_CAPTURE_RATE:-0.20}\"
+export MUZERO_ARENA_SCREEN_MIN_PYRAMID_OPPORTUNITIES=\"${MUZERO_ARENA_SCREEN_MIN_PYRAMID_OPPORTUNITIES:-3}\"
+export MUZERO_ARENA_SCREEN_MIN_PYRAMID_EFFICIENCY=\"${MUZERO_ARENA_SCREEN_MIN_PYRAMID_EFFICIENCY:-0.35}\"
+export MUZERO_ARENA_SCREEN_MIN_PYRAMID_EXIT_CAPTURE_RATE=\"${MUZERO_ARENA_SCREEN_MIN_PYRAMID_EXIT_CAPTURE_RATE:-0.20}\"
+export MUZERO_ARENA_SCREEN_MIN_SLBE_TRIGGERED=\"${MUZERO_ARENA_SCREEN_MIN_SLBE_TRIGGERED:-3}\"
+export MUZERO_ARENA_SCREEN_MIN_SLBE_CAPTURE_RATE=\"${MUZERO_ARENA_SCREEN_MIN_SLBE_CAPTURE_RATE:-0.30}\"
+export MUZERO_ARENA_SCREEN_MIN_PROFITABLE_SYMBOLS=\"${MUZERO_ARENA_SCREEN_MIN_PROFITABLE_SYMBOLS:-5}\"
+export MUZERO_ARENA_SCREEN_MIN_SYMBOL_PROFIT_FACTOR=\"${MUZERO_ARENA_SCREEN_MIN_SYMBOL_PROFIT_FACTOR:-1.0}\"
+export MUZERO_ARENA_SCREEN_MIN_SYMBOL_RETURN_PCT=\"${MUZERO_ARENA_SCREEN_MIN_SYMBOL_RETURN_PCT:-0.0}\"
+export MUZERO_ARENA_SCREEN_MIN_SYMBOL_SPLIT_EFFICIENCY=\"${MUZERO_ARENA_SCREEN_MIN_SYMBOL_SPLIT_EFFICIENCY:-0.20}\"
+export MUZERO_ARENA_SCREEN_MIN_SYMBOL_SPLIT_RUNNER_CAPTURE_RATE=\"${MUZERO_ARENA_SCREEN_MIN_SYMBOL_SPLIT_RUNNER_CAPTURE_RATE:-0.20}\"
+export MUZERO_ARENA_SCREEN_MIN_SYMBOL_PYRAMID_EXIT_CAPTURE_RATE=\"${MUZERO_ARENA_SCREEN_MIN_SYMBOL_PYRAMID_EXIT_CAPTURE_RATE:-0.20}\"
+export MUZERO_ARENA_SCREEN_MIN_SYMBOL_SLBE_CAPTURE_RATE=\"${MUZERO_ARENA_SCREEN_MIN_SYMBOL_SLBE_CAPTURE_RATE:-0.25}\"
+export MUZERO_ARENA_SCREEN_MIN_SYMBOL_CLOSE_QUALITY_SCORE=\"${MUZERO_ARENA_SCREEN_MIN_SYMBOL_CLOSE_QUALITY_SCORE:-0.20}\"
+export MUZERO_ARENA_SCREEN_MIN_SYMBOL_CLOSE_EVENTS=\"${MUZERO_ARENA_SCREEN_MIN_SYMBOL_CLOSE_EVENTS:-6}\"
+export MUZERO_HOLD_DRAG_PROFIT_FLOOR=\"${MUZERO_HOLD_DRAG_PROFIT_FLOOR:-}\"
+export MUZERO_HOLD_DRAG_GRACE_STEPS=\"${MUZERO_HOLD_DRAG_GRACE_STEPS:-}\"
+export MUZERO_HOLD_DRAG_PENALTY_CAP=\"${MUZERO_HOLD_DRAG_PENALTY_CAP:-}\"
+export MUZERO_PYRAMID_STRONG_TREND_REWARD_BONUS=\"${MUZERO_PYRAMID_STRONG_TREND_REWARD_BONUS:-}\"
+export MUZERO_SPLIT_POST_SPLIT_SLBE_BONUS=\"${MUZERO_SPLIT_POST_SPLIT_SLBE_BONUS:-}\"
+export MUZERO_SPLIT_SOFT_PARTIAL_VALUE_FLOOR=\"${MUZERO_SPLIT_SOFT_PARTIAL_VALUE_FLOOR:-}\"
+export MUZERO_SPLIT_RUNNER_PROFIT_BONUS=\"${MUZERO_SPLIT_RUNNER_PROFIT_BONUS:-0.45}\"
+export MUZERO_SPLIT_EARLY_ZONE_PENALTY=\"${MUZERO_SPLIT_EARLY_ZONE_PENALTY:-0.25}\"
+export MUZERO_SPLIT_DECORATIVE_PENALTY=\"${MUZERO_SPLIT_DECORATIVE_PENALTY:-0.15}\"
+export MUZERO_PYRAMID_EXIT_CAPTURE_BONUS=\"${MUZERO_PYRAMID_EXIT_CAPTURE_BONUS:-0.35}\"
+export MUZERO_PYRAMID_BAD_ADD_PENALTY=\"${MUZERO_PYRAMID_BAD_ADD_PENALTY:-0.35}\"
+export MUZERO_RUNNER_PROTECTED_EXIT_BONUS=\"${MUZERO_RUNNER_PROTECTED_EXIT_BONUS:-0.30}\"
+export MUZERO_RUNNER_HOLD_CAPTURE_BONUS=\"${MUZERO_RUNNER_HOLD_CAPTURE_BONUS:-0.12}\"
+export MUZERO_SPLIT_ZONE_CAPTURE_BONUS=\"${MUZERO_SPLIT_ZONE_CAPTURE_BONUS:-0.18}\"
+export MUZERO_RUNNER_EXTENSION_CAPTURE_BONUS=\"${MUZERO_RUNNER_EXTENSION_CAPTURE_BONUS:-0.22}\"
+export MUZERO_RUNNER_MISSED_EXTENSION_PENALTY=\"${MUZERO_RUNNER_MISSED_EXTENSION_PENALTY:-0.10}\"
+export MUZERO_RUNNER_TRADE_COMPLETION_BONUS=\"${MUZERO_RUNNER_TRADE_COMPLETION_BONUS:-0.40}\"
+export MUZERO_RUNNER_GIVEBACK_PENALTY=\"${MUZERO_RUNNER_GIVEBACK_PENALTY:-0.45}\"
+export MUZERO_RUNNER_GIVEBACK_RATIO_PENALTY=\"${MUZERO_RUNNER_GIVEBACK_RATIO_PENALTY:-0.35}\"
+export MUZERO_RUNNER_RETAINED_PROFIT_BONUS=\"${MUZERO_RUNNER_RETAINED_PROFIT_BONUS:-0.25}\"
+export MUZERO_PYRAMID_TRADE_COMPLETION_BONUS=\"${MUZERO_PYRAMID_TRADE_COMPLETION_BONUS:-0.30}\"
+export MUZERO_PYRAMID_STAGNANT_EXIT_PENALTY=\"${MUZERO_PYRAMID_STAGNANT_EXIT_PENALTY:-0.25}\"
+export MUZERO_PYRAMID_HOLD_CAPTURE_BONUS=\"${MUZERO_PYRAMID_HOLD_CAPTURE_BONUS:-0.10}\"
+export MUZERO_PYRAMID_ADD_CAPTURE_BONUS=\"${MUZERO_PYRAMID_ADD_CAPTURE_BONUS:-0.18}\"
+export MUZERO_PYRAMID_MISSED_ADD_PENALTY=\"${MUZERO_PYRAMID_MISSED_ADD_PENALTY:-0.12}\"
+export MUZERO_SLBE_LOCK_PROFIT_RETURN=\"${MUZERO_SLBE_LOCK_PROFIT_RETURN:-}\"
+export MUZERO_SLBE_LOCK_PROFIT_BUFFER=\"${MUZERO_SLBE_LOCK_PROFIT_BUFFER:-}\"
+export MUZERO_CLOSE_REVERSAL_CLOSE_BONUS=\"${MUZERO_CLOSE_REVERSAL_CLOSE_BONUS:-}\"
+export MUZERO_CLOSE_EARLY_PROFIT_CLOSE_PENALTY=\"${MUZERO_CLOSE_EARLY_PROFIT_CLOSE_PENALTY:-}\"
+export MUZERO_EXIT_PLAN_HARD_STOP_ATR_MULT=\"${MUZERO_EXIT_PLAN_HARD_STOP_ATR_MULT:-}\"
+export MUZERO_EXIT_PLAN_SOFT_TP_ATR_MULT=\"${MUZERO_EXIT_PLAN_SOFT_TP_ATR_MULT:-}\"
+export MUZERO_EXIT_PLAN_FULL_TP_ATR_MULT=\"${MUZERO_EXIT_PLAN_FULL_TP_ATR_MULT:-}\"
+export MUZERO_EXIT_PLAN_TIME_STOP_STEPS=\"${MUZERO_EXIT_PLAN_TIME_STOP_STEPS:-}\"
+export MUZERO_EXIT_PLAN_RUNNER_EXTENSION_ATR_MULT=\"${MUZERO_EXIT_PLAN_RUNNER_EXTENSION_ATR_MULT:-}\"
+export MUZERO_EXIT_PLAN_RECOVERY_GRACE_STEPS=\"${MUZERO_EXIT_PLAN_RECOVERY_GRACE_STEPS:-}\"
 export MUZERO_MAX_SYMBOLS=\"${MUZERO_MAX_SYMBOLS:-12}\"
 export MUZERO_MODEL_FAMILY=\"${MUZERO_MODEL_FAMILY:-}\"
 export MUZERO_DATASET_SOURCE=\"${MUZERO_DATASET_SOURCE:-auto}\"
@@ -1463,6 +1725,117 @@ def _build_scalp_reduced_overrides(symbols: list[str] | None = None) -> dict[str
         "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": symbol_count,
         "MUZERO_LIVE_TOP_SYMBOLS": symbol_count,
     }
+
+
+def _build_muzero_seed_short_overrides(
+    symbols: list[str] | None = None,
+    *,
+    resume_checkpoint_path: str | None = None,
+) -> dict[str, str]:
+    """Construit un profil court de qualification de seed MuZero.
+
+    Ce profil sert uniquement a repondre rapidement a la question
+    "ce seed apprend-il quelque chose ?". Il coupe les etages non
+    essentiels (`GNN`, `Dreamer`, `Arena`) pour concentrer le GPU sur un
+    univers coeur plus petit et une fenetre de viabilite plus courte.
+
+    Args:
+        symbols (list[str] | None): Univers coeur explicite. Si absent,
+            un panier coeur live est utilise.
+        resume_checkpoint_path (str | None): Checkpoint de seed a recharger
+            explicitement.
+
+    Returns:
+        dict[str, str]: Variables d'environnement pretes pour Proxmox.
+    """
+    seed_stage = str(
+        os.getenv("MUZERO_SEED_SHORT_STAGE", "offensive_bootstrap") or "offensive_bootstrap"
+    ).strip().lower()
+    if seed_stage not in {"offensive_bootstrap", "seed_short_mixed"}:
+        seed_stage = "offensive_bootstrap"
+    env_symbol_key = (
+        "MUZERO_OFFENSIVE_BOOTSTRAP_SYMBOLS"
+        if seed_stage == "offensive_bootstrap"
+        else "MUZERO_SEED_SHORT_MIXED_SYMBOLS"
+    )
+    requested_symbols = symbols or [
+        str(symbol).strip()
+        for symbol in str(os.getenv(env_symbol_key, "")).split(",")
+        if str(symbol).strip()
+    ]
+    if not requested_symbols and seed_stage != "seed_short_mixed":
+        requested_symbols = [
+            str(symbol).strip()
+            for symbol in str(os.getenv("MUZERO_SEED_SHORT_SYMBOLS", "")).split(",")
+            if str(symbol).strip()
+        ]
+    default_symbols = (
+        list(OFFENSIVE_BOOTSTRAP_SYMBOLS)
+        if seed_stage == "offensive_bootstrap"
+        else list(SEED_QUALIF_SHORT_CORE_SYMBOLS)
+    )
+    short_symbols = requested_symbols or default_symbols
+    symbol_csv = ",".join(short_symbols)
+    symbol_count = str(len(short_symbols))
+    seed_label = "baseline"
+    normalized_resume = str(resume_checkpoint_path or "").strip()
+    if normalized_resume:
+        seed_label = _sanitize_manual_token(Path(normalized_resume).stem, "seed")
+    games_per_symbol = (
+        str(os.getenv("MUZERO_SEED_BOOTSTRAP_GAMES_PER_SYMBOL", "10") or "10")
+        if seed_stage == "offensive_bootstrap"
+        else str(os.getenv("MUZERO_SEED_SHORT_MIXED_GAMES_PER_SYMBOL", "10") or "10")
+    )
+    training_steps = (
+        str(os.getenv("MUZERO_SEED_BOOTSTRAP_TRAINING_STEPS", "3500") or "3500")
+        if seed_stage == "offensive_bootstrap"
+        else str(os.getenv("MUZERO_SEED_SHORT_MIXED_TRAINING_STEPS", "5000") or "5000")
+    )
+    min_step = (
+        str(os.getenv("MUZERO_SEED_BOOTSTRAP_MIN_STEP", "2000") or "2000")
+        if seed_stage == "offensive_bootstrap"
+        else str(os.getenv("MUZERO_SEED_SHORT_MIXED_MIN_STEP", "5000") or "5000")
+    )
+    max_step = (
+        str(os.getenv("MUZERO_SEED_BOOTSTRAP_MAX_STEP", "3500") or "3500")
+        if seed_stage == "offensive_bootstrap"
+        else str(os.getenv("MUZERO_SEED_SHORT_MIXED_MAX_STEP", "5000") or "5000")
+    )
+    overrides = {
+        "TRAINING_PROFILE": "refresh",
+        "TRAINING_AUTOMATION_MODE": "force_refresh",
+        "TRAINING_RUN_TRIGGER": f"manual_muzero_scalp_v610_{seed_stage}_{seed_label}",
+        "TRAINING_ENGINE": "muzero",
+        "TRAINING_TRIAL_MODE": seed_stage,
+        "TRAINING_TRIAL_COST_PROFILE": seed_stage,
+        "TRAINING_SEED_STAGE": seed_stage,
+        "TRAINING_GATE_PROFILE": "standard",
+        "TRAINING_FOCUS_SYMBOLS": symbol_csv,
+        "NIGHTLY_KEEP_VLLM": "0",
+        "RUN_TRAIN_GNN": "0",
+        "RUN_TRAIN_MUZERO": "1",
+        "RUN_TRAIN_DREAMER": "0",
+        "MUZERO_HORIZONS": "scalp",
+        "MUZERO_SYMBOLS_SCALP": symbol_csv,
+        "ARENA_SYMBOLS_SCALP": symbol_csv,
+        "MUZERO_MAX_SYMBOLS": symbol_count,
+        "ARENA_MAX_SYMBOLS": symbol_count,
+        "MUZERO_GAMES_PER_SYMBOL": games_per_symbol,
+        "MUZERO_TRAINING_STEPS": training_steps,
+        "MUZERO_SEED_VIABILITY_MIN_STEP": min_step,
+        "MUZERO_SEED_VIABILITY_MAX_STEP": max_step,
+        "MUZERO_SKIP_ARENA_FOR_BAKEOFF": "true",
+        "ARENA_GAMES_PER_SYMBOL": "2",
+        "ARENA_MIN_GAMES": "6",
+        "ARENA_MIN_SYMBOLS": "3",
+        "MUZERO_LIVE_UNIVERSE_MAX_SYMBOLS": symbol_count,
+        "MUZERO_LIVE_TOP_SYMBOLS": str(min(len(short_symbols), 5)),
+        "MUZERO_DATASET_SOURCE": "auto",
+    }
+    if normalized_resume:
+        overrides["TRAINING_RESUME_CHECKPOINT_PATH"] = normalized_resume
+        overrides["TRAINING_RESUME_STEP"] = "0"
+    return overrides
 
 
 def _normalize_scalp_multi_universe_symbols(symbols: list[str] | None = None) -> list[str]:
@@ -4121,6 +4494,38 @@ def _fetch_remote_training_status() -> dict:
         raise RuntimeError(f"Lecture impossible de {url}: {exc}") from exc
 
 
+def _extract_run_progress_snapshot(status_payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Extrait la progression utile du run depuis l'API HTTP distante.
+
+    Args:
+        status_payload (dict[str, Any] | None): Charge brute de `/training/status`.
+
+    Returns:
+        dict[str, Any]: Resume compact avec `run_id`, `horizon`,
+            `step_current` et `started_at_ts` si disponibles.
+    """
+    payload = dict(status_payload or {})
+    run_payload = dict(payload.get("run") or {})
+    current_step = dict(run_payload.get("current_step") or {})
+    started_at_raw = str(run_payload.get("started_at") or "").strip()
+    started_at_ts: float | None = None
+    if started_at_raw:
+        try:
+            started_at_ts = datetime.fromisoformat(
+                started_at_raw.replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
+            started_at_ts = None
+    return {
+        "run_id": str(run_payload.get("run_id") or "").strip() or None,
+        "run_horizon": str(current_step.get("horizon") or "").strip().lower() or None,
+        "step_current": int(current_step.get("training_step_current") or 0),
+        "started_at_ts": started_at_ts,
+        "active": bool(run_payload.get("active")),
+        "status": str(run_payload.get("status") or "").strip() or None,
+    }
+
+
 def _wait_for_remote_run_start(
     previous_run_id: str | None,
     expected_trigger: str,
@@ -4195,30 +4600,41 @@ def _wait_for_remote_checkpoint_cutover(
     *,
     checkpoint_step: int,
     horizon: str = "scalp",
+    expected_run_id: str | None = None,
     total_steps: int = 40000,
     timeout_seconds: int = 14_400,
     poll_interval_seconds: int = 30,
 ) -> dict[str, Any]:
-    """Attend qu'un checkpoint cible soit ecrit et logge cote serveur.
+    """Attend qu'un checkpoint cible soit confirme pour le run courant.
 
     Args:
         client (paramiko.SSHClient): Session SSH distante deja ouverte.
         checkpoint_step (int): Step du checkpoint attendu.
         horizon (str): Horizon cible.
+        expected_run_id (str | None): Identifiant du run attendu si connu.
         total_steps (int): Budget total du run pour le motif de log.
         timeout_seconds (int): Delai maximal avant echec.
         poll_interval_seconds (int): Frequence de verification.
 
     Returns:
-        dict[str, Any]: Instantane de verification quand les deux conditions sont vraies.
+        dict[str, Any]: Instantane de verification quand le checkpoint
+            appartient bien au run actif et que la progression a atteint
+            la fenetre de coupure.
 
     Raises:
-        RuntimeError: Si le checkpoint ou la ligne de log n'apparaissent pas dans le delai.
+        RuntimeError: Si le checkpoint confirme pour le run courant
+            n'apparait pas dans le delai.
     """
     deadline = time.time() + timeout_seconds
-    last_status: tuple[bool, bool] | None = None
+    last_status: tuple[bool, bool, bool, bool] | None = None
     horizon_token = _sanitize_manual_token(horizon, "scalp").lower()
     while time.time() < deadline:
+        http_snapshot: dict[str, Any] = {}
+        http_error: str | None = None
+        try:
+            http_snapshot = _extract_run_progress_snapshot(_fetch_remote_training_status())
+        except RuntimeError as exc:
+            http_error = str(exc)
         python_code = textwrap.dedent(
             """
             from __future__ import annotations
@@ -4230,6 +4646,7 @@ def _wait_for_remote_checkpoint_cutover(
             checkpoint_step = %(checkpoint_step)s
             total_steps = %(total_steps)s
             horizon = %(horizon)s
+            started_at_ts = %(started_at_ts)s
             remote_dir = Path(%(remote_dir)s)
             checkpoint_path = remote_dir / "data" / "muzero" / "weights" / f"muzero_{horizon}_ckpt_{checkpoint_step}.pkl"
             log_path = remote_dir / "hive_nightly_training.log"
@@ -4242,9 +4659,21 @@ def _wait_for_remote_checkpoint_cutover(
                         latest_step_line = raw_line.strip()
                     if matched_line is None and pattern.search(raw_line):
                         matched_line = raw_line.strip()
+            checkpoint_exists = checkpoint_path.exists()
+            checkpoint_mtime = checkpoint_path.stat().st_mtime if checkpoint_exists else None
+            checkpoint_fresh = bool(
+                checkpoint_exists
+                and (
+                    started_at_ts is None
+                    or checkpoint_mtime is None
+                    or checkpoint_mtime >= started_at_ts - 5.0
+                )
+            )
             payload = {
-                "checkpoint_exists": checkpoint_path.exists(),
+                "checkpoint_exists": checkpoint_exists,
+                "checkpoint_fresh": checkpoint_fresh,
                 "checkpoint_path": str(checkpoint_path),
+                "checkpoint_mtime": checkpoint_mtime,
                 "log_ready": matched_line is not None,
                 "log_line": matched_line,
                 "latest_step_line": latest_step_line,
@@ -4255,29 +4684,71 @@ def _wait_for_remote_checkpoint_cutover(
             "checkpoint_step": int(checkpoint_step),
             "total_steps": int(total_steps),
             "horizon": repr(horizon_token),
+            "started_at_ts": (
+                "None"
+                if http_snapshot.get("started_at_ts") is None
+                else repr(float(http_snapshot["started_at_ts"]))
+            ),
             "remote_dir": repr(REMOTE_DIR),
         }
-        snapshot = _run_remote_python_json(client, python_code, timeout=90, use_sudo=True)
-        status_key = (bool(snapshot.get("checkpoint_exists")), bool(snapshot.get("log_ready")))
+        snapshot = dict(_run_remote_python_json(client, python_code, timeout=90, use_sudo=True))
+        run_id = str(http_snapshot.get("run_id") or "").strip() or None
+        run_horizon = str(http_snapshot.get("run_horizon") or "").strip().lower() or None
+        step_current = int(http_snapshot.get("step_current") or 0)
+        run_matches = not expected_run_id or run_id == expected_run_id
+        status_ready = (
+            run_matches
+            and step_current >= checkpoint_step
+            and (not run_horizon or run_horizon == horizon_token)
+        )
+        snapshot.update(
+            {
+                "run_id": run_id,
+                "run_horizon": run_horizon,
+                "run_matches": run_matches,
+                "status_ready": status_ready,
+                "step_current": step_current,
+                "http_error": http_error,
+            }
+        )
+        status_key = (
+            bool(snapshot.get("checkpoint_exists")),
+            bool(snapshot.get("checkpoint_fresh")),
+            bool(snapshot.get("run_matches")),
+            bool(snapshot.get("status_ready")),
+        )
         if status_key != last_status:
             print(
-                "Attente checkpoint %s %s: checkpoint=%s | log=%s"
+                "Attente checkpoint %s %s: checkpoint=%s | frais=%s | run=%s | progression=%s"
                 % (
                     horizon_token,
                     checkpoint_step,
                     "oui" if status_key[0] else "non",
                     "oui" if status_key[1] else "non",
+                    "oui" if status_key[2] else "non",
+                    "oui" if status_key[3] else "non",
                 )
             )
+            if snapshot.get("run_id"):
+                print(
+                    "Run courant: %s | step=%s | horizon=%s"
+                    % (
+                        snapshot.get("run_id"),
+                        snapshot.get("step_current"),
+                        snapshot.get("run_horizon") or "n/a",
+                    )
+                )
+            elif snapshot.get("http_error"):
+                print(f"Lecture HTTP du run indisponible: {snapshot.get('http_error')}")
             if snapshot.get("latest_step_line"):
                 print(f"Derniere ligne step vue: {snapshot.get('latest_step_line')}")
             last_status = status_key
-        if status_key == (True, True):
+        if all(status_key):
             print(f"Checkpoint {checkpoint_step} pret pour le cutover Arena.")
             return snapshot
         time.sleep(max(5, poll_interval_seconds))
     raise RuntimeError(
-        f"Le checkpoint {checkpoint_step} pour {horizon_token} n'a pas ete observe dans le delai imparti."
+        f"Le checkpoint {checkpoint_step} pour {horizon_token} n'a pas ete confirme pour le run courant dans le delai imparti."
     )
 
 
@@ -4939,6 +5410,7 @@ def launch_muzero_scalp_arena_cutover_8000(
             client,
             checkpoint_step=MANUAL_ARENA_CUTOVER_STEP,
             horizon="scalp",
+            expected_run_id=str(source_run_snapshot.get("run_id") or "").strip() or None,
         )
         stop_remote_training(client, reason=stop_reason)
         _verify_remote_training_stopped(client)
@@ -5027,6 +5499,7 @@ def start_training(
     manual_massive: bool = False,
     *,
     scalp_reduced: bool = False,
+    muzero_seed_short: bool = False,
     muzero_scalp_full_7: bool = False,
     dreamer_scalp_full_7: bool = False,
     intraday_reduced: bool = False,
@@ -5039,12 +5512,15 @@ def start_training(
     stop_existing: bool = False,
     stop_reason: str = "manual_factory_cutover",
     symbols: list[str] | None = None,
+    resume_checkpoint_path: str | None = None,
 ) -> None:
     """Synchronise les scripts EVA Lab et lance l'entrainement distant.
 
     Args:
         manual_massive (bool): Force un run massif immediat de recherche.
         scalp_reduced (bool): Force une relance `scalp` reduite.
+        muzero_seed_short (bool): Force une qualification courte de seed
+            MuZero sur un univers coeur.
         muzero_scalp_full_7 (bool): Lance un `full` MuZero `scalp` 7-symboles.
         dreamer_scalp_full_7 (bool): Lance un `full` Dreamer `scalp` 7-symboles.
         intraday_reduced (bool): Force une relance `intraday` reduite.
@@ -5057,6 +5533,8 @@ def start_training(
         stop_existing (bool): Stoppe le run actif avant lancement si necessaire.
         stop_reason (str): Motif explicite a enregistrer si le run courant est coupe.
         symbols (list[str] | None): Univers reduit optionnel pour `scalp`.
+        resume_checkpoint_path (str | None): Checkpoint explicite a recharger
+            pour le profil de qualification seed.
     """
     print(f"Connexion a Proxmox {HOST}...")
     ssh_password, _sudo_password = _require_remote_credentials()
@@ -5080,6 +5558,11 @@ def start_training(
             runtime_overrides = _build_manual_massive_overrides()
         elif scalp_reduced:
             runtime_overrides = _build_scalp_reduced_overrides(symbols)
+        elif muzero_seed_short:
+            runtime_overrides = _build_muzero_seed_short_overrides(
+                symbols,
+                resume_checkpoint_path=resume_checkpoint_path,
+            )
         elif muzero_scalp_full_7:
             runtime_overrides = _build_muzero_scalp_multi_universe_full_overrides(symbols)
         elif dreamer_scalp_full_7:
@@ -5129,6 +5612,14 @@ def parse_args() -> argparse.Namespace:
         "--scalp-reduced",
         action="store_true",
         help="Relance uniquement `scalp` sur un univers reduit multi-actifs.",
+    )
+    parser.add_argument(
+        "--muzero-seed-short",
+        action="store_true",
+        help=(
+            "Lance une qualification courte de seed MuZero-only sur un univers coeur, "
+            "sans GNN, sans Dreamer et sans Arena."
+        ),
     )
     parser.add_argument(
         "--muzero-scalp-full-7",
@@ -5248,7 +5739,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--symbols",
         default="",
-        help="Liste CSV de symboles a imposer pour les profils `reduced` uniquement.",
+        help="Liste CSV de symboles a imposer pour les profils `reduced` et `seed-short`.",
+    )
+    parser.add_argument(
+        "--resume-checkpoint-path",
+        default="",
+        help="Checkpoint explicite a recharger pour le profil `seed-short`.",
     )
     return parser.parse_args()
 
@@ -5260,6 +5756,7 @@ if __name__ == "__main__":
         for flag in (
             args.manual_massive,
             args.scalp_reduced,
+            args.muzero_seed_short,
             args.muzero_scalp_full_7,
             args.dreamer_scalp_full_7,
             args.muzero_scalp_arena_cutover_8000,
@@ -5277,7 +5774,7 @@ if __name__ == "__main__":
     )
     if selected_profiles > 1:
         raise SystemExit(
-            "Choisissez un seul profil parmi --manual-massive, --scalp-reduced, --muzero-scalp-full-7, --dreamer-scalp-full-7, --muzero-scalp-arena-cutover-8000, --intraday-reduced, --swing-reduced, --all-reduced, --wave1-profile, --wave1-sequence, --v3-sequence, --v3-profile, --v4-sequence, --v4-profile."
+            "Choisissez un seul profil parmi --manual-massive, --scalp-reduced, --muzero-seed-short, --muzero-scalp-full-7, --dreamer-scalp-full-7, --muzero-scalp-arena-cutover-8000, --intraday-reduced, --swing-reduced, --all-reduced, --wave1-profile, --wave1-sequence, --v3-sequence, --v3-profile, --v4-sequence, --v4-profile."
         )
     requested_symbols = [
         item.strip()
@@ -5331,6 +5828,7 @@ if __name__ == "__main__":
         start_training(
             manual_massive=args.manual_massive,
             scalp_reduced=args.scalp_reduced,
+            muzero_seed_short=args.muzero_seed_short,
             muzero_scalp_full_7=args.muzero_scalp_full_7,
             dreamer_scalp_full_7=args.dreamer_scalp_full_7,
             intraday_reduced=args.intraday_reduced,
@@ -5343,6 +5841,7 @@ if __name__ == "__main__":
             stop_existing=args.stop_existing,
             stop_reason=str(args.stop_reason or "manual_factory_cutover"),
             symbols=requested_symbols or None,
+            resume_checkpoint_path=(str(args.resume_checkpoint_path or "").strip() or None),
         )
 
 

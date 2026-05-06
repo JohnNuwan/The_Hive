@@ -31,6 +31,26 @@ def test_lot_size_calculation():
     assert isinstance(lot, float)
 
 
+def test_lot_size_uses_mt5_tick_value_for_cfd():
+    """Verifie que le sizing CFD suit les economics MT5 du symbole."""
+    manager = RiskValidator()
+    lot = manager.calculate_lot_size(
+        balance=Decimal("10000"),
+        risk_percent=Decimal("1.0"),
+        sl_distance=Decimal("100"),
+        symbol="US100.cash",
+        sizing_hint={
+            "tick_size": Decimal("1"),
+            "tick_value": Decimal("1"),
+            "volume_min": Decimal("0.01"),
+            "volume_step": Decimal("0.01"),
+            "volume_max": Decimal("10.0"),
+        },
+    )
+
+    assert lot == 1.0
+
+
 def test_weekend_session_blocks_fx_but_not_crypto(monkeypatch):
     """Verifie que le week-end bloque le Forex mais pas la crypto."""
     manager = RiskValidator()

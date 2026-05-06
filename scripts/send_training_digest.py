@@ -75,8 +75,12 @@ def main() -> int:
     )
 
     while True:
-        logger.info("Envoi du digest training Telegram.")
-        send_training_digest(horizons=horizons)
+        logger.info("Evaluation du digest training Telegram.")
+        sent = send_training_digest(horizons=horizons)
+        if sent:
+            logger.info("Digest training Telegram envoye.")
+        else:
+            logger.info("Digest training Telegram ignore (aucun changement materiel).")
         if interval_minutes <= 0.0:
             return 0
         logger.info("Prochain digest dans %.2f minutes.", interval_minutes)

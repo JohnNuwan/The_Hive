@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from decimal import Decimal, ROUND_FLOOR
 from typing import Any
 from uuid import UUID, uuid4
@@ -41,6 +42,8 @@ class CopyTradingTarget(BaseModel):
         login (int | None): Login du compte si connu.
         phase (str): Phase du compte prop firm.
         terminal_label (str | None): Etiquette descriptive du terminal.
+        symbol_map (dict[str, str]): Traductions explicites symbole source -> cible.
+        supported_symbols (list[str]): Univers de symboles accepte par la cible.
     """
 
     id: UUID = Field(default_factory=uuid4)
@@ -55,6 +58,8 @@ class CopyTradingTarget(BaseModel):
     login: int | None = None
     phase: str = "funded"
     terminal_label: str | None = None
+    symbol_map: dict[str, str] = Field(default_factory=dict)
+    supported_symbols: list[str] = Field(default_factory=list)
 
 
 class RemoteTicketLink(BaseModel):
@@ -90,10 +95,12 @@ class CopyTradingRouter:
         self.settings = get_settings()
         self.targets: dict[UUID, CopyTradingTarget] = {}
         self._ticket_links: dict[int, list[RemoteTicketLink]] = {}
+        self._target_symbols_cache: dict[UUID, tuple[float, dict[str, str]]] = {}
         self._lock = asyncio.Lock()
         self._http_client = httpx.AsyncClient(
             timeout=max(2.0, float(self.settings.banker_copy_request_timeout_seconds))
         )
+        self._target_symbols_cache_ttl_seconds = 300.0
 
     def __getattr__(self, item: str) -> Any:
         """
@@ -176,6 +183,8 @@ class CopyTradingRouter:
                     "login": target.login,
                     "phase": target.phase,
                     "terminal_label": target.terminal_label,
+                    "symbol_map": dict(target.symbol_map),
+                    "supported_symbols": list(target.supported_symbols),
                 }
             )
         return statuses
@@ -227,7 +236,13 @@ class CopyTradingRouter:
             dict[str, Any]: Resultat local enrichi des retours de replication.
         """
         local_result = await self.primary_service.close_position(ticket)
-        remote_results = await self._close_remote_links(ticket)
+        if not local_result.get("success"):
+            return local_result
+
+        remote_results = await self._close_remote_links(
+            ticket,
+            close_as_runner=self._should_keep_remote_runner(local_result),
+        )
         if remote_results:
             local_result["copy_results"] = remote_results
         return local_result
@@ -336,8 +351,18 @@ class CopyTradingRouter:
                 "message": "Volume copie nul apres proportionalite.",
             }
 
+        resolved_symbol = await self._resolve_target_symbol(target, master_order.symbol)
+        if not resolved_symbol:
+            return {
+                "target_id": str(target.id),
+                "target_name": target.name,
+                "success": False,
+                "message": f"Symbole {master_order.symbol} incompatible avec la cible {target.name}.",
+            }
+
         copy_order = master_order.model_copy(
             update={
+                "symbol": resolved_symbol,
                 "volume": scaled_volume,
                 "source": OrderSource.COPY,
                 "account_id": None,
@@ -348,6 +373,7 @@ class CopyTradingRouter:
         result.setdefault("target_id", str(target.id))
         result.setdefault("target_name", target.name)
         result["scaled_volume"] = float(scaled_volume)
+        result["resolved_symbol"] = resolved_symbol
         return result
 
     async def _execute_remote_target_order(
@@ -395,12 +421,33 @@ class CopyTradingRouter:
         data["target_name"] = target.name
         return data
 
-    async def _close_remote_links(self, master_ticket: int) -> list[dict[str, Any]]:
+    def _should_keep_remote_runner(self, local_result: dict[str, Any]) -> bool:
+        """
+        Indique si une cloture gagnante du maitre doit devenir un runner distant.
+
+        Args:
+            local_result (dict[str, Any]): Resultat de cloture du maitre.
+
+        Returns:
+            bool: True si les followers doivent garder une demi-position au BE.
+        """
+        try:
+            return float(local_result.get("profit", 0) or 0) > 0.0
+        except (TypeError, ValueError):
+            return False
+
+    async def _close_remote_links(
+        self,
+        master_ticket: int,
+        close_as_runner: bool = False,
+    ) -> list[dict[str, Any]]:
         """
         Ferme les tickets distants lies a un ticket maitre.
 
         Args:
             master_ticket (int): Ticket maitre local.
+            close_as_runner (bool): Si True, ferme la moitie de la position
+                distante puis deplace le stop au break-even.
 
         Returns:
             list[dict[str, Any]]: Resultats de cloture par cible.
@@ -416,7 +463,10 @@ class CopyTradingRouter:
             target = self.targets.get(link.target_id)
             if target is None or not target.enabled:
                 continue
-            tasks.append(self._close_remote_ticket(target, link.remote_ticket))
+            if close_as_runner:
+                tasks.append(self._close_remote_runner_ticket(target, link.remote_ticket))
+            else:
+                tasks.append(self._close_remote_ticket(target, link.remote_ticket))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         normalized: list[dict[str, Any]] = []
@@ -430,6 +480,65 @@ class CopyTradingRouter:
             self._ticket_links.pop(master_ticket, None)
 
         return normalized
+
+    async def _close_remote_runner_ticket(
+        self,
+        target: CopyTradingTarget,
+        remote_ticket: int,
+    ) -> dict[str, Any]:
+        """
+        Ferme partiellement un follower puis place le stop restant au break-even.
+
+        Args:
+            target (CopyTradingTarget): Cible distante.
+            remote_ticket (int): Ticket distant a traiter.
+
+        Returns:
+            dict[str, Any]: Resultat composite de la demi-cloture et du passage au BE.
+        """
+        position_snapshot = await self._fetch_remote_position_snapshot(target, remote_ticket)
+        if position_snapshot is None:
+            return await self._close_remote_ticket(target, remote_ticket)
+
+        try:
+            current_volume = Decimal(str(position_snapshot.get("volume") or "0"))
+            break_even_price = float(position_snapshot.get("open_price") or 0.0)
+        except (ArithmeticError, TypeError, ValueError):
+            return await self._close_remote_ticket(target, remote_ticket)
+
+        if current_volume <= Decimal("0") or break_even_price <= 0.0:
+            return await self._close_remote_ticket(target, remote_ticket)
+
+        partial_result = await self._close_remote_ticket(
+            target,
+            remote_ticket,
+            volume=current_volume / Decimal("2"),
+        )
+        if not partial_result.get("success"):
+            return await self._close_remote_ticket(target, remote_ticket)
+
+        remaining_volume = Decimal(str(partial_result.get("volume_remaining") or "0"))
+        if remaining_volume <= Decimal("0"):
+            partial_result["runner_mode"] = "full_close_fallback"
+            return partial_result
+
+        modify_result = await self._modify_remote_ticket(
+            target,
+            remote_ticket,
+            sl=break_even_price,
+            tp=0.0,
+        )
+        partial_result["runner_mode"] = "half_close_break_even"
+        partial_result["break_even_price"] = break_even_price
+        partial_result["modify_result"] = modify_result
+        partial_result["success"] = bool(partial_result.get("success")) and bool(
+            modify_result.get("success")
+        )
+        if not modify_result.get("success"):
+            partial_result["message"] = (
+                "Demi-cloture distante reussie, mais passage au break-even echoue."
+            )
+        return partial_result
 
     async def _modify_remote_links(self, master_ticket: int, sl: float, tp: float) -> list[dict[str, Any]]:
         """
@@ -465,13 +574,64 @@ class CopyTradingRouter:
                 normalized.append(result)
         return normalized
 
-    async def _close_remote_ticket(self, target: CopyTradingTarget, remote_ticket: int) -> dict[str, Any]:
+    async def _fetch_remote_position_snapshot(
+        self,
+        target: CopyTradingTarget,
+        remote_ticket: int,
+    ) -> dict[str, Any] | None:
+        """
+        Lit une position distante pour recuperer son volume et son prix d'entree.
+
+        Args:
+            target (CopyTradingTarget): Cible distante.
+            remote_ticket (int): Ticket distant a rechercher.
+
+        Returns:
+            dict[str, Any] | None: Position distante si elle existe, sinon None.
+        """
+        try:
+            response = await self._http_client.get(
+                self._join_url(target.banker_base_url, "/positions"),
+                headers=get_internal_headers("banker"),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            logger.info(
+                "Copy trading: lecture de la position distante impossible sur %s pour %s: %s",
+                target.name,
+                remote_ticket,
+                exc,
+            )
+            return None
+
+        if not isinstance(payload, list):
+            return None
+
+        for position in payload:
+            if not isinstance(position, dict):
+                continue
+            try:
+                if int(position.get("ticket")) == int(remote_ticket):
+                    return position
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    async def _close_remote_ticket(
+        self,
+        target: CopyTradingTarget,
+        remote_ticket: int,
+        volume: Decimal | None = None,
+    ) -> dict[str, Any]:
         """
         Ferme une position distante sur une instance fille.
 
         Args:
             target (CopyTradingTarget): Cible distante.
             remote_ticket (int): Ticket a cloturer.
+            volume (Decimal | None): Volume a cloturer. Si absent, ferme toute
+                la position distante.
 
         Returns:
             dict[str, Any]: Resultat HTTP normalise.
@@ -480,6 +640,7 @@ class CopyTradingRouter:
             response = await self._http_client.delete(
                 self._join_url(target.banker_base_url, f"/positions/{remote_ticket}"),
                 headers=get_internal_headers("banker"),
+                params={"volume": float(volume)} if volume is not None else None,
             )
             response.raise_for_status()
             data = response.json()
@@ -628,6 +789,209 @@ class CopyTradingRouter:
         else:
             comment = "COPY EVA"
         return comment[:31]
+
+    async def _resolve_target_symbol(self, target: CopyTradingTarget, source_symbol: str) -> str | None:
+        """
+        Traduit un symbole source vers le meilleur symbole cible disponible.
+
+        La resolution privilegie d'abord le mapping explicite, puis l'univers
+        de symboles renvoye par l'instance cible, puis la liste statique
+        `supported_symbols` si elle est fournie.
+
+        Args:
+            target (CopyTradingTarget): Cible distante a evaluer.
+            source_symbol (str): Symbole d'origine du compte maitre.
+
+        Returns:
+            str | None: Symbole cible resolu, ou `None` si aucun candidat
+            compatible n'existe.
+        """
+        normalized_source = self._normalize_symbol_token(source_symbol)
+        explicit_map = {
+            self._normalize_symbol_token(key): str(value).strip()
+            for key, value in target.symbol_map.items()
+            if str(value).strip()
+        }
+        configured_catalog = self._build_symbol_catalog(target.supported_symbols)
+        remote_catalog = await self._fetch_target_symbol_catalog(target)
+        effective_catalog = remote_catalog or configured_catalog
+
+        candidates: list[str] = []
+        explicit_symbol = explicit_map.get(normalized_source)
+        if explicit_symbol:
+            candidates.extend(self._build_symbol_candidates(explicit_symbol))
+        candidates.extend(self._build_symbol_candidates(source_symbol))
+
+        if effective_catalog:
+            for candidate in candidates:
+                actual_symbol = effective_catalog.get(self._normalize_symbol_token(candidate))
+                if actual_symbol:
+                    return actual_symbol
+            for candidate in candidates:
+                actual_symbol = self._resolve_catalog_symbol_by_suffix(
+                    effective_catalog=effective_catalog,
+                    candidate=candidate,
+                )
+                if actual_symbol:
+                    return actual_symbol
+            return None
+
+        return candidates[0] if candidates else None
+
+    async def _fetch_target_symbol_catalog(self, target: CopyTradingTarget) -> dict[str, str]:
+        """
+        Lit et met en cache l'univers de symboles d'une cible distante.
+
+        Args:
+            target (CopyTradingTarget): Cible distante a interroger.
+
+        Returns:
+            dict[str, str]: Catalogue `symbole_normalise -> symbole_reel`.
+        """
+        cached_entry = self._target_symbols_cache.get(target.id)
+        now = time.monotonic()
+        if cached_entry and now - cached_entry[0] < self._target_symbols_cache_ttl_seconds:
+            return cached_entry[1]
+
+        try:
+            response = await self._http_client.get(
+                self._join_url(target.banker_base_url, "/symbols/discover"),
+                headers=get_internal_headers("banker"),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            logger.info(
+                "Copy trading: catalogue de symboles distant indisponible pour %s: %s",
+                target.name,
+                exc,
+            )
+            return {}
+
+        raw_symbols = payload.get("symbols", []) if isinstance(payload, dict) else []
+        if not isinstance(raw_symbols, list):
+            return {}
+
+        catalog = self._build_symbol_catalog(raw_symbols)
+        self._target_symbols_cache[target.id] = (now, catalog)
+        return catalog
+
+    def _build_symbol_catalog(self, symbols: list[str]) -> dict[str, str]:
+        """
+        Construit un catalogue normalise a partir d'une liste de symboles.
+
+        Args:
+            symbols (list[str]): Symboles bruts a indexer.
+
+        Returns:
+            dict[str, str]: Dictionnaire `symbole_normalise -> symbole_reel`.
+        """
+        catalog: dict[str, str] = {}
+        for symbol in symbols:
+            cleaned = str(symbol or "").strip()
+            if not cleaned:
+                continue
+            catalog[self._normalize_symbol_token(cleaned)] = cleaned
+        return catalog
+
+    def _build_symbol_candidates(self, symbol: str) -> list[str]:
+        """
+        Produit des variantes plausibles pour un symbole inter-brokers.
+
+        Args:
+            symbol (str): Symbole source a traduire.
+
+        Returns:
+            list[str]: Candidats tries du plus direct au plus permissif.
+        """
+        cleaned = str(symbol or "").strip()
+        if not cleaned:
+            return []
+
+        upper_symbol = cleaned.upper()
+        candidates = [cleaned, upper_symbol]
+        alias_map = {
+            "XAUUSD": ["GOLD", "XAUUSD", "XAUUSD."],
+            "US100.CASH": ["US100", "NAS100", "USTEC", "NASDAQ100"],
+            "US30.CASH": ["US30", "DJ30", "WALLSTREET", "DJIA30"],
+            "GER40.CASH": ["GER40", "DE40", "DAX40", "GERMANY40"],
+            "US500.CASH": ["US500", "SPX500", "SP500", "US500"],
+            "BTCUSD": ["BTCUSD", "XBTUSD"],
+        }
+        candidates.extend(alias_map.get(upper_symbol, []))
+
+        if upper_symbol.endswith(".CASH"):
+            candidates.append(upper_symbol.replace(".CASH", ""))
+        if "." in upper_symbol:
+            candidates.append(upper_symbol.replace(".", ""))
+        candidates.extend([f"{upper_symbol}.E", f"{upper_symbol}.M"])
+
+        unique_candidates: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            normalized = self._normalize_symbol_token(candidate)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_candidates.append(candidate)
+        return unique_candidates
+
+    @staticmethod
+    def _normalize_symbol_token(symbol: str) -> str:
+        """
+        Normalise un symbole pour la comparaison inter-brokers.
+
+        Args:
+            symbol (str): Symbole brut.
+
+        Returns:
+            str: Forme majuscule sans ponctuation sensible.
+        """
+        return (
+            str(symbol or "")
+            .strip()
+            .upper()
+            .replace("_", "")
+            .replace("-", "")
+            .replace(".", "")
+            .replace("/", "")
+            .replace(" ", "")
+        )
+
+    @staticmethod
+    def _resolve_catalog_symbol_by_suffix(
+        effective_catalog: dict[str, str],
+        candidate: str,
+    ) -> str | None:
+        """
+        Tente une resolution permissive pour les brokers a suffixe.
+
+        Cette passe sert surtout pour des univers comme FTUK qui exposent des
+        symboles du type `EURUSD.e` ou `XAUUSD.m` alors que le compte maitre
+        travaille avec `EURUSD` et `XAUUSD`.
+
+        Args:
+            effective_catalog (dict[str, str]): Catalogue normalise de la cible.
+            candidate (str): Symbole candidat issu du compte maitre.
+
+        Returns:
+            str | None: Symbole reel de la cible si une correspondance
+            raisonnable est trouvee, sinon `None`.
+        """
+        normalized_candidate = CopyTradingRouter._normalize_symbol_token(candidate)
+        if not normalized_candidate:
+            return None
+
+        prefix_matches = [
+            actual_symbol
+            for normalized_symbol, actual_symbol in effective_catalog.items()
+            if normalized_symbol.startswith(normalized_candidate)
+        ]
+        if not prefix_matches:
+            return None
+
+        prefix_matches.sort(key=lambda value: (len(value), value))
+        return prefix_matches[0]
 
     @staticmethod
     def _join_url(base_url: str, path: str) -> str:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 from datetime import datetime
@@ -105,6 +107,44 @@ def _format_timestamp(value: Any) -> str:
     return timestamp.strftime("%d/%m/%Y %H:%M")
 
 
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    """Convertit un horodatage ISO en objet ``datetime``.
+
+    Args:
+        value (Any): Valeur brute a convertir.
+
+    Returns:
+        datetime | None: Date convertie ou ``None`` si invalide.
+    """
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _env_int(name: str, default: int) -> int:
+    """Lit un entier depuis l'environnement avec repli robuste.
+
+    Args:
+        name (str): Nom de la variable d'environnement.
+        default (int): Valeur de repli.
+
+    Returns:
+        int: Valeur entiere normalisee.
+    """
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning("Valeur entiere invalide pour %s=%s. Repli=%s.", name, raw_value, default)
+        return default
+
+
 def _resolve_digest_horizons(horizons: list[str] | None = None) -> list[str]:
     """Retourne les horizons a afficher dans le digest.
 
@@ -170,6 +210,250 @@ def _shorten_identifier(value: Any, default: str = "aucun", max_length: int = 44
     return f"{candidate[:head]}...{candidate[-tail:]}"
 
 
+def _resolve_digest_state_path() -> Path:
+    """Retourne le chemin de persistance du digest training.
+
+    Returns:
+        Path: Fichier de cache local au digest.
+    """
+    raw_value = str(os.getenv("TRAINING_DIGEST_STATE_PATH", "")).strip()
+    if raw_value:
+        return Path(raw_value)
+    return Path.cwd() / "data" / "checkpoints" / "training_digest_state.json"
+
+
+def _bucket_metric(value: Any, quantum: float) -> float | None:
+    """Normalise une metrique dans un seau grossier.
+
+    Args:
+        value (Any): Valeur brute a bucketiser.
+        quantum (float): Largeur du seau.
+
+    Returns:
+        float | None: Valeur bucketisee ou ``None`` si invalide.
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if quantum <= 0:
+        return round(numeric, 6)
+    return round(round(numeric / quantum) * quantum, 6)
+
+
+def _build_digest_change_snapshot(
+    *,
+    run_status: dict[str, Any],
+    horizon_statuses: dict[str, dict[str, Any]] | None,
+    horizons: list[str] | None,
+) -> dict[str, Any]:
+    """Construit une vue semantique pour detecter un vrai changement.
+
+    Le digest Telegram contient volontairement un horodatage courant et de
+    nombreuses metriques fines. Cette signature ne retient que les transitions
+    materielles afin d'eviter les messages repetitifs.
+
+    Args:
+        run_status (dict[str, Any]): Statut courant du training.
+        horizon_statuses (dict[str, dict[str, Any]] | None): Statuts par horizon.
+        horizons (list[str] | None): Horizons affiches.
+
+    Returns:
+        dict[str, Any]: Signature semantique compacte.
+    """
+    current_step = dict(run_status.get("current_step") or {})
+    latest_metrics = dict(run_status.get("latest_metrics") or {})
+    arena_progress = dict(run_status.get("arena_progress") or {})
+    family_probe_status = dict(run_status.get("family_probe_status") or {})
+    resolved_horizons = _resolve_digest_horizons(horizons)
+
+    phase = str(current_step.get("phase") or "").strip().lower()
+    optimisation_step = current_step.get("training_step_current")
+    optimisation_bucket = None
+    if optimisation_step is not None:
+        optimisation_bucket_size = max(_env_int("TELEGRAM_TRAINING_DIGEST_STEP_BUCKET", 500), 1)
+        try:
+            optimisation_bucket = (
+                int(float(optimisation_step)) // optimisation_bucket_size
+            ) * optimisation_bucket_size
+        except (TypeError, ValueError):
+            optimisation_bucket = None
+
+    horizon_snapshot: dict[str, dict[str, Any]] = {}
+    for horizon in resolved_horizons:
+        payload = dict((horizon_statuses or {}).get(horizon) or {})
+        metrics = dict(payload.get("candidate_metrics") or {})
+        mechanics = dict(metrics.get("metrics_by_position_mechanics") or {})
+        horizon_snapshot[horizon] = {
+            "selection": payload.get("selection"),
+            "live": payload.get("live_champion_id"),
+            "candidate": payload.get("candidate_id"),
+            "gate_reason": payload.get("gate_reason"),
+            "profit_factor": _bucket_metric(metrics.get("profit_factor"), 0.05),
+            "return_pct": _bucket_metric(metrics.get("return_pct"), 0.05),
+            "split_runner_capture_rate": _bucket_metric(
+                mechanics.get("split_runner_capture_rate"), 0.05
+            ),
+            "pyramid_exit_capture_rate": _bucket_metric(
+                mechanics.get("pyramid_exit_capture_rate"), 0.05
+            ),
+        }
+
+    return {
+        "run_id": run_status.get("run_id"),
+        "status": run_status.get("status"),
+        "strategy": run_status.get("strategy"),
+        "reason": run_status.get("reason"),
+        "resume_source": run_status.get("resume_source"),
+        "current_step": {
+            "name": current_step.get("name"),
+            "phase": phase,
+            "horizon": current_step.get("horizon"),
+            "symbol": current_step.get("symbol"),
+            "symbol_index": current_step.get("symbol_index"),
+            "symbol_total": current_step.get("symbol_total"),
+            "part_index": current_step.get("part_index"),
+            "part_total": current_step.get("part_total"),
+            "optimisation_bucket": optimisation_bucket,
+            "train_step_phase": run_status.get("train_step_phase"),
+        },
+        "seed": {
+            "status": latest_metrics.get("seed_viability_status"),
+            "reason": latest_metrics.get("seed_viability_reason"),
+            "recommended": latest_metrics.get("recommended_seed_for_v66"),
+        },
+        "metrics": {
+            "loss_pol": _bucket_metric(latest_metrics.get("loss_pol"), 0.25),
+            "loss_pol_per_head": _bucket_metric(latest_metrics.get("loss_pol_per_head"), 0.05),
+            "root_mask_rate": _bucket_metric(latest_metrics.get("root_mask_rate"), 0.01),
+            "split_runner_capture_rate": _bucket_metric(
+                latest_metrics.get("split_runner_capture_rate"), 0.05
+            ),
+            "pyramid_exit_capture_rate": _bucket_metric(
+                latest_metrics.get("pyramid_exit_capture_rate"), 0.05
+            ),
+            "close_quality_score": _bucket_metric(
+                latest_metrics.get("close_quality_score"), 0.05
+            ),
+            "runner_giveback_pct": _bucket_metric(
+                latest_metrics.get("runner_giveback_pct"), 0.05
+            ),
+        },
+        "precheck_status": run_status.get("precheck_status"),
+        "family_probe_status": {
+            "reason": family_probe_status.get("reason"),
+            "ready_families": family_probe_status.get("ready_families"),
+            "positive_families": family_probe_status.get("positive_families"),
+        },
+        "arena_progress": {
+            "current_role": arena_progress.get("current_role"),
+            "current_symbol": arena_progress.get("current_symbol"),
+            "symbol_index": arena_progress.get("symbol_index"),
+            "symbol_total": arena_progress.get("symbol_total"),
+            "challenger_score": _bucket_metric(arena_progress.get("challenger_score"), 0.5),
+            "champion_score": _bucket_metric(arena_progress.get("champion_score"), 0.5),
+        },
+        "horizons": horizon_snapshot,
+    }
+
+
+def _build_digest_signature(
+    *,
+    run_status: dict[str, Any],
+    horizon_statuses: dict[str, dict[str, Any]] | None,
+    horizons: list[str] | None,
+) -> tuple[str, dict[str, Any]]:
+    """Construit la signature de changement du digest.
+
+    Args:
+        run_status (dict[str, Any]): Statut courant du training.
+        horizon_statuses (dict[str, dict[str, Any]] | None): Statuts par horizon.
+        horizons (list[str] | None): Horizons a afficher.
+
+    Returns:
+        tuple[str, dict[str, Any]]: Signature SHA-256 et snapshot semantique.
+    """
+    snapshot = _build_digest_change_snapshot(
+        run_status=run_status,
+        horizon_statuses=horizon_statuses,
+        horizons=horizons,
+    )
+    serialized = json.dumps(snapshot, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest(), snapshot
+
+
+def _load_digest_state() -> dict[str, Any]:
+    """Charge l'etat du dernier digest envoye.
+
+    Returns:
+        dict[str, Any]: Etat persiste ou dictionnaire vide.
+    """
+    path = _resolve_digest_state_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Lecture du cache digest impossible pour %s: %s", path, exc)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_digest_state(payload: dict[str, Any]) -> None:
+    """Persiste l'etat du dernier digest envoye.
+
+    Args:
+        payload (dict[str, Any]): Etat a persister.
+    """
+    path = _resolve_digest_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _should_send_digest(
+    *,
+    signature: str,
+    run_status: dict[str, Any],
+) -> tuple[bool, str]:
+    """Determine si le digest Telegram doit etre envoye.
+
+    Args:
+        signature (str): Signature semantique courante.
+        run_status (dict[str, Any]): Statut courant du training.
+
+    Returns:
+        tuple[bool, str]: Decision d'envoi et raison associee.
+    """
+    if not _env_flag("TELEGRAM_TRAINING_DIGEST_ONLY_ON_CHANGE", True):
+        return True, "always_send"
+
+    state = _load_digest_state()
+    previous_signature = str(state.get("signature") or "").strip()
+    force_after_minutes = max(_env_int("TELEGRAM_TRAINING_DIGEST_FORCE_AFTER_MINUTES", 180), 1)
+    now = datetime.now()
+    last_sent_at = _parse_iso_datetime(state.get("last_sent_at"))
+    minutes_since_last_send = None
+    if last_sent_at is not None:
+        minutes_since_last_send = max((now - last_sent_at).total_seconds() / 60.0, 0.0)
+
+    if not previous_signature:
+        return True, "first_digest"
+    if previous_signature != signature:
+        return True, "material_change"
+    if minutes_since_last_send is None:
+        return True, "missing_last_sent_at"
+    if minutes_since_last_send >= force_after_minutes:
+        return True, "forced_refresh"
+
+    run_id = str(run_status.get("run_id") or "").strip() or "n/a"
+    logger.info(
+        "Digest training Telegram ignore: aucun changement materiel pour %s (%.1f min).",
+        run_id,
+        minutes_since_last_send,
+    )
+    return False, "unchanged"
+
+
 def build_training_digest_message(
     *,
     run_status: dict[str, Any] | None = None,
@@ -192,6 +476,8 @@ def build_training_digest_message(
     current_step = dict(status.get("current_step") or {})
     latest_metrics = dict(status.get("latest_metrics") or {})
     arena_progress = dict(status.get("arena_progress") or {})
+    policy_precheck_payload = dict(status.get("policy_precheck") or {})
+    family_probe_status = dict(status.get("family_probe_status") or {})
     resolved_horizons = _resolve_digest_horizons(horizons)
 
     if horizon_statuses is None:
@@ -205,16 +491,22 @@ def build_training_digest_message(
                 resolved_horizon_statuses[horizon] = {"horizon": horizon, "gate_reason": "lecture_impossible"}
         horizon_statuses = resolved_horizon_statuses
 
+    primary_horizon = str(current_step.get("horizon") or "").strip().lower()
+    if not primary_horizon or primary_horizon not in resolved_horizons:
+        primary_horizon = resolved_horizons[0]
+
     lines = [
         "POINT ENTRAINEMENT",
         _format_timestamp(datetime.now().isoformat()),
         "",
         "RUN",
         f"- id: {_shorten_identifier(status.get('run_id'), default='aucun', max_length=56)}",
-        f"- statut: {_humanize_token(status.get('status'), default='inconnu')}",
-        f"- strategie: {_humanize_token(status.get('strategy'))}",
+        (
+            f"- statut: {_humanize_token(status.get('status'), default='inconnu')} | "
+            f"strategie: {_humanize_token(status.get('strategy'))} | "
+            f"reprise: {_humanize_token(status.get('resume_source'))}"
+        ),
         f"- raison: {_humanize_token(status.get('reason'))}",
-        f"- reprise: {_humanize_token(status.get('resume_source'))}",
     ]
 
     if current_step:
@@ -222,10 +514,17 @@ def build_training_digest_message(
             [
                 "",
                 "ACTIF",
-                f"- etape: {_humanize_token(current_step.get('name'))}",
-                f"- phase: {_humanize_token(current_step.get('phase'))} | horizon: {_humanize_token(current_step.get('horizon'))}",
-                f"- symbole: {current_step.get('symbol') or 'n/a'} ({_format_ratio(current_step.get('symbol_index'), current_step.get('symbol_total'))})",
-                f"- partie: {_format_ratio(current_step.get('part_index'), current_step.get('part_total'))} | episode: {_format_ratio(current_step.get('episode_step_current'), current_step.get('episode_step_total'))}",
+                (
+                    f"- etape: {_humanize_token(current_step.get('name'))} | "
+                    f"phase: {_humanize_token(current_step.get('phase'))} | "
+                    f"horizon: {_humanize_token(current_step.get('horizon'))}"
+                ),
+                (
+                    f"- progression: {current_step.get('symbol') or 'n/a'} "
+                    f"({_format_ratio(current_step.get('symbol_index'), current_step.get('symbol_total'))}) | "
+                    f"partie {_format_ratio(current_step.get('part_index'), current_step.get('part_total'))} | "
+                    f"episode {_format_ratio(current_step.get('episode_step_current'), current_step.get('episode_step_total'))}"
+                ),
                 f"- replay: {_format_ratio(status.get('replay_cache_entries'), 196)}",
                 f"- maj: {_format_timestamp(current_step.get('updated_at') or status.get('updated_at'))}",
             ]
@@ -235,12 +534,70 @@ def build_training_digest_message(
         lines.extend(
             [
                 "",
-                "METRIQUES",
-                f"- policy: loss_pol={_format_metric(latest_metrics.get('loss_pol'))} | top1={_format_share_metric(latest_metrics.get('policy_top1_share'))} | entropy={_format_metric(latest_metrics.get('policy_entropy'))}",
-                f"- filtres: root_mask={_format_share_metric(latest_metrics.get('root_mask_rate'))} | post_veto={_format_share_metric(latest_metrics.get('post_veto_to_hold_rate'))}",
-                f"- reward: bonus_doux={_format_share_metric(latest_metrics.get('soft_entry_bonus_rate'))} | penalite_douce={_format_share_metric(latest_metrics.get('soft_entry_penalty_rate'))}",
-                f"- shaping: ratio={_format_metric(latest_metrics.get('soft_penalty_to_bonus_ratio'))} | net={_format_metric(latest_metrics.get('soft_penalty_net'))}",
-                f"- equilibre: eq={_format_share_metric(latest_metrics.get('balanced_episode_rate'))} | long={_format_share_metric(latest_metrics.get('long_entry_share'))} | short={_format_share_metric(latest_metrics.get('short_entry_share'))}",
+                "METRIQUES CLES",
+                (
+                    f"- policy: total={_format_metric(latest_metrics.get('loss_pol'))} | "
+                    f"par_tete={_format_metric(latest_metrics.get('loss_pol_per_head'))} | "
+                    f"top1={_format_share_metric(latest_metrics.get('policy_top1_share'))} | "
+                    f"entropy={_format_metric(latest_metrics.get('policy_entropy'))}"
+                ),
+                (
+                    f"- defensif: root_mask={_format_share_metric(latest_metrics.get('root_mask_rate'))} | "
+                    f"close_q={_format_metric(latest_metrics.get('close_quality_score'))} | "
+                    f"slbe={_format_metric(latest_metrics.get('slbe_capture_rate'))} | "
+                    f"hold_drag={_format_metric(latest_metrics.get('hold_drag_score'))}"
+                ),
+                (
+                    f"- offensif: split_cap={_format_metric(latest_metrics.get('split_runner_capture_rate'))} | "
+                    f"runner_win={_format_metric(latest_metrics.get('runner_profit_hold_window_count'))} | "
+                    f"pyramid_cap={_format_metric(latest_metrics.get('pyramid_exit_capture_rate'))} | "
+                    f"peak_giveback={_format_metric(latest_metrics.get('profit_peak_giveback_ratio'))}"
+                ),
+                (
+                    f"- fenetres: split={_format_metric(latest_metrics.get('split_monetization_window_count'))} | "
+                    f"runner={_format_metric(latest_metrics.get('runner_profit_hold_window_count'))} | "
+                    f"pyramid={_format_metric(latest_metrics.get('pyramid_monetization_window_count'))}"
+                ),
+                (
+                    f"- seed: etage={_humanize_token(latest_metrics.get('seed_stage'))} | "
+                    f"statut={_humanize_token(latest_metrics.get('seed_viability_status'))} | "
+                    f"raison={_humanize_token(latest_metrics.get('seed_viability_reason'))}"
+                ),
+                f"- seed_reco: {_shorten_identifier(latest_metrics.get('recommended_seed_for_v66'))}",
+            ]
+        )
+
+    if policy_precheck_payload:
+        trends = dict(policy_precheck_payload.get("trends") or {})
+        lines.extend(
+            [
+                "",
+                "PRECHECK POLICY",
+                (
+                    f"- statut: {_humanize_token(policy_precheck_payload.get('status'))} | "
+                    f"raison: {_humanize_token(policy_precheck_payload.get('reason'))}"
+                ),
+                (
+                    f"- tendances: loss={_format_metric(trends.get('loss_pol_trend'))} | "
+                    f"root_mask={_format_metric(trends.get('root_mask_rate_trend'))} | "
+                    f"split_runner={_format_metric(trends.get('split_runner_capture_trend'))} | "
+                    f"pyramid_exit={_format_metric(trends.get('pyramid_exit_capture_trend'))}"
+                ),
+            ]
+        )
+
+    if family_probe_status:
+        lines.extend(
+            [
+                "",
+                "FAMILY PROBES",
+                (
+                    f"- statut: {_humanize_token(family_probe_status.get('reason'))} | "
+                    f"pretes: {_format_metric(family_probe_status.get('ready_families'))}/"
+                    f"{_format_metric(family_probe_status.get('required_ready_families'))} | "
+                    f"positives: {_format_metric(family_probe_status.get('positive_families'))}/"
+                    f"{_format_metric(family_probe_status.get('required_positive_families'))}"
+                ),
             ]
         )
 
@@ -248,30 +605,65 @@ def build_training_digest_message(
         lines.extend(
             [
                 "",
-                "Arena:",
-                f"- statut: {_humanize_token(arena_progress.get('status'), default='running')}",
-                f"- role: {_humanize_token(arena_progress.get('current_role'))}",
-                f"- symbole: {arena_progress.get('current_symbol') or 'n/a'} ({_format_ratio(arena_progress.get('symbol_index'), arena_progress.get('symbol_total'))})",
-                f"- scores: challenger={_format_metric(arena_progress.get('challenger_score'))} | champion={_format_metric(arena_progress.get('champion_score'))}",
+                "ARENA",
+                (
+                    f"- statut: {_humanize_token(arena_progress.get('status'), default='running')} | "
+                    f"role: {_humanize_token(arena_progress.get('current_role'))}"
+                ),
+                (
+                    f"- progression: {arena_progress.get('current_symbol') or 'n/a'} "
+                    f"({_format_ratio(arena_progress.get('symbol_index'), arena_progress.get('symbol_total'))}) | "
+                    f"challenger={_format_metric(arena_progress.get('challenger_score'))} | "
+                    f"champion={_format_metric(arena_progress.get('champion_score'))}"
+                ),
             ]
         )
 
-    lines.extend(["", "CHAMPIONS MUZERO"])
+    primary_payload = dict((horizon_statuses or {}).get(primary_horizon) or {})
+    primary_metrics = dict(primary_payload.get("candidate_metrics") or {})
+    primary_mechanics = dict(primary_metrics.get("metrics_by_position_mechanics") or {})
+    lines.extend(
+        [
+            "",
+            f"MUZERO {primary_horizon.upper()}",
+            (
+                f"- selection: {_humanize_token(primary_payload.get('selection'))} | "
+                f"live: {_shorten_identifier(primary_payload.get('live_champion_id'))}"
+            ),
+            (
+                f"- candidat: {_shorten_identifier(primary_payload.get('candidate_id'))} | "
+                f"gate: {_humanize_token(primary_payload.get('gate_reason'))}"
+            ),
+            (
+                f"- perf: PF={_format_metric(primary_metrics.get('profit_factor'))} | "
+                f"Ret={_format_metric(primary_metrics.get('return_pct'), '%')} | "
+                f"WR={_format_metric(primary_metrics.get('win_rate'), '%')}"
+            ),
+            (
+                f"- meca: close_q={_format_metric(primary_mechanics.get('close_quality_score'))} | "
+                f"split_runner={_format_metric(primary_mechanics.get('split_runner_capture_rate'))} | "
+                f"pyramid_exit={_format_metric(primary_mechanics.get('pyramid_exit_capture_rate'))} | "
+                f"slbe={_format_metric(primary_mechanics.get('slbe_capture_rate'))}"
+            ),
+        ]
+    )
+
+    secondary_lines: list[str] = []
     for horizon in resolved_horizons:
-        horizon_payload = dict((horizon_statuses or {}).get(horizon) or {})
-        directional = dict(horizon_payload.get("directional_metrics") or {})
-        candidate_metrics = dict(horizon_payload.get("candidate_metrics") or {})
-        lines.extend(
-            [
-                f"{str(horizon or '').upper() or 'N/A'}",
-                f"- selection: {_humanize_token(horizon_payload.get('selection'))}",
-                f"- live: {_shorten_identifier(horizon_payload.get('live_champion_id'))}",
-                f"- candidat: {_shorten_identifier(horizon_payload.get('candidate_id'))}",
-                f"- gate: {_humanize_token(horizon_payload.get('gate_reason'))}",
-                f"- PF={_format_metric(candidate_metrics.get('profit_factor'))} | Ret={_format_metric(candidate_metrics.get('return_pct'), '%')} | WR={_format_metric(candidate_metrics.get('win_rate'), '%')}",
-                f"- Bias={_humanize_token(directional.get('directional_bias'))}",
-            ]
+        if horizon == primary_horizon:
+            continue
+        payload = dict((horizon_statuses or {}).get(horizon) or {})
+        selection = str(payload.get("selection") or "").strip().lower()
+        live_id = payload.get("live_champion_id")
+        candidate_id = payload.get("candidate_id")
+        if not selection and not live_id and not candidate_id:
+            continue
+        secondary_lines.append(
+            f"- {horizon}: {_humanize_token(payload.get('selection'))} | "
+            f"live={_shorten_identifier(live_id)} | gate={_humanize_token(payload.get('gate_reason'))}"
         )
+    if secondary_lines:
+        lines.extend(["", "AUTRES HORIZONS", *secondary_lines])
 
     return "\n".join(lines)
 
@@ -281,7 +673,7 @@ def send_training_digest(
     run_status: dict[str, Any] | None = None,
     horizon_statuses: dict[str, dict[str, Any]] | None = None,
     horizons: list[str] | None = None,
-) -> None:
+) -> bool:
     """Envoie un digest Telegram compact de l'etat training.
 
     Args:
@@ -289,22 +681,45 @@ def send_training_digest(
         horizon_statuses (dict[str, dict[str, Any]] | None): Statuts champion
             deja resolves par horizon.
         horizons (list[str] | None): Horizons a afficher.
+
+    Returns:
+        bool: ``True`` si un digest a ete envoye, sinon ``False``.
     """
     if not _env_flag("TELEGRAM_NOTIFY_TRAINING", True):
-        return
+        return False
     if not _env_flag("TELEGRAM_NOTIFY_TRAINING_DIGEST", True):
-        return
+        return False
+
+    status = dict(run_status or load_training_status() or {})
+    message = build_training_digest_message(
+        run_status=status,
+        horizon_statuses=horizon_statuses,
+        horizons=horizons,
+    )
+    signature, snapshot = _build_digest_signature(
+        run_status=status,
+        horizon_statuses=horizon_statuses,
+        horizons=horizons,
+    )
+    should_send, reason = _should_send_digest(signature=signature, run_status=status)
+    if not should_send:
+        return False
 
     try:
-        TelegramClient().send_sync(
-            build_training_digest_message(
-                run_status=run_status,
-                horizon_statuses=horizon_statuses,
-                horizons=horizons,
-            )
+        TelegramClient().send_sync(message)
+        _save_digest_state(
+            {
+                "last_sent_at": datetime.now().isoformat(),
+                "signature": signature,
+                "reason": reason,
+                "run_id": status.get("run_id"),
+                "snapshot": snapshot,
+            }
         )
+        return True
     except Exception as exc:
         logger.warning("Notification Telegram de digest training ignoree: %s", exc)
+        return False
 
 
 def send_training_run_started(
@@ -395,6 +810,7 @@ def send_horizon_summary(
     battle_report = report_payload.get("battle_report", {}) or {}
     challenger = battle_report.get("challenger", {}) or {}
     metrics = challenger.get("metrics", {}) or {}
+    mechanics = dict(metrics.get("metrics_by_position_mechanics") or {})
     validation = battle_report.get("validation", {}) or {}
     promotion_gate = promotion_result.get("promotion_gate", {}) or {}
     live_universe = report_payload.get("symbols", []) or []
@@ -429,6 +845,11 @@ def send_horizon_summary(
         f"- Expectancy: {_format_metric(metrics.get('expectancy_pct'), '%')}",
         f"- Drawdown max: {_format_metric(metrics.get('max_drawdown_pct'), '%')}",
         f"- Episodes positifs: {_format_metric(metrics.get('positive_episode_rate'), '%')}",
+        f"- Hold drag: {_format_metric(mechanics.get('hold_drag_score'))}",
+        f"- Close quality: {_format_metric(mechanics.get('close_quality_score'))}",
+        f"- Split eff.: {_format_metric(mechanics.get('split_efficiency'))}",
+        f"- Pyramid eff.: {_format_metric(mechanics.get('pyramid_efficiency'))}",
+        f"- SLBE capture: {_format_metric(mechanics.get('slbe_capture_rate'))}",
         "",
         "Validation:",
         f"- Echantillon suffisant: {bool(validation.get('sample_size_ok', False))}",

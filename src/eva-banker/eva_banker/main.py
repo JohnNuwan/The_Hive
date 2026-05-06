@@ -986,8 +986,32 @@ async def create_order(request: OrderRequest) -> OrderResponse:
         source=request.source,
     )
 
-    # 5. VÃ©rification des risques (Loi 2)
+    # 5. Verification des risques (Loi 2)
     risk_validator: RiskValidator = app.state.risk_validator
+    mt5_service: MT5Service = app.state.mt5_service
+
+    # La validation doit utiliser l'etat reel du compte pour eviter les faux
+    # rejets de copy trading apres un redemarrage local du follower.
+    account, positions = await _read_mt5_snapshot(mt5_service)
+    if account is not None:
+        equity_or_balance = getattr(account, "equity", None) or getattr(account, "balance", None)
+        if equity_or_balance is not None:
+            risk_validator.update_account_balance(Decimal(str(equity_or_balance)))
+    risk_validator.update_positions_count(len(positions))
+
+    # Le calcul de risque doit s'appuyer sur le dernier tick MT5 plutot que sur
+    # un prix mock statique, sinon le follower surestime les copies valides.
+    if order.entry_price is None:
+        tick_payload = await mt5_service.get_symbol_tick(order.symbol)
+        if isinstance(tick_payload, dict) and tick_payload.get("success", True):
+            live_price = (
+                tick_payload.get("ask")
+                if order.action == TradeAction.BUY
+                else tick_payload.get("bid")
+            )
+            if live_price is not None and float(live_price) > 0.0:
+                order.entry_price = Decimal(str(live_price))
+
     risk_result = await risk_validator.validate_order(order)
 
     if not risk_result["allowed"]:
@@ -1024,7 +1048,10 @@ async def get_positions() -> list[Position]:
 
 
 @app.delete("/positions/{ticket}", tags=["Trading"])
-async def close_position(ticket: int) -> dict[str, Any]:
+async def close_position(
+    ticket: int,
+    volume: Decimal | None = Query(default=None, gt=0),
+) -> dict[str, Any]:
     """
     Ferme une position spÃ©cifique via son ticket MT5.
 
@@ -1035,7 +1062,7 @@ async def close_position(ticket: int) -> dict[str, Any]:
         dict[str, Any]: RÃ©sultat de la clÃ´ture (SuccÃ¨s, Prix de clÃ´ture, Profit rÃ©alisÃ©).
     """
     mt5_service: MT5Service = app.state.mt5_service
-    result = await mt5_service.close_position(ticket)
+    result = await mt5_service.close_position(ticket, volume=volume)
 
     # IntÃ©gration Compliance (Juriste / Loi 5)
     # Si le trade est profitable, on informe l'expert Compliance pour provisionnement URSSAF
@@ -1616,4 +1643,47 @@ async def get_copy_trading_status() -> dict[str, Any]:
     return {
         "enabled": bool(targets),
         "targets": targets,
+    }
+
+
+@app.get("/symbols/discover", tags=["Trading"])
+async def discover_available_symbols(
+    include_forex: bool = Query(default=True),
+    include_cfd: bool = Query(default=True),
+    include_crypto: bool = Query(default=True),
+    max_symbols: int = Query(default=0, ge=0, le=5000),
+) -> dict[str, Any]:
+    """
+    Expose l'univers de symboles tradables vu par une instance Banker.
+
+    Cet endpoint sert principalement au copy trading inter-brokers pour
+    traduire les symboles quand deux terminaux n'emploient pas la meme
+    nomenclature.
+
+    Args:
+        include_forex (bool): Inclut les paires Forex si True.
+        include_cfd (bool): Inclut les CFD si True.
+        include_crypto (bool): Inclut les cryptos si True.
+        max_symbols (int): Limite optionnelle du nombre de symboles.
+
+    Returns:
+        dict[str, Any]: Liste des symboles visibles et options d'appel.
+    """
+    mt5_service: MT5Service = app.state.mt5_service
+    symbols = await mt5_service.discover_symbols(
+        include_forex=include_forex,
+        include_cfd=include_cfd,
+        include_crypto=include_crypto,
+        max_symbols=max_symbols,
+    )
+    return {
+        "status": "ok",
+        "count": len(symbols),
+        "symbols": symbols,
+        "filters": {
+            "include_forex": include_forex,
+            "include_cfd": include_cfd,
+            "include_crypto": include_crypto,
+            "max_symbols": max_symbols,
+        },
     }

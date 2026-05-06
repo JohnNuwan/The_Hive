@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_FLOOR
 from functools import lru_cache
 from typing import Any
 from uuid import uuid4
@@ -476,6 +476,7 @@ class RiskValidator:
         risk_percent: Decimal,
         sl_distance: Decimal,
         symbol: str = "EURUSD",
+        sizing_hint: dict[str, Decimal] | None = None,
     ) -> float:
         """
         Calcule la taille de lot optimale.
@@ -485,6 +486,10 @@ class RiskValidator:
             risk_percent (Decimal): Risque cible en pourcentage.
             sl_distance (Decimal): Distance au stop loss.
             symbol (str): Symbole traite.
+            sizing_hint (dict[str, Decimal] | None): Metadonnees MT5 utiles
+                au sizing (`tick_size`, `tick_value`, `volume_min`,
+                `volume_step`, `volume_max`). Si absentes, un repli
+                heuristique est applique.
 
         Returns:
             float: Taille de lot arrondie et securisee.
@@ -495,23 +500,55 @@ class RiskValidator:
         risk_amount = balance * (risk_percent / Decimal("100"))
         symbol_upper = symbol.upper()
         asset_class = self._symbol_asset_classes.get(symbol_upper)
+        sizing_hint = sizing_hint or {}
+        tick_size = Decimal(str(sizing_hint.get("tick_size", Decimal("0")) or Decimal("0")))
+        tick_value = Decimal(str(sizing_hint.get("tick_value", Decimal("0")) or Decimal("0")))
+        volume_min = Decimal(str(sizing_hint.get("volume_min", Decimal("0.01")) or Decimal("0.01")))
+        volume_step = Decimal(str(sizing_hint.get("volume_step", Decimal("0.01")) or Decimal("0.01")))
+        volume_max = Decimal(str(sizing_hint.get("volume_max", Decimal("100.0")) or Decimal("100.0")))
 
-        if asset_class == "crypto" or self._is_crypto_symbol(symbol_upper):
-            point_value = Decimal("1")
-        elif "XAU" in symbol_upper:
-            point_value = Decimal("100")
-        elif any(idx in symbol_upper for idx in ["US30", "US100", "GER40", "CASH"]):
-            point_value = Decimal("1")
+        loss_per_lot: Decimal
+        if tick_size > 0 and tick_value > 0:
+            ticks_to_stop = sl_distance / tick_size
+            loss_per_lot = ticks_to_stop * tick_value
         else:
-            point_value = Decimal("100000")
+            # Repli heuristique si le broker ne fournit pas les economics
+            # du symbole via l'API Python MT5.
+            if asset_class == "crypto" or self._is_crypto_symbol(symbol_upper):
+                point_value = Decimal("1")
+            elif "XAU" in symbol_upper:
+                point_value = Decimal("100")
+            elif any(idx in symbol_upper for idx in ["US30", "US100", "GER40", "CASH"]):
+                point_value = Decimal("1")
+            else:
+                point_value = Decimal("100000")
+            loss_per_lot = sl_distance * point_value
 
         try:
-            raw_lots = risk_amount / (sl_distance * point_value)
+            raw_lots = risk_amount / loss_per_lot
             if raw_lots <= 0:
                 return 0.0
 
-            lot_size = float(max(raw_lots, Decimal("0")).quantize(Decimal("0.01")))
-            return max(0.0, lot_size)
+            if volume_step <= 0:
+                volume_step = Decimal("0.01")
+            if volume_max < volume_min:
+                volume_max = volume_min
+
+            precision = max(0, -volume_step.normalize().as_tuple().exponent)
+            quantum = Decimal("1").scaleb(-precision)
+
+            if raw_lots >= volume_min:
+                steps = ((raw_lots - volume_min) / volume_step).to_integral_value(
+                    rounding=ROUND_FLOOR
+                )
+                normalized_lots = volume_min + (steps * volume_step)
+            else:
+                # On conserve la valeur brute arrondie pour que le garde-fou
+                # "minimum broker" puisse journaliser un veto explicite.
+                normalized_lots = raw_lots.quantize(quantum)
+
+            normalized_lots = min(max(normalized_lots, Decimal("0")), volume_max)
+            return float(normalized_lots)
         except ZeroDivisionError:
             return 0.0
 

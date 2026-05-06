@@ -4,8 +4,12 @@ chcp 65001 >nul
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 set PYTHONLEGACYWINDOWSSTDIO=utf-8
-if "%BANKER_RICH_LOGS%"=="" set BANKER_RICH_LOGS=true
+cd /d "%~dp0"
 if "%BANKER_ENV_FILE%"=="" set "BANKER_ENV_FILE=.env"
+
+:start
+call :load_env_file "%BANKER_ENV_FILE%"
+if "%BANKER_RICH_LOGS%"=="" set BANKER_RICH_LOGS=true
 if "%BANKER_API_PORT%"=="" set BANKER_API_PORT=8100
 if "%BANKER_BIND_HOST%"=="" set BANKER_BIND_HOST=0.0.0.0
 if "%BANKER_ENABLE_TUNNEL%"=="" set BANKER_ENABLE_TUNNEL=true
@@ -14,8 +18,6 @@ if "%BANKER_INSTANCE_NAME%"=="" (
 ) else (
     title THE HIVE - %BANKER_INSTANCE_NAME%
 )
-
-:start
 echo [%DATE% %TIME%] Demarrage de The Banker (mode natif MT5)...
 
 :: Verification de la dependance MetaTrader5
@@ -87,14 +89,20 @@ if %errorlevel% equ 3 (
     exit /b 1
 )
 
-:: Lancement du service
-venv\Scripts\python -X utf8 -m uvicorn eva_banker.main:app --host %BANKER_BIND_HOST% --port %BANKER_API_PORT% --env-file "%BANKER_ENV_FILE%" --no-access-log
+:: Lancement du service avec duplication des logs console vers un fichier par instance
+venv\Scripts\python -X utf8 -m eva_banker.banker_runner --host %BANKER_BIND_HOST% --port %BANKER_API_PORT% --env-file "%BANKER_ENV_FILE%"
 
 echo.
 echo [%DATE% %TIME%] Processus Banker arrete.
 echo Redemarrage dans 5 secondes (Ctrl+C pour annuler)...
 timeout /t 5 >nul
 goto start
+
+:load_env_file
+if "%~1"=="" goto :eof
+if not exist "%~1" goto :eof
+for /f "usebackq tokens=1,* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\load_env_for_cmd.ps1" -Path "%~1"`) do set "%%A=%%B"
+goto :eof
 
 :check_existing_banker
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
