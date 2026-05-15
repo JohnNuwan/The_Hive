@@ -20,10 +20,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+follower-ui = [
+    "customtkinter>=5.2.2",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
 ]
+
+[project.scripts]
+hive-follower-agent = "eva_banker.follower.cli:main"
+hive-follower-relay = "eva_banker.follower.relay_server:main"
+hive-follower-ui = "eva_banker.follower.ui:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

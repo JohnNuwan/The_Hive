@@ -2,8 +2,10 @@
 
 from datetime import datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
-from eva_banker.services.risk import RiskValidator
+from eva_banker.services.risk import RiskValidator, resolve_effective_max_open_positions
+from shared import Position, TradeAction
 
 
 def test_drawdown_limit():
@@ -59,3 +61,88 @@ def test_weekend_session_blocks_fx_but_not_crypto(monkeypatch):
 
     assert manager.is_within_trading_session("EURUSD") is False
     assert manager.is_within_trading_session("BTCUSD") is True
+
+
+def test_follower_uses_dedicated_open_positions_limit():
+    """Verifie qu'un follower herite d'un plafond de positions plus large."""
+    settings = SimpleNamespace(
+        banker_follower_mode=True,
+        risk_max_open_positions=5,
+        risk_follower_max_open_positions=12,
+    )
+
+    assert resolve_effective_max_open_positions(settings) == 12
+
+
+def test_break_even_runner_is_excluded_from_open_positions_limit():
+    """Verifie qu'un runner protege au break-even devient un HOLD."""
+    validator = RiskValidator(max_open_positions=3)
+    positions = [
+        Position(
+            ticket=1,
+            symbol="XAUUSD",
+            action=TradeAction.BUY,
+            volume=Decimal("0.02"),
+            open_price=Decimal("4700"),
+            current_price=Decimal("4715"),
+            stop_loss=Decimal("4700"),
+            profit=Decimal("15"),
+            comment="MZ HOLD RUNNER",
+            open_time=datetime.now(),
+        ),
+        Position(
+            ticket=2,
+            symbol="EURUSD",
+            action=TradeAction.SELL,
+            volume=Decimal("0.10"),
+            open_price=Decimal("1.1700"),
+            current_price=Decimal("1.1680"),
+            stop_loss=Decimal("1.1750"),
+            profit=Decimal("20"),
+            open_time=datetime.now(),
+        ),
+    ]
+
+    validator.update_positions_snapshot(positions)
+
+    assert validator.get_counted_open_positions() == 1
+    assert validator.get_total_open_positions() == 2
+    assert validator.get_hold_positions_count() == 1
+
+
+def test_uncommented_manual_position_can_be_ignored_for_follower_limit():
+    """Verifie qu'un follower peut ignorer les positions manuelles sans commentaire."""
+    validator = RiskValidator(max_open_positions=3)
+    validator.settings = SimpleNamespace(risk_ignore_uncommented_positions=True)
+    positions = [
+        Position(
+            ticket=1,
+            symbol="USOIL.cash",
+            action=TradeAction.BUY,
+            volume=Decimal("0.20"),
+            open_price=Decimal("96"),
+            current_price=Decimal("95"),
+            stop_loss=None,
+            profit=Decimal("-10"),
+            comment="",
+            open_time=datetime.now(),
+        ),
+        Position(
+            ticket=2,
+            symbol="BTCUSD",
+            action=TradeAction.BUY,
+            volume=Decimal("0.09"),
+            open_price=Decimal("80000"),
+            current_price=Decimal("80100"),
+            stop_loss=Decimal("79000"),
+            profit=Decimal("15"),
+            comment="COPY MZ-SCP-CH-v",
+            open_time=datetime.now(),
+        ),
+    ]
+
+    validator.update_positions_snapshot(positions)
+
+    assert validator.get_counted_open_positions() == 1
+    assert validator.get_total_open_positions() == 2
+    assert validator.get_ignored_positions_count() == 1

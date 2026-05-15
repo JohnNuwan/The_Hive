@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import signal
+import threading
 from datetime import datetime
 from time import perf_counter
 from typing import Callable, NamedTuple
@@ -125,6 +126,7 @@ class JAXMuZeroAgent:
             or os.name == "nt"
             or not hasattr(signal, "setitimer")
             or not hasattr(signal, "SIGALRM")
+            or threading.current_thread() is not threading.main_thread()
         ):
             return step_callback()
 
@@ -192,15 +194,38 @@ class JAXMuZeroAgent:
         )
         max_episode_seconds = max(
             0.0,
-            float(getattr(self.config, "collection_max_episode_seconds", 0.0) or 0.0),
+            float(
+                getattr(
+                    env,
+                    "collection_max_episode_seconds",
+                    getattr(self.config, "collection_max_episode_seconds", 0.0),
+                )
+                or 0.0
+            ),
         )
         max_step_seconds = max(
             0.0,
             float(getattr(self.config, "collection_max_step_seconds", 0.0) or 0.0),
         )
+        collection_num_simulations = int(
+            getattr(
+                env,
+                "collection_num_simulations",
+                getattr(self.config, "collection_num_simulations", self.config.num_simulations),
+            )
+            or getattr(self.config, "collection_num_simulations", self.config.num_simulations)
+        )
+        max_episode_moves = int(
+            getattr(
+                env,
+                "max_steps_per_episode",
+                getattr(self.config, "collection_max_moves", self.config.max_moves),
+            )
+            or getattr(self.config, "collection_max_moves", self.config.max_moves)
+        )
         mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
 
-        while not done and steps < self.config.max_moves:
+        while not done and steps < max_episode_moves:
             steps += 1
             step_started_at = perf_counter()
             current_observation = obs
@@ -217,10 +242,7 @@ class JAXMuZeroAgent:
                     root_value_logits,
                     root_legal_actions=root_legal_actions,
                     add_exploration_noise=exploration,
-                    num_simulations=int(
-                        getattr(self.config, "collection_num_simulations", self.config.num_simulations)
-                        or self.config.num_simulations
-                    ),
+                    num_simulations=collection_num_simulations,
                 )
                 mcts_elapsed_seconds = perf_counter() - mcts_started_at
 
@@ -275,7 +297,7 @@ class JAXMuZeroAgent:
                 heartbeat_payload = {
                     "symbol": str(getattr(env, "symbol", "unknown")),
                     "steps": int(steps),
-                    "max_moves": int(self.config.max_moves),
+                    "max_moves": int(getattr(env, "max_steps_per_episode", self.config.max_moves)),
                     "elapsed_seconds": float(episode_elapsed_seconds),
                     "step_elapsed_seconds": float(step_elapsed_seconds),
                     "mcts_elapsed_seconds": float(mcts_elapsed_seconds),
@@ -289,10 +311,7 @@ class JAXMuZeroAgent:
                     heartbeat_payload["elapsed_seconds"],
                     heartbeat_payload["step_elapsed_seconds"],
                     heartbeat_payload["mcts_elapsed_seconds"],
-                    int(
-                        getattr(self.config, "collection_num_simulations", self.config.num_simulations)
-                        or self.config.num_simulations
-                    ),
+                    collection_num_simulations,
                     heartbeat_payload["done"],
                 )
                 if progress_callback is not None:
@@ -465,7 +484,12 @@ class JAXMuZeroAgent:
             "bad_pyramid_exit",
             "hard_stop_exit",
             "runner_retained_profit_pct",
+            "runner_retained_profit_score",
             "runner_giveback_pct",
+            "runner_viable_window_count",
+            "runner_hold_after_soft_tp_count",
+            "runner_viable_but_closed_count",
+            "early_full_close_after_soft_tp_count",
         )
         for field_name in metadata_fields:
             if field_name in episode_summary:

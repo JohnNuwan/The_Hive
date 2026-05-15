@@ -114,6 +114,9 @@ class MuZeroConfigV3:
         self.num_unroll_steps = int(os.getenv("MUZERO_NUM_UNROLL_STEPS", "5"))
         self.td_steps = int(os.getenv("MUZERO_TD_STEPS", "10"))
         self.max_moves = int(os.getenv("MUZERO_MAX_MOVES", "300"))
+        raw_collection_max_moves = str(
+            os.getenv("MUZERO_COLLECTION_MAX_MOVES", "")
+        ).strip()
         self.randomize_episode_start = str(
             os.getenv("MUZERO_RANDOMIZE_EPISODE_START", "1")
         ).strip().lower() not in {"0", "false", "no", "off"}
@@ -129,6 +132,10 @@ class MuZeroConfigV3:
         )
         self.collection_max_step_seconds = float(
             os.getenv("MUZERO_COLLECTION_MAX_STEP_SECONDS", "20")
+        )
+        self.collection_parallel_games = max(
+            1,
+            int(os.getenv("MUZERO_COLLECTION_PARALLEL_GAMES", "1")),
         )
         self.directional_curriculum_soft_end_step = int(
             os.getenv("MUZERO_DIRECTIONAL_CURRICULUM_SOFT_END_STEP", "8000")
@@ -191,7 +198,7 @@ class MuZeroConfigV3:
             os.getenv("MUZERO_POLICY_PRECHECK_MAX_LOSS_POL", "5.8")
         )
         self.policy_precheck_max_loss_pol_per_head = float(
-            os.getenv("MUZERO_POLICY_PRECHECK_MAX_LOSS_POL_PER_HEAD", "1.08")
+            os.getenv("MUZERO_POLICY_PRECHECK_MAX_LOSS_POL_PER_HEAD", "1.12")
         )
         self.policy_precheck_min_top1_share = float(
             os.getenv("MUZERO_POLICY_PRECHECK_MIN_TOP1_SHARE", "0.75")
@@ -245,10 +252,10 @@ class MuZeroConfigV3:
             os.getenv("MUZERO_POLICY_SCREEN_MAX_LOSS_POL_PER_HEAD", "1.20")
         )
         self.policy_screen_min_top1_share = float(
-            os.getenv("MUZERO_POLICY_SCREEN_MIN_TOP1_SHARE", "0.88")
+            os.getenv("MUZERO_POLICY_SCREEN_MIN_TOP1_SHARE", "0.60")
         )
         self.policy_screen_max_policy_entropy = float(
-            os.getenv("MUZERO_POLICY_SCREEN_MAX_POLICY_ENTROPY", "0.45")
+            os.getenv("MUZERO_POLICY_SCREEN_MAX_POLICY_ENTROPY", "1.10")
         )
         self.policy_screen_max_root_mask_rate = float(
             os.getenv("MUZERO_POLICY_SCREEN_MAX_ROOT_MASK_RATE", "0.05")
@@ -277,6 +284,14 @@ class MuZeroConfigV3:
         self.arena_screen_candidate_count = int(
             os.getenv("MUZERO_ARENA_SCREEN_CANDIDATE_COUNT", "5")
         )
+        self.arena_screen_target_steps = [
+            int(value.strip())
+            for value in os.getenv(
+                "MUZERO_ARENA_SCREEN_TARGET_STEPS",
+                "10000,12000,14000,16000",
+            ).split(",")
+            if value.strip().isdigit()
+        ]
         self.arena_screen_window_size = int(
             os.getenv("MUZERO_ARENA_SCREEN_WINDOW_SIZE", "500")
         )
@@ -382,6 +397,9 @@ class MuZeroConfigV3:
         self.arena_plateau_min_step = int(
             os.getenv("MUZERO_ARENA_PLATEAU_MIN_STEP", "10000")
         )
+        self.arena_plateau_stop_enabled = str(
+            os.getenv("MUZERO_ARENA_PLATEAU_STOP_ENABLED", "0")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self.arena_plateau_window_size = int(
             os.getenv("MUZERO_ARENA_PLATEAU_WINDOW_SIZE", "500")
         )
@@ -422,7 +440,7 @@ class MuZeroConfigV3:
             os.getenv("MUZERO_SEED_BOOTSTRAP_MAX_LOSS_POL_PER_HEAD", "1.16")
         )
         self.seed_bootstrap_max_root_mask_rate = float(
-            os.getenv("MUZERO_SEED_BOOTSTRAP_MAX_ROOT_MASK_RATE", "0.01")
+            os.getenv("MUZERO_SEED_BOOTSTRAP_MAX_ROOT_MASK_RATE", "0.06")
         )
         self.seed_bootstrap_min_split_monetization_window_count = float(
             os.getenv("MUZERO_SEED_BOOTSTRAP_MIN_SPLIT_MONETIZATION_WINDOW_COUNT", "1")
@@ -506,11 +524,22 @@ class MuZeroConfigV3:
         else:
             # La collecte supporte un budget MCTS plus leger que l'optimisation.
             self.collection_num_simulations = max(1, min(self.num_simulations, 32))
+        if raw_collection_max_moves:
+            self.collection_max_moves = max(
+                16,
+                min(self.max_moves, int(raw_collection_max_moves)),
+            )
+        elif self.collection_num_simulations >= 256:
+            # Avec un MCTS tres profond, garder 300 pas de collecte et un
+            # timeout de cinq minutes produit surtout des episodes tronques.
+            self.collection_max_moves = max(96, min(self.max_moves, 180))
+        else:
+            self.collection_max_moves = int(self.max_moves)
         self.policy_target_smoothing_alpha_root = float(
-            os.getenv("MUZERO_POLICY_TARGET_SMOOTHING_ALPHA_ROOT", "0.24")
+            os.getenv("MUZERO_POLICY_TARGET_SMOOTHING_ALPHA_ROOT", "0.28")
         )
         self.policy_target_smoothing_alpha_unroll = float(
-            os.getenv("MUZERO_POLICY_TARGET_SMOOTHING_ALPHA_UNROLL", "0.16")
+            os.getenv("MUZERO_POLICY_TARGET_SMOOTHING_ALPHA_UNROLL", "0.18")
         )
         self.policy_target_smoothing_temperature = float(
             os.getenv("MUZERO_POLICY_TARGET_SMOOTHING_TEMPERATURE", "1.40")
@@ -527,7 +556,7 @@ class MuZeroConfigV3:
             os.getenv("MUZERO_ROOT_EXPLORATION_FRACTION", "0.25")
         )
         self.pb_c_base = 19_652
-        self.pb_c_init = 1.25
+        self.pb_c_init = float(os.getenv("MUZERO_PB_C_INIT", "1.25"))
         self.reanalyze_every_steps = int(os.getenv("MUZERO_REANALYZE_EVERY_STEPS", "500"))
         self.reanalyze_max_games = int(os.getenv("MUZERO_REANALYZE_MAX_GAMES", "16"))
         self.reanalyze_max_positions_per_game = int(

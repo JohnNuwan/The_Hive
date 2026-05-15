@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
 import shlex
 import shutil
 import stat
+import subprocess
 import sys
 import textwrap
 import time
@@ -23,6 +25,7 @@ HOST = os.getenv("HIVE_SSH_HOST", "192.168.1.6")
 USER = os.getenv("HIVE_SSH_USER", "aza")
 PASS = os.getenv("HIVE_SSH_PASSWORD")
 SUDO_PASS = os.getenv("HIVE_SUDO_PASSWORD", PASS)
+SSH_KEY = os.getenv("HIVE_SSH_KEY")
 REMOTE_DIR = "/home/aza/The_Hive"
 REMOTE_LAB_CONTAINER_NAME = "the_hive-lab-1"
 REMOTE_LAB_DIR = "/app/eva-lab"
@@ -56,8 +59,12 @@ OFFENSIVE_BOOTSTRAP_SYMBOLS = [
     "US500.cash",
     "GER40.cash",
 ]
-MANUAL_ARENA_CUTOVER_STEP = 9000
-MANUAL_ARENA_SCREEN_STEPS = (7000, 7500, 8000, 9000)
+FULL_CYCLE_TARGETED_HISTORY_TIMEFRAMES = ("M1", "M5", "M15", "H1", "D1", "W1")
+MANUAL_ARENA_SCREEN_STEPS = (10000, 12000, 14000, 16000)
+# Le cutover ne doit intervenir qu'une fois le dernier checkpoint de screen
+# disponible, sinon le watcher coupe le run trop tot et rend 12000/14000
+# impossibles a evaluer.
+MANUAL_ARENA_CUTOVER_STEP = max(MANUAL_ARENA_SCREEN_STEPS)
 MANUAL_ARENA_RESULTS_DIR = f"{REMOTE_DIR}/data/checkpoints/manual_checkpoint_selection"
 MANUAL_ARENA_RESULTS_DIR_LAB = f"{REMOTE_LAB_DIR}/data/checkpoints/manual_checkpoint_selection"
 MANUAL_ARENA_SCREEN_BUDGET = {
@@ -112,7 +119,9 @@ SYNC_FILES = [
     Path("src/shared/shared/config.py"),
     Path("src/shared/shared/models.py"),
     Path("scripts/auto_train_gnn.sh"),
+    Path("scripts/deploy/start_training_proxmox.py"),
     Path("scripts/deploy/v4_sequence_runner.py"),
+    Path("scripts/deploy/run_seeded_muzero_ga_campaign.py"),
     Path("scripts/prepare_gold_cpu_artifacts.py"),
 ]
 
@@ -153,13 +162,17 @@ PASSTHROUGH_VARS = [
     "MUZERO_BATCH_SIZE",
     "MUZERO_NUM_SIMULATIONS",
     "MUZERO_COLLECTION_NUM_SIMULATIONS",
+    "MUZERO_ROOT_EXPLORATION_FRACTION",
+    "MUZERO_PB_C_INIT",
     "MUZERO_MAX_MOVES",
     "MUZERO_RANDOMIZE_EPISODE_START",
     "MUZERO_EPISODE_WARMUP_BARS",
     "MUZERO_COLLECTION_HEARTBEAT_EVERY_STEPS",
     "MUZERO_COLLECTION_HEARTBEAT_EVERY_SECONDS",
     "MUZERO_COLLECTION_MAX_EPISODE_SECONDS",
+    "MUZERO_COLLECTION_MAX_MOVES",
     "MUZERO_COLLECTION_MAX_STEP_SECONDS",
+    "MUZERO_COLLECTION_PARALLEL_GAMES",
     "MUZERO_DIRECTIONAL_CURRICULUM_SOFT_END_STEP",
     "MUZERO_DIRECTIONAL_CURRICULUM_END_STEP",
     "MUZERO_SOFT_REWARD_EARLY_END_STEP",
@@ -206,6 +219,7 @@ PASSTHROUGH_VARS = [
     "MUZERO_POLICY_SCREEN_MIN_SHORT_ENTRY_SHARE",
     "MUZERO_ARENA_SCREEN_RECENT_STEPS",
     "MUZERO_ARENA_SCREEN_CANDIDATE_COUNT",
+    "MUZERO_ARENA_SCREEN_TARGET_STEPS",
     "MUZERO_ARENA_SCREEN_WINDOW_SIZE",
     "MUZERO_ARENA_SCREEN_GAMES_PER_SYMBOL",
     "MUZERO_ARENA_SCREEN_MIN_GAMES",
@@ -286,7 +300,11 @@ PASSTHROUGH_VARS = [
     "MUZERO_POLICY_LOSS_UNROLL_WEIGHT",
     "MUZERO_REPLAY_HARD_NEGATIVE_RATIO",
     "MUZERO_REPLAY_HARD_NEGATIVE_TYPE_CAP",
+    "MUZERO_REPLAY_OFFENSIVE_CURRICULUM",
+    "MUZERO_GA_BOOTSTRAP_FROM_CHECKPOINTS",
+    "ARENA_REQUIRE_NEMESIS_VALIDATION",
     "MUZERO_ARENA_PLATEAU_MIN_STEP",
+    "MUZERO_ARENA_PLATEAU_STOP_ENABLED",
     "MUZERO_ARENA_PLATEAU_WINDOW_SIZE",
     "MUZERO_ARENA_PLATEAU_MAX_LOSS_POL_IMPROVEMENT",
     "MUZERO_ARENA_PLATEAU_MIN_SPLIT_RUNNER_IMPROVEMENT",
@@ -833,10 +851,11 @@ if [ \"$NIGHTLY_KEEP_VLLM\" = \"1\" ]; then
   emit_training_log INFO launcher \"vLLM conserve en ligne pour ce run.\"
 else
   echo \"[nightly] Arret temporaire de vLLM pour liberer le GPU\"
+  docker update --restart=no the_hive-vllm-1 >/dev/null 2>&1 || true
   docker compose stop vllm || true
   VLLM_STOPPED=1
   emit_launcher_state \"preflight\" \"stopped_for_training\" \"$([ \"$NIGHTLY_STOP_COMFYUI\" = \"1\" ] && echo stop_requested || echo online)\"
-  emit_training_log INFO launcher \"vLLM arrete volontairement pour liberer le GPU.\"
+  emit_training_log INFO launcher \"vLLM arrete volontairement pour liberer le GPU et son auto-redemarrage est neutralise pendant le run.\"
 fi
 
 if [ \"$NIGHTLY_STOP_COMFYUI\" = \"1\" ]; then
@@ -854,6 +873,7 @@ cleanup() {
     docker compose up -d comfyui >/dev/null 2>&1 || true
   fi
   if [ \"$VLLM_STOPPED\" = \"1\" ]; then
+    docker update --restart=unless-stopped the_hive-vllm-1 >/dev/null 2>&1 || true
     if [ \"$NIGHTLY_DEFER_VLLM_RESTART\" = \"1\" ]; then
       echo \"[nightly] Redemarrage de vLLM differe jusqu'a la fin de la sequence\"
       emit_launcher_state \"cleanup\" \"deferred\" \"$([ \"$COMFYUI_STOPPED\" = \"1\" ] && echo restarting || echo online)\"
@@ -906,6 +926,8 @@ export MUZERO_GAMES_PER_SYMBOL=\"${MUZERO_GAMES_PER_SYMBOL:-12}\"
 export MUZERO_BATCH_SIZE=\"${MUZERO_BATCH_SIZE:-32}\"
 export MUZERO_NUM_SIMULATIONS=\"${MUZERO_NUM_SIMULATIONS:-100}\"
 export MUZERO_COLLECTION_NUM_SIMULATIONS=\"${MUZERO_COLLECTION_NUM_SIMULATIONS:-32}\"
+export MUZERO_ROOT_EXPLORATION_FRACTION=\"${MUZERO_ROOT_EXPLORATION_FRACTION:-0.25}\"
+export MUZERO_PB_C_INIT=\"${MUZERO_PB_C_INIT:-1.25}\"
 export MUZERO_REANALYZE_EVERY_STEPS=\"${MUZERO_REANALYZE_EVERY_STEPS:-500}\"
 export MUZERO_REANALYZE_MAX_GAMES=\"${MUZERO_REANALYZE_MAX_GAMES:-16}\"
 export MUZERO_REANALYZE_MAX_POSITIONS_PER_GAME=\"${MUZERO_REANALYZE_MAX_POSITIONS_PER_GAME:-24}\"
@@ -916,7 +938,9 @@ export MUZERO_EPISODE_WARMUP_BARS=\"${MUZERO_EPISODE_WARMUP_BARS:-100}\"
 export MUZERO_COLLECTION_HEARTBEAT_EVERY_STEPS=\"${MUZERO_COLLECTION_HEARTBEAT_EVERY_STEPS:-25}\"
 export MUZERO_COLLECTION_HEARTBEAT_EVERY_SECONDS=\"${MUZERO_COLLECTION_HEARTBEAT_EVERY_SECONDS:-30}\"
 export MUZERO_COLLECTION_MAX_EPISODE_SECONDS=\"${MUZERO_COLLECTION_MAX_EPISODE_SECONDS:-300}\"
+export MUZERO_COLLECTION_MAX_MOVES=\"${MUZERO_COLLECTION_MAX_MOVES:-180}\"
 export MUZERO_COLLECTION_MAX_STEP_SECONDS=\"${MUZERO_COLLECTION_MAX_STEP_SECONDS:-20}\"
+export MUZERO_COLLECTION_PARALLEL_GAMES=\"${MUZERO_COLLECTION_PARALLEL_GAMES:-1}\"
 export MUZERO_DIRECTIONAL_CURRICULUM_SOFT_END_STEP=\"${MUZERO_DIRECTIONAL_CURRICULUM_SOFT_END_STEP:-8000}\"
 export MUZERO_DIRECTIONAL_CURRICULUM_END_STEP=\"${MUZERO_DIRECTIONAL_CURRICULUM_END_STEP:-15000}\"
 export MUZERO_SOFT_REWARD_EARLY_END_STEP=\"${MUZERO_SOFT_REWARD_EARLY_END_STEP:-4000}\"
@@ -1175,6 +1199,10 @@ docker compose run --rm \
   -e MUZERO_BATCH_SIZE=\"$MUZERO_BATCH_SIZE\" \
   -e MUZERO_NUM_SIMULATIONS=\"$MUZERO_NUM_SIMULATIONS\" \
   -e MUZERO_COLLECTION_NUM_SIMULATIONS=\"$MUZERO_COLLECTION_NUM_SIMULATIONS\" \
+  -e MUZERO_COLLECTION_MAX_MOVES=\"$MUZERO_COLLECTION_MAX_MOVES\" \
+  -e MUZERO_COLLECTION_PARALLEL_GAMES=\"$MUZERO_COLLECTION_PARALLEL_GAMES\" \
+  -e MUZERO_ROOT_EXPLORATION_FRACTION=\"$MUZERO_ROOT_EXPLORATION_FRACTION\" \
+  -e MUZERO_PB_C_INIT=\"$MUZERO_PB_C_INIT\" \
   -e MUZERO_REANALYZE_EVERY_STEPS=\"$MUZERO_REANALYZE_EVERY_STEPS\" \
   -e MUZERO_REANALYZE_MAX_GAMES=\"$MUZERO_REANALYZE_MAX_GAMES\" \
   -e MUZERO_REANALYZE_MAX_POSITIONS_PER_GAME=\"$MUZERO_REANALYZE_MAX_POSITIONS_PER_GAME\" \
@@ -1289,20 +1317,41 @@ done
 wait \"$TRAINER_RUN_PID\"
 """
 
-def _require_remote_credentials() -> tuple[str, str]:
+def _require_remote_credentials() -> tuple[str | None, str]:
     """Valide la presence des secrets SSH utilises pour Proxmox.
 
     Returns:
-        tuple[str, str]: Mot de passe SSH et mot de passe sudo.
+        tuple[str | None, str]: Mot de passe SSH optionnel et mot de passe sudo.
 
     Raises:
         RuntimeError: Si les secrets requis ne sont pas charges.
     """
-    if not PASS:
-        raise RuntimeError("Variable d'environnement HIVE_SSH_PASSWORD manquante.")
+    if not PASS and not SSH_KEY:
+        raise RuntimeError("Variable d'environnement HIVE_SSH_PASSWORD ou HIVE_SSH_KEY manquante.")
     if not SUDO_PASS:
         raise RuntimeError("Variable d'environnement HIVE_SUDO_PASSWORD manquante.")
     return PASS, SUDO_PASS
+
+
+def _connect_remote_client(client: paramiko.SSHClient) -> None:
+    """Ouvre une session SSH en supportant mot de passe et cle dediee.
+
+    Args:
+        client (paramiko.SSHClient): Client Paramiko initialise.
+    """
+
+    ssh_password, _sudo_password = _require_remote_credentials()
+    connect_kwargs: dict[str, object] = {
+        "username": USER,
+        "timeout": 15,
+        "allow_agent": True,
+        "look_for_keys": True,
+    }
+    if ssh_password:
+        connect_kwargs["password"] = ssh_password
+    if SSH_KEY:
+        connect_kwargs["key_filename"] = SSH_KEY
+    client.connect(HOST, **connect_kwargs)
 
 
 def ensure_remote_parent(sftp: paramiko.SFTPClient, remote_path: str) -> None:
@@ -1412,13 +1461,19 @@ def _upload_history_subset(
         print(f"Historique cible synchronise pour {','.join(symbols)} ({matched} fichiers).")
 
 
-def _sync_remote_training_payload(client: paramiko.SSHClient, profile_hint: str | None = None) -> None:
+def _sync_remote_training_payload(
+    client: paramiko.SSHClient,
+    profile_hint: str | None = None,
+    history_symbols: list[str] | None = None,
+) -> None:
     """Synchronise le payload d'entrainement utile sur le serveur.
 
     Args:
         client (paramiko.SSHClient): Session SSH active.
         profile_hint (str | None): Profil cible optionnel pour filtrer
             l'historique utile.
+        history_symbols (list[str] | None): Liste explicite de symboles
+            historiques a synchroniser en priorite.
     """
     sftp = client.open_sftp()
     try:
@@ -1426,14 +1481,23 @@ def _sync_remote_training_payload(client: paramiko.SSHClient, profile_hint: str 
             local_path = LOCAL_ROOT / relative_path
             remote_path = f"{REMOTE_DIR}/{relative_path.as_posix()}"
             upload_file(sftp, local_path, remote_path)
-        history_symbols = _resolve_history_symbols_for_profile(profile_hint)
+        selected_history_symbols = history_symbols or _resolve_history_symbols_for_profile(profile_hint)
+        skip_history_sync = str(os.getenv("TRAINING_SKIP_HISTORY_SYNC", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         for relative_dir in SYNC_DIRS:
             local_dir = LOCAL_ROOT / relative_dir
             remote_dir = f"{REMOTE_DIR}/{relative_dir.as_posix()}"
-            if relative_dir == HISTORY_DIR and history_symbols is not None:
+            if relative_dir == HISTORY_DIR and skip_history_sync:
+                print("Synchronisation data/history ignoree par configuration locale.")
+                continue
+            if relative_dir == HISTORY_DIR and selected_history_symbols is not None:
                 _upload_history_subset(
                     sftp,
-                    symbols=history_symbols,
+                    symbols=selected_history_symbols,
                     remote_dir=remote_dir,
                 )
                 continue
@@ -1580,6 +1644,7 @@ def _launch_training_with_client(
     *,
     runtime_overrides: dict[str, str],
     sync_profile_hint: str | None = None,
+    history_symbols: list[str] | None = None,
     show_logs: bool = True,
 ) -> str:
     """Synchronise le payload distant puis lance un run avec surcharges.
@@ -1588,12 +1653,24 @@ def _launch_training_with_client(
         client (paramiko.SSHClient): Session SSH deja ouverte.
         runtime_overrides (dict[str, str]): Variables d'environnement a injecter.
         sync_profile_hint (str | None): Profil eventuel pour filtrer l'historique.
+        history_symbols (list[str] | None): Liste explicite de symboles
+            historiques a synchroniser.
         show_logs (bool): Affiche un tail initial du log si True.
 
     Returns:
         str: PID shell distant renvoye par le lanceur.
     """
-    _sync_remote_training_payload(client, profile_hint=sync_profile_hint)
+    _sync_remote_training_payload(
+        client,
+        profile_hint=sync_profile_hint,
+        history_symbols=history_symbols,
+    )
+    if history_symbols:
+        _ingest_remote_history_into_timescale(
+            client,
+            symbols=history_symbols,
+            timeframes=list(FULL_CYCLE_TARGETED_HISTORY_TIMEFRAMES),
+        )
     print("Script distant mis a jour.")
     pid = _launch_remote_training_process(client, runtime_overrides)
     print(f"Entrainement nocturne lance. PID={pid}")
@@ -1605,6 +1682,61 @@ def _launch_training_with_client(
         if tail_err:
             print(tail_err)
     return pid
+
+
+def _ingest_remote_history_into_timescale(
+    client: paramiko.SSHClient,
+    *,
+    symbols: list[str],
+    timeframes: list[str],
+) -> None:
+    """Injecte les CSV synchronises dans TimescaleDB cote lab.
+
+    Args:
+        client (paramiko.SSHClient): Session SSH distante active.
+        symbols (list[str]): Symboles synchronises.
+        timeframes (list[str]): Timeframes a injecter.
+
+    Raises:
+        RuntimeError: Si l'injection echoue et que le repli n'est pas autorise.
+    """
+
+    normalized_symbols = [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
+    normalized_timeframes = [str(timeframe).strip().upper() for timeframe in timeframes if str(timeframe).strip()]
+    if not normalized_symbols or not normalized_timeframes:
+        return
+
+    remote_inner_command = (
+        f"cd {REMOTE_LAB_DIR} && "
+        f"PYTHONPATH={REMOTE_LAB_DIR} "
+        f"python scripts/fetch_history.py "
+        f"--symbols {shlex.quote(','.join(normalized_symbols))} "
+        f"--timeframes {shlex.quote(','.join(normalized_timeframes))} "
+        f"--write-timescale "
+        f"--ingest-existing-only"
+    )
+    command = (
+        f"cd {REMOTE_DIR} && {REMOTE_ENV_LOADER} && "
+        f"docker exec -i {shlex.quote(REMOTE_LAB_CONTAINER_NAME)} bash -lc "
+        f"{shlex.quote(remote_inner_command)}"
+    )
+    output, error, code = run_command(client, command, timeout=1800)
+    if code == 0:
+        print(
+            "Historique synchronise injecte dans TimeScaleDB cote lab "
+            f"({', '.join(normalized_symbols)})."
+        )
+        return
+
+    allow_fail = str(os.getenv("TRAINING_ALLOW_TIMESCALE_HISTORY_INGEST_FAIL", "1")).strip().lower()
+    message = (error or output or f"code {code}").strip()
+    if allow_fail in {"1", "true", "yes", "on"}:
+        print(
+            "Injection TimeScale ignoree pour ce cycle; repli CSV conserve: "
+            f"{message}"
+        )
+        return
+    raise RuntimeError(f"Echec injection TimeScale distante: {message}")
 
 
 def _build_v4_supervisor_overrides() -> dict[str, str]:
@@ -1881,6 +2013,164 @@ def _sanitize_manual_token(value: str | None, default: str) -> str:
     return token.strip("._-") or default
 
 
+def _refresh_targeted_history_before_full_cycle(symbols: list[str] | None) -> None:
+    """Rafraichit l'historique critique avant un cycle `full-7`.
+
+    Args:
+        symbols (list[str] | None): Univers `scalp` a couvrir.
+
+    Raises:
+        RuntimeError: Si le refresh historique local echoue.
+    """
+    normalized_symbols = _normalize_scalp_multi_universe_symbols(symbols)
+    skip_refresh = str(os.getenv("TRAINING_SKIP_TARGETED_HISTORY_REFRESH", "0")).strip().lower()
+    if skip_refresh in {"1", "true", "yes", "on"}:
+        print("Refresh historique cible ignore par configuration locale.")
+        return
+
+    command = [
+        sys.executable,
+        str((LOCAL_ROOT / "scripts" / "fetch_history.py").resolve()),
+        "--symbols",
+        ",".join(normalized_symbols),
+        "--timeframes",
+        ",".join(FULL_CYCLE_TARGETED_HISTORY_TIMEFRAMES),
+    ]
+    print(
+        "Rafraichissement historique cible avant `full-7`: "
+        f"{', '.join(normalized_symbols)}"
+    )
+    completed = subprocess.run(
+        command,
+        cwd=str(LOCAL_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0:
+        error_output = (completed.stderr or completed.stdout or "").strip()
+        allow_stale = str(os.getenv("TRAINING_ALLOW_STALE_HISTORY_ON_REFRESH_FAIL", "0")).strip().lower()
+        if allow_stale in {"1", "true", "yes", "on"}:
+            print(
+                "Refresh historique cible indisponible; poursuite avec les CSV deja synchronises: "
+                f"{error_output or f'code {completed.returncode}'}"
+            )
+            return
+        raise RuntimeError(
+            "Echec du refresh historique cible avant `full-7`: "
+            f"{error_output or f'code {completed.returncode}'}"
+        )
+    print(
+        "Historique cible rafraichi sur les timeframes "
+        f"{', '.join(FULL_CYCLE_TARGETED_HISTORY_TIMEFRAMES)}."
+    )
+
+    freshness_report = _build_targeted_history_freshness_report(
+        normalized_symbols,
+        FULL_CYCLE_TARGETED_HISTORY_TIMEFRAMES,
+    )
+    stale_entries = list(freshness_report.get("stale_entries") or [])
+    if stale_entries:
+        details = "; ".join(stale_entries[:8])
+        allow_stale = str(os.getenv("TRAINING_ALLOW_STALE_HISTORY_AFTER_REFRESH", "0")).strip().lower()
+        if allow_stale in {"1", "true", "yes", "on"}:
+            print(
+                "Alerte fraicheur CSV apres refresh cible; poursuite autorisee par configuration: "
+                f"{details}"
+            )
+            return
+        raise RuntimeError(
+            "Refresh historique termine mais certains CSV restent trop anciens: "
+            f"{details}"
+        )
+
+
+def _get_history_stale_threshold_hours(timeframe: str) -> float:
+    """Retourne le seuil de retard acceptable pour un timeframe.
+
+    Args:
+        timeframe (str): Timeframe cible.
+
+    Returns:
+        float: Nombre maximal d'heures de retard avant alerte.
+    """
+
+    normalized = str(timeframe or "").strip().upper()
+    if normalized == "D1":
+        return float(os.getenv("HISTORY_STALE_D1_HOURS", "48"))
+    if normalized == "W1":
+        return float(os.getenv("HISTORY_STALE_W1_HOURS", "240"))
+    return float(os.getenv("HISTORY_STALE_INTRADAY_HOURS", "6"))
+
+
+def _read_last_history_csv_timestamp(path: Path) -> datetime | None:
+    """Lit la derniere bougie d'un CSV historique.
+
+    Args:
+        path (Path): Fichier cible.
+
+    Returns:
+        datetime | None: Dernier horodatage lu, ou ``None``.
+    """
+
+    if not path.exists():
+        return None
+    last_value: str | None = None
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            last_value = str(row.get("time") or "").strip() or last_value
+    if not last_value:
+        return None
+    try:
+        return datetime.fromisoformat(last_value)
+    except ValueError:
+        return None
+
+
+def _build_targeted_history_freshness_report(
+    symbols: list[str],
+    timeframes: tuple[str, ...] | list[str],
+) -> dict[str, object]:
+    """Construit un diagnostic de fraicheur local pour les CSV critiques.
+
+    Args:
+        symbols (list[str]): Symboles a controler.
+        timeframes (tuple[str, ...] | list[str]): Timeframes requis.
+
+    Returns:
+        dict[str, object]: Rapport synthetique et liste d'entrees stale.
+    """
+
+    now = datetime.now()
+    history_dir = LOCAL_ROOT / HISTORY_DIR
+    stale_entries: list[str] = []
+    report: dict[str, object] = {
+        "generated_at": now.isoformat(),
+        "history_dir": str(history_dir),
+        "stale_entries": stale_entries,
+        "files_checked": 0,
+    }
+    for symbol in symbols:
+        for timeframe in timeframes:
+            path = history_dir / f"{symbol}_{timeframe}.csv"
+            last_bar_at = _read_last_history_csv_timestamp(path)
+            report["files_checked"] = int(report.get("files_checked", 0) or 0) + 1
+            if last_bar_at is None:
+                stale_entries.append(f"{symbol}[{timeframe}]=absent")
+                continue
+            lag_hours = max((now - last_bar_at).total_seconds() / 3600.0, 0.0)
+            stale_after_hours = _get_history_stale_threshold_hours(timeframe)
+            if lag_hours > stale_after_hours:
+                stale_entries.append(
+                    f"{symbol}[{timeframe}]={lag_hours:.1f}h>{stale_after_hours:.1f}h"
+                )
+    report["all_fresh"] = not stale_entries
+    return report
+
+
 def _build_manual_checkpoint_alias_id(
     run_id: str | None,
     *,
@@ -1944,7 +2234,7 @@ def _build_manual_screen_candidate_sort_key(candidate: dict[str, Any]) -> tuple[
 
 
 def _select_best_manual_screen_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    """Retourne le meilleur checkpoint d'un screen Arena selon la regle fixee.
+    """Retourne le meilleur checkpoint gagnant d'un screen Arena.
 
     Args:
         candidates (list[dict[str, Any]]): Candidats evalues pendant le screen.
@@ -1953,11 +2243,21 @@ def _select_best_manual_screen_candidate(candidates: list[dict[str, Any]]) -> di
         dict[str, Any]: Candidat gagnant du pre-classement.
 
     Raises:
-        ValueError: Si aucun candidat n'est fourni.
+        RuntimeError: Si aucun checkpoint `VICTORY` n'est disponible.
     """
     if not candidates:
-        raise ValueError("Impossible de selectionner un checkpoint sans candidat Arena.")
-    ranked = sorted(candidates, key=_build_manual_screen_candidate_sort_key, reverse=True)
+        raise RuntimeError("Impossible de selectionner un checkpoint sans candidat Arena.")
+    victory_candidates = [
+        dict(candidate)
+        for candidate in candidates
+        if str((candidate.get("battle_report") or {}).get("outcome") or "").strip().upper()
+        == "VICTORY"
+    ]
+    if not victory_candidates:
+        raise RuntimeError(
+            "Le screen Arena n'a produit aucune VICTORY sur les checkpoints demandes."
+        )
+    ranked = sorted(victory_candidates, key=_build_manual_screen_candidate_sort_key, reverse=True)
     return dict(ranked[0])
 
 
@@ -2043,8 +2343,8 @@ def _build_muzero_scalp_multi_universe_full_overrides(
         "ARENA_SYMBOLS_SCALP": symbol_csv,
         "MUZERO_MAX_SYMBOLS": symbol_count,
         "ARENA_MAX_SYMBOLS": symbol_count,
-        "MUZERO_TRAINING_STEPS": "40000",
-        "MUZERO_GAMES_PER_SYMBOL": "28",
+        "MUZERO_TRAINING_STEPS": str(os.getenv("MUZERO_TRAINING_STEPS", "50000")),
+        "MUZERO_GAMES_PER_SYMBOL": str(os.getenv("MUZERO_GAMES_PER_SYMBOL", "100")),
         "ARENA_GAMES_PER_SYMBOL": "12",
         "ARENA_MIN_GAMES": "28",
         "ARENA_MIN_SYMBOLS": "7",
@@ -3917,12 +4217,12 @@ def launch_v3_profile_remote(
     finalists_path = results_dir / f"{normalized_profile}_finalists.json"
 
     print(f"Connexion a Proxmox {HOST}...")
-    ssh_password, _sudo_password = _require_remote_credentials()
+    _require_remote_credentials()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
-        client.connect(HOST, username=USER, password=ssh_password, timeout=15)
+        _connect_remote_client(client)
         print("Connexion SSH etablie.")
 
         active_run = _read_active_remote_run()
@@ -4150,12 +4450,12 @@ def launch_v4_profile_remote(
     full_results_path = results_dir / f"v4_{normalized_engine}_{normalized_profile}_full_results.json"
 
     print(f"Connexion a Proxmox {HOST}...")
-    ssh_password, _sudo_password = _require_remote_credentials()
+    _require_remote_credentials()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
-        client.connect(HOST, username=USER, password=ssh_password, timeout=15)
+        _connect_remote_client(client)
         print("Connexion SSH etablie.")
 
         active_run = _read_active_remote_run()
@@ -4401,12 +4701,12 @@ def launch_v4_sequence_remote(
     local_archive_dir = _archive_local_v4_snapshots(sequence_id)
 
     print(f"Connexion a Proxmox {HOST}...")
-    ssh_password, _sudo_password = _require_remote_credentials()
+    _require_remote_credentials()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
-        client.connect(HOST, username=USER, password=ssh_password, timeout=15)
+        _connect_remote_client(client)
         print("Connexion SSH etablie.")
 
         active_run = _read_active_remote_run()
@@ -4826,7 +5126,7 @@ def _run_remote_manual_screen_arena(
     source_run_id: str,
     symbols: list[str],
 ) -> dict[str, Any]:
-    """Execute a distance le screen Arena `7000/7500/8000/9000`.
+    """Execute a distance le screen Arena tardif `10000/12000/14000`.
 
     Args:
         client (paramiko.SSHClient): Session SSH distante deja ouverte.
@@ -5258,12 +5558,12 @@ def launch_training_sequence_remote(
         raise ValueError(f"Sequence de vague 1 non supportee: {sequence_name}")
 
     print(f"Connexion a Proxmox {HOST}...")
-    ssh_password, sudo_password = _require_remote_credentials()
+    _ssh_password, sudo_password = _require_remote_credentials()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
-        client.connect(HOST, username=USER, password=ssh_password, timeout=15)
+        _connect_remote_client(client)
         print("Connexion SSH etablie.")
 
         if stop_existing:
@@ -5381,7 +5681,7 @@ def launch_muzero_scalp_arena_cutover_8000(
     stop_reason: str = "manual_checkpoint_selection_cutover",
     symbols: list[str] | None = None,
 ) -> None:
-    """Fige le run `scalp` au checkpoint de bascule puis declenche `screen -> full Arena -> reprise`.
+    """Fige le run `scalp` au dernier checkpoint de screen puis declenche `screen -> full Arena -> reprise`.
 
     Args:
         stop_reason (str): Motif explicite de la coupure du run courant.
@@ -5396,15 +5696,19 @@ def launch_muzero_scalp_arena_cutover_8000(
     source_run_id = str(source_run_snapshot.get("run_id") or "").strip() or f"manual_{datetime.now():%Y%m%d_%H%M%S}"
 
     print(f"Connexion a Proxmox {HOST}...")
-    ssh_password, _sudo_password = _require_remote_credentials()
+    _require_remote_credentials()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
-        client.connect(HOST, username=USER, password=ssh_password, timeout=15)
+        _connect_remote_client(client)
         print("Connexion SSH etablie.")
 
-        _sync_remote_training_payload(client, profile_hint=None)
+        _sync_remote_training_payload(
+            client,
+            profile_hint=None,
+            history_symbols=normalized_symbols,
+        )
         print("Payload distant synchronise pour le cutover Arena.")
         _wait_for_remote_checkpoint_cutover(
             client,
@@ -5427,10 +5731,14 @@ def launch_muzero_scalp_arena_cutover_8000(
         ]
         if len(screen_results) != len(MANUAL_ARENA_SCREEN_STEPS):
             raise RuntimeError(
-                "Le screen Arena distant n'a pas retourne les trois checkpoints attendus "
-                f"({len(screen_results)} au lieu de {len(MANUAL_ARENA_SCREEN_STEPS)})."
-            )
-        winner = _select_best_manual_screen_candidate(screen_results)
+            "Le screen Arena distant n'a pas retourne les trois checkpoints attendus "
+            f"({len(screen_results)} au lieu de {len(MANUAL_ARENA_SCREEN_STEPS)})."
+        )
+        try:
+            winner = _select_best_manual_screen_candidate(screen_results)
+        except RuntimeError as exc:
+            print(f"Screen Arena termine sans checkpoint gagnant: {exc}")
+            return
         print(
             "Screen Arena termine. Gagnant provisoire: "
             f"ckpt{winner.get('checkpoint_step')} | "
@@ -5537,12 +5845,12 @@ def start_training(
             pour le profil de qualification seed.
     """
     print(f"Connexion a Proxmox {HOST}...")
-    ssh_password, _sudo_password = _require_remote_credentials()
+    _require_remote_credentials()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
-        client.connect(HOST, username=USER, password=ssh_password, timeout=15)
+        _connect_remote_client(client)
         print("Connexion SSH etablie.")
 
         if stop_existing:
@@ -5553,6 +5861,7 @@ def start_training(
             or str(wave1_profile or "").strip()
             or None
         )
+        history_symbols: list[str] | None = None
         runtime_overrides: dict[str, str] = {}
         if manual_massive:
             runtime_overrides = _build_manual_massive_overrides()
@@ -5564,8 +5873,12 @@ def start_training(
                 resume_checkpoint_path=resume_checkpoint_path,
             )
         elif muzero_scalp_full_7:
+            _refresh_targeted_history_before_full_cycle(symbols)
+            history_symbols = _normalize_scalp_multi_universe_symbols(symbols)
             runtime_overrides = _build_muzero_scalp_multi_universe_full_overrides(symbols)
         elif dreamer_scalp_full_7:
+            _refresh_targeted_history_before_full_cycle(symbols)
+            history_symbols = _normalize_scalp_multi_universe_symbols(symbols)
             runtime_overrides = _build_dreamer_scalp_multi_universe_full_overrides(symbols)
         elif intraday_reduced:
             runtime_overrides = _build_intraday_reduced_overrides(symbols)
@@ -5586,6 +5899,7 @@ def start_training(
             client,
             runtime_overrides=runtime_overrides,
             sync_profile_hint=sync_profile_hint,
+            history_symbols=history_symbols,
             show_logs=True,
         )
 
@@ -5635,8 +5949,8 @@ def parse_args() -> argparse.Namespace:
         "--muzero-scalp-arena-cutover-8000",
         action="store_true",
         help=(
-            "Attend `ckpt_9000`, stoppe le run MuZero `scalp`, evalue `7000/7500/8000/9000` "
-            "en Arena puis promeut ou relance automatiquement."
+            "Attend `ckpt_16000`, stoppe le run MuZero `scalp`, evalue `10000/12000/14000/16000` "
+            "en screen Arena puis ne lance la full Arena qu'en presence d'une `VICTORY`."
         ),
     )
     parser.add_argument(

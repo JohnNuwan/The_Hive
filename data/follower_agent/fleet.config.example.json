@@ -1,0 +1,67 @@
+{
+  "fleet_id": "client-alpha",
+  "accounts": [
+    {
+      "enabled": true,
+      "client_id": "client-alpha-ftuk-100k-1",
+      "account_label": "FTUK 100K 1",
+      "relay_base_url": "http://127.0.0.1:8705",
+      "api_token": "",
+      "poll_interval_seconds": 1.0,
+      "heartbeat_interval_seconds": 5.0,
+      "dry_run": true,
+      "mock_mt5": true,
+      "mt5_login": 0,
+      "mt5_password": "",
+      "mt5_server": "FTUKMarkets-Trade",
+      "mt5_terminal_path": "C:\\MT5\\FTUK_100K_1\\terminal64.exe",
+      "mt5_terminal_portable": false,
+      "allocation_ratio": 1.0,
+      "balance_reference": 100000.0,
+      "master_balance_reference": 10000.0,
+      "use_equity_for_sizing": true,
+      "symbol_map": {
+        "US30.cash": "US30.e",
+        "GER40.cash": "DE40.e",
+        "US100.cash": "USTEC.m",
+        "US500.cash": "US500.e",
+        "XAUUSD": "XAUUSD.m",
+        "BTCUSD": "BTCUSD.e"
+      },
+      "supported_symbols": [],
+      "state_path": "data/follower_agent/client-alpha-ftuk-100k-1.state.json",
+      "log_path": "logs/follower_agent_client-alpha-ftuk-100k-1.log"
+    },
+    {
+      "enabled": false,
+      "client_id": "client-alpha-ftuk-100k-2",
+      "account_label": "FTUK 100K 2",
+      "relay_base_url": "http://127.0.0.1:8705",
+      "api_token": "",
+      "poll_interval_seconds": 1.0,
+      "heartbeat_interval_seconds": 5.0,
+      "dry_run": true,
+      "mock_mt5": true,
+      "mt5_login": 0,
+      "mt5_password": "",
+      "mt5_server": "FTUKMarkets-Trade",
+      "mt5_terminal_path": "C:\\MT5\\FTUK_100K_2\\terminal64.exe",
+      "mt5_terminal_portable": false,
+      "allocation_ratio": 1.0,
+      "balance_reference": 100000.0,
+      "master_balance_reference": 10000.0,
+      "use_equity_for_sizing": true,
+      "symbol_map": {
+        "US30.cash": "US30.e",
+        "GER40.cash": "DE40.e",
+        "US100.cash": "USTEC.m",
+        "US500.cash": "US500.e",
+        "XAUUSD": "XAUUSD.m",
+        "BTCUSD": "BTCUSD.e"
+      },
+      "supported_symbols": [],
+      "state_path": "data/follower_agent/client-alpha-ftuk-100k-2.state.json",
+      "log_path": "logs/follower_agent_client-alpha-ftuk-100k-2.log"
+    }
+  ]
+}

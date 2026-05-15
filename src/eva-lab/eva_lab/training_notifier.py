@@ -88,6 +88,20 @@ def _format_ratio(current: Any, total: Any) -> str:
     return f"{left}/{right}"
 
 
+def _format_bool_token(value: Any) -> str:
+    """Formate un booleen compact pour Telegram.
+
+    Args:
+        value (Any): Valeur brute a convertir.
+
+    Returns:
+        str: `oui`, `non` ou `n/a`.
+    """
+    if value is None:
+        return "n/a"
+    return "oui" if bool(value) else "non"
+
+
 def _format_timestamp(value: Any) -> str:
     """Formate un horodatage ISO pour Telegram.
 
@@ -325,6 +339,11 @@ def _build_digest_change_snapshot(
         "metrics": {
             "loss_pol": _bucket_metric(latest_metrics.get("loss_pol"), 0.25),
             "loss_pol_per_head": _bucket_metric(latest_metrics.get("loss_pol_per_head"), 0.05),
+            "loss_pol_root": _bucket_metric(latest_metrics.get("loss_pol_root"), 0.05),
+            "loss_pol_unroll_mean": _bucket_metric(
+                latest_metrics.get("loss_pol_unroll_mean"),
+                0.05,
+            ),
             "root_mask_rate": _bucket_metric(latest_metrics.get("root_mask_rate"), 0.01),
             "split_runner_capture_rate": _bucket_metric(
                 latest_metrics.get("split_runner_capture_rate"), 0.05
@@ -338,6 +357,8 @@ def _build_digest_change_snapshot(
             "runner_giveback_pct": _bucket_metric(
                 latest_metrics.get("runner_giveback_pct"), 0.05
             ),
+            "arena_cutover_ready": bool(run_status.get("arena_cutover_ready", False)),
+            "screen_window": str(run_status.get("screen_window") or ""),
         },
         "precheck_status": run_status.get("precheck_status"),
         "family_probe_status": {
@@ -538,6 +559,8 @@ def build_training_digest_message(
                 (
                     f"- policy: total={_format_metric(latest_metrics.get('loss_pol'))} | "
                     f"par_tete={_format_metric(latest_metrics.get('loss_pol_per_head'))} | "
+                    f"root={_format_metric(latest_metrics.get('loss_pol_root'))} | "
+                    f"unroll={_format_metric(latest_metrics.get('loss_pol_unroll_mean'))} | "
                     f"top1={_format_share_metric(latest_metrics.get('policy_top1_share'))} | "
                     f"entropy={_format_metric(latest_metrics.get('policy_entropy'))}"
                 ),
@@ -550,18 +573,28 @@ def build_training_digest_message(
                 (
                     f"- offensif: split_cap={_format_metric(latest_metrics.get('split_runner_capture_rate'))} | "
                     f"runner_win={_format_metric(latest_metrics.get('runner_profit_hold_window_count'))} | "
+                    f"runner_score={_format_metric(latest_metrics.get('runner_retained_profit_score'))} | "
                     f"pyramid_cap={_format_metric(latest_metrics.get('pyramid_exit_capture_rate'))} | "
                     f"peak_giveback={_format_metric(latest_metrics.get('profit_peak_giveback_ratio'))}"
                 ),
                 (
                     f"- fenetres: split={_format_metric(latest_metrics.get('split_monetization_window_count'))} | "
-                    f"runner={_format_metric(latest_metrics.get('runner_profit_hold_window_count'))} | "
+                    f"runner_viable={_format_metric(latest_metrics.get('runner_viable_window_count'))} | "
+                    f"runner_hold={_format_metric(latest_metrics.get('runner_hold_after_soft_tp_count'))} | "
                     f"pyramid={_format_metric(latest_metrics.get('pyramid_monetization_window_count'))}"
+                ),
+                (
+                    f"- runner: close_trop_tot={_format_metric(latest_metrics.get('early_full_close_after_soft_tp_count'))} | "
+                    f"runner_rate={_format_metric(latest_metrics.get('runner_viable_but_closed_count'))}"
                 ),
                 (
                     f"- seed: etage={_humanize_token(latest_metrics.get('seed_stage'))} | "
                     f"statut={_humanize_token(latest_metrics.get('seed_viability_status'))} | "
                     f"raison={_humanize_token(latest_metrics.get('seed_viability_reason'))}"
+                ),
+                (
+                    f"- arena_cutover: pret={_format_bool_token(status.get('arena_cutover_ready'))} | "
+                    f"fenetre={_humanize_token(status.get('screen_window'))}"
                 ),
                 f"- seed_reco: {_shorten_identifier(latest_metrics.get('recommended_seed_for_v66'))}",
             ]
@@ -579,6 +612,8 @@ def build_training_digest_message(
                 ),
                 (
                     f"- tendances: loss={_format_metric(trends.get('loss_pol_trend'))} | "
+                    f"root={_format_metric(trends.get('loss_pol_root_trend'))} | "
+                    f"unroll={_format_metric(trends.get('loss_pol_unroll_mean_trend'))} | "
                     f"root_mask={_format_metric(trends.get('root_mask_rate_trend'))} | "
                     f"split_runner={_format_metric(trends.get('split_runner_capture_trend'))} | "
                     f"pyramid_exit={_format_metric(trends.get('pyramid_exit_capture_trend'))}"

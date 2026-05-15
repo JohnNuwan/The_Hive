@@ -29,5 +29,13 @@ Get-Content -LiteralPath $resolvedPath | ForEach-Object {
         $value = $value.Substring(1, $value.Length - 2)
     }
 
+    # Les valeurs repassent ensuite dans une boucle `for /f` de cmd.exe.
+    # On echappe donc les caracteres qui seraient interpretes avant le `set`.
+    $value = $value.Replace("^", "^^")
+    $value = $value.Replace("&", "^&")
+    $value = $value.Replace("|", "^|")
+    $value = $value.Replace("<", "^<")
+    $value = $value.Replace(">", "^>")
+
     Write-Output ("{0}={1}" -f $key, $value)
 }

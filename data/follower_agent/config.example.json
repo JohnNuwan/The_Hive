@@ -1,0 +1,40 @@
+{
+  "client_id": "client-demo",
+  "account_label": "Follower Demo",
+  "relay_base_url": "http://127.0.0.1:8705",
+  "api_token": "",
+  "poll_interval_seconds": 1.0,
+  "heartbeat_interval_seconds": 5.0,
+  "dry_run": true,
+  "mock_mt5": true,
+  "mt5_login": 0,
+  "mt5_password": "",
+  "mt5_server": "",
+  "mt5_terminal_path": "C:/Program Files/MetaTrader 5/terminal64.exe",
+  "mt5_terminal_portable": false,
+  "allocation_ratio": 1.0,
+  "balance_reference": null,
+  "master_balance_reference": 10000.0,
+  "use_equity_for_sizing": true,
+  "symbol_map": {
+    "US30.cash": "US30.e",
+    "GER40.cash": "DE40.e",
+    "US100.cash": "USTEC.m",
+    "US500.cash": "US500.e",
+    "XAUUSD": "XAUUSD.m",
+    "BTCUSD": "BTCUSD.e"
+  },
+  "supported_symbols": [
+    "EURUSD",
+    "GBPUSD",
+    "USDJPY",
+    "XAUUSD.m",
+    "US30.e",
+    "DE40.e",
+    "USTEC.m",
+    "US500.e",
+    "BTCUSD.e"
+  ],
+  "state_path": "data/follower_agent/state.json",
+  "log_path": "logs/follower_agent.log"
+}

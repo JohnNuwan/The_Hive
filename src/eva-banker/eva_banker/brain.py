@@ -655,6 +655,78 @@ class AutoTradingEngine:
         return False
 
     @staticmethod
+    def _can_split_live_runner(position) -> bool:
+        """Indique si le volume permet de creer un runner protege.
+
+        Args:
+            position: Position ouverte MT5 ou ``None``.
+
+        Returns:
+            bool: True si une cloture 70% laisse au moins 0.01 lot.
+        """
+        if position is None:
+            return False
+        try:
+            volume = Decimal(str(getattr(position, "volume", "0") or "0"))
+        except Exception:
+            return False
+        return volume >= Decimal("0.02")
+
+    async def _split_positive_runner_or_secure(
+        self,
+        position,
+        action_label: str,
+        fallback_sl: float,
+        latent_profit: float,
+    ) -> bool:
+        """Transforme une position positive en runner ou applique un SLBE simple.
+
+        Args:
+            position: Position MT5 positive a securiser.
+            action_label (str): Sens lisible de la position.
+            fallback_sl (float): Stop de secours si le volume est trop petit.
+            latent_profit (float): Profit latent en points/prix.
+
+        Returns:
+            bool: True si la position a ete modifiee ou partiellement fermee.
+        """
+        if self._can_split_live_runner(position):
+            close_result = await self.mt5.close_position(position.ticket)
+            if close_result.get("success"):
+                runner_mode = str(close_result.get("runner_mode") or close_result.get("copy_close_mode") or "")
+                logger.info(
+                    "Shepherd: split runner %s sur %s #%s (mode=%s, profit=%.5f).",
+                    action_label,
+                    position.symbol,
+                    position.ticket,
+                    runner_mode or "inconnu",
+                    latent_profit,
+                )
+                return True
+            logger.warning(
+                "Shepherd: split runner refuse sur %s #%s: %s",
+                position.symbol,
+                position.ticket,
+                close_result.get("message", "erreur inconnue"),
+            )
+
+        modify_result = await self.mt5.modify_position(position.ticket, sl=fallback_sl, tp=0.0)
+        if modify_result.get("success"):
+            msg = self._fmt_shepherd_msg(position.symbol, action_label, "SECURED", fallback_sl, latent_profit)
+            logger.info(msg)
+            self.telegram.send_sync(msg)
+            return True
+
+        logger.warning(
+            "Shepherd: echec de securisation %s sur %s #%s: %s",
+            action_label,
+            position.symbol,
+            position.ticket,
+            modify_result.get("message", "erreur inconnue"),
+        )
+        return False
+
+    @staticmethod
     def _resolve_live_position_state(position) -> dict[str, float]:
         """Construit l'etat de position live attendu par MuZero.
 
@@ -2453,6 +2525,28 @@ class AutoTradingEngine:
                     exit_price = info.get("entry_price", 0.0)
                     duration = (datetime.now() - info["open_time"]).total_seconds() / 60
                     reason = "Ferme (details indisponibles)"
+
+                if hasattr(self.mt5, "synchronize_external_close"):
+                    try:
+                        sync_result = await self.mt5.synchronize_external_close(
+                            ticket=ticket,
+                            profit=float(profit),
+                            master_snapshot=info,
+                        )
+                        logger.info(
+                            "Cloture distante synchronisee pour %s #%s: %s succes, %s echec(s).",
+                            info["symbol"],
+                            ticket,
+                            (sync_result.get("copy_summary") or {}).get("success", 0),
+                            (sync_result.get("copy_summary") or {}).get("failed", 0),
+                        )
+                    except Exception as exc_sync:
+                        logger.error(
+                            "Echec de synchronisation des followers pour %s #%s: %s",
+                            info["symbol"],
+                            ticket,
+                            exc_sync,
+                        )
                 
                 msg = self._fmt_close_msg(
                     symbol=info["symbol"],
@@ -2503,6 +2597,7 @@ class AutoTradingEngine:
                         action=info["action"],
                         pnl=profit
                     ))
+                self._trade_open_info.pop(ticket, None)
             except Exception as e:
                 logger.error(f"Error processing closed ticket #{ticket}: {e}")
                 # Cleanup if it failed mid-way
@@ -2524,6 +2619,10 @@ class AutoTradingEngine:
                         "action": pos.action.value if hasattr(pos.action, 'value') else str(pos.action),
                         "entry_price": float(pos.open_price),
                         "open_time": pos.open_time,
+                        "volume": float(pos.volume),
+                        "stop_loss_price": float(pos.stop_loss or 0.0),
+                        "take_profit_price": float(pos.take_profit or 0.0),
+                        "comment": str(getattr(pos, "comment", "") or ""),
                     }
                 logger.info(f"âœ… Synced {len(positions)} existing positions.")
         except Exception as e:
@@ -2726,7 +2825,7 @@ class AutoTradingEngine:
                     continue
                 self._clear_pause_state("positions_unavailable")
 
-                self.risk.update_positions_count(len(positions))
+                self.risk.update_positions_snapshot(positions)
                 open_symbols = {
                     position.symbol
                     for position in positions
@@ -2784,18 +2883,12 @@ class AutoTradingEngine:
                                 continue
                             if profit > be_threshold and (sl == 0.0 or sl < open_price):
                                 new_sl = open_price + max(self._get_symbol_pip_size(pos.symbol), trail_distance * 0.25)
-                                modify_result = await self.mt5.modify_position(pos.ticket, sl=new_sl, tp=0.0)
-                                if modify_result.get("success"):
-                                    msg = self._fmt_shepherd_msg(pos.symbol, "BUY", "SECURED", new_sl, profit)
-                                    logger.info(msg)
-                                    self.telegram.send_sync(msg)
-                                else:
-                                    logger.warning(
-                                        "Shepherd: echec de securisation BUY sur %s #%s: %s",
-                                        pos.symbol,
-                                        pos.ticket,
-                                        modify_result.get("message", "erreur inconnue"),
-                                    )
+                                positions_changed = await self._split_positive_runner_or_secure(
+                                    position=pos,
+                                    action_label="BUY",
+                                    fallback_sl=new_sl,
+                                    latent_profit=profit,
+                                ) or positions_changed
                             elif profit > trail_activation:
                                 trailing_sl = current_price - trail_distance
                                 if trailing_sl > sl:
@@ -2834,18 +2927,12 @@ class AutoTradingEngine:
                                 continue
                             if profit > be_threshold and (sl == 0.0 or sl > open_price):
                                 new_sl = open_price - max(self._get_symbol_pip_size(pos.symbol), trail_distance * 0.25)
-                                modify_result = await self.mt5.modify_position(pos.ticket, sl=new_sl, tp=0.0)
-                                if modify_result.get("success"):
-                                    msg = self._fmt_shepherd_msg(pos.symbol, "SELL", "SECURED", new_sl, profit)
-                                    logger.info(msg)
-                                    self.telegram.send_sync(msg)
-                                else:
-                                    logger.warning(
-                                        "Shepherd: echec de securisation SELL sur %s #%s: %s",
-                                        pos.symbol,
-                                        pos.ticket,
-                                        modify_result.get("message", "erreur inconnue"),
-                                    )
+                                positions_changed = await self._split_positive_runner_or_secure(
+                                    position=pos,
+                                    action_label="SELL",
+                                    fallback_sl=new_sl,
+                                    latent_profit=profit,
+                                ) or positions_changed
                             elif profit > trail_activation:
                                 trailing_sl = current_price + trail_distance
                                 if sl == 0.0 or trailing_sl < sl:
@@ -2868,7 +2955,7 @@ class AutoTradingEngine:
                     refreshed_positions = await self.mt5.get_open_positions()
                     if refreshed_positions is not None:
                         positions = refreshed_positions
-                        self.risk.update_positions_count(len(positions))
+                        self.risk.update_positions_snapshot(positions)
                         open_symbols = {
                             position.symbol
                             for position in positions
@@ -2896,10 +2983,15 @@ class AutoTradingEngine:
                     continue
                 self._clear_pause_state("nemesis_active")
 
-                if len(positions) >= self.risk.max_open_positions:
+                if self.risk.get_counted_open_positions() >= self.risk.max_open_positions:
                     logger.info(
-                        "Nombre maximal de positions atteint (%s). Attente du prochain cycle.",
+                        (
+                            "Nombre maximal de positions actives atteint (%s). "
+                            "Attente du prochain cycle. total=%s hold=%s"
+                        ),
                         self.risk.max_open_positions,
+                        self.risk.get_total_open_positions(),
+                        self.risk.get_hold_positions_count(),
                     )
                     await asyncio.sleep(60)
                     continue

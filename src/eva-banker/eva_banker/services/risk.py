@@ -15,9 +15,33 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from shared import RiskStatus, TradeOrder, calculate_var, get_settings
+from shared import Position, RiskStatus, TradeOrder, calculate_var, get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_effective_max_open_positions(settings: Any) -> int:
+    """
+    Calcule le plafond de positions effectivement applique.
+
+    Les followers ont besoin d'un plafond plus haut que le master, car ils
+    conservent un reliquat de position apres les clotures gagnantes et peuvent
+    donc empiler plusieurs runners simultanement.
+
+    Args:
+        settings (Any): Objet de configuration pydantic ou equivalent.
+
+    Returns:
+        int: Nombre maximal de positions a autoriser pour cette instance.
+    """
+    master_limit = int(getattr(settings, "risk_max_open_positions", 3) or 3)
+    if bool(getattr(settings, "banker_follower_mode", False)):
+        follower_limit = int(
+            getattr(settings, "risk_follower_max_open_positions", master_limit)
+            or master_limit
+        )
+        return max(master_limit, follower_limit)
+    return master_limit
 
 
 class RiskValidator:
@@ -64,6 +88,9 @@ class RiskValidator:
         self._daily_pnl = Decimal("0")
         self._total_pnl = Decimal("0")
         self._open_positions_count = 0
+        self._total_positions_count = 0
+        self._hold_positions_count = 0
+        self._ignored_positions_count = 0
         self._account_balance = Decimal("100000")
         self._session_log_states: dict[str, str] = {}
         self._symbol_asset_classes: dict[str, str] = {}
@@ -74,6 +101,27 @@ class RiskValidator:
             max_daily_drawdown,
             max_total_drawdown,
         )
+
+    @staticmethod
+    def _normalize_symbol_token(symbol: str) -> str:
+        """
+        Normalise un symbole pour les heuristiques de risque.
+
+        Cette normalisation retire les suffixes brokers les plus courants
+        afin de raisonner sur le sous-jacent reel (`BTCUSD.e` -> `BTCUSD`,
+        `DE40.e` -> `DE40`, `US30.cash` -> `US30`).
+
+        Args:
+            symbol (str): Symbole brut a normaliser.
+
+        Returns:
+            str: Symbole en majuscules sans suffixe broker.
+        """
+        normalized_symbol = str(symbol or "").strip().upper()
+        for suffix in (".CASH", ".E", ".M"):
+            if normalized_symbol.endswith(suffix):
+                normalized_symbol = normalized_symbol[: -len(suffix)]
+        return normalized_symbol
 
     async def validate_order(self, order: TradeOrder) -> dict[str, Any]:
         """
@@ -187,6 +235,108 @@ class RiskValidator:
         )
         return result
 
+    @staticmethod
+    def is_hold_position(position: Position) -> bool:
+        """
+        Indique si une position doit etre consideree comme un runner HOLD.
+
+        Une position HOLD est un reliquat protege au break-even ou mieux.
+        Elle ne consomme plus le meme budget de risque qu'une entree fraiche,
+        et ne doit donc plus compter dans le plafond d'ouvertures simultanees.
+
+        Args:
+            position (Position): Position ouverte a evaluer.
+
+        Returns:
+            bool: True si la position est protegee au break-even ou mieux.
+        """
+        if position is None:
+            return False
+
+        comment = str(getattr(position, "comment", "") or "").strip().upper()
+        if "HOLD" in comment:
+            return True
+
+        stop_loss = getattr(position, "stop_loss", None)
+        if stop_loss is None:
+            return False
+
+        open_price = Decimal(str(getattr(position, "open_price", "0") or "0"))
+        stop_loss_price = Decimal(str(stop_loss))
+        if open_price <= 0:
+            return False
+
+        if position.action == position.action.BUY:
+            return stop_loss_price >= open_price
+        if position.action == position.action.SELL:
+            return stop_loss_price <= open_price
+        return False
+
+    def is_ignored_position(self, position: Position) -> bool:
+        """
+        Indique si une position ouverte doit etre ignoree du plafond EVA.
+
+        Ce garde-fou sert aux comptes followers qui contiennent deja des
+        positions manuelles historiques. Quand le flag runtime est actif, seules
+        les positions sans commentaire MT5 sont ignorees ; les positions COPY,
+        EVA Close et HOLD restent pilotees par EVA.
+
+        Args:
+            position (Position): Position ouverte a evaluer.
+
+        Returns:
+            bool: True si la position ne doit pas consommer le plafond EVA.
+        """
+        if position is None:
+            return False
+        if not bool(getattr(self.settings, "risk_ignore_uncommented_positions", False)):
+            return False
+        comment = str(getattr(position, "comment", "") or "").strip()
+        return comment == ""
+
+    def summarize_positions(self, positions: list[Position]) -> dict[str, int]:
+        """
+        Calcule les compteurs de positions utilises par le module de risque.
+
+        Args:
+            positions (list[Position]): Positions ouvertes a analyser.
+
+        Returns:
+            dict[str, int]: Totaux `total`, `hold` et `counted`.
+        """
+        total_positions_count = len(positions or [])
+        ignored_positions_count = sum(
+            1 for position in (positions or []) if self.is_ignored_position(position)
+        )
+        hold_positions_count = sum(
+            1
+            for position in (positions or [])
+            if not self.is_ignored_position(position) and self.is_hold_position(position)
+        )
+        counted_positions_count = max(
+            0,
+            total_positions_count - hold_positions_count - ignored_positions_count,
+        )
+        return {
+            "total": total_positions_count,
+            "hold": hold_positions_count,
+            "ignored": ignored_positions_count,
+            "counted": counted_positions_count,
+        }
+
+    def update_positions_snapshot(self, positions: list[Position]) -> None:
+        """
+        Met a jour les compteurs a partir d'un snapshot complet de positions.
+
+        Args:
+            positions (list[Position]): Positions ouvertes courantes.
+        """
+        counters = self.summarize_positions(positions)
+        self._total_positions_count = counters["total"]
+        self._hold_positions_count = counters["hold"]
+        self._ignored_positions_count = counters["ignored"]
+        self._open_positions_count = counters["counted"]
+
     def register_symbol_universe(self, asset_classes: dict[str, str]) -> None:
         """
         Enregistre les classes d'actifs du dernier univers decouvert.
@@ -213,6 +363,8 @@ class RiskValidator:
         if order.stop_loss_price is None:
             return Decimal("100")
 
+        normalized_symbol = self._normalize_symbol_token(order.symbol)
+
         if order.entry_price is not None:
             current_price = Decimal(str(order.entry_price))
         else:
@@ -229,8 +381,16 @@ class RiskValidator:
                 "XAGUSD": Decimal("23.50"),
                 "US100.CASH": Decimal("18000.00"),
                 "GER40.CASH": Decimal("17000.00"),
+                "US30": Decimal("39000.00"),
+                "US100": Decimal("18000.00"),
+                "GER40": Decimal("17000.00"),
+                "DE40": Decimal("17000.00"),
+                "US500": Decimal("5200.00"),
             }
-            current_price = mock_prices.get(order.symbol.upper(), Decimal("100"))
+            current_price = mock_prices.get(
+                normalized_symbol,
+                mock_prices.get(order.symbol.upper(), Decimal("100")),
+            )
 
         sl_distance = abs(current_price - order.stop_loss_price)
         if sl_distance <= 0:
@@ -256,17 +416,28 @@ class RiskValidator:
             Decimal: Taille de contrat approximee.
         """
         symbol_upper = symbol.upper()
-        asset_class = self._symbol_asset_classes.get(symbol_upper)
+        normalized_symbol = self._normalize_symbol_token(symbol_upper)
+        asset_class = self._symbol_asset_classes.get(symbol_upper) or self._symbol_asset_classes.get(
+            normalized_symbol
+        )
 
-        if asset_class == "crypto" or self._is_crypto_symbol(symbol_upper):
+        if asset_class == "crypto" or self._is_crypto_symbol(normalized_symbol):
             return Decimal("1")
-        if "XAU" in symbol_upper:
+        if "XAU" in normalized_symbol:
             return Decimal("100")
-        if "US30" in symbol_upper or "GER40" in symbol_upper or "CASH" in symbol_upper:
+        if (
+            "US30" in normalized_symbol
+            or "GER40" in normalized_symbol
+            or "DE40" in normalized_symbol
+            or "US100" in normalized_symbol
+            or "USTEC" in normalized_symbol
+            or "US500" in normalized_symbol
+            or "CASH" in symbol_upper
+        ):
             return Decimal("1")
-        if "JPY" in symbol_upper:
+        if "JPY" in normalized_symbol:
             return Decimal("1000")
-        if "USD" in symbol_upper or "EUR" in symbol_upper:
+        if "USD" in normalized_symbol or "EUR" in normalized_symbol:
             return Decimal("100000")
         return Decimal("10")
 
@@ -286,8 +457,11 @@ class RiskValidator:
             bool: True si la session est ouverte, sinon False.
         """
         symbol_upper = symbol.upper()
-        asset_class = self._symbol_asset_classes.get(symbol_upper)
-        if asset_class == "crypto" or self._is_crypto_symbol(symbol_upper):
+        normalized_symbol = self._normalize_symbol_token(symbol_upper)
+        asset_class = self._symbol_asset_classes.get(symbol_upper) or self._symbol_asset_classes.get(
+            normalized_symbol
+        )
+        if asset_class == "crypto" or self._is_crypto_symbol(normalized_symbol):
             self._session_log_states.pop(symbol_upper, None)
             return True
 
@@ -460,6 +634,45 @@ class RiskValidator:
             count (int): Nombre courant de positions.
         """
         self._open_positions_count = count
+        self._total_positions_count = count
+        self._hold_positions_count = 0
+        self._ignored_positions_count = 0
+
+    def get_counted_open_positions(self) -> int:
+        """
+        Retourne le nombre de positions qui consomment encore du risque.
+
+        Returns:
+            int: Nombre de positions comptees contre le plafond de risque.
+        """
+        return self._open_positions_count
+
+    def get_total_open_positions(self) -> int:
+        """
+        Retourne le nombre total de positions ouvertes.
+
+        Returns:
+            int: Nombre total de positions visibles sur le compte.
+        """
+        return self._total_positions_count
+
+    def get_hold_positions_count(self) -> int:
+        """
+        Retourne le nombre de runners proteges exclus du plafond de risque.
+
+        Returns:
+            int: Nombre de positions HOLD.
+        """
+        return self._hold_positions_count
+
+    def get_ignored_positions_count(self) -> int:
+        """
+        Retourne le nombre de positions ouvertes ignorees du plafond EVA.
+
+        Returns:
+            int: Nombre de positions sans commentaire ignorees.
+        """
+        return self._ignored_positions_count
 
     def update_account_balance(self, balance: Decimal) -> None:
         """
@@ -570,6 +783,9 @@ class RiskValidator:
             daily_drawdown_percent=self._get_daily_drawdown_percent(),
             total_drawdown_percent=self._get_total_drawdown_percent(),
             open_positions_count=self._open_positions_count,
+            total_positions_count=self._total_positions_count,
+            hold_positions_count=self._hold_positions_count,
+            ignored_positions_count=self._ignored_positions_count,
             anti_tilt_active=self._is_anti_tilt_active(),
             anti_tilt_expires_at=self._anti_tilt_until,
             trading_allowed=trading_allowed,
@@ -585,11 +801,12 @@ def get_risk_validator() -> RiskValidator:
         RiskValidator: Instance configuree depuis les settings.
     """
     settings = get_settings()
+    effective_max_open_positions = resolve_effective_max_open_positions(settings)
     return RiskValidator(
         max_risk_per_trade=Decimal(str(settings.risk_max_single_trade_percent)),
         max_daily_drawdown=Decimal(str(settings.risk_max_daily_drawdown_percent)),
         max_total_drawdown=Decimal(str(settings.risk_max_total_drawdown_percent)),
-        max_open_positions=settings.risk_max_open_positions,
+        max_open_positions=effective_max_open_positions,
         anti_tilt_losses=settings.risk_anti_tilt_losses,
         anti_tilt_hours=settings.risk_anti_tilt_duration_hours,
     )

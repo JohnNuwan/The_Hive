@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1180,9 +1181,13 @@ def _upgrade_scalp_position_mechanics_profile_v2(
     reward_policy.setdefault("pyramid_bad_add_penalty", 0.35)
     reward_policy.setdefault("runner_protected_exit_bonus", 0.30)
     reward_policy.setdefault("runner_hold_capture_bonus", 0.10)
+    reward_policy.setdefault("runner_hold_after_soft_tp_bonus", 0.12)
     reward_policy.setdefault("runner_trade_completion_bonus", 0.40)
     reward_policy.setdefault("runner_giveback_penalty", 0.45)
     reward_policy.setdefault("runner_retained_profit_bonus", 0.25)
+    reward_policy.setdefault("runner_split_activation_bonus", 0.18)
+    reward_policy.setdefault("runner_viable_but_closed_penalty", 0.18)
+    reward_policy.setdefault("early_full_close_after_soft_tp_penalty", 0.22)
     reward_policy.setdefault("split_zone_capture_bonus", 0.18)
     reward_policy.setdefault("split_window_activation_bonus", 0.14)
     reward_policy.setdefault("runner_extension_capture_bonus", 0.22)
@@ -1707,6 +1712,12 @@ def _apply_position_mechanics_env_overrides(profile: dict[str, Any]) -> dict[str
     )
     apply_value(
         "reward_policy",
+        "runner_hold_after_soft_tp_bonus",
+        "MUZERO_RUNNER_HOLD_AFTER_SOFT_TP_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
         "split_zone_capture_bonus",
         "MUZERO_SPLIT_ZONE_CAPTURE_BONUS",
         lambda env_name, current: _env_float(env_name, float(current or 0.0)),
@@ -1721,6 +1732,12 @@ def _apply_position_mechanics_env_overrides(profile: dict[str, Any]) -> dict[str
         "reward_policy",
         "runner_extension_capture_bonus",
         "MUZERO_RUNNER_EXTENSION_CAPTURE_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "runner_split_activation_bonus",
+        "MUZERO_RUNNER_SPLIT_ACTIVATION_BONUS",
         lambda env_name, current: _env_float(env_name, float(current or 0.0)),
     )
     apply_value(
@@ -1763,6 +1780,18 @@ def _apply_position_mechanics_env_overrides(profile: dict[str, Any]) -> dict[str
         "reward_policy",
         "runner_retained_profit_bonus",
         "MUZERO_RUNNER_RETAINED_PROFIT_BONUS",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "runner_viable_but_closed_penalty",
+        "MUZERO_RUNNER_VIABLE_BUT_CLOSED_PENALTY",
+        lambda env_name, current: _env_float(env_name, float(current or 0.0)),
+    )
+    apply_value(
+        "reward_policy",
+        "early_full_close_after_soft_tp_penalty",
+        "MUZERO_EARLY_FULL_CLOSE_AFTER_SOFT_TP_PENALTY",
         lambda env_name, current: _env_float(env_name, float(current or 0.0)),
     )
     apply_value(
@@ -2110,6 +2139,124 @@ def get_history_dir(data_dir: str | os.PathLike[str] | None = None) -> Path:
     return Path(explicit)
 
 
+def get_history_stale_threshold_hours(timeframe: str) -> float:
+    """Retourne le seuil de fraicheur acceptable pour un timeframe.
+
+    Args:
+        timeframe (str): Timeframe cible (`M1`, `M5`, `H1`, `D1`, `W1`, ...).
+
+    Returns:
+        float: Nombre maximal d'heures de retard avant alerte.
+    """
+
+    normalized = str(timeframe or "").strip().upper()
+    if normalized == "D1":
+        return _env_float("HISTORY_STALE_D1_HOURS", 48.0)
+    if normalized == "W1":
+        return _env_float("HISTORY_STALE_W1_HOURS", 240.0)
+    return _env_float("HISTORY_STALE_INTRADAY_HOURS", 6.0)
+
+
+def _read_last_history_timestamp(path: Path) -> datetime | None:
+    """Lit l'horodatage de la derniere bougie d'un CSV historique.
+
+    Args:
+        path (Path): Fichier historique a inspecter.
+
+    Returns:
+        datetime | None: Horodatage de la derniere bougie, ou ``None``.
+    """
+
+    if not path.exists():
+        return None
+    frame = pd.read_csv(path, usecols=["time"])
+    if frame.empty:
+        return None
+    timestamp = pd.to_datetime(frame["time"].iloc[-1], utc=False, errors="coerce")
+    if pd.isna(timestamp):
+        return None
+    return timestamp.to_pydatetime()
+
+
+def build_history_freshness_report(
+    data_dir: str | os.PathLike[str] | None = None,
+    *,
+    symbols: list[str] | tuple[str, ...] | None = None,
+    timeframes: list[str] | tuple[str, ...] | None = None,
+    reference_time: datetime | None = None,
+) -> dict[str, Any]:
+    """Construit un rapport de fraicheur des CSV historiques.
+
+    Args:
+        data_dir (str | os.PathLike[str] | None): Dossier historique cible.
+        symbols (list[str] | tuple[str, ...] | None): Symboles a controler.
+        timeframes (list[str] | tuple[str, ...] | None): Timeframes a controler.
+        reference_time (datetime | None): Date de reference optionnelle.
+
+    Returns:
+        dict[str, Any]: Rapport synthetique de fraicheur.
+    """
+
+    history_dir = get_history_dir(data_dir)
+    selected_symbols = [
+        str(symbol).strip()
+        for symbol in list(symbols or [])
+        if str(symbol).strip()
+    ]
+    selected_timeframes = [
+        str(timeframe).strip().upper()
+        for timeframe in list(timeframes or [])
+        if str(timeframe).strip()
+    ]
+    now = reference_time or datetime.now()
+    report: dict[str, Any] = {
+        "generated_at": now.isoformat(),
+        "history_dir": str(history_dir),
+        "files_checked": 0,
+        "stale_files": 0,
+        "worst_lag_hours": 0.0,
+        "symbols": {},
+    }
+
+    candidates: list[tuple[str, str, Path]] = []
+    if selected_symbols and selected_timeframes:
+        for symbol in selected_symbols:
+            for timeframe in selected_timeframes:
+                candidates.append((symbol, timeframe, history_dir / f"{symbol}_{timeframe}.csv"))
+    else:
+        for file_path in sorted(history_dir.glob("*.csv")):
+            parsed = parse_history_filename(file_path)
+            if parsed is None:
+                continue
+            symbol, timeframe = parsed
+            candidates.append((symbol, timeframe, file_path))
+
+    for symbol, timeframe, file_path in candidates:
+        symbol_bucket = report["symbols"].setdefault(symbol, {})
+        last_bar_at = _read_last_history_timestamp(file_path) if file_path.exists() else None
+        stale_after_hours = get_history_stale_threshold_hours(timeframe)
+        lag_hours = None
+        stale = True
+        if last_bar_at is not None:
+            lag_hours = max((now - last_bar_at).total_seconds() / 3600.0, 0.0)
+            stale = lag_hours > stale_after_hours
+            report["worst_lag_hours"] = max(float(report["worst_lag_hours"]), float(lag_hours))
+        symbol_bucket[timeframe] = {
+            "path": str(file_path),
+            "exists": file_path.exists(),
+            "last_bar_at": last_bar_at.isoformat() if last_bar_at is not None else None,
+            "lag_hours": float(lag_hours) if lag_hours is not None else None,
+            "stale_after_hours": float(stale_after_hours),
+            "stale": bool(stale),
+        }
+        report["files_checked"] = int(report["files_checked"]) + 1
+        if stale:
+            report["stale_files"] = int(report["stale_files"]) + 1
+
+    report["all_fresh"] = int(report["stale_files"]) == 0
+    return report
+
+
 def parse_history_filename(path: Path) -> tuple[str, str] | None:
     """Extrait le symbole et le timeframe depuis un nom de fichier historique.
 
@@ -2413,6 +2560,32 @@ def load_history_frame(
     Returns:
         pd.DataFrame | None: Donnees OHLCV indexees par date, ou ``None`` si indisponible.
     """
+    def _attach_freshness_metadata(frame: pd.DataFrame) -> pd.DataFrame:
+        """Annote un DataFrame avec la fraicheur du dataset source.
+
+        Args:
+            frame (pd.DataFrame): Donnees historiques deja chargees.
+
+        Returns:
+            pd.DataFrame: Meme DataFrame enrichi en attributs.
+        """
+
+        last_bar_at = None
+        lag_hours = None
+        stale = None
+        if not frame.empty:
+            last_timestamp = frame.index[-1]
+            if isinstance(last_timestamp, pd.Timestamp):
+                last_bar_at = last_timestamp.to_pydatetime()
+            else:
+                last_bar_at = pd.Timestamp(last_timestamp).to_pydatetime()
+            lag_hours = max((datetime.now() - last_bar_at).total_seconds() / 3600.0, 0.0)
+            stale = lag_hours > get_history_stale_threshold_hours(timeframe)
+        frame.attrs["dataset_last_bar_at"] = last_bar_at.isoformat() if last_bar_at is not None else None
+        frame.attrs["dataset_lag_hours"] = float(lag_hours) if lag_hours is not None else None
+        frame.attrs["dataset_stale"] = stale
+        return frame
+
     try:
         from eva_lab.timescale_store import load_history_frame_from_timescale
 
@@ -2422,7 +2595,8 @@ def load_history_frame(
             limit=get_timeframe_history_bars(timeframe),
         )
         if frame is not None:
-            return frame
+            frame.attrs["dataset_timeframe"] = timeframe.upper()
+            return _attach_freshness_metadata(frame)
     except Exception as exc:
         logger.debug("Lecture TimeDB ignoree pour %s %s: %s", symbol, timeframe, exc)
 
@@ -2432,7 +2606,7 @@ def load_history_frame(
         frame = _read_history_frame(direct_path)
         frame.attrs["dataset_source"] = f"csv:{direct_path.name}"
         frame.attrs["dataset_timeframe"] = timeframe.upper()
-        return frame
+        return _attach_freshness_metadata(frame)
 
     if timeframe == "M5":
         source_path = history_dir / f"{symbol}_M1.csv"
@@ -2440,7 +2614,7 @@ def load_history_frame(
             frame = _resample_ohlcv(_read_history_frame(source_path), "5min")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
 
     if timeframe == "M15":
         source_path = history_dir / f"{symbol}_M5.csv"
@@ -2448,13 +2622,13 @@ def load_history_frame(
             frame = _resample_ohlcv(_read_history_frame(source_path), "15min")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
         source_path = history_dir / f"{symbol}_M1.csv"
         if source_path.exists():
             frame = _resample_ohlcv(_read_history_frame(source_path), "15min")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
 
     if timeframe == "H1":
         source_path = history_dir / f"{symbol}_M15.csv"
@@ -2462,19 +2636,19 @@ def load_history_frame(
             frame = _resample_ohlcv(_read_history_frame(source_path), "1H")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
         source_path = history_dir / f"{symbol}_M5.csv"
         if source_path.exists():
             frame = _resample_ohlcv(_read_history_frame(source_path), "1H")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
         source_path = history_dir / f"{symbol}_M1.csv"
         if source_path.exists():
             frame = _resample_ohlcv(_read_history_frame(source_path), "1H")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
 
     if timeframe == "D1":
         source_path = history_dir / f"{symbol}_H1.csv"
@@ -2482,25 +2656,25 @@ def load_history_frame(
             frame = _resample_ohlcv(_read_history_frame(source_path), "1D")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
         source_path = history_dir / f"{symbol}_M15.csv"
         if source_path.exists():
             frame = _resample_ohlcv(_read_history_frame(source_path), "1D")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
         source_path = history_dir / f"{symbol}_M5.csv"
         if source_path.exists():
             frame = _resample_ohlcv(_read_history_frame(source_path), "1D")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
         source_path = history_dir / f"{symbol}_M1.csv"
         if source_path.exists():
             frame = _resample_ohlcv(_read_history_frame(source_path), "1D")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
 
     if timeframe == "W1":
         source_path = history_dir / f"{symbol}_D1.csv"
@@ -2508,31 +2682,31 @@ def load_history_frame(
             frame = _resample_ohlcv(_read_history_frame(source_path), "1W")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
         source_path = history_dir / f"{symbol}_H1.csv"
         if source_path.exists():
             frame = _resample_ohlcv(_read_history_frame(source_path), "1W")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
         source_path = history_dir / f"{symbol}_M15.csv"
         if source_path.exists():
             frame = _resample_ohlcv(_read_history_frame(source_path), "1W")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
         source_path = history_dir / f"{symbol}_M5.csv"
         if source_path.exists():
             frame = _resample_ohlcv(_read_history_frame(source_path), "1W")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
         source_path = history_dir / f"{symbol}_M1.csv"
         if source_path.exists():
             frame = _resample_ohlcv(_read_history_frame(source_path), "1W")
             frame.attrs["dataset_source"] = f"csv_resampled:{source_path.name}"
             frame.attrs["dataset_timeframe"] = timeframe.upper()
-            return frame
+            return _attach_freshness_metadata(frame)
 
     return None
 

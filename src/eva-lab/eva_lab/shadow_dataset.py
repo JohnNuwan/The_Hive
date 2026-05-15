@@ -23,6 +23,11 @@ ACTION_MAP = {
     "CLOSE": 4,
 }
 
+INVERSE_ACTION_MAP = {
+    ACTION_MAP["BUY"]: ACTION_MAP["SELL"],
+    ACTION_MAP["SELL"]: ACTION_MAP["BUY"],
+}
+
 
 def resolve_shadow_files(data_dirs: Iterable[str | Path]) -> list[Path]:
     """
@@ -130,11 +135,7 @@ def build_game_from_shadow_episode(
         GameHistory: Episode encode pour MuZero/Dreamer.
     """
     game = GameHistory()
-    uniform_policy = np.full(
-        action_space_size,
-        1.0 / max(action_space_size, 1),
-        dtype=np.float32,
-    )
+    episode_quality = _summarize_shadow_episode(episode)
 
     for transition in episode:
         observation = transition.get("observation", {}) or {}
@@ -148,9 +149,171 @@ def build_game_from_shadow_episode(
 
         reward = float(transition.get("reward", 0.0) or 0.0)
         obs_vec = build_observation_vector(observation, observation_size)
-        game.store(obs_vec, action_one_hot, reward, uniform_policy, 0.0)
+        target_policy = build_shadow_target_policy(
+            transition,
+            action_index=action_index,
+            action_space_size=action_space_size,
+            episode_quality=episode_quality,
+        )
+        game.store(obs_vec, action_one_hot, reward, target_policy, 0.0)
+
+    game.metadata.update(
+        {
+            "shadow_policy_mode": "action_biased",
+            "shadow_episode_profit": episode_quality["profit"],
+            "shadow_episode_reward": episode_quality["reward"],
+            "shadow_episode_quality": episode_quality["quality"],
+        }
+    )
 
     return game
+
+
+def build_shadow_target_policy(
+    transition: dict[str, Any],
+    *,
+    action_index: int,
+    action_space_size: int,
+    episode_quality: dict[str, float],
+) -> np.ndarray:
+    """
+    Construit une cible policy exploitable a partir d'un trade Shadow.
+
+    Les imports live ne disposent pas toujours de visites MCTS. La cible
+    conserve donc un plancher legal, puis renforce l'action observee si le
+    trade est bon et privilegie HOLD/CLOSE si le trade est perdant.
+
+    Args:
+        transition (dict[str, Any]): Transition shadow source.
+        action_index (int): Index de l'action observee.
+        action_space_size (int): Taille de l'espace d'actions.
+        episode_quality (dict[str, float]): Resume profit/recompense episode.
+
+    Returns:
+        np.ndarray: Distribution normalisee, non nulle et non uniforme.
+    """
+    if action_space_size <= 0:
+        return np.zeros(0, dtype=np.float32)
+
+    policy = np.full(action_space_size, 0.04, dtype=np.float32)
+    metadata = dict(transition.get("metadata") or {})
+    action_payload = dict(transition.get("action") or {})
+    action_name = str(action_payload.get("type", "HOLD")).upper()
+    reward = _safe_float(transition.get("reward"), fallback=0.0)
+    profit = _safe_float(metadata.get("profit", metadata.get("raw_pnl")), fallback=0.0)
+    quality = float(episode_quality.get("quality", 0.0) or 0.0)
+    is_profitable = quality > 0.0 or reward > 0.0 or profit > 0.0
+    is_bad = quality < 0.0 and reward <= 0.0 and profit <= 0.0
+    hold_index = ACTION_MAP["HOLD"]
+    split_index = ACTION_MAP["SPLIT"]
+    close_index = ACTION_MAP["CLOSE"]
+
+    if is_profitable:
+        _add_policy_mass(policy, action_index, 0.62)
+        if action_name in {"SPLIT", "PARTIAL", "PARTIAL_CLOSE"}:
+            _add_policy_mass(policy, split_index, 0.16)
+            _add_policy_mass(policy, hold_index, 0.10)
+        elif action_name == "CLOSE" and _looks_like_hold_runner(metadata, action_payload):
+            _add_policy_mass(policy, close_index, 0.18)
+            _add_policy_mass(policy, hold_index, 0.22)
+        elif action_name == "CLOSE":
+            _add_policy_mass(policy, close_index, 0.14)
+    elif is_bad:
+        _add_policy_mass(policy, hold_index, 0.24)
+        _add_policy_mass(policy, close_index, 0.34)
+        if action_name == "CLOSE":
+            _add_policy_mass(policy, close_index, 0.16)
+        elif 0 <= action_index < action_space_size:
+            _add_policy_mass(policy, action_index, 0.08)
+        inverse_index = INVERSE_ACTION_MAP.get(action_index)
+        if inverse_index is not None and 0 <= inverse_index < action_space_size:
+            policy[inverse_index] = min(float(policy[inverse_index]), 0.03)
+    else:
+        _add_policy_mass(policy, action_index, 0.46)
+        _add_policy_mass(policy, hold_index, 0.12)
+
+    return _normalize_policy(policy)
+
+
+def _summarize_shadow_episode(episode: list[dict[str, Any]]) -> dict[str, float]:
+    """
+    Resume le resultat d'un episode shadow pour ponderer la cible policy.
+
+    Args:
+        episode (list[dict[str, Any]]): Transitions du meme trade.
+
+    Returns:
+        dict[str, float]: Profit, recompense et qualite consolides.
+    """
+    reward_total = 0.0
+    profit_total = 0.0
+    for transition in episode:
+        reward_total += _safe_float(transition.get("reward"), fallback=0.0)
+        metadata = dict(transition.get("metadata") or {})
+        profit_total += _safe_float(
+            metadata.get("profit", metadata.get("raw_pnl", metadata.get("net_pnl"))),
+            fallback=0.0,
+        )
+    quality = profit_total if abs(profit_total) > 1e-9 else reward_total
+    return {
+        "reward": reward_total,
+        "profit": profit_total,
+        "quality": quality,
+    }
+
+
+def _looks_like_hold_runner(metadata: dict[str, Any], action_payload: dict[str, Any]) -> bool:
+    """
+    Detecte une sortie partielle suivie d'un runner conserve au break-even.
+
+    Args:
+        metadata (dict[str, Any]): Metadonnees de trade.
+        action_payload (dict[str, Any]): Action shadow source.
+
+    Returns:
+        bool: ``True`` si la transition ressemble a un HOLD protege.
+    """
+    close_ratio = _safe_float(
+        action_payload.get("close_ratio", metadata.get("close_ratio", metadata.get("closed_ratio"))),
+        fallback=0.0,
+    )
+    slbe_flag = bool(
+        metadata.get("slbe", False)
+        or metadata.get("sl_be", False)
+        or metadata.get("sl_at_be", False)
+        or metadata.get("break_even", False)
+        or action_payload.get("slbe", False)
+    )
+    return slbe_flag or 0.45 <= close_ratio <= 0.80
+
+
+def _add_policy_mass(policy: np.ndarray, index: int, mass: float) -> None:
+    """
+    Ajoute une masse cible si l'action est supportee.
+
+    Args:
+        policy (np.ndarray): Distribution modifiable.
+        index (int): Index cible.
+        mass (float): Masse ajoutee avant normalisation.
+    """
+    if 0 <= int(index) < len(policy):
+        policy[int(index)] += float(mass)
+
+
+def _normalize_policy(policy: np.ndarray) -> np.ndarray:
+    """
+    Normalise une distribution policy en evitant les zeros complets.
+
+    Args:
+        policy (np.ndarray): Distribution brute.
+
+    Returns:
+        np.ndarray: Distribution ``float32`` normalisee.
+    """
+    total = float(np.sum(policy))
+    if not np.isfinite(total) or total <= 0.0:
+        return np.full(len(policy), 1.0 / max(len(policy), 1), dtype=np.float32)
+    return (policy / total).astype(np.float32)
 
 
 def build_observation_vector(observation: dict[str, Any], observation_size: int) -> np.ndarray:

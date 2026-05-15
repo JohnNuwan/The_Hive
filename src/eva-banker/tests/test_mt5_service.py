@@ -3,6 +3,8 @@
 import asyncio
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -70,8 +72,13 @@ class _FakeMT5Module:
         """Memorise les parametres d'initialisation puis reussit."""
         self.initialize_calls.append(kwargs)
         if self._initialize_results:
-            return self._initialize_results.pop(0)
-        return True
+            result = self._initialize_results.pop(0)
+        else:
+            result = True
+        if result and self.login_result and kwargs.get("login") and kwargs.get("server"):
+            self._connected_login = int(kwargs["login"])
+            self._connected_server = str(kwargs["server"])
+        return result
 
     def account_info(self):
         """Retourne le compte actif si un login a deja ete realise."""
@@ -109,32 +116,37 @@ def test_connect_uses_explicit_terminal_path_and_portable_mode():
     fake_mt5 = _FakeMT5Module()
 
     async def scenario() -> None:
-        with patch.object(mt5_module, "MT5_AVAILABLE", True), patch.object(
-            mt5_module, "mt5", fake_mt5, create=True
-        ):
-            service = MT5Service(
-                mock_mode=False,
-                login=531240000,
-                password="secret",
-                server="FTMO-Server3",
-                terminal_path="C:/MT5/FTMO-Server3/terminal64.exe",
-                terminal_portable=True,
-                terminal_timeout_ms=45000,
-            )
-            connected = await service.connect()
-            assert connected is True
+        with TemporaryDirectory() as tmpdir:
+            claim_dir = Path(tmpdir)
+            with patch.object(mt5_module, "MT5_AVAILABLE", True), patch.object(
+                mt5_module, "mt5", fake_mt5, create=True
+            ):
+                service = MT5Service(
+                    mock_mode=False,
+                    login=531240000,
+                    password="secret",
+                    server="FTMO-Server3",
+                    terminal_path="C:/MT5/FTMO-Server3/terminal64.exe",
+                    terminal_portable=True,
+                    terminal_timeout_ms=45000,
+                )
+                with patch.object(service, "_get_account_claim_directory", return_value=claim_dir):
+                    connected = await service.connect()
+                    assert connected is True
 
     asyncio.run(scenario())
 
     assert fake_mt5.initialize_calls == [
         {
             "path": "C:/MT5/FTMO-Server3/terminal64.exe",
+            "login": 531240000,
+            "password": "secret",
+            "server": "FTMO-Server3",
             "portable": True,
             "timeout": 45000,
         }
     ]
-    assert fake_mt5.login_calls[0]["login"] == 531240000
-    assert fake_mt5.login_calls[0]["server"] == "FTMO-Server3"
+    assert fake_mt5.login_calls == []
 
 
 def test_connect_uses_timeout_even_without_explicit_terminal_path():
@@ -142,21 +154,31 @@ def test_connect_uses_timeout_even_without_explicit_terminal_path():
     fake_mt5 = _FakeMT5Module()
 
     async def scenario() -> None:
-        with patch.object(mt5_module, "MT5_AVAILABLE", True), patch.object(
-            mt5_module, "mt5", fake_mt5, create=True
-        ):
-            service = MT5Service(
-                mock_mode=False,
-                login=521044924,
-                password="secret",
-                server="FTMO-Server2",
-            )
-            connected = await service.connect()
-            assert connected is True
+        with TemporaryDirectory() as tmpdir:
+            claim_dir = Path(tmpdir)
+            with patch.object(mt5_module, "MT5_AVAILABLE", True), patch.object(
+                mt5_module, "mt5", fake_mt5, create=True
+            ):
+                service = MT5Service(
+                    mock_mode=False,
+                    login=521044924,
+                    password="secret",
+                    server="FTMO-Server2",
+                )
+                with patch.object(service, "_get_account_claim_directory", return_value=claim_dir):
+                    connected = await service.connect()
+                    assert connected is True
 
     asyncio.run(scenario())
 
-    assert fake_mt5.initialize_calls == [{"timeout": 60000}]
+    assert fake_mt5.initialize_calls == [
+        {
+            "login": 521044924,
+            "password": "secret",
+            "server": "FTMO-Server2",
+            "timeout": 60000,
+        }
+    ]
 
 
 def test_connect_retry_with_alternate_portable_mode_after_ipc_timeout():
@@ -184,10 +206,16 @@ def test_connect_retry_with_alternate_portable_mode_after_ipc_timeout():
     assert fake_mt5.initialize_calls == [
         {
             "path": "C:/MT5/FTUK/terminal64.exe",
+            "login": 333382142,
+            "password": "secret",
+            "server": "FTUKMarkets-Trade",
             "timeout": 120000,
         },
         {
             "path": "C:/MT5/FTUK/terminal64.exe",
+            "login": 333382142,
+            "password": "secret",
+            "server": "FTUKMarkets-Trade",
             "portable": True,
             "timeout": 120000,
         },
@@ -203,6 +231,7 @@ def test_connect_does_not_retry_portable_mode_when_alternance_is_disabled():
         mt5_reconnect_cooldown_seconds=15,
         mt5_warning_cooldown_seconds=30,
         mt5_try_alternate_portable_mode=False,
+        mt5_initialize_retries=1,
     )
 
     async def scenario() -> None:
@@ -226,6 +255,9 @@ def test_connect_does_not_retry_portable_mode_when_alternance_is_disabled():
     assert fake_mt5.initialize_calls == [
         {
             "path": "C:/MT5/FTUK/terminal64.exe",
+            "login": 333382142,
+            "password": "secret",
+            "server": "FTUKMarkets-Trade",
             "timeout": 120000,
         }
     ]
@@ -258,6 +290,100 @@ def test_close_position_mock_supports_partial_close():
     assert result["volume_remaining"] == 0.10
     assert len(service._mock_positions) == 1
     assert service._mock_positions[0].volume == Decimal("0.10")
+
+
+def test_connect_refuses_duplicate_account_claim_for_another_pid():
+    """Verifie qu'un second Banker ne peut pas revendiquer le meme compte."""
+    fake_mt5_a = _FakeMT5Module()
+    fake_mt5_b = _FakeMT5Module()
+
+    with TemporaryDirectory() as temp_dir:
+        claim_dir = Path(temp_dir)
+
+        async def connect_first() -> bool:
+            with patch.object(mt5_module, "MT5_AVAILABLE", True), patch.object(
+                mt5_module, "mt5", fake_mt5_a, create=True
+            ):
+                service = MT5Service(
+                    mock_mode=False,
+                    login=531240000,
+                    password="secret",
+                    server="FTMO-Server3",
+                    terminal_path="C:/MT5/FTMO-Server3/terminal64.exe",
+                )
+                with patch.object(service, "_get_account_claim_directory", return_value=claim_dir), patch.object(
+                    service, "_get_runtime_process_id", return_value=11111
+                ):
+                    return await service.connect()
+
+        async def connect_second() -> bool:
+            with patch.object(mt5_module, "MT5_AVAILABLE", True), patch.object(
+                mt5_module, "mt5", fake_mt5_b, create=True
+            ):
+                service = MT5Service(
+                    mock_mode=False,
+                    login=531240000,
+                    password="secret",
+                    server="FTMO-Server3",
+                    terminal_path="C:/MT5/FTMO-Server3/terminal64.exe",
+                )
+                with patch.object(service, "_get_account_claim_directory", return_value=claim_dir), patch.object(
+                    service, "_get_runtime_process_id", return_value=22222
+                ), patch.object(service, "_is_process_alive", return_value=True):
+                    return await service.connect()
+
+        assert asyncio.run(connect_first()) is True
+        assert asyncio.run(connect_second()) is False
+
+
+def test_disconnect_releases_account_claim():
+    """Verifie que la deconnexion libere le verrou local du compte."""
+    fake_mt5 = _FakeMT5Module()
+
+    with TemporaryDirectory() as temp_dir:
+        claim_dir = Path(temp_dir)
+
+        async def scenario() -> None:
+            with patch.object(mt5_module, "MT5_AVAILABLE", True), patch.object(
+                mt5_module, "mt5", fake_mt5, create=True
+            ):
+                service = MT5Service(
+                    mock_mode=False,
+                    login=333382206,
+                    password="secret",
+                    server="FTUKMarkets-Trade",
+                    terminal_path="C:/MT5/FTUK/terminal64.exe",
+                )
+                with patch.object(service, "_get_account_claim_directory", return_value=claim_dir), patch.object(
+                    service, "_get_runtime_process_id", return_value=33333
+                ):
+                    assert await service.connect() is True
+                    expected_claim = claim_dir / "FTUKMarkets-Trade__333382206.json"
+                    assert expected_claim.exists()
+                    await service.disconnect()
+                    assert not expected_claim.exists()
+
+        asyncio.run(scenario())
+
+
+def test_get_max_spread_points_uses_symbol_specific_thresholds():
+    """Vérifie que les indices critiques utilisent leurs seuils dédiés."""
+    service = MT5Service(mock_mode=True)
+
+    assert service.get_max_spread_points("US30.cash") == 250
+    assert service.get_max_spread_points("GER40.cash") == 300
+    assert service.get_max_spread_points("US500.cash") == 70
+    assert service.get_max_spread_points("US100.cash") == 120
+
+
+def test_get_max_spread_points_keeps_family_defaults():
+    """Vérifie les seuils de repli pour forex, métal et crypto."""
+    service = MT5Service(mock_mode=True)
+
+    assert service.get_max_spread_points("EURUSD") == 25
+    assert service.get_max_spread_points("XAUUSD") == 60
+    assert service.get_max_spread_points("BTCUSD") == 1500
+    assert service.get_max_spread_points("ETHUSD.e") == 1500
 
 
 def test_get_symbol_risk_sizing_hint_reads_mt5_metadata():

@@ -4,14 +4,64 @@ GÃ¨re la connexion et l'exÃ©cution des ordres sur MT5
 """
 
 import asyncio
+import json
 import logging
+import os
 import sys
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_FLOOR
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared import AccountBalance, Position, TradeAction, TradeOrder, get_settings
+from shared.models import AccountBalance, Position, TradeAction, TradeOrder
+
+try:
+    from shared.config import get_settings
+except ImportError:
+    class _SecretFallback:
+        """Secret minimal pour les environnements client sans configuration serveur."""
+
+        def __init__(self, value: str = "") -> None:
+            """Initialise le secret fallback.
+
+            Args:
+                value (str): Valeur secrete brute.
+            """
+
+            self.value = value
+
+        def get_secret_value(self) -> str:
+            """Retourne la valeur secrete brute.
+
+            Returns:
+                str: Valeur secrete.
+            """
+
+            return self.value
+
+    class _MT5SettingsFallback:
+        """Configuration minimale pour lancer MT5Service hors stack serveur."""
+
+        mock_mt5 = True
+        mt5_login = 0
+        mt5_password = _SecretFallback("")
+        mt5_server = ""
+        mt5_terminal_path = ""
+        mt5_terminal_portable = False
+        mt5_terminal_timeout_ms = 60000
+        mt5_duplicate_order_cooldown_seconds = 5
+        mt5_reconnect_cooldown_seconds = 15
+        mt5_warning_cooldown_seconds = 30
+
+    def get_settings() -> _MT5SettingsFallback:
+        """Retourne une configuration MT5 minimale.
+
+        Returns:
+            _MT5SettingsFallback: Valeurs par defaut suffisantes pour le follower.
+        """
+
+        return _MT5SettingsFallback()
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +197,23 @@ class MT5Service:
             getattr(settings, "mt5_try_alternate_portable_mode", True)
         )
         self._terminal_timeout_ms = max(1000, int(terminal_timeout_ms or 60000))
+        self._initialize_retries = max(1, int(getattr(settings, "mt5_initialize_retries", 3)))
+        self._initialize_retry_delay_seconds = max(
+            1.0,
+            float(getattr(settings, "mt5_initialize_retry_delay_seconds", 5.0)),
+        )
+        self._account_info_wait_attempts = max(
+            1,
+            int(getattr(settings, "mt5_account_info_wait_attempts", 5)),
+        )
+        self._account_info_wait_delay_seconds = max(
+            0.2,
+            float(getattr(settings, "mt5_account_info_wait_delay_seconds", 1.5)),
+        )
+        self._login_retries = max(1, int(getattr(settings, "mt5_login_retries", 2)))
+        self._instance_name = os.getenv("BANKER_INSTANCE_NAME", "").strip()
+        self._account_claim_path: Path | None = None
+        self._account_claim_key: str | None = None
         logger.info(
             "MT5Service initialise (mock_explicite=%s, mock_actif=%s, login=%s, server=%s, terminal=%s, portable=%s, alternance_portable=%s)",
             self._explicit_mock_mode,
@@ -175,6 +242,10 @@ class MT5Service:
         }
         if self._terminal_path:
             init_kwargs["path"] = self._terminal_path
+        if self._login and self._password and self._server:
+            init_kwargs["login"] = self._login
+            init_kwargs["password"] = self._password
+            init_kwargs["server"] = self._server
         if portable_mode:
             init_kwargs["portable"] = True
         return init_kwargs
@@ -199,6 +270,95 @@ class MT5Service:
             if alternate_kwargs != attempts[0]:
                 attempts.append(alternate_kwargs)
         return attempts
+
+    async def _initialize_terminal(self) -> tuple[bool, Any]:
+        """
+        Initialise MT5 avec retry court et credentials explicites.
+
+        Le login est injecte directement dans `MetaTrader5.initialize` pour
+        eviter les fenetres interactives de connexion au demarrage.
+
+        Returns:
+            tuple[bool, Any]: True et None si l'initialisation reussit,
+                sinon False et la derniere erreur MT5 observee.
+        """
+        initialize_attempts = self._build_initialize_attempts()
+        last_initialize_error: Any = None
+
+        for retry_index in range(1, self._initialize_retries + 1):
+            for attempt_index, init_kwargs in enumerate(initialize_attempts, start=1):
+                try:
+                    await asyncio.to_thread(mt5.shutdown)
+                except Exception:
+                    pass
+
+                if await asyncio.to_thread(mt5.initialize, **init_kwargs):
+                    return True, None
+
+                last_initialize_error = mt5.last_error()
+                logger.warning(
+                    "Initialisation MT5 echouee (cycle %s/%s, tentative %s/%s, portable=%s, terminal=%s): %s",
+                    retry_index,
+                    self._initialize_retries,
+                    attempt_index,
+                    len(initialize_attempts),
+                    bool(init_kwargs.get("portable", False)),
+                    init_kwargs.get("path", self._terminal_path or "<terminal-auto>"),
+                    last_initialize_error,
+                )
+
+            if retry_index < self._initialize_retries:
+                logger.warning(
+                    "MT5: nouvel essai d'initialisation dans %.1f secondes.",
+                    self._initialize_retry_delay_seconds,
+                )
+                await asyncio.sleep(self._initialize_retry_delay_seconds)
+
+        return False, last_initialize_error
+
+    async def _wait_for_account_info(self) -> Any | None:
+        """
+        Attend que MT5 expose les informations du compte courant.
+
+        Returns:
+            Any | None: Objet `account_info` MT5 si disponible, sinon None.
+        """
+        for attempt_index in range(1, self._account_info_wait_attempts + 1):
+            account_info = await asyncio.to_thread(mt5.account_info)
+            if account_info:
+                return account_info
+            if attempt_index < self._account_info_wait_attempts:
+                await asyncio.sleep(self._account_info_wait_delay_seconds)
+        return None
+
+    async def _login_account(self) -> bool:
+        """
+        Connecte explicitement le compte MT5 configure.
+
+        Returns:
+            bool: True si MT5 accepte les identifiants, False sinon.
+        """
+        for attempt_index in range(1, self._login_retries + 1):
+            authorized = await asyncio.to_thread(
+                mt5.login,
+                login=self._login,
+                password=self._password,
+                server=self._server,
+            )
+            if authorized:
+                return True
+
+            logger.warning(
+                "MT5 login echoue pour %s@%s (tentative %s/%s): %s",
+                self._login,
+                self._server,
+                attempt_index,
+                self._login_retries,
+                mt5.last_error(),
+            )
+            if attempt_index < self._login_retries:
+                await asyncio.sleep(self._initialize_retry_delay_seconds)
+        return False
 
     def _live_mode_requested(self) -> bool:
         """
@@ -249,6 +409,188 @@ class MT5Service:
         """
         if self._should_emit_offline_warning():
             logger.warning(message, *args)
+
+    def _get_runtime_process_id(self) -> int:
+        """
+        Retourne le PID courant de l'instance Banker.
+
+        Returns:
+            int: Identifiant du processus local.
+        """
+        return os.getpid()
+
+    def _get_account_claim_directory(self) -> Path:
+        """
+        Retourne le repertoire local de verrous par compte MT5.
+
+        Returns:
+            Path: Dossier des verrous `login@server`.
+        """
+        return Path.cwd() / "logs" / "mt5_account_claims"
+
+    def _build_account_claim_key(self, login: int, server: str) -> str:
+        """
+        Construit une cle stable de verrou pour un compte MT5.
+
+        Args:
+            login (int): Login du compte MT5.
+            server (str): Serveur associe au compte.
+
+        Returns:
+            str: Cle exploitable dans un nom de fichier local.
+        """
+        clean_server = "".join(
+            char if char.isalnum() or char in ("-", "_") else "_"
+            for char in (server or "unknown")
+        )
+        return f"{clean_server}__{login}"
+
+    def _is_process_alive(self, pid: int | None) -> bool:
+        """
+        Indique si un PID local semble encore vivant.
+
+        Args:
+            pid (int | None): PID a verifier.
+
+        Returns:
+            bool: True si le processus existe encore.
+        """
+        if not pid or pid <= 0:
+            return False
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                process_query_limited_information = 0x1000
+                handle = ctypes.windll.kernel32.OpenProcess(
+                    process_query_limited_information,
+                    False,
+                    int(pid),
+                )
+                if handle:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+                    return True
+                return False
+            except Exception:
+                return False
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def _release_account_claim(self) -> None:
+        """
+        Libere le verrou local du compte si l'instance en est proprietaire.
+        """
+        if self._account_claim_path is None:
+            return
+
+        try:
+            if self._account_claim_path.exists():
+                try:
+                    payload = json.loads(self._account_claim_path.read_text(encoding="utf-8"))
+                except Exception:
+                    payload = {}
+                if payload.get("pid") in {None, self._get_runtime_process_id()}:
+                    self._account_claim_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("Impossible de liberer le verrou local MT5: %s", exc)
+        finally:
+            self._account_claim_path = None
+            self._account_claim_key = None
+
+    def _claim_account(self, login: int, server: str) -> bool:
+        """
+        Reserve localement un compte MT5 pour eviter les doublons d'instance.
+
+        Args:
+            login (int): Login MT5 reellement ouvert.
+            server (str): Serveur MT5 reellement ouvert.
+
+        Returns:
+            bool: True si le compte est reserve pour cette instance.
+        """
+        if not login:
+            logger.error("Refus de revendiquer un compte MT5 sans login valide.")
+            return False
+
+        claim_dir = self._get_account_claim_directory()
+        claim_dir.mkdir(parents=True, exist_ok=True)
+
+        claim_key = self._build_account_claim_key(login, server)
+        claim_path = claim_dir / f"{claim_key}.json"
+        current_pid = self._get_runtime_process_id()
+
+        if self._account_claim_key == claim_key and self._account_claim_path == claim_path:
+            return True
+
+        if self._account_claim_path is not None:
+            self._release_account_claim()
+
+        payload = {
+            "pid": current_pid,
+            "login": login,
+            "server": server,
+            "instance_name": self._instance_name,
+            "terminal_path": self._terminal_path,
+            "port": os.getenv("BANKER_API_PORT", ""),
+            "claimed_at": datetime.now().isoformat(),
+        }
+
+        for _ in range(2):
+            try:
+                fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                try:
+                    existing_payload = json.loads(claim_path.read_text(encoding="utf-8"))
+                except Exception:
+                    existing_payload = {}
+
+                existing_pid = existing_payload.get("pid")
+                if existing_pid == current_pid:
+                    self._account_claim_path = claim_path
+                    self._account_claim_key = claim_key
+                    return True
+
+                if self._is_process_alive(existing_pid):
+                    logger.error(
+                        "Refus de demarrage: le compte MT5 %s@%s est deja utilise par le PID %s (instance=%s, port=%s).",
+                        login,
+                        server,
+                        existing_pid,
+                        existing_payload.get("instance_name") or "<inconnue>",
+                        existing_payload.get("port") or "<inconnu>",
+                    )
+                    return False
+
+                try:
+                    claim_path.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning(
+                        "Impossible de purger un verrou MT5 stale pour %s@%s: %s",
+                        login,
+                        server,
+                        exc,
+                    )
+                    return False
+                continue
+
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+            self._account_claim_path = claim_path
+            self._account_claim_key = claim_key
+            return True
+
+        logger.error(
+            "Impossible de revendiquer le compte MT5 %s@%s apres purge du verrou stale.",
+            login,
+            server,
+        )
+        return False
 
     async def _ensure_live_connection(self, reason: str, *, force: bool = False) -> bool:
         """
@@ -403,32 +745,9 @@ class MT5Service:
 
         try:
             # Certains terminaux brokers n'exposent le bridge IPC qu'en mode
-            # portable (ou l'inverse). On tente donc les deux profils avant
-            # de declarer le terminal hors ligne.
-            initialize_attempts = self._build_initialize_attempts()
-            last_initialize_error: Any = None
-            initialized = False
-
-            for attempt_index, init_kwargs in enumerate(initialize_attempts, start=1):
-                try:
-                    await asyncio.to_thread(mt5.shutdown)
-                except Exception:
-                    pass
-
-                if await asyncio.to_thread(mt5.initialize, **init_kwargs):
-                    initialized = True
-                    break
-
-                last_initialize_error = mt5.last_error()
-                logger.warning(
-                    "Initialisation MT5 echouee (tentative %s/%s, portable=%s, terminal=%s): %s",
-                    attempt_index,
-                    len(initialize_attempts),
-                    bool(init_kwargs.get("portable", False)),
-                    init_kwargs.get("path", self._terminal_path or "<terminal-auto>"),
-                    last_initialize_error,
-                )
-
+            # portable (ou l'inverse). Le login est injecte pendant
+            # l'initialisation pour eviter les prompts interactifs MT5.
+            initialized, last_initialize_error = await self._initialize_terminal()
             if not initialized:
                 self._mark_live_disconnected(
                     f"Echec d'initialisation MT5: {last_initialize_error}"
@@ -436,20 +755,26 @@ class MT5Service:
                 return False
 
             # Verifier si le terminal est deja connecte au bon compte
-            account_info = await asyncio.to_thread(mt5.account_info)
+            account_info = await self._wait_for_account_info()
             if account_info and account_info.login == self._login:
                 logger.info(f"MT5 deja connecte: compte {account_info.login} sur {account_info.server} "
                            f"(Balance: {account_info.balance}, Equity: {account_info.equity})")
             elif self._login and self._password and self._server:
                 # Login automatique si credentials fournis et pas encore connecte
-                authorized = await asyncio.to_thread(
-                    mt5.login,
-                    login=self._login,
-                    password=self._password,
-                    server=self._server
-                )
+                authorized = await self._login_account()
                 if authorized:
-                    account_info = await asyncio.to_thread(mt5.account_info)
+                    account_info = await self._wait_for_account_info()
+                    if not account_info or account_info.login != self._login:
+                        seen = (
+                            f"{getattr(account_info, 'login', None)}@{getattr(account_info, 'server', None)}"
+                            if account_info
+                            else "<aucun compte>"
+                        )
+                        await asyncio.to_thread(mt5.shutdown)
+                        self._mark_live_disconnected(
+                            f"MT5 login accepte mais compte attendu indisponible: attendu {self._login}@{self._server}, vu {seen}."
+                        )
+                        return False
                     logger.info(f"MT5 login reussi: compte {self._login} sur {self._server}")
                 else:
                     # Certains terminaux restent connectes a un ancien compte.
@@ -468,22 +793,29 @@ class MT5Service:
                             account_info.balance,
                         )
                     else:
-                        logger.error(
-                            "MT5 login echoue pour %s@%s: %s",
-                            self._login,
-                            self._server,
-                            mt5.last_error(),
-                        )
                         await asyncio.to_thread(mt5.shutdown)
                         self._mark_live_disconnected(
                             f"Impossible d'ouvrir la session MT5 {self._login}@{self._server}."
                         )
                         return False
+            elif account_info and self._login and account_info.login != self._login:
+                await asyncio.to_thread(mt5.shutdown)
+                self._mark_live_disconnected(
+                    f"MT5 connecte au mauvais compte: attendu {self._login}, vu {account_info.login}@{account_info.server}."
+                )
+                return False
             elif account_info:
                 logger.info(f"MT5 connecte: compte {account_info.login} sur {account_info.server}")
             else:
                 self._mark_live_disconnected("MT5 initialise mais aucun compte n'est connecte.")
                 await asyncio.to_thread(mt5.shutdown)
+                return False
+
+            if not self._claim_account(account_info.login, account_info.server):
+                await asyncio.to_thread(mt5.shutdown)
+                self._mark_live_disconnected(
+                    f"Compte MT5 deja revendique par une autre instance: {account_info.login}@{account_info.server}."
+                )
                 return False
 
             self.mock_mode = False
@@ -708,6 +1040,7 @@ class MT5Service:
 
     async def disconnect(self) -> None:
         """DÃ©connexion de MT5"""
+        self._release_account_claim()
         if not self.mock_mode and MT5_AVAILABLE:
             await asyncio.to_thread(mt5.shutdown)
         self.is_connected = False
@@ -746,6 +1079,8 @@ class MT5Service:
         return AccountBalance(
             login=info.login,
             server=info.server,
+            name=str(getattr(info, "name", "") or ""),
+            company=str(getattr(info, "company", "") or ""),
             balance=Decimal(str(info.balance)),
             equity=Decimal(str(info.equity)),
             margin=Decimal(str(info.margin)),
@@ -799,6 +1134,7 @@ class MT5Service:
                     swap=Decimal(str(getattr(pos, "swap", 0.0))),
                     commission=Decimal(str(getattr(pos, "commission", 0.0))),
                     magic_number=pos.magic,
+                    comment=str(getattr(pos, "comment", "") or ""),
                     open_time=datetime.fromtimestamp(pos.time),
                 )
             )
@@ -1087,6 +1423,78 @@ class MT5Service:
         return any(token in normalized_symbol for token in index_tokens)
 
     @staticmethod
+    def _normalize_symbol_for_spread(symbol: str) -> str:
+        """Normalise un symbole pour résoudre un seuil de spread stable.
+
+        Args:
+            symbol (str): Symbole brut provenant du signal ou de MT5.
+
+        Returns:
+            str: Symbole normalisé en majuscules sans suffixe broker.
+        """
+        normalized_symbol = str(symbol or "").strip().upper()
+        for suffix in (".CASH", ".E", ".M"):
+            if normalized_symbol.endswith(suffix):
+                normalized_symbol = normalized_symbol[: -len(suffix)]
+        return normalized_symbol
+
+    def get_max_spread_points(self, symbol: str) -> int:
+        """Retourne le spread maximal autorisé pour un symbole.
+
+        Args:
+            symbol (str): Symbole à contrôler.
+
+        Returns:
+            int: Seuil de spread en points.
+        """
+        normalized_symbol = self._normalize_symbol_for_spread(symbol)
+        per_symbol_thresholds = {
+            "US30": 250,
+            # FTUK cote regulierement le DAX autour de 277-281 points au
+            # moment des ouvertures. Un seuil a 220 coupe des ordres valides
+            # sur tous les followers alors que le master reste sain.
+            "GER40": 300,
+            "DE40": 300,
+            "US500": 70,
+            "US100": 120,
+            "USTEC": 120,
+            "XAUUSD": 60,
+            "BTCUSD": 1500,
+            "ETHUSD": 1500,
+        }
+        if normalized_symbol in per_symbol_thresholds:
+            return per_symbol_thresholds[normalized_symbol]
+        if "XAU" in normalized_symbol:
+            return 60
+        if "BTC" in normalized_symbol or "ETH" in normalized_symbol:
+            return 1500
+        if self._is_index_symbol(normalized_symbol):
+            return 350
+        return 25
+
+    def get_spread_guard_profile(self) -> dict[str, Any]:
+        """Expose le profil de spread effectivement chargé.
+
+        Returns:
+            dict[str, Any]: Profil courant et seuils résolus par symbole.
+        """
+        thresholds = {
+            "EURUSD": self.get_max_spread_points("EURUSD"),
+            "XAUUSD": self.get_max_spread_points("XAUUSD"),
+            "US30.cash": self.get_max_spread_points("US30.cash"),
+            "GER40.cash": self.get_max_spread_points("GER40.cash"),
+            "US100.cash": self.get_max_spread_points("US100.cash"),
+            "US500.cash": self.get_max_spread_points("US500.cash"),
+            "BTCUSD": self.get_max_spread_points("BTCUSD"),
+            "ETHUSD": self.get_max_spread_points("ETHUSD"),
+        }
+        return {
+            "profile": "per_symbol_v611",
+            "default_forex_major": 25,
+            "thresholds": thresholds,
+        }
+
+    @staticmethod
     def _resolve_filling_mode(symbol_info: Any) -> int:
         """
         Selectionne un mode de remplissage compatible avec le broker.
@@ -1229,14 +1637,7 @@ class MT5Service:
                 # eviter un ordre valide au calcul mais invalide au moment du deal.
                 current_spread = (price.ask - price.bid) / point
 
-                max_spread = 25
-                sym = order.symbol.upper()
-                if "XAU" in sym:
-                    max_spread = 60
-                elif "BTC" in sym or "ETH" in sym:
-                    max_spread = 1500
-                elif self._is_index_symbol(sym):
-                    max_spread = 350
+                max_spread = self.get_max_spread_points(order.symbol)
 
                 if current_spread > max_spread:
                     logger.warning(
@@ -1309,10 +1710,21 @@ class MT5Service:
 
                 if result.retcode == mt5.TRADE_RETCODE_DONE:
                     order_executed = True
+                    logger.info(
+                        "Ordre MT5 execute: %s %s %s | ticket=%s | deal=%s | commentaire=%s",
+                        order.action.value,
+                        normalized_volume,
+                        order.symbol,
+                        getattr(result, "order", None),
+                        getattr(result, "deal", None),
+                        safe_comment,
+                    )
                     return {
                         "success": True,
                         "ticket": result.order,
+                        "deal": getattr(result, "deal", None),
                         "normalized_volume": float(normalized_volume),
+                        "comment": safe_comment,
                         "message": (
                             f"Ordre execute: {order.action.value} {normalized_volume} "
                             f"{order.symbol} (tentative {attempt + 1})"
@@ -1332,6 +1744,14 @@ class MT5Service:
                     await asyncio.sleep(1.0)
                     continue
 
+                logger.warning(
+                    "Ordre MT5 refuse: %s %s %s | retcode=%s | message=%s",
+                    order.action.value,
+                    normalized_volume,
+                    order.symbol,
+                    result.retcode,
+                    result.comment,
+                )
                 return {
                     "success": False,
                     "message": f"Erreur MT5: {result.comment}",
@@ -1561,6 +1981,7 @@ class MT5Service:
             take_profit=order.take_profit_price,
             profit=Decimal("0"),
             magic_number=order.magic_number,
+            comment=order.comment,
             open_time=datetime.now(),
         )
         self._mock_positions.append(position)

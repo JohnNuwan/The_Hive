@@ -139,6 +139,11 @@ class Settings(BaseSettings):
     mt5_terminal_portable: bool = False
     mt5_try_alternate_portable_mode: bool = True
     mt5_terminal_timeout_ms: int = 60000
+    mt5_initialize_retries: int = 3
+    mt5_initialize_retry_delay_seconds: float = 5.0
+    mt5_account_info_wait_attempts: int = 5
+    mt5_account_info_wait_delay_seconds: float = 1.5
+    mt5_login_retries: int = 2
     mt5_duplicate_order_cooldown_seconds: int = 20
     mt5_reconnect_cooldown_seconds: int = 15
     mt5_warning_cooldown_seconds: int = 30
@@ -146,6 +151,8 @@ class Settings(BaseSettings):
     banker_ghost_fragmentation_enabled: bool = False
     banker_ghost_fragmentation_min_volume: float = 0.20
     banker_copy_targets_json: str = ""
+    banker_copy_enabled_logins: str = ""
+    banker_copy_disabled_logins: str = ""
     banker_copy_request_timeout_seconds: float = 10.0
 
     # Constitution Loi 2 - Limites de risque
@@ -153,6 +160,8 @@ class Settings(BaseSettings):
     risk_max_total_drawdown_percent: float = 8.0
     risk_max_single_trade_percent: float = 1.0
     risk_max_open_positions: int = 3
+    risk_follower_max_open_positions: int = 12
+    risk_ignore_uncommented_positions: bool = False
     risk_anti_tilt_losses: int = 2
     risk_anti_tilt_duration_hours: int = 24
     risk_news_filter_minutes: int = 30

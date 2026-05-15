@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -52,6 +53,7 @@ from eva_lab.training_utils import (
     get_horizon_history_bars,
     infer_family_from_symbols,
     load_history_frame,
+    resolve_model_family,
     resolve_feature_profile,
 )
 
@@ -59,12 +61,74 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("eva_lab.train_muzero")
 
 
+def _resolve_collection_runtime_budget(
+    symbol: str,
+    config: MuZeroConfigV3,
+) -> dict[str, float | int | str]:
+    """Resout un budget de collecte adapte a la famille du symbole.
+
+    Les indices deviennent tres couteux avec un MCTS profond. Sans budget
+    dedie, la collecte passe surtout son temps a expirer sur `US30.cash`
+    avant de produire des episodes exploitables.
+
+    Args:
+        symbol (str): Symbole collecte.
+        config (MuZeroConfigV3): Configuration MuZero courante.
+
+    Returns:
+        dict[str, float | int | str]: Budget effectif de collecte.
+    """
+
+    family = resolve_model_family(symbol=symbol)
+    simulations = int(
+        getattr(config, "collection_num_simulations", config.num_simulations)
+        or config.num_simulations
+    )
+    max_moves = int(
+        getattr(config, "collection_max_moves", config.max_moves)
+        or config.max_moves
+    )
+    max_episode_seconds = float(
+        getattr(config, "collection_max_episode_seconds", 0.0) or 0.0
+    )
+
+    if family == "indices":
+        simulations = max(
+            32,
+            min(
+                simulations,
+                int(os.getenv("MUZERO_COLLECTION_NUM_SIMULATIONS_INDICES", "192")),
+            ),
+        )
+        max_moves = max(
+            48,
+            min(
+                max_moves,
+                int(os.getenv("MUZERO_COLLECTION_MAX_MOVES_INDICES", "96")),
+            ),
+        )
+        max_episode_seconds = max(
+            120.0,
+            min(
+                max_episode_seconds,
+                float(os.getenv("MUZERO_COLLECTION_MAX_EPISODE_SECONDS_INDICES", "180")),
+            ),
+        )
+
+    return {
+        "family": family,
+        "collection_num_simulations": simulations,
+        "collection_max_moves": max_moves,
+        "collection_max_episode_seconds": max_episode_seconds,
+    }
+
 
 def build_environment(
     symbol: str,
     config: MuZeroConfigV3,
     *,
     training_progress_step: int = 0,
+    for_collection: bool = False,
 ) -> TradingEnvironment | None:
     """Construit l'environnement MuZero a partir de l'historique du symbole.
 
@@ -73,6 +137,8 @@ def build_environment(
         config (MuZeroConfigV3): Configuration MuZero active.
         training_progress_step (int): Etape d'optimisation a refléter dans
             le curriculum de self-play.
+        for_collection (bool): Active les garde-fous specifiques a la
+            collecte, notamment un horizon d'episode plus court.
 
     Returns:
         TradingEnvironment | None: Environnement pret ou ``None`` si
@@ -89,7 +155,22 @@ def build_environment(
         logger.warning("Historique insuffisant pour %s sur %s.", symbol, config.primary_timeframe)
         return None
 
-    max_steps = min(config.max_moves, market_data.shape[0] - 101)
+    collection_budget = (
+        _resolve_collection_runtime_budget(symbol, config)
+        if for_collection
+        else {}
+    )
+    max_steps_budget = (
+        int(
+            collection_budget.get(
+                "collection_max_moves",
+                getattr(config, "collection_max_moves", config.max_moves),
+            )
+        )
+        if for_collection
+        else int(config.max_moves)
+    )
+    max_steps = min(max_steps_budget, market_data.shape[0] - 101)
     env = TradingEnvironment(
         data=market_data,
         day_labels=day_labels,
@@ -100,8 +181,79 @@ def build_environment(
         training_progress_step=int(training_progress_step or 0),
     )
     setattr(env, "dataset_source", str(frame.attrs.get("dataset_source") or getattr(config, "dataset_source", "csv")))
+    setattr(env, "dataset_last_bar_at", frame.attrs.get("dataset_last_bar_at"))
+    setattr(env, "dataset_lag_hours", frame.attrs.get("dataset_lag_hours"))
+    setattr(env, "dataset_stale", frame.attrs.get("dataset_stale"))
+    if for_collection:
+        setattr(
+            env,
+            "collection_num_simulations",
+            int(
+                collection_budget.get(
+                    "collection_num_simulations",
+                    getattr(config, "collection_num_simulations", config.num_simulations),
+                )
+            ),
+        )
+        setattr(
+            env,
+            "collection_max_episode_seconds",
+            float(
+                collection_budget.get(
+                    "collection_max_episode_seconds",
+                    getattr(config, "collection_max_episode_seconds", 0.0) or 0.0,
+                )
+            ),
+        )
+        setattr(env, "collection_budget_family", str(collection_budget.get("family") or "mixed"))
     return env
 
+
+def _collect_single_muzero_game(
+    *,
+    symbol: str,
+    config: MuZeroConfigV3,
+    params: Any,
+    opt_state: Any,
+    training_step_count: int,
+) -> tuple[Any | None, dict[str, object], str | None]:
+    """Collecte une partie MuZero isolee pour un symbole donne.
+
+    Cette variante sert a parallelliser la collecte entre plusieurs
+    parties independantes sans partager le replay buffer principal.
+
+    Args:
+        symbol (str): Symbole cible.
+        config (MuZeroConfigV3): Configuration MuZero active.
+        params (Any): Poids MuZero courants.
+        opt_state (Any): Etat d'optimiseur courant.
+        training_step_count (int): Etape de progression a refleter.
+
+    Returns:
+        tuple[Any | None, dict[str, object], str | None]: Partie collectee,
+        resume d'episode et raison d'arret eventuelle.
+    """
+    env = build_environment(
+        symbol,
+        config,
+        training_progress_step=int(training_step_count or 0),
+        for_collection=True,
+    )
+    if env is None:
+        return None, {}, "historique_inutilisable"
+
+    worker_agent = JAXMuZeroAgent(config)
+    worker_agent.params = params
+    worker_agent.opt_state = opt_state
+    worker_agent.training_step_count = int(training_step_count or 0)
+    game = worker_agent.play_game(
+        env,
+        exploration=True,
+        progress_callback=None,
+    )
+    summary = dict(env.get_summary() or {})
+    stopped_reason = str(game.metadata.get("stopped_reason") or "").strip()
+    return game, summary, (stopped_reason or None)
 
 
 def _is_gold_proxy_precheck_enabled(
@@ -312,6 +464,48 @@ def _to_metric_float(
         return float(default)
 
 
+def _coerce_metric_mapping(
+    raw_value: object,
+    *,
+    default: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Convertit une metrique libre en dictionnaire robuste.
+
+    Certaines metriques `*_by_symbol` sont persistees sous forme de chaine
+    Python (`"{'EURUSD': 0.41}"`) dans les snapshots intermediaires. Le
+    precheck policy doit accepter ces deux formats sans interrompre le run.
+
+    Args:
+        raw_value (object): Valeur source brute.
+        default (dict[str, object] | None): Valeur de repli.
+
+    Returns:
+        dict[str, object]: Dictionnaire exploitable, ou le repli si la
+            conversion echoue.
+    """
+    fallback = dict(default or {})
+    if raw_value is None:
+        return fallback
+    if isinstance(raw_value, dict):
+        return dict(raw_value)
+    if isinstance(raw_value, str):
+        payload = raw_value.strip()
+        if not payload:
+            return fallback
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                parsed_value = parser(payload)
+            except (json.JSONDecodeError, SyntaxError, ValueError, TypeError):
+                continue
+            if isinstance(parsed_value, dict):
+                return dict(parsed_value)
+        return fallback
+    try:
+        return dict(raw_value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+
+
 def _normalize_rate(value: float) -> float:
     """Normalise un taux qui peut etre exprime en ratio ou en pourcentage.
 
@@ -362,6 +556,37 @@ def _resolve_loss_pol_per_head(
         return explicit_per_head
     loss_pol = _to_metric_float(metrics, "loss_pol", default=default)
     return loss_pol / _resolve_policy_head_weight_sum(config)
+
+
+def _build_arena_cutover_status(step: int) -> dict[str, object]:
+    """Construit l'etat de la fenetre de cutover Arena tardive.
+
+    Args:
+        step (int): Etape d'optimisation courante.
+
+    Returns:
+        dict[str, object]: Indicateurs de readiness Arena et fenetre active.
+    """
+    ordered_steps = (10000, 12000, 14000)
+    if step < ordered_steps[0]:
+        return {
+            "arena_cutover_ready": False,
+            "screen_window": "before_ckpt10000",
+        }
+    if step < ordered_steps[1]:
+        return {
+            "arena_cutover_ready": True,
+            "screen_window": "ckpt10000_to_11999",
+        }
+    if step < ordered_steps[2]:
+        return {
+            "arena_cutover_ready": True,
+            "screen_window": "ckpt12000_to_13999",
+        }
+    return {
+        "arena_cutover_ready": True,
+        "screen_window": "ckpt14000_plus",
+    }
 
 
 def _evaluate_policy_precheck_window(
@@ -420,6 +645,10 @@ def _evaluate_policy_precheck_window(
         _resolve_loss_pol_per_head(item, config=config, default=999.0)
         for item in history
     ]
+    loss_root_values = [_to_metric_float(item, "loss_pol_root", default=999.0) for item in history]
+    loss_unroll_mean_values = [
+        _to_metric_float(item, "loss_pol_unroll_mean", default=999.0) for item in history
+    ]
     top1_values = [_to_metric_float(item, "policy_top1_share", default=0.0) for item in history]
     entropy_values = [_to_metric_float(item, "policy_entropy", default=1.0) for item in history]
     root_mask_values = [_to_metric_float(item, "root_mask_rate", default=1.0) for item in history]
@@ -455,8 +684,8 @@ def _evaluate_policy_precheck_window(
         getattr(config, "policy_precheck_min_symbol_close_events", 6) or 6
     )
     for item in history:
-        close_quality_by_symbol = dict(item.get("close_quality_by_symbol") or {})
-        close_events_by_symbol = dict(item.get("close_events_by_symbol") or {})
+        close_quality_by_symbol = _coerce_metric_mapping(item.get("close_quality_by_symbol"))
+        close_events_by_symbol = _coerce_metric_mapping(item.get("close_events_by_symbol"))
         good_symbol_count = 0
         for symbol, raw_quality in close_quality_by_symbol.items():
             try:
@@ -474,6 +703,8 @@ def _evaluate_policy_precheck_window(
     medians = {
         "loss_pol": statistics.median(loss_values),
         "loss_pol_per_head": statistics.median(loss_per_head_values),
+        "loss_pol_root": statistics.median(loss_root_values),
+        "loss_pol_unroll_mean": statistics.median(loss_unroll_mean_values),
         "policy_top1_share": statistics.median(top1_values),
         "policy_entropy": statistics.median(entropy_values),
         "root_mask_rate": statistics.median(root_mask_values),
@@ -499,14 +730,28 @@ def _evaluate_policy_precheck_window(
             if len(loss_per_head_values) >= 2
             else 0.0
         ),
+        "loss_pol_root_trend": _compute_metric_trend("loss_pol_root", default=999.0),
+        "loss_pol_unroll_mean_trend": _compute_metric_trend(
+            "loss_pol_unroll_mean",
+            default=999.0,
+        ),
         "root_mask_rate_trend": _compute_metric_trend("root_mask_rate", default=1.0),
         "split_runner_capture_trend": _compute_metric_trend("split_runner_capture_rate", default=0.0),
         "pyramid_exit_capture_trend": _compute_metric_trend("pyramid_exit_capture_rate", default=0.0),
         "close_quality_score_trend": _compute_metric_trend("close_quality_score", default=0.0),
     }
+    late_policy_convergence = (
+        stage == "pre_arena"
+        and trends["loss_pol_root_trend"] <= -0.01
+        and trends["loss_pol_unroll_mean_trend"] <= -0.01
+    )
+    loss_pol_per_head_limit = float(
+        getattr(config, "policy_precheck_max_loss_pol_per_head", 1.12) or 1.12
+    )
     full_checks = {
-        "loss_pol_per_head": medians["loss_pol_per_head"] <= float(
-            getattr(config, "policy_precheck_max_loss_pol_per_head", 1.08) or 1.08
+        "loss_pol_per_head": (
+            medians["loss_pol_per_head"] <= loss_pol_per_head_limit
+            or late_policy_convergence
         ),
         "policy_top1_share": medians["policy_top1_share"] >= float(
             getattr(config, "policy_precheck_min_top1_share", 0.75) or 0.75
@@ -605,6 +850,9 @@ def _evaluate_policy_precheck_window(
         "screen_checks": screen_checks,
         "medians": medians,
         "trends": trends,
+        "arena_cutover_ready": _build_arena_cutover_status(step).get("arena_cutover_ready"),
+        "screen_window": _build_arena_cutover_status(step).get("screen_window"),
+        "late_policy_convergence": late_policy_convergence,
         "latest_metrics": dict(history[-1] or {}),
     }
 
@@ -1139,6 +1387,36 @@ def _select_recent_screen_checkpoints(
     if not available_checkpoints:
         return []
 
+    target_steps = [
+        int(step)
+        for step in list(getattr(config, "arena_screen_target_steps", []) or [])
+        if int(step) <= int(last_step)
+    ]
+    if target_steps:
+        checkpoints_by_step = {
+            int(item["checkpoint_step"]): dict(item)
+            for item in available_checkpoints
+        }
+        explicit_targets = [
+            {
+                **dict(checkpoints_by_step[step]),
+                "selection_anchor_step": step,
+                "selection_window": {
+                    "mode": "v6_12_late_target",
+                    "target_step": step,
+                    "target_steps": target_steps,
+                    "last_step": int(last_step),
+                },
+            }
+            for step in target_steps
+            if step in checkpoints_by_step
+        ]
+        if explicit_targets:
+            return sorted(
+                explicit_targets[-candidate_count:],
+                key=lambda item: int(item["checkpoint_step"]),
+            )
+
     recent_checkpoints = [
         dict(item)
         for item in available_checkpoints
@@ -1246,6 +1524,304 @@ def _select_best_screen_candidate(candidates: list[dict[str, object]]) -> dict[s
     return dict(ranked[0])
 
 
+def _build_champion_league_table(
+    *,
+    engine: str,
+    horizon: str,
+    screen_results: list[dict[str, object]],
+    selected_candidate_id: str | None,
+    battle_report: dict[str, object] | None = None,
+    promotion_result: dict[str, object] | None = None,
+    screen_gate: dict[str, object] | None = None,
+    family_probe_report: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    """Construit une table unique des candidats vus par le cycle.
+
+    Args:
+        engine (str): Moteur source du cycle.
+        horizon (str): Horizon evalue.
+        screen_results (list[dict[str, object]]): Resultats des screens.
+        selected_candidate_id (str | None): Identifiant du candidat retenu.
+        battle_report (dict[str, object] | None): Rapport full Arena.
+        promotion_result (dict[str, object] | None): Resultat de promotion.
+        screen_gate (dict[str, object] | None): Gate du screen.
+        family_probe_report (dict[str, object] | None): Rapport des probes.
+
+    Returns:
+        list[dict[str, object]]: Lignes de ligue triees par etape.
+    """
+    rows: list[dict[str, object]] = []
+    selected_path = str(
+        (battle_report or {}).get("challenger", {}).get("path")
+        if isinstance((battle_report or {}).get("challenger"), dict)
+        else ""
+    )
+    for item in screen_results:
+        report = dict(item.get("battle_report") or {})
+        challenger = dict(report.get("challenger") or {})
+        metrics = dict(challenger.get("metrics") or {})
+        checkpoint_step = int(item.get("checkpoint_step") or 0)
+        checkpoint_path = str(item.get("checkpoint_path") or "")
+        is_selected = bool(
+            selected_path
+            and checkpoint_path
+            and Path(selected_path).resolve() == Path(checkpoint_path).resolve()
+        )
+        candidate_id = (
+            selected_candidate_id
+            if is_selected and selected_candidate_id
+            else f"{engine}_{horizon}_ckpt{checkpoint_step}"
+        )
+        rows.append(
+            {
+                "candidate_id": candidate_id,
+                "algo_source": engine,
+                "horizon": horizon,
+                "stage": "screen",
+                "checkpoint_step": checkpoint_step,
+                "checkpoint_path": checkpoint_path,
+                "score_proxy": _to_metric_float(challenger.get("score")),
+                "score_nemesis": _to_metric_float(
+                    dict(report.get("nemesis_validation") or {}).get("score"),
+                    default=0.0,
+                ),
+                "score_arena": None,
+                "outcome": str(report.get("outcome") or "UNKNOWN"),
+                "promotion_possible": bool(
+                    str(report.get("outcome") or "").upper() == "VICTORY"
+                    and (
+                        not is_selected
+                        or bool((screen_gate or {}).get("allowed", False))
+                    )
+                ),
+                "profit_factor": _to_metric_float(metrics, "profit_factor"),
+                "return_pct": _to_metric_float(metrics, "return_pct"),
+                "drawdown_pct": _to_metric_float(metrics, "max_drawdown_pct", default=100.0),
+                "reason": _describe_battle_rejection(report, screen_gate if is_selected else None),
+            }
+        )
+
+    if battle_report:
+        challenger = dict(battle_report.get("challenger") or {})
+        metrics = dict(challenger.get("metrics") or {})
+        promotion_gate = dict((promotion_result or {}).get("promotion_gate") or {})
+        rows.append(
+            {
+                "candidate_id": selected_candidate_id or str(challenger.get("id") or ""),
+                "algo_source": engine,
+                "horizon": horizon,
+                "stage": "full_arena",
+                "checkpoint_step": None,
+                "checkpoint_path": str(challenger.get("path") or ""),
+                "score_proxy": None,
+                "score_nemesis": _to_metric_float(
+                    dict(battle_report.get("nemesis_validation") or {}).get("score"),
+                    default=0.0,
+                ),
+                "score_arena": _to_metric_float(challenger.get("score")),
+                "outcome": str(battle_report.get("outcome") or "UNKNOWN"),
+                "promotion_possible": bool(
+                    str(battle_report.get("outcome") or "").upper() == "VICTORY"
+                    and promotion_gate.get("allowed", False)
+                    and str((promotion_result or {}).get("status") or "") == "promoted"
+                ),
+                "profit_factor": _to_metric_float(metrics, "profit_factor"),
+                "return_pct": _to_metric_float(metrics, "return_pct"),
+                "drawdown_pct": _to_metric_float(metrics, "max_drawdown_pct", default=100.0),
+                "reason": _describe_battle_rejection(battle_report, promotion_gate),
+            }
+        )
+
+    if family_probe_report:
+        summary = dict(family_probe_report.get("family_probe_summary") or {})
+        if summary:
+            rows.append(
+                {
+                    "candidate_id": selected_candidate_id,
+                    "algo_source": engine,
+                    "horizon": horizon,
+                    "stage": "family_probe",
+                    "checkpoint_step": None,
+                    "checkpoint_path": None,
+                    "score_proxy": None,
+                    "score_nemesis": None,
+                    "score_arena": None,
+                    "outcome": "VICTORY" if summary.get("allowed", False) else "DEFEAT",
+                    "promotion_possible": bool(summary.get("allowed", False)),
+                    "profit_factor": None,
+                    "return_pct": None,
+                    "drawdown_pct": None,
+                    "reason": str(summary.get("reason") or "family_probe"),
+                }
+            )
+
+    return sorted(rows, key=lambda row: (str(row.get("stage") or ""), int(row.get("checkpoint_step") or 0)))
+
+
+def _build_champion_rejection_report(
+    *,
+    screen_gate: dict[str, object] | None = None,
+    promotion_gate: dict[str, object] | None = None,
+    battle_report: dict[str, object] | None = None,
+    family_probe_report: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Explique pourquoi le cycle n'a pas produit de champion.
+
+    Args:
+        screen_gate (dict[str, object] | None): Gate du screen tardif.
+        promotion_gate (dict[str, object] | None): Gate finale.
+        battle_report (dict[str, object] | None): Rapport full Arena.
+        family_probe_report (dict[str, object] | None): Rapport famille.
+
+    Returns:
+        dict[str, object]: Diagnostic compact et prochain override conseille.
+    """
+    gate = dict(promotion_gate or screen_gate or {})
+    metrics = dict(gate.get("metrics") or {})
+    battle = dict(battle_report or {})
+    challenger = dict(battle.get("challenger") or {})
+    if not metrics:
+        metrics = dict(challenger.get("metrics") or {})
+
+    failing_checks = [
+        key
+        for key, allowed in dict(gate.get("checks") or {}).items()
+        if allowed is False
+    ]
+    family_summary = dict((family_probe_report or {}).get("family_probe_summary") or {})
+    nemesis = dict(battle.get("nemesis_validation") or {})
+    weak_metrics = _rank_weak_champion_metrics(metrics)
+    symbol_blockers = _extract_symbol_blockers(metrics)
+    next_overrides = _recommend_next_champion_overrides(
+        failing_checks=failing_checks,
+        weak_metrics=weak_metrics,
+        nemesis_validation=nemesis,
+        family_probe_summary=family_summary,
+    )
+    return {
+        "status": "champion_found" if str((battle or {}).get("outcome") or "").upper() == "VICTORY" and gate.get("allowed", False) else "blocked",
+        "reason": (
+            str(gate.get("reason") or "")
+            or str(family_summary.get("reason") or "")
+            or _describe_battle_rejection(battle, gate)
+        ),
+        "failure_mode": str(gate.get("failure_mode") or ""),
+        "failing_checks": failing_checks,
+        "weak_metrics": weak_metrics,
+        "symbol_blockers": symbol_blockers,
+        "nemesis_validation": nemesis,
+        "family_probe_summary": family_summary,
+        "next_overrides": next_overrides,
+    }
+
+
+def _describe_battle_rejection(
+    battle_report: dict[str, object],
+    gate: dict[str, object] | None = None,
+) -> str:
+    """Retourne une raison lisible de rejet Arena.
+
+    Args:
+        battle_report (dict[str, object]): Rapport Arena.
+        gate (dict[str, object] | None): Gate associee.
+
+    Returns:
+        str: Raison compacte.
+    """
+    if gate and str(gate.get("reason") or "").strip():
+        return str(gate.get("reason"))
+    validation = dict(battle_report.get("validation") or {})
+    if str(battle_report.get("outcome") or "").upper() == "VICTORY":
+        return "victory"
+    if not validation.get("sample_size_ok", True):
+        return "sample_size"
+    if not validation.get("nemesis_ok", True):
+        return "nemesis_failed"
+    if not validation.get("inverse_ok", True):
+        return "inverse_beats_challenger"
+    if not validation.get("directional_ok", True):
+        return "directional_collapse"
+    return "score_edge_or_profitability"
+
+
+def _rank_weak_champion_metrics(metrics: dict[str, object]) -> list[dict[str, object]]:
+    """Classe les metriques les plus faibles pour piloter le prochain run."""
+
+    candidates = [
+        ("profit_factor", _to_metric_float(metrics, "profit_factor"), 1.20, "augmenter_pf"),
+        ("return_pct", _to_metric_float(metrics, "return_pct"), 0.0, "forcer_profit_net"),
+        ("expectancy_pct", _to_metric_float(metrics, "expectancy_pct"), 0.0, "augmenter_expectancy"),
+        ("close_quality_score", _to_metric_float(metrics, "close_quality_score"), 0.40, "corriger_sorties"),
+        ("split_runner_capture_rate", _to_metric_float(metrics, "split_runner_capture_rate"), 0.20, "forcer_split_runner"),
+        ("pyramid_exit_capture_rate", _to_metric_float(metrics, "pyramid_exit_capture_rate"), 0.20, "corriger_pyramid_exit"),
+        ("slbe_capture_rate", _to_metric_float(metrics, "slbe_capture_rate"), 0.30, "renforcer_slbe"),
+    ]
+    weak = [
+        {
+            "metric": name,
+            "value": value,
+            "target": target,
+            "override_hint": hint,
+        }
+        for name, value, target, hint in candidates
+        if value < target
+    ]
+    return sorted(weak, key=lambda item: float(item["value"]) - float(item["target"]))[:5]
+
+
+def _extract_symbol_blockers(metrics: dict[str, object]) -> list[dict[str, object]]:
+    """Extrait les symboles qui bloquent le plus la selection."""
+
+    blockers: list[dict[str, object]] = []
+    for symbol, payload in _coerce_metric_mapping(metrics.get("metrics_by_symbol")).items():
+        symbol_metrics = _coerce_metric_mapping(payload)
+        profit_factor = _to_metric_float(symbol_metrics, "profit_factor")
+        return_pct = _to_metric_float(symbol_metrics, "return_pct")
+        close_quality = _to_metric_float(symbol_metrics, "close_quality_score")
+        if profit_factor < 1.0 or return_pct <= 0.0 or close_quality < 0.25:
+            blockers.append(
+                {
+                    "symbol": symbol,
+                    "profit_factor": profit_factor,
+                    "return_pct": return_pct,
+                    "close_quality_score": close_quality,
+                }
+            )
+    return sorted(
+        blockers,
+        key=lambda item: (
+            _to_metric_float(item, "profit_factor"),
+            _to_metric_float(item, "return_pct"),
+        ),
+    )[:7]
+
+
+def _recommend_next_champion_overrides(
+    *,
+    failing_checks: list[str],
+    weak_metrics: list[dict[str, object]],
+    nemesis_validation: dict[str, object],
+    family_probe_summary: dict[str, object],
+) -> list[str]:
+    """Transforme les echecs en overrides concrets pour le cycle suivant."""
+
+    recommendations: list[str] = []
+    weak_names = {str(item.get("metric") or "") for item in weak_metrics}
+    if "profit_factor" in weak_names or "return_pct" in weak_names:
+        recommendations.append("augmenter le poids profit_factor/expectancy dans le screen et la fitness GA")
+    if "split_runner_capture_rate" in weak_names or "split_runner_capture_rate" in failing_checks:
+        recommendations.append("surponderer les episodes split + runner profitable dans le replay")
+    if "close_quality_score" in weak_names or "close_quality_score" in failing_checks:
+        recommendations.append("durcir le curriculum de sorties: TP partiel, SLBE, close tardif")
+    if "pyramid_exit_capture_rate" in weak_names:
+        recommendations.append("reduire les pyramids decoratives et favoriser les exits profitables")
+    if nemesis_validation and not bool(nemesis_validation.get("allowed", True)):
+        recommendations.append("injecter les slices Nemesis perdantes dans le prochain proxy GA")
+    if family_probe_summary and not bool(family_probe_summary.get("allowed", True)):
+        recommendations.append("forcer un univers multi-famille avant full Arena")
+    return recommendations[:5]
+
+
 @contextmanager
 def _temporary_env_overrides(overrides: dict[str, str]) -> Any:
     """Applique temporairement des variables d'environnement.
@@ -1283,9 +1859,13 @@ def _evaluate_screen_winner_gate(
     Returns:
         dict[str, object]: Verdict intermediaire avant full Arena.
     """
-    challenger_metrics = dict((dict(battle_report.get("challenger") or {})).get("metrics") or {})
-    mechanics_metrics = dict(challenger_metrics.get("metrics_by_position_mechanics") or {})
-    metrics_by_symbol = dict(challenger_metrics.get("metrics_by_symbol") or {})
+    challenger_metrics = _coerce_metric_mapping(
+        _coerce_metric_mapping(battle_report.get("challenger")).get("metrics")
+    )
+    mechanics_metrics = _coerce_metric_mapping(
+        challenger_metrics.get("metrics_by_position_mechanics")
+    )
+    metrics_by_symbol = _coerce_metric_mapping(challenger_metrics.get("metrics_by_symbol"))
     split_opportunities = int(
         mechanics_metrics.get(
             "split_opportunity_count",
@@ -1342,8 +1922,10 @@ def _evaluate_screen_winner_gate(
         getattr(config, "arena_screen_min_symbol_close_events", 6) or 6
     )
     for symbol_metrics_raw in metrics_by_symbol.values():
-        symbol_metrics = dict(symbol_metrics_raw or {})
-        symbol_mechanics = dict(symbol_metrics.get("metrics_by_position_mechanics") or {})
+        symbol_metrics = _coerce_metric_mapping(symbol_metrics_raw)
+        symbol_mechanics = _coerce_metric_mapping(
+            symbol_metrics.get("metrics_by_position_mechanics")
+        )
         if (
             _to_metric_float(symbol_metrics, "profit_factor") >= min_symbol_profit_factor
             or _to_metric_float(symbol_metrics, "return_pct") > min_symbol_return_pct
@@ -1413,6 +1995,8 @@ def _evaluate_screen_winner_gate(
                 ) >= min_symbol_close_quality_score
             )
     checks = {
+        "screen_victory": str(battle_report.get("outcome") or "").strip().upper()
+        == "VICTORY",
         "profit_factor": _to_metric_float(challenger_metrics, "profit_factor") >= float(
             getattr(config, "arena_screen_min_profit_factor", 1.20) or 1.20
         ),
@@ -1788,12 +2372,30 @@ def main() -> dict[str, object]:
     gold_precheck_games = max(1, int(os.getenv("MUZERO_GOLD_PRECHECK_GAMES", "6")))
     logger.info("Demarrage MuZero horizon=%s | timeframe=%s", horizon, config.primary_timeframe)
     logger.info("Peripheriques JAX: %s", jax.devices())
+    runtime_devices = ", ".join(str(device) for device in jax.devices())
+    runtime_message = (
+        f"MuZero {horizon}: runtime pid={os.getpid()} "
+        f"CUDA_VISIBLE_DEVICES={os.getenv('CUDA_VISIBLE_DEVICES', '')} "
+        f"JAX_PLATFORMS={os.getenv('JAX_PLATFORMS', 'auto')} "
+        f"devices=[{runtime_devices}]"
+    )
+    logger.info(runtime_message)
+    collection_budget_message = (
+        f"MuZero {horizon}: budget collecte "
+        f"sims={int(getattr(config, 'collection_num_simulations', config.num_simulations) or config.num_simulations)} "
+        f"max_moves={int(getattr(config, 'collection_max_moves', config.max_moves) or config.max_moves)} "
+        f"timeout_episode={float(getattr(config, 'collection_max_episode_seconds', 0.0) or 0.0):.0f}s "
+        f"timeout_step={float(getattr(config, 'collection_max_step_seconds', 0.0) or 0.0):.0f}s."
+    )
+    logger.info(collection_budget_message)
     logger.info("Inventaire historique: %s", build_inventory_report())
     logger.info("Univers MuZero: %s", config.symbols)
     append_training_log(
         f"MuZero {horizon} demarre sur {len(config.symbols)} symboles.",
         source="muzero",
     )
+    append_training_log(collection_budget_message, source="muzero")
+    append_training_log(runtime_message, source="muzero")
     send_training_horizon_started(horizon, len(config.symbols))
     set_gold_precheck(None)
     mark_step_running(
@@ -1999,6 +2601,7 @@ def main() -> dict[str, object]:
     seed_viability_payload: dict[str, object] | None = None
     killed_after_seed_viability = False
     plateau_payload: dict[str, object] | None = None
+    plateau_checkpoint_saved = False
     stopped_for_plateau = False
 
     if mechanics_only_mode:
@@ -2024,11 +2627,27 @@ def main() -> dict[str, object]:
         )
     else:
         logger.info("Phase 1 - collecte historique par self-play guide")
+        collection_parallel_games = max(
+            1,
+            min(
+                games_per_symbol,
+                int(getattr(config, "collection_parallel_games", 1) or 1),
+            ),
+        )
+        if collection_parallel_games > 1:
+            append_training_log(
+                (
+                    f"MuZero {horizon}: collecte parallele active "
+                    f"({collection_parallel_games} parties simultanees par symbole)."
+                ),
+                source="muzero",
+            )
         for symbol_index, symbol in enumerate(config.symbols, start=1):
             env = build_environment(
                 symbol,
                 config,
                 training_progress_step=int(agent.training_step_count),
+                for_collection=True,
             )
             if env is None:
                 continue
@@ -2037,6 +2656,85 @@ def main() -> dict[str, object]:
                 f"MuZero {horizon}: collecte sur {symbol} ({symbol_index}/{len(config.symbols)}).",
                 source="muzero",
             )
+            if collection_parallel_games > 1:
+                with ThreadPoolExecutor(
+                    max_workers=collection_parallel_games,
+                    thread_name_prefix=f"muzero-collect-{symbol_index}",
+                ) as collection_pool:
+                    futures = [
+                        collection_pool.submit(
+                            _collect_single_muzero_game,
+                            symbol=symbol,
+                            config=config,
+                            params=agent.params,
+                            opt_state=agent.opt_state,
+                            training_step_count=int(agent.training_step_count),
+                        )
+                        for _ in range(games_per_symbol)
+                    ]
+                    for game_index, future in enumerate(futures):
+                        mark_step_running(
+                            step_name,
+                            engine=engine,
+                            phase="collecte",
+                            horizon=horizon,
+                            family=initial_family,
+                            symbol=symbol,
+                            symbol_index=symbol_index,
+                            symbol_total=len(config.symbols),
+                            part_index=game_index + 1,
+                            part_total=games_per_symbol,
+                            dataset_id=dataset_id,
+                            dataset_source=dataset_source,
+                            feature_profile=feature_profile_name,
+                            mechanics_profile_version=mechanics_profile_version,
+                            ga_status=ga_status,
+                            ga_generation=ga_generation,
+                            ga_trial=ga_trial,
+                            ga_campaign_id=ga_campaign_id,
+                            ga_scope=ga_scope,
+                            ga_parent_champion_id=ga_parent_champion_id,
+                            trial_mode=trial_mode,
+                            trial_cost_profile=trial_cost_profile,
+                            focus_symbols=focus_symbols,
+                            gate_profile=gate_profile,
+                            replay_cache_status="warming",
+                            replay_cache_key=replay_cache_key,
+                            replay_cache_entries=agent.replay_buffer.size,
+                            replay_cache_source="memoire",
+                            dataset_coverage=dataset_coverage,
+                        )
+                        game, summary, stopped_reason = future.result()
+                        if game is None:
+                            continue
+                        if len(game) > 0:
+                            agent.replay_buffer.save_game(game)
+                        total_games += 1
+                        if stopped_reason:
+                            logger.warning(
+                                "[%s] %s partie %s/%s interrompue (%s).",
+                                horizon,
+                                symbol,
+                                game_index + 1,
+                                games_per_symbol,
+                                stopped_reason,
+                            )
+                            append_training_log(
+                                f"MuZero {horizon}: {symbol} partie {game_index + 1}/{games_per_symbol} interrompue ({stopped_reason}).",
+                                level="WARNING",
+                                source="muzero",
+                            )
+                        logger.info(
+                            "[%s] %s partie %s/%s | return=%.2f%% | trades=%s | buffer=%s",
+                            horizon,
+                            symbol,
+                            game_index + 1,
+                            games_per_symbol,
+                            summary.get("return_pct", 0.0),
+                            summary.get("total_trades", 0),
+                            agent.replay_buffer.size,
+                        )
+                continue
             for game_index in range(games_per_symbol):
                 def _report_collection_heartbeat(heartbeat: dict[str, object]) -> None:
                     """Diffuse un heartbeat de collecte pour la supervision.
@@ -2057,7 +2755,10 @@ def main() -> dict[str, object]:
                         part_index=game_index + 1,
                         part_total=games_per_symbol,
                         episode_step_current=int(heartbeat.get("steps", 0) or 0),
-                        episode_step_total=int(heartbeat.get("max_moves", config.max_moves) or config.max_moves),
+                        episode_step_total=int(
+                            heartbeat.get("max_moves", getattr(env, "max_steps_per_episode", config.max_moves))
+                            or getattr(env, "max_steps_per_episode", config.max_moves)
+                        ),
                         episode_elapsed_seconds=float(heartbeat.get("elapsed_seconds", 0.0) or 0.0),
                         dataset_id=dataset_id,
                         dataset_source=dataset_source,
@@ -2254,6 +2955,7 @@ def main() -> dict[str, object]:
                     "reanalyze_ms": float(reanalyze_ms),
                 }
                 last_metrics = metrics
+                arena_cutover_status = _build_arena_cutover_status(step)
                 policy_precheck_history.append(
                     {
                         **dict(metrics),
@@ -2262,9 +2964,13 @@ def main() -> dict[str, object]:
                 )
                 merge_training_status(
                     {
-                        "latest_metrics": dict(last_metrics),
+                        "latest_metrics": {
+                            **dict(last_metrics),
+                            **arena_cutover_status,
+                        },
                         "train_step_phase": "optimisation",
                         "phase_durations_ms": phase_durations_ms,
+                        **arena_cutover_status,
                     }
                 )
 
@@ -2287,6 +2993,7 @@ def main() -> dict[str, object]:
                         "seed_viability": dict(seed_viability_payload),
                         "latest_metrics": {
                             **dict(last_metrics),
+                            **arena_cutover_status,
                             "seed_viability_status": seed_viability_payload.get("status"),
                             "seed_viability_reason": seed_viability_payload.get("reason"),
                             "seed_stage": seed_viability_payload.get("seed_stage"),
@@ -2320,26 +3027,58 @@ def main() -> dict[str, object]:
                     config=config,
                     step=step,
                 )
-                if bool(plateau_payload.get("allowed")):
+                if bool(plateau_payload.get("allowed")) and not plateau_checkpoint_saved:
+                    checkpoint_path = weights_dir / f"muzero_{horizon}_ckpt_{step}.pkl"
+                    agent.save(
+                        str(checkpoint_path),
+                        artifact_kind="arena_plateau_checkpoint",
+                        lineage={
+                            **lineage,
+                            "plateau_step": step,
+                            "plateau_reason": plateau_payload.get("reason"),
+                        },
+                    )
                     merge_training_status(
                         {
                             "latest_metrics": {
                                 **dict(last_metrics),
                                 "plateau_detected": True,
+                                "plateau_checkpoint_path": str(checkpoint_path),
                             },
-                            "plateau_status": dict(plateau_payload),
+                            "plateau_status": {
+                                **dict(plateau_payload),
+                                "checkpoint_path": str(checkpoint_path),
+                            },
                         }
                     )
                     append_training_log(
                         (
                             f"MuZero {horizon}: plateau confirme a l'etape {step} "
-                            "-> bascule anticipee vers Arena."
+                            f"-> checkpoint {checkpoint_path.name}."
                         ),
                         level="INFO",
                         source="muzero",
                     )
-                    stopped_for_plateau = True
-                    break
+                    plateau_checkpoint_saved = True
+                    if bool(getattr(config, "arena_plateau_stop_enabled", False)):
+                        append_training_log(
+                            (
+                                f"MuZero {horizon}: bascule anticipee vers Arena activee "
+                                "par MUZERO_ARENA_PLATEAU_STOP_ENABLED."
+                            ),
+                            level="WARNING",
+                            source="muzero",
+                        )
+                        stopped_for_plateau = True
+                        break
+                    append_training_log(
+                        (
+                            f"MuZero {horizon}: le plateau est conserve comme signal de screen, "
+                            "mais le run continue vers les checkpoints tardifs."
+                        ),
+                        level="INFO",
+                        source="muzero",
+                    )
 
                 collapse_check_step = int(
                     getattr(config, "directional_collapse_check_step", 4000) or 4000
@@ -2377,6 +3116,7 @@ def main() -> dict[str, object]:
                             "policy_precheck": dict(policy_precheck_payload),
                             "latest_metrics": {
                                 **dict(last_metrics),
+                                **arena_cutover_status,
                                 "policy_precheck_passed": policy_precheck_payload.get("status") != "blocked",
                                 "policy_precheck_mode": policy_precheck_payload.get("status"),
                                 "root_mask_rate_trend": dict(
@@ -2385,7 +3125,21 @@ def main() -> dict[str, object]:
                                 "loss_pol_trend": dict(
                                     policy_precheck_payload.get("trends") or {}
                                 ).get("loss_pol_trend"),
+                                "loss_pol_root": dict(
+                                    policy_precheck_payload.get("medians") or {}
+                                ).get("loss_pol_root"),
+                                "loss_pol_unroll_mean": dict(
+                                    policy_precheck_payload.get("medians") or {}
+                                ).get("loss_pol_unroll_mean"),
+                                "loss_pol_root_trend": dict(
+                                    policy_precheck_payload.get("trends") or {}
+                                ).get("loss_pol_root_trend"),
+                                "loss_pol_unroll_mean_trend": dict(
+                                    policy_precheck_payload.get("trends") or {}
+                                ).get("loss_pol_unroll_mean_trend"),
                             },
+                            "arena_cutover_ready": arena_cutover_status.get("arena_cutover_ready"),
+                            "screen_window": arena_cutover_status.get("screen_window"),
                         }
                     )
                     policy_precheck_executed = True
@@ -2667,6 +3421,7 @@ def main() -> dict[str, object]:
         and not killed_after_precheck
         and last_metrics is not None
     ):
+        final_arena_cutover_status = _build_arena_cutover_status(last_optimization_step)
         final_policy_precheck = _evaluate_policy_precheck_window(
             history=list(policy_precheck_history),
             config=config,
@@ -2674,11 +3429,35 @@ def main() -> dict[str, object]:
             stage="pre_arena",
         )
         policy_precheck_payload = dict(final_policy_precheck)
+        if stopped_for_plateau:
+            if policy_precheck_payload.get("status") == "full_ready":
+                policy_precheck_payload.update(
+                    {
+                        "status": "screen_only",
+                        "reason": "plateau_screen_cutover",
+                        "plateau_status": dict(plateau_payload or {}),
+                    }
+                )
+            elif policy_precheck_payload.get("status") == "blocked":
+                screen_checks = dict(policy_precheck_payload.get("screen_checks") or {})
+                screen_failed_check = next(
+                    (name for name, passed in screen_checks.items() if not passed),
+                    None,
+                )
+                if screen_failed_check is None:
+                    policy_precheck_payload.update(
+                        {
+                            "status": "screen_only",
+                            "reason": "plateau_screen_cutover",
+                            "plateau_status": dict(plateau_payload or {}),
+                        }
+                    )
         merge_training_status(
             {
                 "policy_precheck": dict(policy_precheck_payload),
                 "latest_metrics": {
                     **dict(last_metrics),
+                    **final_arena_cutover_status,
                     "policy_precheck_passed": policy_precheck_payload.get("status") != "blocked",
                     "policy_precheck_mode": policy_precheck_payload.get("status"),
                     "root_mask_rate_trend": dict(
@@ -2687,7 +3466,21 @@ def main() -> dict[str, object]:
                     "loss_pol_trend": dict(
                         policy_precheck_payload.get("trends") or {}
                     ).get("loss_pol_trend"),
+                    "loss_pol_root": dict(
+                        policy_precheck_payload.get("medians") or {}
+                    ).get("loss_pol_root"),
+                    "loss_pol_unroll_mean": dict(
+                        policy_precheck_payload.get("medians") or {}
+                    ).get("loss_pol_unroll_mean"),
+                    "loss_pol_root_trend": dict(
+                        policy_precheck_payload.get("trends") or {}
+                    ).get("loss_pol_root_trend"),
+                    "loss_pol_unroll_mean_trend": dict(
+                        policy_precheck_payload.get("trends") or {}
+                    ).get("loss_pol_unroll_mean_trend"),
                 },
+                "arena_cutover_ready": final_arena_cutover_status.get("arena_cutover_ready"),
+                "screen_window": final_arena_cutover_status.get("screen_window"),
             }
         )
         if policy_precheck_payload.get("status") == "blocked":
@@ -3490,6 +4283,8 @@ def main() -> dict[str, object]:
     screen_results: list[dict[str, object]] = []
     screen_gate: dict[str, object] | None = None
     family_probe_report: dict[str, object] | None = None
+    champion_league_table: list[dict[str, object]] = []
+    champion_rejection_report: dict[str, object] = {}
     policy_precheck_mode = str((policy_precheck_payload or {}).get("status") or "full_ready").strip().lower()
 
     if policy_precheck_mode == "screen_only":
@@ -3619,6 +4414,27 @@ def main() -> dict[str, object]:
                 "policy_precheck": dict(policy_precheck_payload or {}),
                 "screen_results": list(screen_results),
             }
+            best_screen_report = (
+                dict((_select_best_screen_candidate(screen_results).get("battle_report") or {}))
+                if screen_results
+                else None
+            )
+            champion_league_table = _build_champion_league_table(
+                engine=engine,
+                horizon=horizon,
+                screen_results=screen_results,
+                selected_candidate_id=selected_candidate_id,
+                battle_report=best_screen_report,
+                promotion_result=promotion_result,
+                screen_gate=screen_gate,
+            )
+            champion_rejection_report = _build_champion_rejection_report(
+                screen_gate=screen_gate,
+                promotion_gate=promotion_gate,
+                battle_report=best_screen_report,
+            )
+            promotion_result["champion_league_table"] = champion_league_table
+            promotion_result["champion_rejection_report"] = champion_rejection_report
             promoter.persist_challenger_manifest(
                 engine=engine,
                 horizon=horizon,
@@ -3626,9 +4442,7 @@ def main() -> dict[str, object]:
                 challenger_id=selected_candidate_id,
                 challenger_path=str(selected_challenger_path),
                 latest_checkpoint=str(selected_latest_checkpoint),
-                battle_report=dict((_select_best_screen_candidate(screen_results).get("battle_report") or {}))
-                if screen_results
-                else None,
+                battle_report=best_screen_report,
                 training_metrics=training_metrics_payload,
                 promotion_gate=promotion_gate,
                 promotion_result=promotion_result,
@@ -3694,6 +4508,8 @@ def main() -> dict[str, object]:
                 "policy_precheck_mode": policy_precheck_mode,
                 "screen_results": list(screen_results),
                 "screen_gate": dict(screen_gate or {}),
+                "champion_league_table": champion_league_table,
+                "champion_rejection_report": champion_rejection_report,
             }
             terminal_summary_path = write_terminal_summary(terminal_summary)
             logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
@@ -3734,6 +4550,8 @@ def main() -> dict[str, object]:
                 "policy_precheck_mode": policy_precheck_mode,
                 "screen_results": list(screen_results),
                 "screen_gate": dict(screen_gate or {}),
+                "champion_league_table": champion_league_table,
+                "champion_rejection_report": champion_rejection_report,
                 "promotion": promotion_result,
                 "terminal_summary_path": str(terminal_summary_path),
             }
@@ -3790,6 +4608,22 @@ def main() -> dict[str, object]:
             "screen_gate": dict(screen_gate or {}),
             "family_probe_report": dict(family_probe_report or {}),
         }
+        champion_league_table = _build_champion_league_table(
+            engine=engine,
+            horizon=horizon,
+            screen_results=screen_results,
+            selected_candidate_id=arena_candidate_id,
+            promotion_result=promotion_result,
+            screen_gate=screen_gate,
+            family_probe_report=family_probe_report,
+        )
+        champion_rejection_report = _build_champion_rejection_report(
+            screen_gate=screen_gate,
+            promotion_gate=promotion_gate,
+            family_probe_report=family_probe_report,
+        )
+        promotion_result["champion_league_table"] = champion_league_table
+        promotion_result["champion_rejection_report"] = champion_rejection_report
         promoter.persist_challenger_manifest(
             engine=engine,
             horizon=horizon,
@@ -3835,6 +4669,8 @@ def main() -> dict[str, object]:
             "screen_results": list(screen_results),
             "screen_gate": dict(screen_gate or {}),
             "family_probe_report": dict(family_probe_report or {}),
+            "champion_league_table": champion_league_table,
+            "champion_rejection_report": champion_rejection_report,
         }
         terminal_summary_path = write_terminal_summary(terminal_summary)
         logger.info("Resume terminal MuZero ecrit dans %s", terminal_summary_path)
@@ -3876,6 +4712,8 @@ def main() -> dict[str, object]:
             "screen_results": list(screen_results),
             "screen_gate": dict(screen_gate or {}),
             "family_probe_report": dict(family_probe_report or {}),
+            "champion_league_table": champion_league_table,
+            "champion_rejection_report": champion_rejection_report,
             "promotion": promotion_result,
             "terminal_summary_path": str(terminal_summary_path),
         }
@@ -3961,6 +4799,24 @@ def main() -> dict[str, object]:
     promotion_result.setdefault("screen_results", list(screen_results))
     promotion_result.setdefault("screen_gate", dict(screen_gate or {}))
     promotion_result.setdefault("family_probe_report", dict(family_probe_report or {}))
+    champion_league_table = _build_champion_league_table(
+        engine=engine,
+        horizon=horizon,
+        screen_results=screen_results,
+        selected_candidate_id=arena_candidate_id,
+        battle_report=battle_report,
+        promotion_result=promotion_result,
+        screen_gate=screen_gate,
+        family_probe_report=family_probe_report,
+    )
+    champion_rejection_report = _build_champion_rejection_report(
+        screen_gate=screen_gate,
+        promotion_gate=dict(promotion_result.get("promotion_gate") or {}),
+        battle_report=battle_report,
+        family_probe_report=family_probe_report,
+    )
+    promotion_result.setdefault("champion_league_table", champion_league_table)
+    promotion_result.setdefault("champion_rejection_report", champion_rejection_report)
     logger.info("Promotion live %s: %s", horizon, promotion_result.get("status"))
     append_training_log(
         "MuZero "
@@ -4057,6 +4913,8 @@ def main() -> dict[str, object]:
         "screen_results": list(screen_results),
         "screen_gate": dict(screen_gate or {}),
         "family_probe_report": dict(family_probe_report or {}),
+        "champion_league_table": champion_league_table,
+        "champion_rejection_report": champion_rejection_report,
         "selected_checkpoint_step": selected_checkpoint_step,
         "battle_report": battle_report,
         "promotion": promotion_result,
@@ -4136,6 +4994,8 @@ def main() -> dict[str, object]:
         "screen_results": list(screen_results),
         "screen_gate": dict(screen_gate or {}),
         "family_probe_report": dict(family_probe_report or {}),
+        "champion_league_table": champion_league_table,
+        "champion_rejection_report": champion_rejection_report,
         "selected_checkpoint_step": selected_checkpoint_step,
     }
     terminal_summary_path = write_terminal_summary(terminal_summary)

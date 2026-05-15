@@ -415,6 +415,8 @@ class ChampionPromoter:
             return "insufficient_sample"
         if not checks.get("return_pct", True) or not checks.get("net_realized_pct", True) or not checks.get("profit_factor", True):
             return "unprofitable"
+        if not checks.get("validation_nemesis", True):
+            return "nemesis_failed"
         if not checks.get("close_quality_score", True) or not checks.get("split_efficiency", True):
             return "bad_exit"
         if reason in {"directional_balance", "directional_entries"}:
@@ -502,6 +504,7 @@ class ChampionPromoter:
         checks = {
             "arena_victory": str(battle_report.get("outcome", "")).upper() == "VICTORY",
             "validation_sample": bool(validation.get("sample_size_ok", False)),
+            "validation_nemesis": bool(validation.get("nemesis_ok", True)),
             "evaluation_games": evaluation_games >= thresholds["min_eval_games"],
             "evaluation_symbols": evaluation_symbols >= thresholds["min_eval_symbols"],
             "total_trades": total_trades >= thresholds["min_total_trades"],
@@ -570,6 +573,7 @@ class ChampionPromoter:
             "mechanics_profile_version": challenger_metrics.get("mechanics_profile_version"),
             "dataset_coverage": challenger_metrics.get("dataset_coverage") or {},
             "metrics_by_symbol": dict(challenger_metrics.get("metrics_by_symbol") or {}),
+            "nemesis_validation": dict(battle_report.get("nemesis_validation") or {}),
         }
         return {
             "allowed": all(checks.values()),
@@ -805,7 +809,8 @@ class ChampionPromoter:
         Args:
             engine (str): Moteur du challenger.
             horizon (str): Horizon strategique cible.
-            status (str): Etat du manifeste (`promoted`, `candidate_only`, `blocked`).
+            status (str): Etat du manifeste (`promoted`, `arena_winner`,
+                `candidate_seed`, `candidate_only`, `live_locked`, `blocked`).
             challenger_id (str | None): Identifiant du challenger.
             challenger_path (str | Path | None): Checkpoint challenger.
             latest_checkpoint (str | Path | None): Dernier checkpoint du run.
@@ -845,7 +850,16 @@ class ChampionPromoter:
         gate_payload = dict(promotion_gate or {})
         lineage_payload = self._normalize_lineage(lineage or result_payload.get("lineage"))
         champion_paths = list(result_payload.get("champion_paths") or [])
-        variant = "champion" if str(status).strip().lower() == "promoted" else "blocked"
+        status_key = str(status).strip().lower()
+        variant = (
+            "champion"
+            if status_key == "promoted"
+            else (
+                "preview"
+                if status_key in {"arena_winner", "candidate_seed", "candidate_only"}
+                else "blocked"
+            )
+        )
         manifest = {
             "status": status,
             "promoted_at": datetime.now().isoformat() if str(status).strip().lower() == "promoted" else None,
@@ -916,7 +930,7 @@ class ChampionPromoter:
         existing_status = str((existing_manifest or {}).get("status") or "").strip().lower()
         manual_live_lock = bool((existing_manifest or {}).get("manual_live_lock", False))
         if (
-            incoming_status in {"blocked", "candidate_only"}
+            incoming_status in {"blocked", "candidate_only", "candidate_seed", "arena_winner", "live_locked"}
             and existing_status == "promoted"
             and manual_live_lock
         ):
@@ -1281,13 +1295,16 @@ class ChampionPromoter:
             candidate_id (str | None): Dernier candidat connu.
 
         Returns:
-            str: Etat `none`, `candidate_only`, `promoted` ou `blocked`.
+            str: Etat `none`, `candidate_seed`, `arena_winner`,
+                `candidate_only`, `promoted`, `live_locked` ou `blocked`.
         """
         manifest_payload = dict(manifest or {})
         gate_payload = dict(promotion_gate or {})
         manifest_status = str(manifest_payload.get("status") or "").strip().lower()
         if manifest_status == "promoted":
             return "promoted" if gate_payload.get("allowed", False) else "blocked"
+        if manifest_status in {"candidate_seed", "arena_winner", "live_locked"}:
+            return manifest_status
         if manifest_status == "candidate_only":
             return "candidate_only"
         if manifest_status in {"blocked", "error", "skipped"}:

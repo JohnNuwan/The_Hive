@@ -70,6 +70,19 @@ TIMEFRAMES: dict[str, tuple[int, int]] = {
 TIMESCALE_BATCH_SIZE = int(os.getenv("HISTORY_TIMESCALE_BATCH_SIZE", "5000"))
 
 
+def _as_bool(value: str | None) -> bool:
+    """Convertit une valeur texte en booleen.
+
+    Args:
+        value (str | None): Valeur brute a interpreter.
+
+    Returns:
+        bool: True si la valeur represente un booleen actif.
+    """
+
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _sql_identifier(identifier: str) -> str:
     """Quote un identifiant SQL simple ou schema.table.
 
@@ -460,7 +473,129 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("HISTORY_WRITE_TIMESCALE", "0").strip().lower() in {"1", "true", "yes", "on"},
         help="Ecrit aussi les bougies dans TimescaleDB en plus des CSV.",
     )
+    parser.add_argument(
+        "--ingest-existing-only",
+        action="store_true",
+        help="Ignore MT5 et pousse uniquement les CSV deja presents vers TimescaleDB.",
+    )
+    parser.add_argument(
+        "--terminal-path",
+        default=os.getenv("HISTORY_MT5_TERMINAL_PATH") or os.getenv("MT5_TERMINAL_PATH") or "",
+        help="Chemin du terminal MT5 source utilise pour l'export historique.",
+    )
+    parser.add_argument(
+        "--terminal-portable",
+        action="store_true",
+        default=_as_bool(os.getenv("HISTORY_MT5_TERMINAL_PORTABLE") or os.getenv("MT5_TERMINAL_PORTABLE")),
+        help="Initialise le terminal MT5 source en mode portable.",
+    )
+    parser.add_argument(
+        "--login",
+        type=int,
+        default=int(
+            os.getenv("HISTORY_MT5_LOGIN")
+            or os.getenv("MT5_LOGIN")
+            or "0"
+        ),
+        help="Login MT5 attendu pour la source historique.",
+    )
+    parser.add_argument(
+        "--password",
+        default=os.getenv("HISTORY_MT5_PASSWORD") or os.getenv("MT5_PASSWORD") or "",
+        help="Mot de passe MT5 source pour l'export historique.",
+    )
+    parser.add_argument(
+        "--server",
+        default=os.getenv("HISTORY_MT5_SERVER") or os.getenv("MT5_SERVER") or "",
+        help="Serveur MT5 attendu pour la source historique.",
+    )
+    parser.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=int(os.getenv("HISTORY_MT5_TIMEOUT_MS") or "120000"),
+        help="Delai maximal d'initialisation MT5 en millisecondes.",
+    )
     return parser.parse_args()
+
+
+def initialize_history_terminal(args: argparse.Namespace) -> None:
+    """Initialise explicitement la source MT5 de l'export historique.
+
+    Args:
+        args (argparse.Namespace): Arguments CLI resolves.
+
+    Raises:
+        RuntimeError: Si le terminal MT5 ne peut pas etre initialise.
+        ValueError: Si le compte connecte ne correspond pas au compte attendu.
+    """
+
+    init_kwargs: dict[str, Any] = {
+        "timeout": max(int(args.timeout_ms), 1000),
+    }
+    if str(args.terminal_path or "").strip():
+        init_kwargs["path"] = str(args.terminal_path).strip()
+        init_kwargs["portable"] = bool(args.terminal_portable)
+    if int(args.login or 0) > 0:
+        init_kwargs["login"] = int(args.login)
+    if str(args.password or "").strip():
+        init_kwargs["password"] = str(args.password)
+    if str(args.server or "").strip():
+        init_kwargs["server"] = str(args.server).strip()
+
+    if not mt5.initialize(**init_kwargs):
+        raise RuntimeError(f"Initialisation MT5 impossible: {mt5.last_error()}")
+
+    terminal_info = mt5.terminal_info()
+    account_info = mt5.account_info()
+    logger.info(
+        "Source MT5 historique connectee: compte=%s serveur=%s terminal=%s portable=%s.",
+        getattr(account_info, "login", None),
+        getattr(account_info, "server", None),
+        getattr(terminal_info, "path", None),
+        init_kwargs.get("portable", False),
+    )
+
+    expected_login = int(args.login or 0)
+    expected_server = str(args.server or "").strip()
+    current_login = int(getattr(account_info, "login", 0) or 0)
+    current_server = str(getattr(account_info, "server", "") or "").strip()
+    if expected_login and current_login != expected_login:
+        raise ValueError(
+            f"Compte MT5 source inattendu: attendu={expected_login}, obtenu={current_login}."
+        )
+    if expected_server and current_server.lower() != expected_server.lower():
+        raise ValueError(
+            f"Serveur MT5 source inattendu: attendu={expected_server}, obtenu={current_server}."
+        )
+
+
+def validate_symbol_access(selected: Iterable[SymbolCandidate]) -> None:
+    """Valide l'acces aux symboles critiques avant l'export complet.
+
+    Args:
+        selected (Iterable[SymbolCandidate]): Symboles retenus pour l'export.
+
+    Raises:
+        RuntimeError: Si aucun symbole teste n'est exploitable sur le terminal source.
+    """
+
+    selected_list = list(selected)
+    sample = selected_list[: min(3, len(selected_list))]
+    failed: list[str] = []
+    for candidate in sample:
+        if mt5.symbol_select(candidate.name, True):
+            continue
+        failed.append(candidate.name)
+        logger.warning(
+            "Selection MT5 impossible pour %s sur la source historique: %s.",
+            candidate.name,
+            mt5.last_error(),
+        )
+    if len(failed) == len(sample) and failed:
+        raise RuntimeError(
+            "Aucun symbole test n'est accessible sur le terminal MT5 source. "
+            "Verifier le compte, le serveur et la disponibilite du Market Watch."
+        )
 
 
 def _normalize_symbol_name(name: str) -> str:
@@ -697,6 +832,39 @@ def fetch_data(
     return output_path
 
 
+def ingest_existing_csv_to_timescale(
+    symbol: str,
+    timeframe_name: str,
+    *,
+    data_dir: Path,
+    timescale_writer: TimescaleWriter,
+) -> Path | None:
+    """Injecte un CSV deja present dans TimescaleDB.
+
+    Args:
+        symbol (str): Symbole a injecter.
+        timeframe_name (str): Timeframe logique du CSV.
+        data_dir (Path): Dossier racine des historiques.
+        timescale_writer (TimescaleWriter): Ecrivain TimescaleDB actif.
+
+    Returns:
+        Path | None: Chemin du CSV injecte, ou ``None`` si introuvable.
+    """
+
+    csv_path = data_dir / f"{symbol}_{timeframe_name}.csv"
+    if not csv_path.exists():
+        logger.warning("Injection TimeScale ignoree: CSV absent pour %s [%s].", symbol, timeframe_name)
+        return None
+    frame = pd.read_csv(csv_path)
+    if frame.empty:
+        logger.warning("Injection TimeScale ignoree: CSV vide pour %s [%s].", symbol, timeframe_name)
+        return None
+    frame["time"] = pd.to_datetime(frame["time"], utc=False)
+    timescale_writer.write_ohlc(symbol, timeframe_name, frame)
+    logger.info("CSV injecte dans TimeScaleDB: %s [%s].", symbol, timeframe_name)
+    return csv_path
+
+
 def _copy_rates_chunked(symbol: str, timeframe_value: int, count: int) -> object | None:
     """Recupere un historique MT5 par paquets pour eviter les limites broker.
 
@@ -780,11 +948,13 @@ def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     timescale_writer = TimescaleWriter(enabled=args.write_timescale)
 
-    if not mt5.initialize():
-        logger.error("Initialisation MT5 impossible: %s", mt5.last_error())
-        return 1
-
-    logger.info("Version MT5: %s", mt5.version())
+    if not args.ingest_existing_only:
+        try:
+            initialize_history_terminal(args)
+        except Exception as exc:
+            logger.error("Initialisation MT5 impossible pour la source historique: %s", exc)
+            return 1
+        logger.info("Version MT5: %s", mt5.version())
     try:
         selected = select_target_symbols(args)
         if not selected:
@@ -809,6 +979,26 @@ def main() -> int:
             logger.info(" - %s: %s", category, count)
 
         generated_files: list[Path] = []
+        if args.ingest_existing_only:
+            if not args.write_timescale:
+                logger.error("Le mode --ingest-existing-only exige --write-timescale.")
+                return 4
+            for candidate in selected:
+                for timeframe_name in requested_timeframes:
+                    output_path = ingest_existing_csv_to_timescale(
+                        candidate.name,
+                        timeframe_name,
+                        data_dir=OUTPUT_DIR,
+                        timescale_writer=timescale_writer,
+                    )
+                    if output_path is not None:
+                        generated_files.append(output_path)
+            write_inventory(selected, generated_files)
+            logger.info("Injection TimeScale terminee: %s fichiers utilises.", len(generated_files))
+            return 0
+
+        validate_symbol_access(selected)
+
         for candidate in selected:
             for timeframe_name in requested_timeframes:
                 timeframe_value, count = TIMEFRAMES[timeframe_name]

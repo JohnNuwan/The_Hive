@@ -571,6 +571,14 @@ def run_step(name: str, command: list[str], extra_env: dict[str, str] | None = N
             env.get("CUDA_VISIBLE_DEVICES"),
             env.get("JAX_PLATFORMS"),
         )
+        append_training_log(
+            (
+                f"Etape {name}: runtime MuZero cible "
+                f"CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES')} "
+                f"JAX_PLATFORMS={env.get('JAX_PLATFORMS')}."
+            ),
+            source="nightly",
+        )
 
     logger.info("Debut etape %s: %s", name, command)
     mark_step_running(name, phase="demarrage")

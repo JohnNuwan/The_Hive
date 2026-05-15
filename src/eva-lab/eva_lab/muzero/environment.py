@@ -645,12 +645,17 @@ class TradingEnvironment:
         self.runner_extension_capture_count = 0
         self.runner_profit_hold_window_count = 0
         self.runner_profit_hold_capture_count = 0
+        self.runner_hold_after_soft_tp_count = 0
+        self.runner_viable_window_count = 0
         self.runner_missed_extension_count = 0
+        self.runner_viable_but_closed_count = 0
+        self.early_full_close_after_soft_tp_count = 0
         self.runner_managed_exit_count = 0
         self.runner_exit_profitable_count = 0
         self.runner_forced_stop_count = 0
         self.runner_retained_profit_pct = 0.0
         self.runner_giveback_pct = 0.0
+        self.runner_retained_profit_score_total = 0.0
         self.profit_peak_reached_count = 0
         self.profit_peak_giveback_ratio_total = 0.0
         self.profit_peak_giveback_ratio_observations = 0
@@ -1696,7 +1701,9 @@ class TradingEnvironment:
                 "runner_extension_active": False,
                 "runner_extension_opportunity": False,
                 "split_monetization_window": False,
+                "runner_viable_window": False,
                 "runner_profit_hold_window": False,
+                "runner_hold_after_soft_tp": False,
                 "pyramid_monetization_window": False,
                 "profit_peak_reached": False,
                 "position_peak_giveback_ratio": 0.0,
@@ -1764,10 +1771,11 @@ class TradingEnvironment:
                 )
             )
         )
+        soft_tp_near_active = trade_ret >= (tp_like_threshold * 0.85)
         soft_tp_zone_active = (
             bool(self.soft_tp_hit_active)
             or bool(self.full_tp_hit_active)
-            or trade_ret >= tp_like_threshold
+            or soft_tp_near_active
         )
         continuation_retest_support = (
             trade_ret >= max(min_trade_return, tp_like_threshold * 0.65)
@@ -1810,8 +1818,8 @@ class TradingEnvironment:
             1e-6,
         )
         runner_hold_floor = max(
-            min_trade_return * 0.25,
-            tp_like_threshold * 0.20,
+            min_trade_return * 0.20,
+            tp_like_threshold * 0.10,
             1e-6,
         )
         pyramid_window_floor = max(
@@ -1837,15 +1845,14 @@ class TradingEnvironment:
             and self.split_count < max_splits
             and trade_ret >= min_trade_return
         )
+        # Les fenetres offensives doivent s'ouvrir sur la trajectoire du trade.
+        # Le giveback reste juge par la reward et non par un veto dur.
         split_monetization_window = (
             split_opportunity
             and trade_ret >= monetization_return_floor
             and peak_trade_return >= current_positive_return
         )
-        split_tp_zone_opportunity = (
-            split_monetization_window
-            and (soft_tp_zone_active or peak_trade_return >= (tp_like_threshold * 0.75))
-        )
+        split_tp_zone_opportunity = split_monetization_window
         pyramid_opportunity = (
             trade_ret >= min_profit_to_add
             and self.position_pyramids < max_additions
@@ -1858,14 +1865,34 @@ class TradingEnvironment:
         pyramid_add_opportunity = (
             pyramid_monetization_window
         )
+        runner_peak_floor = max(
+            min_trade_return * 0.25,
+            tp_like_threshold * 0.20,
+            1e-6,
+        )
+        runner_context_live = bool(self.runner_active or self.runner_extension_active)
+        runner_viable_window = (
+            peak_trade_return >= runner_peak_floor
+            and current_positive_return >= max(peak_trade_return * 0.25, runner_hold_floor, 1e-6)
+        )
         runner_profit_hold_window = (
-            self.runner_active
-            and peak_trade_return >= runner_hold_floor
+            runner_context_live
+            and peak_trade_return >= runner_peak_floor
             and current_positive_return >= max(peak_trade_return * 0.35, 1e-6)
         )
-        runner_extension_opportunity = (
-            runner_profit_hold_window
+        runner_hold_after_soft_tp = runner_profit_hold_window and soft_tp_zone_active
+        runner_extension_context_ready = (
+            self.runner_active
+            or self.runner_extension_active
+            or (
+                self.split_count > 0
+                and (
+                    self.slbe_active
+                    or self.runner_protected
+                )
+            )
         )
+        runner_extension_opportunity = runner_extension_context_ready and runner_profit_hold_window
         hold_drag_opportunity = qualifying_profit and has_management_trigger and reversal_context
         position_age_steps = self._position_age_steps()
         time_stop_expired = self.time_stop_steps > 0 and position_age_steps >= self.time_stop_steps
@@ -1900,7 +1927,9 @@ class TradingEnvironment:
             "runner_extension_active": bool(self.runner_extension_active),
             "runner_extension_opportunity": runner_extension_opportunity,
             "split_monetization_window": split_monetization_window,
+            "runner_viable_window": runner_viable_window,
             "runner_profit_hold_window": runner_profit_hold_window,
+            "runner_hold_after_soft_tp": runner_hold_after_soft_tp,
             "pyramid_monetization_window": pyramid_monetization_window,
             "profit_peak_reached": profit_peak_reached,
             "position_peak_giveback_ratio": position_peak_giveback_ratio,
@@ -1933,8 +1962,12 @@ class TradingEnvironment:
             self.pyramid_monetization_window_count += 1
         if bool(snapshot.get("runner_extension_opportunity", False)):
             self.runner_extension_opportunity_count += 1
+        if bool(snapshot.get("runner_viable_window", False)):
+            self.runner_viable_window_count += 1
         if bool(snapshot.get("runner_profit_hold_window", False)):
             self.runner_profit_hold_window_count += 1
+        if bool(snapshot.get("runner_hold_after_soft_tp", False)):
+            self.runner_hold_after_soft_tp_count += 1
         if bool(snapshot.get("profit_peak_reached", False)):
             self.profit_peak_reached_count += 1
             self.profit_peak_giveback_ratio_total += float(
@@ -2252,6 +2285,12 @@ class TradingEnvironment:
         runner_protected_exit_bonus = float(
             reward_terms.get("runner_protected_exit_bonus", 0.30) or 0.30
         )
+        runner_viable_but_closed_penalty = float(
+            reward_terms.get("runner_viable_but_closed_penalty", 0.18) or 0.18
+        )
+        early_full_close_after_soft_tp_penalty = float(
+            reward_terms.get("early_full_close_after_soft_tp_penalty", 0.22) or 0.22
+        )
         runner_retained_profit_bonus = float(
             reward_terms.get("runner_retained_profit_bonus", 0.25) or 0.25
         )
@@ -2290,6 +2329,18 @@ class TradingEnvironment:
         )
         near_hard_stop = bool(snapshot.get("near_hard_stop", False))
         time_stop_expired = bool(snapshot.get("time_stop_expired", False))
+        runner_viable_window = bool(snapshot.get("runner_viable_window", False))
+        # Le nom historique est conserve pour la compatibilite des metriques,
+        # mais la penalite vise maintenant toute fermeture totale d'un runner
+        # encore viable, meme hors zone `soft_tp` stricte.
+        early_full_close_after_soft_tp = (
+            realized_trade > 0.0
+            and runner_viable_window
+            and not defensive_close
+            and not near_hard_stop
+            and not time_stop_expired
+            and not runner_active_before_close
+        )
 
         if trade_ret > strong_winner_threshold:
             core_reward += self.quality_mult * 1.5 + (realized_pct * close_realized_multiplier)
@@ -2319,6 +2370,11 @@ class TradingEnvironment:
         if early_close_noise:
             self.early_close_noise_count += 1
             management_adjustment -= early_profit_close_penalty
+        elif early_full_close_after_soft_tp:
+            self.early_full_close_after_soft_tp_count += 1
+            self.runner_viable_but_closed_count += 1
+            management_adjustment -= early_full_close_after_soft_tp_penalty
+            management_adjustment -= runner_viable_but_closed_penalty
         elif offensive_close_zone:
             management_adjustment -= early_profit_close_penalty * 0.35
 
@@ -3015,6 +3071,9 @@ class TradingEnvironment:
             "runner_extension_capture_bonus": float(
                 reward_policy.get("runner_extension_capture_bonus", 0.22) or 0.22
             ),
+            "runner_split_activation_bonus": float(
+                reward_policy.get("runner_split_activation_bonus", 0.18) or 0.18
+            ),
             "runner_missed_extension_penalty": float(
                 reward_policy.get("runner_missed_extension_penalty", 0.10) or 0.10
             ),
@@ -3035,6 +3094,15 @@ class TradingEnvironment:
             ),
             "runner_retained_profit_bonus": float(
                 reward_policy.get("runner_retained_profit_bonus", 0.25) or 0.25
+            ),
+            "runner_hold_after_soft_tp_bonus": float(
+                reward_policy.get("runner_hold_after_soft_tp_bonus", 0.12) or 0.12
+            ),
+            "runner_viable_but_closed_penalty": float(
+                reward_policy.get("runner_viable_but_closed_penalty", 0.18) or 0.18
+            ),
+            "early_full_close_after_soft_tp_penalty": float(
+                reward_policy.get("early_full_close_after_soft_tp_penalty", 0.22) or 0.22
             ),
             "pyramid_trade_completion_bonus": float(
                 reward_policy.get("pyramid_trade_completion_bonus", 0.30) or 0.30
@@ -3306,11 +3374,17 @@ class TradingEnvironment:
         split_monetization_window = bool(
             management_snapshot.get("split_monetization_window", False)
         )
+        runner_viable_window = bool(
+            management_snapshot.get("runner_viable_window", False)
+        )
         runner_extension_opportunity = bool(
             management_snapshot.get("runner_extension_opportunity", False)
         )
         runner_profit_hold_window = bool(
             management_snapshot.get("runner_profit_hold_window", False)
+        )
+        runner_hold_after_soft_tp = bool(
+            management_snapshot.get("runner_hold_after_soft_tp", False)
         )
         pyramid_add_opportunity = bool(
             management_snapshot.get("pyramid_add_opportunity", False)
@@ -3715,6 +3789,10 @@ class TradingEnvironment:
                         reward += reward_terms["split_window_activation_bonus"] * exit_reward_phase_scale
                     if split_tp_zone_opportunity or split_monetization_window:
                         reward += reward_terms["split_zone_capture_bonus"] * exit_reward_phase_scale
+                    if runner_viable_window:
+                        reward += (
+                            reward_terms["runner_split_activation_bonus"] * exit_reward_phase_scale
+                        )
                 elif realized_trade > 0:
                     if split_realized_pct >= soft_partial_value_floor:
                         reward += (
@@ -3900,10 +3978,16 @@ class TradingEnvironment:
                     else 0.0
                 )
                 self.runner_profit_hold_capture_count += 1
+                self.runner_retained_profit_score_total += retained_ratio
                 reward += min(
                     reward_terms["runner_hold_capture_bonus"],
                     max(0.03, retained_ratio * reward_terms["runner_hold_capture_bonus"]),
                 ) * exit_reward_phase_scale
+                if runner_hold_after_soft_tp:
+                    reward += min(
+                        reward_terms["runner_hold_after_soft_tp_bonus"],
+                        max(0.03, retained_ratio * reward_terms["runner_hold_after_soft_tp_bonus"]),
+                    ) * exit_reward_phase_scale
                 if peak_giveback_ratio > 0.75:
                     reward -= reward_terms["runner_giveback_hard_penalty"] * exit_reward_phase_scale
                 elif peak_giveback_ratio > 0.55:
@@ -3929,13 +4013,15 @@ class TradingEnvironment:
             if (
                 bool(management_snapshot.get("soft_tp_hit", False))
                 and not bool(management_snapshot.get("offensive_continuation_support", False))
+                and not runner_viable_window
+                and not runner_profit_hold_window
             ):
                 reward -= 0.20 * exit_reward_phase_scale
                 if bool(management_snapshot.get("reversal_context", False)):
                     self.tp_like_missed_count += 1
             if bool(management_snapshot.get("full_tp_hit", False)) and not bool(
                 management_snapshot.get("offensive_continuation_support", False)
-            ):
+            ) and not runner_profit_hold_window:
                 reward -= 0.30 * exit_reward_phase_scale
             if bool(management_snapshot.get("profit_peak_reached", False)):
                 peak_giveback_ratio = max(
@@ -3996,7 +4082,15 @@ class TradingEnvironment:
         split_window_captured = bool(
             split_monetization_window and action == SPLIT and split_performed and split_realized_trade > 0.0
         )
-        runner_window_captured = bool(runner_profit_hold_window and action == HOLD)
+        runner_window_captured = bool(
+            (runner_profit_hold_window and action == HOLD)
+            or (
+                runner_viable_window
+                and action == SPLIT
+                and split_performed
+                and split_realized_trade > 0.0
+            )
+        )
         pyramid_window_captured = bool(
             pyramid_monetization_window
             and (
@@ -4012,7 +4106,7 @@ class TradingEnvironment:
             current_wait_steps=self._split_window_wait_steps,
         )
         self._runner_window_wait_steps, runner_window_missed = self._update_offensive_window_wait_steps(
-            active=runner_profit_hold_window,
+            active=(runner_profit_hold_window or runner_viable_window),
             captured=runner_window_captured,
             current_wait_steps=self._runner_window_wait_steps,
         )
@@ -4310,16 +4404,25 @@ class TradingEnvironment:
                 if self.runner_extension_opportunity_count > 0
                 else 0.0
             ),
+            "runner_viable_window_count": self.runner_viable_window_count,
             "runner_profit_hold_capture_rate": (
                 self.runner_profit_hold_capture_count / max(self.runner_profit_hold_window_count, 1)
                 if self.runner_profit_hold_window_count > 0
                 else 0.0
             ),
             "runner_missed_extension_count": self.runner_missed_extension_count,
+            "runner_hold_after_soft_tp_count": self.runner_hold_after_soft_tp_count,
+            "runner_viable_but_closed_count": self.runner_viable_but_closed_count,
+            "early_full_close_after_soft_tp_count": self.early_full_close_after_soft_tp_count,
             "runner_managed_exit_count": self.runner_managed_exit_count,
             "runner_exit_profitable_count": self.runner_exit_profitable_count,
             "runner_forced_stop_count": self.runner_forced_stop_count,
             "runner_retained_profit_pct": self.runner_retained_profit_pct,
+            "runner_retained_profit_score": (
+                self.runner_retained_profit_score_total / max(self.runner_profit_hold_capture_count, 1)
+                if self.runner_profit_hold_capture_count > 0
+                else 0.0
+            ),
             "runner_giveback_pct": self.runner_giveback_pct,
             "runner_giveback_ratio": (
                 self.runner_giveback_pct
@@ -4421,6 +4524,11 @@ class TradingEnvironment:
             if self.runner_profit_hold_window_count > 0
             else 0.0
         )
+        runner_retained_profit_score = (
+            self.runner_retained_profit_score_total / max(self.runner_profit_hold_capture_count, 1)
+            if self.runner_profit_hold_capture_count > 0
+            else 0.0
+        )
         runner_giveback_ratio = (
             self.runner_giveback_pct / max(self.runner_retained_profit_pct + self.runner_giveback_pct, 1e-6)
             if (self.runner_retained_profit_pct + self.runner_giveback_pct) > 0.0
@@ -4510,13 +4618,18 @@ class TradingEnvironment:
             "runner_extension_count": self.runner_extension_count,
             "runner_extension_opportunity_count": self.runner_extension_opportunity_count,
             "runner_extension_capture_rate": runner_extension_capture_rate,
+            "runner_viable_window_count": self.runner_viable_window_count,
             "runner_profit_hold_window_count": self.runner_profit_hold_window_count,
             "runner_profit_hold_capture_rate": runner_profit_hold_capture_rate,
             "runner_missed_extension_count": self.runner_missed_extension_count,
+            "runner_hold_after_soft_tp_count": self.runner_hold_after_soft_tp_count,
+            "runner_viable_but_closed_count": self.runner_viable_but_closed_count,
+            "early_full_close_after_soft_tp_count": self.early_full_close_after_soft_tp_count,
             "runner_managed_exit_count": self.runner_managed_exit_count,
             "runner_exit_profitable_count": self.runner_exit_profitable_count,
             "runner_forced_stop_count": self.runner_forced_stop_count,
             "runner_retained_profit_pct": self.runner_retained_profit_pct,
+            "runner_retained_profit_score": runner_retained_profit_score,
             "runner_giveback_pct": self.runner_giveback_pct,
             "runner_giveback_ratio": runner_giveback_ratio,
             "profit_peak_reached_count": self.profit_peak_reached_count,
@@ -4783,7 +4896,12 @@ class TradingEnvironment:
             "runner_managed_exit_count": self.runner_managed_exit_count,
             "runner_exit_profitable_count": self.runner_exit_profitable_count,
             "runner_forced_stop_count": self.runner_forced_stop_count,
+            "runner_viable_window_count": self.runner_viable_window_count,
+            "runner_hold_after_soft_tp_count": self.runner_hold_after_soft_tp_count,
+            "runner_viable_but_closed_count": self.runner_viable_but_closed_count,
+            "early_full_close_after_soft_tp_count": self.early_full_close_after_soft_tp_count,
             "runner_retained_profit_pct": self.runner_retained_profit_pct,
+            "runner_retained_profit_score": runner_retained_profit_score,
             "runner_giveback_pct": self.runner_giveback_pct,
             "forced_stop_near_miss_count": self.forced_stop_near_miss_count,
             "net_return_long_pct": self.net_realized_long_pct,

@@ -369,11 +369,50 @@ def _build_seed_reference_from_status(muzero_status: dict[str, Any]) -> dict[str
     checkpoint_info = dict(muzero_status.get("champion_checkpoint") or {})
     seed_checkpoint_path = str(checkpoint_info.get("path") or "").strip()
     artifact_compatibility = dict(muzero_status.get("artifact_compatibility") or {})
+    bootstrap_from_checkpoints = str(
+        os.getenv("MUZERO_GA_BOOTSTRAP_FROM_CHECKPOINTS", "0")
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
     if promotion_state != "promoted":
-        raise RuntimeError("Aucun champion MuZero scalp promu n'est disponible pour le seed GA.")
+        if not bootstrap_from_checkpoints:
+            raise RuntimeError("Aucun champion MuZero scalp promu n'est disponible pour le seed GA.")
+        latest_checkpoint_info = dict(muzero_status.get("latest_checkpoint") or {})
+        latest_model_info = dict(muzero_status.get("latest_model") or {})
+        candidate_checkpoint_path = (
+            str(latest_checkpoint_info.get("path") or "").strip()
+            or str(latest_model_info.get("path") or "").strip()
+            or str(muzero_status.get("challenger_path") or "").strip()
+        )
+        candidate_id = (
+            str(muzero_status.get("candidate_id") or "").strip()
+            or str(muzero_status.get("latest_candidate") or "").strip()
+            or (Path(candidate_checkpoint_path).stem if candidate_checkpoint_path else "")
+        )
+        if not candidate_checkpoint_path or not candidate_id:
+            raise RuntimeError("Aucun checkpoint candidat MuZero scalp disponible pour le bootstrap GA.")
+        return {
+            "champion_id": f"candidate_seed::{candidate_id}",
+            "checkpoint_path": candidate_checkpoint_path,
+            "metrics": dict(muzero_status.get("candidate_metrics") or {}),
+            "mechanics_profile_version": str(muzero_status.get("mechanics_profile_version") or "").strip() or None,
+            "feature_profile": str(muzero_status.get("feature_profile") or "").strip() or None,
+            "artifact_compatibility": artifact_compatibility or {"allowed": True, "status": "bootstrap_candidate"},
+            "checkpoint_schema_version": muzero_status.get("checkpoint_schema_version"),
+            "resume_source": "bootstrap_from_checkpoints",
+            "lineage": {
+                **dict(muzero_status.get("lineage") or {}),
+                "bootstrap_from_checkpoints": True,
+                "source_promotion_state": promotion_state,
+            },
+            "seed_parent_champion_id": str(muzero_status.get("seed_parent_champion_id") or "").strip() or None,
+            "is_bootstrap_seed": True,
+        }
     if selection != "champion":
-        raise RuntimeError("Le seed GA MuZero refuse les artefacts live non champions.")
+        if not bootstrap_from_checkpoints:
+            raise RuntimeError("Le seed GA MuZero refuse les artefacts live non champions.")
+        if not seed_checkpoint_path:
+            latest_checkpoint_info = dict(muzero_status.get("latest_checkpoint") or {})
+            seed_checkpoint_path = str(latest_checkpoint_info.get("path") or "").strip()
     if not artifact_compatibility.get("allowed", False):
         reason = str(artifact_compatibility.get("reason") or "artifact_incompatible").strip()
         raise RuntimeError(

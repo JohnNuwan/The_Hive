@@ -324,6 +324,124 @@ class Arena:
         }
 
     @staticmethod
+    def _read_bool_env(name: str, default: bool = False) -> bool:
+        """Lit une variable booleenne d'environnement.
+
+        Args:
+            name (str): Nom de variable.
+            default (bool): Valeur de repli.
+
+        Returns:
+            bool: Valeur normalisee.
+        """
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+        return str(raw_value).strip().lower() not in {"0", "false", "no", "off"}
+
+    @classmethod
+    def _build_nemesis_validation(
+        cls,
+        challenger_metrics: dict[str, Any],
+        champion_metrics: dict[str, Any],
+        inverse_metrics: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Construit les slices de robustesse Nemesis depuis les metriques Arena.
+
+        Args:
+            challenger_metrics (dict[str, Any]): Metriques du challenger.
+            champion_metrics (dict[str, Any]): Metriques du champion courant.
+            inverse_metrics (dict[str, Any]): Metriques du miroir directionnel.
+
+        Returns:
+            dict[str, Any]: Verdict de robustesse par type d'echec.
+        """
+        challenger_mechanics = dict(challenger_metrics.get("metrics_by_position_mechanics") or {})
+        champion_mechanics = dict(champion_metrics.get("metrics_by_position_mechanics") or {})
+        total_trades = max(float(challenger_metrics.get("total_trades", 0.0) or 0.0), 1.0)
+        champion_trades = max(float(champion_metrics.get("total_trades", 0.0) or 0.0), 1.0)
+
+        def ratio(metrics: dict[str, Any], mechanics: dict[str, Any], key: str, denominator: float) -> float:
+            """Calcule un ratio borne depuis les metriques agregees."""
+
+            value = float(mechanics.get(key, metrics.get(key, 0.0)) or 0.0)
+            return max(0.0, min(value / max(denominator, 1.0), 1.0))
+
+        challenger_slices = {
+            "liquidity_trap": float(challenger_metrics.get("liquidity_trap_share", 0.0) or 0.0),
+            "bad_runner": float(challenger_metrics.get("bad_runner_share", 0.0) or 0.0),
+            "bad_pyramid": float(challenger_metrics.get("bad_pyramid_share", 0.0) or 0.0),
+            "hard_stop": ratio(challenger_metrics, challenger_mechanics, "hard_stop_exit_count", total_trades),
+            "bad_close": 1.0 - float(
+                challenger_mechanics.get(
+                    "close_quality_score",
+                    challenger_metrics.get("close_quality_score", 0.0),
+                )
+                or 0.0
+            ),
+            "trend_reversal": 1.0
+            if float(challenger_metrics.get("profit_factor", 0.0) or 0.0)
+            <= float(inverse_metrics.get("profit_factor", 0.0) or 0.0)
+            else 0.0,
+        }
+        champion_slices = {
+            "liquidity_trap": float(champion_metrics.get("liquidity_trap_share", 0.0) or 0.0),
+            "bad_runner": float(champion_metrics.get("bad_runner_share", 0.0) or 0.0),
+            "bad_pyramid": float(champion_metrics.get("bad_pyramid_share", 0.0) or 0.0),
+            "hard_stop": ratio(champion_metrics, champion_mechanics, "hard_stop_exit_count", champion_trades),
+            "bad_close": 1.0 - float(
+                champion_mechanics.get(
+                    "close_quality_score",
+                    champion_metrics.get("close_quality_score", 0.0),
+                )
+                or 0.0
+            ),
+            "trend_reversal": 1.0
+            if float(champion_metrics.get("profit_factor", 0.0) or 0.0)
+            <= float(inverse_metrics.get("profit_factor", 0.0) or 0.0)
+            else 0.0,
+        }
+        thresholds = {
+            "liquidity_trap": cls._read_float_env("ARENA_NEMESIS_MAX_LIQUIDITY_TRAP_SHARE", 0.20),
+            "bad_runner": cls._read_float_env("ARENA_NEMESIS_MAX_BAD_RUNNER_SHARE", 0.35),
+            "bad_pyramid": cls._read_float_env("ARENA_NEMESIS_MAX_BAD_PYRAMID_SHARE", 0.35),
+            "hard_stop": cls._read_float_env("ARENA_NEMESIS_MAX_HARD_STOP_SHARE", 0.40),
+            "bad_close": cls._read_float_env("ARENA_NEMESIS_MAX_BAD_CLOSE_SHARE", 0.60),
+            "trend_reversal": cls._read_float_env("ARENA_NEMESIS_MAX_TREND_REVERSAL_FLAG", 0.0),
+        }
+        slices: dict[str, dict[str, Any]] = {}
+        failed_slices: list[str] = []
+        score = 0.0
+        for name, challenger_value in challenger_slices.items():
+            champion_value = champion_slices.get(name, 0.0)
+            threshold = thresholds[name]
+            beats_champion = (
+                not champion_metrics
+                or float(champion_metrics.get("evaluation_games", 0.0) or 0.0) <= 0.0
+                or challenger_value <= (champion_value + 1e-9)
+            )
+            below_threshold = challenger_value <= threshold
+            passed = bool(beats_champion and below_threshold)
+            if not passed:
+                failed_slices.append(name)
+            score += max(0.0, threshold - challenger_value)
+            slices[name] = {
+                "challenger": round(challenger_value, 6),
+                "champion": round(champion_value, 6),
+                "threshold": round(threshold, 6),
+                "beats_champion": beats_champion,
+                "passed": passed,
+            }
+
+        return {
+            "status": "passed" if not failed_slices else "failed",
+            "allowed": not failed_slices,
+            "score": round(score, 6),
+            "failed_slices": failed_slices,
+            "slices": slices,
+        }
+
+    @staticmethod
     def _compute_max_drawdown_pct(equity_curve: list[float] | tuple[float, ...]) -> float:
         """Calcule le drawdown maximal d'une courbe d'equite.
 
@@ -1842,12 +1960,22 @@ class Arena:
         }
         if normalized_engine == "muzero":
             inverse_ok = all(inverse_checks.values())
+        nemesis_validation = self._build_nemesis_validation(
+            challenger_metrics,
+            champion_metrics,
+            inverse_metrics,
+        )
+        nemesis_ok = (
+            bool(nemesis_validation.get("allowed", True))
+            or not self._read_bool_env("ARENA_REQUIRE_NEMESIS_VALIDATION", True)
+        )
 
         is_bootstrap = champion_path is None
         is_victory = (
             sample_size_ok
             and challenger_directional_ok
             and inverse_ok
+            and nemesis_ok
             and (is_bootstrap or challenger_score > (champion_score + min_score_edge))
         )
 
@@ -1873,6 +2001,7 @@ class Arena:
                 "sample_size_ok": sample_size_ok,
                 "directional_ok": challenger_directional_ok,
                 "inverse_ok": inverse_ok,
+                "nemesis_ok": nemesis_ok,
                 "inverse_checks": inverse_checks,
                 "min_games": min_games,
                 "min_symbols": min_symbols,
@@ -1891,6 +2020,7 @@ class Arena:
                 "metrics": champion_metrics,
             },
             "inverse_metrics": inverse_metrics,
+            "nemesis_validation": nemesis_validation,
             "inverse_challenger": {
                 "id": f"{challenger_id}::inverse",
                 "path": str(challenger_path),
@@ -1913,9 +2043,13 @@ class Arena:
                             "INVERSE_BEATS_CHALLENGER"
                             if not inverse_ok
                             else (
-                                "REJECT_DIRECTIONAL_COLLAPSE"
-                                if not challenger_directional_ok
-                                else "KEEP_CURRENT"
+                                "REJECT_NEMESIS_SLICE"
+                                if not nemesis_ok
+                                else (
+                                    "REJECT_DIRECTIONAL_COLLAPSE"
+                                    if not challenger_directional_ok
+                                    else "KEEP_CURRENT"
+                                )
                             )
                         )
                     )
@@ -1931,6 +2065,7 @@ class Arena:
         arena_progress["outcome"] = report["outcome"]
         arena_progress["action_required"] = report["action_required"]
         arena_progress["validation"] = report["validation"]
+        arena_progress["nemesis_validation"] = nemesis_validation
         arena_progress["mechanics_profile_version"] = report.get("mechanics_profile_version")
         arena_progress["dataset_coverage"] = dict(report.get("dataset_coverage") or {})
         arena_progress["challenger_score"] = round(challenger_score, 4)

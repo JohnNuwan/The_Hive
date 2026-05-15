@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import pickle
 import tempfile
 import unittest
@@ -242,6 +243,32 @@ class MuZeroCheckpointCompatibilityTests(unittest.TestCase):
             seed_reference["lineage"],
             {"parent_champion_id": "gen_scalp_parent"},
         )
+
+    def test_seed_reference_allows_checkpoint_bootstrap_when_enabled(self) -> None:
+        """Autorise le GA bootstrap depuis un checkpoint tardif sans champion."""
+
+        previous_value = os.environ.get("MUZERO_GA_BOOTSTRAP_FROM_CHECKPOINTS")
+        os.environ["MUZERO_GA_BOOTSTRAP_FROM_CHECKPOINTS"] = "1"
+        try:
+            seed_reference = _build_seed_reference_from_status(
+                {
+                    "promotion_state": "candidate_only",
+                    "selection": "blocked_champion",
+                    "candidate_id": "gen_scalp_ckpt14000",
+                    "latest_checkpoint": {"path": "/tmp/muzero_scalp_ckpt_14000.pkl"},
+                    "candidate_metrics": {"profit_factor": 1.12},
+                    "artifact_compatibility": {"allowed": True},
+                }
+            )
+        finally:
+            if previous_value is None:
+                os.environ.pop("MUZERO_GA_BOOTSTRAP_FROM_CHECKPOINTS", None)
+            else:
+                os.environ["MUZERO_GA_BOOTSTRAP_FROM_CHECKPOINTS"] = previous_value
+
+        self.assertEqual(seed_reference["champion_id"], "candidate_seed::gen_scalp_ckpt14000")
+        self.assertEqual(seed_reference["checkpoint_path"], "/tmp/muzero_scalp_ckpt_14000.pkl")
+        self.assertTrue(seed_reference["is_bootstrap_seed"])
 
 
 if __name__ == "__main__":

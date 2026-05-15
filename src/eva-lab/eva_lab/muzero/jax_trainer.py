@@ -123,7 +123,7 @@ class MuZeroTrainerJAX:
         alpha = float(max(0.0, min(1.0, alpha)))
         target_policy = self._normalize_policy(target_policy)
         smoothing_temperature = float(
-            getattr(self.config, "policy_target_smoothing_temperature", 1.30) or 1.30
+            getattr(self.config, "policy_target_smoothing_temperature", 1.40) or 1.40
         )
         if abs(smoothing_temperature - 1.0) > 1e-6:
             target_policy = self._normalize_policy(
@@ -188,7 +188,7 @@ class MuZeroTrainerJAX:
         root_target_policy_smoothed = self._smooth_target_policy(
             root_target_policy,
             self._build_root_legal_policy(root_has_position),
-            float(getattr(self.config, "policy_target_smoothing_alpha_root", 0.20) or 0.20),
+            float(getattr(self.config, "policy_target_smoothing_alpha_root", 0.28) or 0.28),
         )
         root_target_value = batch.target_values[:, 0]
         predicted_root_value = support_to_scalar(value_logits, self.config.support_size)
@@ -218,7 +218,7 @@ class MuZeroTrainerJAX:
             unroll_target_policy_smoothed = self._smooth_target_policy(
                 unroll_target_policy,
                 self._build_uniform_policy_from_target(unroll_target_policy),
-                float(getattr(self.config, "policy_target_smoothing_alpha_unroll", 0.12) or 0.12),
+                float(getattr(self.config, "policy_target_smoothing_alpha_unroll", 0.18) or 0.18),
             )
             
             loss_rew += jnp.mean(optax.softmax_cross_entropy(reward_logits, target_reward_support))

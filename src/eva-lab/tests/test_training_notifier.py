@@ -23,6 +23,8 @@ class TrainingNotifierDigestTests(unittest.TestCase):
             "reason": "no_deployable_champion",
             "resume_source": "explicit_resume",
             "replay_cache_entries": 128,
+            "arena_cutover_ready": True,
+            "screen_window": "ckpt10000_to_11999",
             "current_step": {
                 "name": "muzero_scalp",
                 "phase": "optimisation",
@@ -39,6 +41,8 @@ class TrainingNotifierDigestTests(unittest.TestCase):
             "latest_metrics": {
                 "loss_pol": 5.32,
                 "loss_pol_per_head": 0.89,
+                "loss_pol_root": 0.74,
+                "loss_pol_unroll_mean": 0.93,
                 "loss_total": 16.44,
                 "policy_entropy": 0.44,
                 "policy_top1_share": 0.86,
@@ -88,8 +92,13 @@ class TrainingNotifierDigestTests(unittest.TestCase):
                 "runner_extension_capture_rate": 0.09,
                 "runner_profit_hold_capture_rate": 0.21,
                 "runner_profit_hold_window_count": 5,
+                "runner_viable_window_count": 8,
+                "runner_hold_after_soft_tp_count": 4,
+                "runner_viable_but_closed_count": 2,
+                "early_full_close_after_soft_tp_count": 2,
                 "runner_missed_extension_count": 3,
                 "runner_retained_profit_pct": 0.52,
+                "runner_retained_profit_score": 0.61,
                 "runner_giveback_pct": 0.18,
                 "runner_giveback_ratio": 0.26,
                 "profit_peak_giveback_ratio": 0.31,
@@ -109,6 +118,8 @@ class TrainingNotifierDigestTests(unittest.TestCase):
                 "reason": "eligible_screen",
                 "trends": {
                     "loss_pol_trend": -0.12,
+                    "loss_pol_root_trend": -0.08,
+                    "loss_pol_unroll_mean_trend": -0.05,
                     "root_mask_rate_trend": 0.03,
                     "split_runner_capture_trend": 0.01,
                     "pyramid_exit_capture_trend": 0.00,
@@ -158,14 +169,20 @@ class TrainingNotifierDigestTests(unittest.TestCase):
         self.assertIn("POINT ENTRAINEMENT", message)
         self.assertIn("- id: nightly-20260424-042458", message)
         self.assertIn("- etape: muzero scalp | phase: optimisation | horizon: scalp", message)
-        self.assertIn("- policy: total=5.32 | par_tete=0.89 | top1=86.00% | entropy=0.44", message)
+        self.assertIn(
+            "- policy: total=5.32 | par_tete=0.89 | root=0.74 | unroll=0.93 | top1=86.00% | entropy=0.44",
+            message,
+        )
         self.assertIn("- defensif: root_mask=11.00% | close_q=0.58 | slbe=0.37 | hold_drag=0.22", message)
-        self.assertIn("- offensif: split_cap=0.27 | runner_win=5.00 | pyramid_cap=0.28 | peak_giveback=0.31", message)
-        self.assertIn("- fenetres: split=9.00 | runner=5.00 | pyramid=6.00", message)
+        self.assertIn("- offensif: split_cap=0.27 | runner_win=5.00 | runner_score=0.61 | pyramid_cap=0.28 | peak_giveback=0.31", message)
+        self.assertIn("- fenetres: split=9.00 | runner_viable=8.00 | runner_hold=4.00 | pyramid=6.00", message)
+        self.assertIn("- runner: close_trop_tot=2.00 | runner_rate=2.00", message)
         self.assertIn("- seed: etage=offensive bootstrap | statut=monitoring | raison=within seed window", message)
+        self.assertIn("- arena_cutover: pret=oui | fenetre=ckpt10000 to 11999", message)
         self.assertIn("- seed_reco: muzero-scalp-ckpt-23000", message)
         self.assertIn("PRECHECK POLICY", message)
         self.assertIn("- statut: screen only | raison: eligible screen", message)
+        self.assertIn("- tendances: loss=-0.12 | root=-0.08 | unroll=-0.05 | root_mask=0.03 | split_runner=0.01 | pyramid_exit=0.00", message)
         self.assertIn("FAMILY PROBES", message)
         self.assertIn("- statut: family probe passed | pretes: 3.00/3.00 | positives: 2.00/2.00", message)
         self.assertIn("MUZERO SCALP", message)

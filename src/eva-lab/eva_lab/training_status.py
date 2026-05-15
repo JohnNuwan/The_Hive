@@ -146,6 +146,8 @@ def _default_status() -> dict[str, Any]:
         "metrics_by_position_mechanics": {},
         "latest_metrics": {},
         "arena_progress": None,
+        "arena_cutover_ready": False,
+        "screen_window": None,
         "last_successful_step": None,
         "last_successful_step_at": None,
         "train_step_phase": None,
@@ -1165,7 +1167,10 @@ def reset_training_status(
     status["supervisor_state"] = str(os.getenv("TRAINING_SUPERVISOR_STATE", "")).strip() or None
     status["launcher"] = dict(previous.get("launcher") or {})
     status["dependencies"] = dict(previous.get("dependencies") or {})
-    status["universe"] = universe or build_training_universe_summary()
+    status["universe"] = build_effective_training_universe_summary(
+        focus_symbols,
+        base_universe=universe or build_training_universe_summary(),
+    )
     status["arena_progress"] = None
     persisted = persist_training_status(status)
     append_training_log(
@@ -1371,6 +1376,10 @@ def mark_step_running(
         status["world_model_steps"] = world_model_steps
     if dataset_coverage is not None:
         status["dataset_coverage"] = dict(dataset_coverage)
+    status["universe"] = build_effective_training_universe_summary(
+        list(status.get("focus_symbols") or []),
+        base_universe=dict(status.get("universe") or {}),
+    )
     if metrics_by_position_mechanics is not None:
         status["metrics_by_position_mechanics"] = dict(metrics_by_position_mechanics)
     status["failed_step"] = None
@@ -1613,3 +1622,63 @@ def build_training_universe_summary(data_dir: str | os.PathLike[str] | None = No
         "sample_symbols": sample_symbols,
         "horizon_universe": horizon_universe,
     }
+
+
+def build_effective_training_universe_summary(
+    focus_symbols: list[str] | None,
+    *,
+    base_universe: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Construit un resume d'univers focalise sur les symboles reels du run.
+
+    Args:
+        focus_symbols (list[str] | None): Liste explicite des symboles du run.
+        base_universe (dict[str, Any] | None): Resume global deja calcule.
+
+    Returns:
+        dict[str, Any]: Resume enrichi avec l'univers effectif du run.
+    """
+    universe = dict(base_universe or build_training_universe_summary())
+    normalized_focus = [
+        str(symbol).strip()
+        for symbol in list(focus_symbols or [])
+        if str(symbol).strip()
+    ]
+    if not normalized_focus:
+        return universe
+
+    inventory_total_symbols = int(universe.get("total_symbols") or 0)
+    unique_focus_symbols = list(dict.fromkeys(normalized_focus))
+    effective_count = len(unique_focus_symbols)
+    horizon_universe = dict(universe.get("horizon_universe") or {})
+    effective_horizon_universe = {
+        horizon: {
+            **dict(payload or {}),
+            "count": effective_count,
+            "sample_symbols": unique_focus_symbols[:8],
+        }
+        for horizon, payload in horizon_universe.items()
+    }
+    universe["inventory_total_symbols"] = inventory_total_symbols
+    universe["total_symbols"] = effective_count
+    universe["sample_symbols"] = unique_focus_symbols[:12]
+    universe["effective_symbols"] = unique_focus_symbols
+    universe["effective_horizon_universe"] = effective_horizon_universe
+    try:
+        from eva_lab.training_utils import build_history_freshness_report
+
+        tracked_timeframes = sorted(
+            {
+                str(dict(payload or {}).get("timeframe") or "").strip().upper()
+                for payload in effective_horizon_universe.values()
+                if str(dict(payload or {}).get("timeframe") or "").strip()
+            }
+        )
+        universe["freshness"] = build_history_freshness_report(
+            data_dir=universe.get("history_dir"),
+            symbols=unique_focus_symbols,
+            timeframes=tracked_timeframes,
+        )
+    except Exception:
+        universe["freshness"] = {}
+    return universe

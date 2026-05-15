@@ -218,6 +218,7 @@ class Position(BaseModel):
     swap: Decimal = Decimal("0")
     commission: Decimal = Decimal("0")
     magic_number: int = 0
+    comment: str = ""
     open_time: datetime
 
     @property
@@ -254,6 +255,9 @@ class RiskStatus(BaseModel):
     daily_drawdown_percent: Decimal = Decimal("0")
     total_drawdown_percent: Decimal = Decimal("0")
     open_positions_count: int = 0
+    total_positions_count: int = 0
+    hold_positions_count: int = 0
+    ignored_positions_count: int = 0
     anti_tilt_active: bool = False
     anti_tilt_expires_at: datetime | None = None
     news_filter_active: bool = False
@@ -299,9 +303,13 @@ class AccountBalance(BaseModel):
         equity (Decimal): Solde avec flottant (Balance + P&L latent).
         margin (Decimal): Marge utilisée pour les positions ouvertes.
         free_margin (Decimal): Marge disponible pour de nouveaux trades.
+        name (str): Nom du titulaire tel que remonte par le terminal MT5.
+        company (str): Societe/broker tel que remonte par le terminal MT5.
     """
     login: int
     server: str
+    name: str = ""
+    company: str = ""
     balance: Decimal
     equity: Decimal
     margin: Decimal = Decimal("0")

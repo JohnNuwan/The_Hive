@@ -267,6 +267,39 @@ class PrioritizedReplayBuffer:
         """
         return cls._hard_negative_type(game) is not None
 
+    @classmethod
+    def _offensive_curriculum_multiplier(cls, game: GameHistory) -> float:
+        """Calcule le boost de replay pour les episodes offensifs utiles.
+
+        Args:
+            game (GameHistory): Episode MuZero analyse.
+
+        Returns:
+            float: Multiplicateur borne applique a la priorite.
+        """
+        if str(os.getenv("MUZERO_REPLAY_OFFENSIVE_CURRICULUM", "1")).strip().lower() in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            return 1.0
+
+        metadata = dict(game.metadata or {})
+        boost = 1.0
+        boost += min(cls._metadata_float(game, "soft_tp_hit_count"), 3.0) * 0.06
+        boost += min(cls._metadata_float(game, "full_tp_hit_count"), 2.0) * 0.08
+        boost += min(cls._metadata_float(game, "split_monetization_capture_count"), 3.0) * 0.12
+        boost += min(cls._metadata_float(game, "runner_profit_hold_capture_count"), 3.0) * 0.14
+        boost += min(cls._metadata_float(game, "runner_extension_capture_count"), 3.0) * 0.10
+        boost += min(cls._metadata_float(game, "pyramid_monetization_capture_count"), 3.0) * 0.10
+        boost += min(cls._metadata_float(game, "pyramid_add_capture_count"), 3.0) * 0.08
+        boost += max(0.0, cls._metadata_float(game, "close_quality_score")) * 0.20
+        boost += max(0.0, cls._metadata_float(game, "return_pct")) * 0.02
+        if float(metadata.get("profit_factor", 0.0) or 0.0) > 1.0:
+            boost += min(float(metadata.get("profit_factor", 1.0) or 1.0) - 1.0, 2.0) * 0.12
+        return max(1.0, min(boost, 2.50))
+
     def save_game(self, game: GameHistory) -> None:
         """Persiste un episode complet dans l'arbre de priorites.
 
@@ -276,6 +309,7 @@ class PrioritizedReplayBuffer:
         if len(game) <= 0:
             return
         priority = np.max(game.priorities) if game.priorities else 1.0
+        priority *= self._offensive_curriculum_multiplier(game)
         self.tree.add(float(priority**self.alpha), game)
 
     def sample(
@@ -645,8 +679,13 @@ class PrioritizedReplayBuffer:
                 "runner_extension_opportunity_count": 0.0,
                 "runner_profit_hold_capture_rate": 0.0,
                 "runner_profit_hold_window_count": 0.0,
+                "runner_viable_window_count": 0.0,
+                "runner_hold_after_soft_tp_count": 0.0,
+                "runner_viable_but_closed_count": 0.0,
+                "early_full_close_after_soft_tp_count": 0.0,
                 "runner_missed_extension_count": 0.0,
                 "runner_retained_profit_pct": 0.0,
+                "runner_retained_profit_score": 0.0,
                 "runner_giveback_pct": 0.0,
                 "runner_giveback_ratio": 0.0,
                 "profit_peak_reached_count": 0.0,
@@ -750,11 +789,16 @@ class PrioritizedReplayBuffer:
         runner_extension_capture_count = 0.0
         runner_profit_hold_window_count = 0.0
         runner_profit_hold_capture_count = 0.0
+        runner_viable_window_count = 0.0
+        runner_hold_after_soft_tp_count = 0.0
+        runner_viable_but_closed_count = 0.0
+        early_full_close_after_soft_tp_count = 0.0
         runner_missed_extension_count = 0.0
         runner_managed_exit_count = 0.0
         runner_exit_profitable_count = 0.0
         runner_forced_stop_count = 0.0
         runner_retained_profit_total = 0.0
+        runner_retained_profit_score_total = 0.0
         runner_giveback_total = 0.0
         profit_peak_reached_count = 0.0
         profit_peak_giveback_ratio_total = 0.0
@@ -938,11 +982,31 @@ class PrioritizedReplayBuffer:
                 game,
                 "runner_profit_hold_capture_rate",
             ) * self._metadata_float(game, "runner_profit_hold_window_count")
+            runner_viable_window_count += self._metadata_float(game, "runner_viable_window_count")
+            runner_hold_after_soft_tp_count += self._metadata_float(
+                game,
+                "runner_hold_after_soft_tp_count",
+            )
+            runner_viable_but_closed_count += self._metadata_float(
+                game,
+                "runner_viable_but_closed_count",
+            )
+            early_full_close_after_soft_tp_count += self._metadata_float(
+                game,
+                "early_full_close_after_soft_tp_count",
+            )
             runner_missed_extension_count += self._metadata_float(game, "runner_missed_extension_count")
             runner_managed_exit_count += self._metadata_float(game, "runner_managed_exit_count")
             runner_exit_profitable_count += self._metadata_float(game, "runner_exit_profitable_count")
             runner_forced_stop_count += self._metadata_float(game, "runner_forced_stop_count")
             runner_retained_profit_total += self._metadata_float(game, "runner_retained_profit_pct")
+            runner_retained_profit_score_total += self._metadata_float(
+                game,
+                "runner_retained_profit_score",
+            ) * (
+                self._metadata_float(game, "runner_profit_hold_capture_rate")
+                * self._metadata_float(game, "runner_profit_hold_window_count")
+            )
             runner_giveback_total += self._metadata_float(game, "runner_giveback_pct")
             profit_peak_reached_count += self._metadata_float(game, "profit_peak_reached_count")
             profit_peak_giveback_ratio_total += self._metadata_float(
@@ -1292,18 +1356,27 @@ class PrioritizedReplayBuffer:
                 else 0.0
             ),
             "runner_profit_hold_window_count": runner_profit_hold_window_count,
+            "runner_viable_window_count": runner_viable_window_count,
             "runner_profit_hold_capture_rate": (
                 runner_profit_hold_capture_count / max(runner_profit_hold_window_count, 1.0)
                 if runner_profit_hold_window_count > 0.0
                 else 0.0
             ),
             "runner_missed_extension_count": runner_missed_extension_count,
+            "runner_hold_after_soft_tp_count": runner_hold_after_soft_tp_count,
+            "runner_viable_but_closed_count": runner_viable_but_closed_count,
+            "early_full_close_after_soft_tp_count": early_full_close_after_soft_tp_count,
             "runner_managed_exit_count": runner_managed_exit_count,
             "runner_exit_profitable_count": runner_exit_profitable_count,
             "runner_forced_stop_count": runner_forced_stop_count,
             "runner_retained_profit_pct": (
                 runner_retained_profit_total / max(split_runner_profitable_count, 1.0)
                 if split_runner_profitable_count > 0.0
+                else 0.0
+            ),
+            "runner_retained_profit_score": (
+                runner_retained_profit_score_total / max(runner_profit_hold_capture_count, 1.0)
+                if runner_profit_hold_capture_count > 0.0
                 else 0.0
             ),
             "runner_giveback_pct": (

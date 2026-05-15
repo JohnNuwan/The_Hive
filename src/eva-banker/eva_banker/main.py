@@ -133,6 +133,7 @@ class OrderRequest(BaseModel):
     symbol: str = Field(..., description="Symbole (ex: XAUUSD)")
     action: TradeAction
     volume: Decimal = Field(..., gt=0, le=5)
+    entry_price: Decimal | None = Field(None, description="Prix d'entree de reference")
     stop_loss: Decimal | None = Field(None, description="Prix Stop Loss (obligatoire)")
     take_profit: Decimal | None = None
     account_id: UUID | None = None
@@ -443,6 +444,33 @@ async def _close_optional_service(service_name: str, service: Any) -> None:
         logger.warning("Fermeture partielle du service %s: %s", service_name, exc)
 
 
+async def _repair_copy_links_without_duplication(mt5_service: Any) -> None:
+    """
+    Reconstruit les liens de copy trading sans ouvrir de nouvelles positions.
+
+    Args:
+        mt5_service (Any): Service MT5 courant, potentiellement routeur copy.
+    """
+    repair_method = getattr(mt5_service, "repair_open_positions", None)
+    if not callable(repair_method):
+        return
+
+    try:
+        result = await repair_method(create_missing=False)
+    except Exception as exc:
+        logger.warning("Copy trading: reparation des liens au demarrage impossible: %s", exc)
+        return
+
+    targets = list(result.get("targets") or [])
+    repaired_links = sum(int(target.get("repaired_links", 0) or 0) for target in targets)
+    missing_positions = sum(int(target.get("missing_positions", 0) or 0) for target in targets)
+    logger.info(
+        "Copy trading: liens reconstruits au demarrage=%s, positions distantes manquantes=%s.",
+        repaired_links,
+        missing_positions,
+    )
+
+
 class FollowerAutoEngineStub:
     """
     Fournit un moteur minimal lorsque le banker tourne en mode follower.
@@ -682,6 +710,7 @@ async def lifespan(app: FastAPI):
             # Detecter l'univers reel puis preparer le premier lot de scan.
             await app.state.auto_engine.refresh_symbol_universe(force=True)
             await mt5_service.initialize_symbols(app.state.auto_engine.get_symbol_batch(advance=False))
+            await _repair_copy_links_without_duplication(mt5_service)
             
             # DÃ‰MARRAGE AU LANCEMENT (Seulement aprÃ¨s connexion rÃ©ussie)
             await app.state.auto_engine.start()
@@ -979,6 +1008,7 @@ async def create_order(request: OrderRequest) -> OrderResponse:
         symbol=request.symbol,
         action=request.action,
         volume=request.volume,
+        entry_price=request.entry_price,
         stop_loss_price=request.stop_loss,
         take_profit_price=request.take_profit,
         account_id=request.account_id,
@@ -997,7 +1027,7 @@ async def create_order(request: OrderRequest) -> OrderResponse:
         equity_or_balance = getattr(account, "equity", None) or getattr(account, "balance", None)
         if equity_or_balance is not None:
             risk_validator.update_account_balance(Decimal(str(equity_or_balance)))
-    risk_validator.update_positions_count(len(positions))
+    risk_validator.update_positions_snapshot(positions)
 
     # Le calcul de risque doit s'appuyer sur le dernier tick MT5 plutot que sur
     # un prix mock statique, sinon le follower surestime les copies valides.
@@ -1024,6 +1054,16 @@ async def create_order(request: OrderRequest) -> OrderResponse:
     # 6. Le Worker exÃ©cute la compÃ©tence
     worker: BankerWorker = app.state.worker
     result = await worker.execute_skill(skill, order)
+    if request.source == OrderSource.COPY:
+        logger.info(
+            "Ordre copy traite: %s %s %s | succes=%s | ticket=%s | message=%s",
+            order.symbol,
+            order.action.value,
+            order.volume,
+            result.get("success"),
+            result.get("ticket"),
+            result.get("message"),
+        )
 
     return OrderResponse(
         success=result["success"],
@@ -1160,7 +1200,7 @@ async def get_risk_status() -> RiskStatus:
     account, positions = await _read_mt5_snapshot(mt5_service)
     if account is not None:
         risk_validator.update_account_balance(Decimal(str(account.balance)))
-    risk_validator.update_positions_count(len(positions))
+    risk_validator.update_positions_snapshot(positions)
     risk = await risk_validator.get_current_status()
     if account is None:
         return risk.model_copy(update={"trading_allowed": False})
@@ -1306,7 +1346,7 @@ async def get_trading_status():
     account, positions = await _read_mt5_snapshot(mt5_service)
     if account is not None:
         risk_validator.update_account_balance(Decimal(str(account.balance)))
-    risk_validator.update_positions_count(len(positions))
+    risk_validator.update_positions_snapshot(positions)
     risk = await risk_validator.get_current_status()
     if account is None:
         risk = risk.model_copy(update={"trading_allowed": False})
@@ -1361,6 +1401,7 @@ async def get_trading_status():
             "mt5_connected": mt5_service.is_connected,
             "mock_mode": mt5_service.mock_mode,
         },
+        "spread_guard": mt5_service.get_spread_guard_profile(),
         "copy_trading": {
             "targets": getattr(app.state.mt5_service, "get_targets_status", lambda: [])(),
         },
@@ -1375,6 +1416,10 @@ async def get_trading_status():
         "gnn": connectors.get("gnn", {}),
         "nemesis": nemesis_status,
         "account": {
+            "login": int(account.login) if account is not None else 0,
+            "server": account.server if account is not None else "",
+            "name": account.name if account is not None else "",
+            "company": account.company if account is not None else "",
             "equity": float(account.equity) if account is not None else 0.0,
             "balance": float(account.balance) if account is not None else 0.0,
             "margin": float(account.margin) if account is not None else 0.0,
@@ -1391,6 +1436,12 @@ async def get_trading_status():
                 "profit": float(p.profit),
                 "open_price": float(p.open_price),
                 "current_price": float(p.current_price),
+                "comment": getattr(p, "comment", "") or "",
+                "position_mode": (
+                    "IGNORED"
+                    if risk_validator.is_ignored_position(p)
+                    else ("HOLD" if risk_validator.is_hold_position(p) else "ACTIVE")
+                ),
             }
             for p in positions
         ],
@@ -1398,6 +1449,10 @@ async def get_trading_status():
             "daily_drawdown_percent": float(risk.daily_drawdown_percent),
             "trading_allowed": risk.trading_allowed,
             "open_positions": risk.open_positions_count,
+            "open_positions_total": getattr(risk, "total_positions_count", risk.open_positions_count),
+            "hold_positions": getattr(risk, "hold_positions_count", 0),
+            "ignored_positions": getattr(risk, "ignored_positions_count", 0),
+            "max_open_positions": int(getattr(risk_validator, "max_open_positions", 0) or 0),
             "anti_tilt_active": risk.anti_tilt_active,
             "news_filter_active": risk.news_filter_active,
         },
@@ -1513,6 +1568,61 @@ async def get_model_performance(
         "status": "ok",
         "window_days": days,
         **performance,
+    }
+
+
+@app.get("/history/deals", tags=["Trading"])
+async def get_history_deals(
+    days: int = Query(default=30, ge=1, le=730),
+    closed_only: bool = Query(default=False),
+    limit: int = Query(default=0, ge=0, le=100000),
+):
+    """
+    Retourne les deals MT5 bruts normalises pour l'ingestion offline.
+
+    Cet endpoint evite qu'un processus d'analyse externe tente de reprendre la
+    main sur le terminal MT5 deja revendique par le Banker. Il sert de source
+    canonique pour le pipeline Shadow/Nemesis multi-comptes.
+
+    Args:
+        days (int): Fenetre historique a lire en jours.
+        closed_only (bool): Si True, ne retourne que les deals de sortie.
+        limit (int): Nombre maximal de deals retournes, 0 pour illimite.
+
+    Returns:
+        dict[str, Any]: Compte, fenetre et deals MT5 normalises.
+    """
+    mt5_service: MT5Service = app.state.mt5_service
+    settings = get_settings()
+    to_dt = datetime.now()
+    from_dt = to_dt - timedelta(days=days)
+    deals = await mt5_service.get_deal_history(
+        from_dt=from_dt,
+        to_dt=to_dt,
+        closed_only=closed_only,
+    )
+    if limit > 0:
+        deals = deals[-limit:]
+
+    server = str(getattr(settings, "mt5_server", "") or "")
+    broker = "FTUK" if "FTUK" in server.upper() else ("FTMO" if "FTMO" in server.upper() else "")
+    return {
+        "status": "ok",
+        "account": {
+            "login": int(getattr(settings, "mt5_login", 0) or 0),
+            "server": server,
+            "broker": broker,
+            "instance_name": os.getenv("BANKER_INSTANCE_NAME", ""),
+            "follower_mode": bool(getattr(settings, "banker_follower_mode", False)),
+        },
+        "window": {
+            "from": from_dt.isoformat(),
+            "to": to_dt.isoformat(),
+            "days": days,
+            "closed_only": closed_only,
+        },
+        "deals_total": len(deals),
+        "deals": deals,
     }
 
 @app.get("/", tags=["SystÃ¨me"])
@@ -1644,6 +1754,38 @@ async def get_copy_trading_status() -> dict[str, Any]:
         "enabled": bool(targets),
         "targets": targets,
     }
+
+
+@app.post("/copy-trading/repair-open-positions", tags=["Trading"])
+async def repair_copy_trading_open_positions(
+    create_missing: bool = Query(default=True),
+) -> dict[str, Any]:
+    """
+    Repare la copie du panier courant vers les followers actifs.
+
+    Cet endpoint sert apres un redemarrage controle du master ou apres
+    l'ajout de nouveaux followers. Il reconstruit les liens `ticket maitre ->
+    tickets followers` sur les positions deja ouvertes et peut ouvrir les
+    positions manquantes sur les comptes cibles.
+
+    Args:
+        create_missing (bool): Si True, ouvre les positions absentes sur les
+            followers actifs.
+
+    Returns:
+        dict[str, Any]: Resume detaille de la reparation.
+
+    Raises:
+        HTTPException: Si le mode copy trading n'est pas disponible.
+    """
+    mt5_service = app.state.mt5_service
+    repair_method = getattr(mt5_service, "repair_open_positions", None)
+    if not callable(repair_method):
+        raise HTTPException(
+            status_code=409,
+            detail="Le copy trading n'est pas actif sur cette instance.",
+        )
+    return await repair_method(create_missing=create_missing)
 
 
 @app.get("/symbols/discover", tags=["Trading"])
