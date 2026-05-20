@@ -48,6 +48,7 @@ from eva_lab.training_status import (
     CPU_SCHEDULER_STATE_PATH,
     RUN_LOG_PATH,
     STATUS_DIR,
+    build_effective_training_universe_summary,
     build_training_universe_summary,
     classify_training_symbol,
     derive_observed_training_step,
@@ -182,6 +183,7 @@ async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str
     timescale_info = describe_timescale_source()
 
     vllm_state = str(launcher.get("vllm_state") or "").lower()
+    probe_tasks: dict[str, asyncio.Future] = {}
     if vllm_state == "stopped_for_training":
         dependencies["vllm"] = {
             "name": "vllm",
@@ -191,11 +193,24 @@ async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str
             "port": 8000,
         }
     else:
-        dependencies["vllm"] = await _probe_tcp_dependency("vllm", vllm_host, 8000)
+        probe_tasks["vllm"] = asyncio.create_task(_probe_tcp_dependency("vllm", vllm_host, 8000))
 
-    dependencies["redis"] = await _probe_tcp_dependency("redis", redis_host, 6379)
-    dependencies["neo4j"] = await _probe_tcp_dependency("neo4j", neo4j_host, 7687)
-    dependencies["mosquitto"] = await _probe_tcp_dependency("mosquitto", mqtt_host, 1883)
+    probe_tasks["redis"] = asyncio.create_task(_probe_tcp_dependency("redis", redis_host, 6379))
+    probe_tasks["neo4j"] = asyncio.create_task(_probe_tcp_dependency("neo4j", neo4j_host, 7687))
+    probe_tasks["mosquitto"] = asyncio.create_task(_probe_tcp_dependency("mosquitto", mqtt_host, 1883))
+
+    if probe_tasks:
+        probe_results = await asyncio.gather(*probe_tasks.values(), return_exceptions=True)
+        for dependency_name, result in zip(probe_tasks.keys(), probe_results):
+            if isinstance(result, Exception):
+                dependencies[dependency_name] = {
+                    "name": dependency_name,
+                    "ok": False,
+                    "state": "offline",
+                    "error": str(result),
+                }
+                continue
+            dependencies[dependency_name] = result
     dependencies["timescaledb"] = {
         "name": "timescaledb",
         "ok": bool(timescale_info.get("ok", False)),
@@ -1722,11 +1737,40 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
     """
     run_status = load_training_status()
     runtime_profile = _resolve_runtime_profile(run_status)
-    nightly_summary = load_nightly_summary()
-    sequence_state = load_sequence_state()
-    universe_summary = run_status.get("universe") or build_training_universe_summary()
-    dependencies = await _collect_training_dependencies(run_status)
-    logs = tail_training_log(limit)
+
+    async def _safe_thread_read(reader, *, default, timeout_seconds: float):
+        """Lit une source synchrone hors boucle avec timeout court."""
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(reader), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            return default
+        except Exception:
+            return default
+
+    nightly_summary = await _safe_thread_read(
+        load_nightly_summary,
+        default=None,
+        timeout_seconds=0.75,
+    )
+    sequence_state = await _safe_thread_read(
+        load_sequence_state,
+        default={},
+        timeout_seconds=0.75,
+    )
+    try:
+        dependencies = await asyncio.wait_for(_collect_training_dependencies(run_status), timeout=2.0)
+    except asyncio.TimeoutError:
+        dependencies = dict(run_status.get("dependencies") or {})
+        dependencies["status_source"] = "cached_after_timeout"
+    except Exception as exc:
+        dependencies = dict(run_status.get("dependencies") or {})
+        dependencies["status_source"] = "cached_after_error"
+        dependencies["status_error"] = str(exc)
+    logs = await _safe_thread_read(
+        lambda: tail_training_log(limit),
+        default=[],
+        timeout_seconds=0.5,
+    )
 
     current_step = run_status.get("current_step") or {}
     arena_progress = run_status.get("arena_progress") or None
@@ -1741,6 +1785,11 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
     run_view["step_label"] = format_training_step_label(effective_step)
     run_view["reported_step_label"] = format_training_step_label(current_step)
     run_view["observed_step_label"] = format_training_step_label(observed_step)
+    universe_summary = build_effective_training_universe_summary(
+        list(run_view.get("focus_symbols") or []),
+        base_universe=dict(run_view.get("universe") or build_training_universe_summary()),
+    )
+    run_view["universe"] = universe_summary
     run_view["has_active_run"] = bool(run_status.get("active"))
     run_view["supervisor_state"] = sequence_state.get("state")
     if arena_progress and isinstance(arena_progress, dict):
@@ -1815,11 +1864,13 @@ async def training_status(limit: int = Query(default=30, ge=1, le=100)):
         "replay_cache_reuse_ratio": ((run_view.get("dataset_coverage") or {}).get("replay_cache_reuse_ratio")),
         "metrics_by_position_mechanics": run_view.get("metrics_by_position_mechanics", {}),
     }
-    await _publish_training_run_snapshot(
-        run_view=run_view,
-        dependencies=dependencies,
-        universe=universe_summary,
-        nightly_summary=nightly_summary,
+    asyncio.create_task(
+        _publish_training_run_snapshot(
+            run_view=run_view,
+            dependencies=dependencies,
+            universe=universe_summary,
+            nightly_summary=nightly_summary,
+        )
     )
     return payload
 

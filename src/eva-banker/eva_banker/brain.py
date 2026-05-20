@@ -156,6 +156,7 @@ class AutoTradingEngine:
             self._env_text("BANKER_TRAINING_COMPAT_MODE", "disabled")
         )
         self._cpu_live_mode = self._training_compat_mode == "cpu_live"
+        self._cpu_live_gnn_live = self._env_flag("BANKER_CPU_LIVE_GNN_LIVE", False)
         self._cpu_live_symbols = self._parse_symbol_allowlist(
             self._env_text(
                 "BANKER_CPU_LIVE_SYMBOLS",
@@ -171,6 +172,9 @@ class AutoTradingEngine:
         )
         self._ensemble_enabled = self._env_flag("BANKER_ENSEMBLE_ENABLED", False)
         self._ensemble_min_edge = max(0.0, self._env_float("BANKER_ENSEMBLE_MIN_EDGE", 0.15))
+        self._forced_live_champion_id_muzero = (
+            self._env_text("BANKER_FORCE_LIVE_CHAMPION_ID_MUZERO", "").strip() or None
+        )
         if self._cpu_live_mode:
             # Le mode de compatibilite garde un chemin live minimal et stable
             # pendant qu'un gros run GPU monopolise `vLLM` et les ressources Lab.
@@ -196,6 +200,9 @@ class AutoTradingEngine:
 
         # Sprint 7: The Cortex
         self.cortex = Strategist(mt5_service=mt5)
+        self._cpu_live_cortex_advisory = bool(
+            getattr(self.cortex, "_cpu_live_cortex_advisory", False)
+        )
 
         # Sprint 8.5: Telegram Notification
         from shared.telegram_client import TelegramClient
@@ -850,8 +857,18 @@ class AutoTradingEngine:
         if self._lab_universe_enabled:
             live_symbols = await self._refresh_lab_live_universe(force=force)
             if live_symbols:
-                allowed_symbols = set(live_symbols)
-                restricted = [symbol for symbol in discovered if symbol in allowed_symbols]
+                allowed_symbols = {str(symbol).strip().upper() for symbol in live_symbols}
+                if self._cpu_live_mode:
+                    # En `cpu_live`, l'allowlist locale doit rester prioritaire
+                    # pour eviter qu'un endpoint Lab degrade reduise le live a
+                    # un sous-ensemble trop petit.
+                    allowed_symbols.update(
+                        {str(symbol).strip().upper() for symbol in self._resolve_cpu_live_runtime_symbols()}
+                    )
+                restricted = [
+                    symbol for symbol in discovered
+                    if str(symbol).strip().upper() in allowed_symbols
+                ]
                 if restricted:
                     logger.info(
                         "Univers live restreint par EVA Lab: %s/%s symboles (%s).",
@@ -875,14 +892,36 @@ class AutoTradingEngine:
 
         if self._cpu_live_mode:
             cpu_runtime_symbols = self._resolve_cpu_live_runtime_symbols()
-            allowed_cpu_symbols = {symbol.upper() for symbol in cpu_runtime_symbols}
-            restricted_cpu = [symbol for symbol in discovered if symbol.upper() in allowed_cpu_symbols]
+            discovered_lookup = {symbol.upper(): symbol for symbol in discovered}
+            restricted_cpu: list[str] = []
+            missing_cpu_symbols: list[str] = []
+
+            # En mode live CPU, l'allowlist operationnelle fait foi. On
+            # preserve donc cet ordre et on tente de forcer la visibilite MT5
+            # quand un symbole n'apparait pas dans la decouverte initiale.
+            for requested_symbol in cpu_runtime_symbols:
+                normalized_symbol = str(requested_symbol).strip().upper()
+                discovered_symbol = discovered_lookup.get(normalized_symbol)
+                if discovered_symbol:
+                    restricted_cpu.append(discovered_symbol)
+                    continue
+
+                if await self.mt5.ensure_symbol_selected(requested_symbol):
+                    restricted_cpu.append(requested_symbol)
+                else:
+                    missing_cpu_symbols.append(requested_symbol)
+
             if restricted_cpu:
                 logger.info(
                     "Mode cpu_live: univers restreint aux symboles live autorises (%s/%s symboles).",
                     len(restricted_cpu),
                     len(discovered),
                 )
+                if missing_cpu_symbols:
+                    logger.warning(
+                        "Mode cpu_live: symboles absents du terminal malgre l'allowlist: %s",
+                        ", ".join(missing_cpu_symbols),
+                    )
                 discovered = restricted_cpu
             else:
                 logger.warning(
@@ -950,6 +989,7 @@ class AutoTradingEngine:
                             horizon,
                             response.status,
                         )
+                        self._apply_forced_live_governance()
                         return self._lab_universe_symbols
 
                     payload = await response.json()
@@ -1015,6 +1055,15 @@ class AutoTradingEngine:
                         (payload.get("promotion_gate", {}) or {}).get("reason") or "unknown"
                     )
                     self._lab_universe_last_refresh = now
+                    if (
+                        self._forced_live_champion_id_muzero
+                        and not self._lab_universe_live_champion_id_muzero
+                    ):
+                        logger.warning(
+                            "Univers EVA Lab sans champion MuZero explicite. Repli sur l'override local %s.",
+                            self._forced_live_champion_id_muzero,
+                        )
+                        self._apply_forced_live_governance()
                     if self._require_valid_champion and not self._lab_universe_gate_allowed:
                         logger.warning(
                             "Live gele: aucun champion valide pour %s (%s).",
@@ -1024,7 +1073,37 @@ class AutoTradingEngine:
                     return self._lab_universe_symbols
         except Exception as exc:
             logger.warning("Lecture de l'univers EVA Lab impossible: %s", exc)
+            self._apply_forced_live_governance()
             return self._lab_universe_symbols
+
+    def _apply_forced_live_governance(self) -> None:
+        """Applique un repli local quand EVA Lab ne repond plus correctement.
+
+        Ce repli n'invente aucun nouveau champion. Il reutilise uniquement
+        l'identifiant force par l'operateur pour eviter qu'un timeout HTTP
+        bloque toute la journee live.
+        """
+        if not self._forced_live_champion_id_muzero:
+            return
+
+        runtime_symbols = self._resolve_cpu_live_runtime_symbols() or list(self._cpu_live_symbols)
+        self._lab_universe_symbols = list(dict.fromkeys(runtime_symbols))
+        self._lab_universe_source = "forced_local_override"
+        self._lab_universe_family = "scalp"
+        self._lab_universe_live_champion_id = self._forced_live_champion_id_muzero
+        self._lab_universe_live_champion_id_muzero = self._forced_live_champion_id_muzero
+        self._lab_active_live_engine = "muzero"
+        self._lab_muzero_can_activate_live = True
+        self._lab_universe_gate_allowed = True
+        self._lab_universe_selection = "champion"
+        self._lab_universe_gate_reason = "manual_override_forced_live"
+        self._lab_universe_top_symbols = list(self._lab_universe_symbols[:5])
+        self._lab_universe_top_symbols_by_engine["muzero"] = list(self._lab_universe_symbols[:5])
+        logger.info(
+            "Repli live local applique: champion MuZero force=%s, symboles=%s.",
+            self._forced_live_champion_id_muzero,
+            len(self._lab_universe_symbols),
+        )
 
     def get_live_universe_status(self) -> dict[str, object]:
         """Expose l'etat de restriction d'univers utilise par le banker.
@@ -1121,7 +1200,13 @@ class AutoTradingEngine:
             "cpu_live_mode": self._cpu_live_mode,
             "allowed_horizons": ["scalp"] if self._cpu_live_mode else ["auto"],
             "cortex_required": not self._cpu_live_mode,
-            "gnn_mode": "consultatif" if self._cpu_live_mode else "fusionne",
+            "gnn_mode": (
+                "live"
+                if self._cpu_live_mode and self._cpu_live_gnn_live
+                else "consultatif"
+                if self._cpu_live_mode
+                else "fusionne"
+            ),
             "shadow_learning_mode": "shadow_only",
             "intraday_retrain_allowed": False,
             "intraday_promotion_allowed": False,

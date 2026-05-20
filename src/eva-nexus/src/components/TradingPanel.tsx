@@ -105,22 +105,40 @@ export default function TradingPanel() {
             try {
                 const bankerHealth = await checkNodeHealth('Banker', '/api/banker/health')
                 const currentStatus: BankerNodeStatus = bankerHealth.status === 'online' ? 'online' : 'offline'
-                const [tradingResp, championResp, performanceResp, trainingResp, nemesisResp] = await Promise.all([
+                setBankerStatus(currentStatus)
+
+                const [tradingResp, championResp, performanceResp, trainingResp, nemesisResp] = await Promise.allSettled([
                     currentStatus === 'online' ? getTradingStatus() : Promise.resolve(DEFAULT_TRADING_STATUS),
                     getLabChampionStatus(),
                     currentStatus === 'online' ? getModelPerformance(7, 6) : Promise.resolve(null),
                     getLabTrainingStatus(),
                     currentStatus === 'online' ? getNemesisStatus() : Promise.resolve(null),
                 ])
-                setBankerStatus(currentStatus)
-                setTradingData(tradingResp)
-                setChampionStatus(championResp)
-                setModelPerformance(performanceResp)
-                setTrainingStatus(trainingResp)
-                setNemesisStatus(nemesisResp)
+
+                if (tradingResp.status === 'fulfilled') {
+                    setTradingData(tradingResp.value)
+                } else if (currentStatus !== 'online') {
+                    setTradingData(DEFAULT_TRADING_STATUS)
+                }
+
+                if (championResp.status === 'fulfilled') {
+                    setChampionStatus(championResp.value)
+                }
+
+                if (performanceResp.status === 'fulfilled') {
+                    setModelPerformance(performanceResp.value)
+                }
+
+                if (trainingResp.status === 'fulfilled') {
+                    setTrainingStatus(trainingResp.value)
+                }
+
+                if (nemesisResp.status === 'fulfilled') {
+                    setNemesisStatus(nemesisResp.value)
+                }
             } catch (error) {
                 console.error('Erreur de chargement du Trading Floor:', error)
-                setBankerStatus('offline')
+                setBankerStatus((previous) => (previous === 'online' ? previous : 'offline'))
             }
         }
 

@@ -14,8 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-import MetaTrader5 as mt5
 import pandas as pd
+
+try:
+    import MetaTrader5 as mt5
+except ImportError:  # pragma: no cover - autorise l'injection Timescale sans terminal MT5.
+    mt5 = None
 
 try:
     from dotenv import load_dotenv
@@ -45,6 +49,13 @@ except ImportError:  # pragma: no cover - utile si le script est isole hors depo
     get_timescale_runtime_status = None
     get_timescale_settings = None
 
+try:
+    from eva_lab.training_utils import resolve_feature_profile
+    from shared.indicators import IndicatorFactory
+except ImportError:  # pragma: no cover - utile si le script est lance hors pile complete.
+    resolve_feature_profile = None
+    IndicatorFactory = None
+
 if load_dotenv is not None:
     load_dotenv()
 
@@ -60,14 +71,15 @@ CRYPTO_TOKENS = {
 }
 INDEX_HINTS = {"US30", "US500", "USTEC", "NAS100", "GER40", "UK100", "JP225", "FRA40", "SPX500", "AUS200"}
 TIMEFRAMES: dict[str, tuple[int, int]] = {
-    "M1": (mt5.TIMEFRAME_M1, int(os.getenv("HISTORY_M1_BARS", "100000"))),
-    "M5": (mt5.TIMEFRAME_M5, int(os.getenv("HISTORY_M5_BARS", "120000"))),
-    "M15": (mt5.TIMEFRAME_M15, int(os.getenv("HISTORY_M15_BARS", "40000"))),
-    "H1": (mt5.TIMEFRAME_H1, int(os.getenv("HISTORY_H1_BARS", "30000"))),
-    "D1": (mt5.TIMEFRAME_D1, int(os.getenv("HISTORY_D1_BARS", "2500"))),
-    "W1": (mt5.TIMEFRAME_W1, int(os.getenv("HISTORY_W1_BARS", "1040"))),
+    "M1": ((mt5.TIMEFRAME_M1 if mt5 is not None else 1), int(os.getenv("HISTORY_M1_BARS", "100000"))),
+    "M5": ((mt5.TIMEFRAME_M5 if mt5 is not None else 5), int(os.getenv("HISTORY_M5_BARS", "120000"))),
+    "M15": ((mt5.TIMEFRAME_M15 if mt5 is not None else 15), int(os.getenv("HISTORY_M15_BARS", "40000"))),
+    "H1": ((mt5.TIMEFRAME_H1 if mt5 is not None else 60), int(os.getenv("HISTORY_H1_BARS", "30000"))),
+    "D1": ((mt5.TIMEFRAME_D1 if mt5 is not None else 1440), int(os.getenv("HISTORY_D1_BARS", "2500"))),
+    "W1": ((mt5.TIMEFRAME_W1 if mt5 is not None else 10080), int(os.getenv("HISTORY_W1_BARS", "1040"))),
 }
 TIMESCALE_BATCH_SIZE = int(os.getenv("HISTORY_TIMESCALE_BATCH_SIZE", "5000"))
+METAL_PREFIXES = ("XAU", "XAG", "XPT", "XPD")
 
 
 def _as_bool(value: str | None) -> bool:
@@ -102,6 +114,68 @@ def _sql_identifier(identifier: str) -> str:
     return ".".join(f'"{part.replace(chr(34), chr(34) * 2)}"' for part in parts)
 
 
+def _infer_training_family(symbol: str) -> str:
+    """Deduit la famille logique d'un symbole pour les features.
+
+    Args:
+        symbol (str): Symbole brut issu de MT5.
+
+    Returns:
+        str: Famille canonique (`forex`, `index_cfd`, `crypto` ou `metal`).
+    """
+
+    normalized = str(symbol or "").strip().upper()
+    if any(normalized.startswith(prefix) for prefix in METAL_PREFIXES):
+        return "metal"
+    if any(token in normalized for token in INDEX_HINTS) or normalized.endswith(".CASH"):
+        return "index_cfd"
+    if any(token in normalized for token in CRYPTO_TOKENS) or normalized.endswith("USD.E"):
+        return "crypto"
+    if len(normalized) >= 6 and normalized[:3] in FOREX_QUOTES and normalized[3:6] in FOREX_QUOTES:
+        return "forex"
+    return "index_cfd"
+
+
+def _resolve_session_phase(timestamp: pd.Timestamp) -> str:
+    """Mappe une horodate vers une phase de session simplifiee.
+
+    Args:
+        timestamp (pd.Timestamp): Horodatage de la bougie.
+
+    Returns:
+        str: Session simplifiee exploitable par les features.
+    """
+
+    hour = int(pd.Timestamp(timestamp).hour)
+    if 0 <= hour < 7:
+        return "asia"
+    if 7 <= hour < 12:
+        return "europe_open"
+    if 12 <= hour < 17:
+        return "london_ny_overlap"
+    if 17 <= hour < 22:
+        return "ny"
+    return "late"
+
+
+def _classify_adx_regime(adx_value: float) -> str:
+    """Traduit une valeur ADX en regime textuel stable.
+
+    Args:
+        adx_value (float): Valeur ADX courante.
+
+    Returns:
+        str: Regime synthétique.
+    """
+
+    value = float(adx_value or 0.0)
+    if value >= 30.0:
+        return "strong_trend"
+    if value >= 20.0:
+        return "trend"
+    return "range"
+
+
 @dataclass
 class SymbolCandidate:
     """Decrit un symbole retenu pour l'export historique.
@@ -134,6 +208,8 @@ class TimescaleWriter:
         self._disabled_reason: str | None = None
         self._storage_profile = "balanced"
         self._bars_table = "market.market_bars"
+        self._features_table = "market.market_features"
+        self._allowed_feature_timeframes = {"M5", "H1", "D1"}
         if not self.enabled:
             return
         if psycopg2 is None or execute_values is None:
@@ -158,6 +234,7 @@ class TimescaleWriter:
         settings = get_timescale_settings() if get_timescale_settings is not None else {}
         self._storage_profile = str(settings.get("storage_profile") or "balanced")
         self._bars_table = str(settings.get("bars_table") or "market.market_bars")
+        self._features_table = str(settings.get("features_table") or "market.market_features")
         runtime = get_timescale_runtime_status(repair=True)
         if not bool(runtime.get("database_exists", False)):
             self._disable_writer("base applicative TimeScaleDB absente")
@@ -204,6 +281,7 @@ class TimescaleWriter:
             inserted_rows = 0
             with psycopg2.connect(self._build_dsn()) as connection:
                 with connection.cursor() as cursor:
+                    cursor.execute("SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0")
                     for chunk in self._chunk_rows(rows):
                         execute_values(
                             cursor,
@@ -254,10 +332,98 @@ class TimescaleWriter:
                 inserted_rows,
                 self._storage_profile,
             )
+            self.write_features(symbol, timeframe_name, frame)
         except Exception as exc:  # pragma: no cover - depend du service externe.
             self._disable_writer(
                 f"echec d'ecriture sur {symbol} [{timeframe_name}]",
                 details=str(exc),
+            )
+
+    def write_features(self, symbol: str, timeframe_name: str, frame: pd.DataFrame) -> None:
+        """Persiste les features de marche canoniques dans TimescaleDB.
+
+        Args:
+            symbol (str): Symbole exporte.
+            timeframe_name (str): Timeframe logique.
+            frame (pd.DataFrame): Bougies OHLCV source.
+        """
+        if not self.enabled:
+            return
+        if IndicatorFactory is None or resolve_feature_profile is None:
+            return
+        if timeframe_name.upper() not in self._allowed_feature_timeframes:
+            return
+        if frame.empty:
+            return
+
+        family = _infer_training_family(symbol)
+        feature_profile = resolve_feature_profile("scalp", family)
+        profile_name = str(feature_profile.get("profile_name") or "scalp_unknown_v1").strip()
+        feature_rows = self._build_feature_rows(symbol, timeframe_name, frame, family, profile_name, feature_profile)
+        if not feature_rows:
+            return
+
+        try:
+            with psycopg2.connect(self._build_dsn()) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute("SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0")
+                    for chunk in self._chunk_rows(feature_rows):
+                        execute_values(
+                            cursor,
+                            f"""
+                            INSERT INTO {_sql_identifier(self._features_table)} (
+                                timestamp,
+                                symbol,
+                                timeframe,
+                                feature_profile,
+                                ema_fast,
+                                ema_slow,
+                                ema200,
+                                vwap,
+                                obv,
+                                rsi,
+                                adx,
+                                atr,
+                                bb_width,
+                                relative_volume,
+                                session_phase,
+                                payload,
+                                computed_at
+                            )
+                            VALUES %s
+                            ON CONFLICT (symbol, timeframe, feature_profile, timestamp) DO UPDATE SET
+                                ema_fast = EXCLUDED.ema_fast,
+                                ema_slow = EXCLUDED.ema_slow,
+                                ema200 = EXCLUDED.ema200,
+                                vwap = EXCLUDED.vwap,
+                                obv = EXCLUDED.obv,
+                                rsi = EXCLUDED.rsi,
+                                adx = EXCLUDED.adx,
+                                atr = EXCLUDED.atr,
+                                bb_width = EXCLUDED.bb_width,
+                                relative_volume = EXCLUDED.relative_volume,
+                                session_phase = EXCLUDED.session_phase,
+                                payload = EXCLUDED.payload,
+                                computed_at = EXCLUDED.computed_at
+                            """,
+                            chunk,
+                            template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)",
+                            page_size=min(len(chunk), TIMESCALE_BATCH_SIZE),
+                        )
+                    connection.commit()
+            logger.info(
+                "TimescaleDB features mis a jour: %s [%s] (%s lignes, profil=%s).",
+                symbol,
+                timeframe_name,
+                len(feature_rows),
+                profile_name,
+            )
+        except Exception as exc:  # pragma: no cover - depend du service externe.
+            logger.warning(
+                "Ecriture TimeScaleDB des features impossible pour %s [%s]: %s",
+                symbol,
+                timeframe_name,
+                exc,
             )
 
     @staticmethod
@@ -288,6 +454,99 @@ class TimescaleWriter:
                     int(getattr(row, "spread", 0) or 0),
                     "mt5",
                     pd.Timestamp.utcnow().to_pydatetime(),
+                )
+            )
+        return rows
+
+    @staticmethod
+    def _build_feature_rows(
+        symbol: str,
+        timeframe_name: str,
+        frame: pd.DataFrame,
+        family: str,
+        profile_name: str,
+        feature_profile: dict[str, Any],
+    ) -> list[tuple[Any, ...]]:
+        """Construit les lignes de features canoniques a inserer.
+
+        Args:
+            symbol (str): Symbole source.
+            timeframe_name (str): Timeframe logique.
+            frame (pd.DataFrame): Bougies OHLCV normalisees.
+            family (str): Famille logique du symbole.
+            profile_name (str): Nom de profil de features.
+            feature_profile (dict[str, Any]): Profil de features resolu.
+
+        Returns:
+            list[tuple[Any, ...]]: Lignes pretes pour l'UPSERT SQL.
+        """
+        enriched = frame.copy()
+        enriched["time"] = pd.to_datetime(enriched["time"], utc=False)
+        enriched = enriched.sort_values("time").drop_duplicates(subset=["time"]).reset_index(drop=True)
+
+        for column in ["tick_volume", "real_volume", "spread"]:
+            if column not in enriched.columns:
+                enriched[column] = 0.0
+
+        close = enriched["close"].astype(float)
+        high = enriched["high"].astype(float)
+        low = enriched["low"].astype(float)
+        volume = enriched["tick_volume"].astype(float)
+
+        enriched["ema_fast"] = close.ewm(span=20, adjust=False).mean()
+        enriched["ema_slow"] = close.ewm(span=50, adjust=False).mean()
+        enriched["ema200"] = close.ewm(span=200, adjust=False).mean()
+        enriched["vwap"] = IndicatorFactory.vwap(high, low, close, volume)
+        enriched["obv"] = IndicatorFactory.obv(close, volume)
+        enriched["rsi"] = IndicatorFactory.rsi(close, 14)
+        enriched["adx"] = IndicatorFactory.adx(high, low, close)["adx"]
+        enriched["atr"] = IndicatorFactory.atr(high, low, close, 14)
+        bollinger = IndicatorFactory.bollinger_bands(close)
+        enriched["bb_width"] = (bollinger["upper"] - bollinger["lower"]) / close.replace(0, pd.NA)
+        volume_baseline = volume.replace(0.0, pd.NA).rolling(20, min_periods=1).mean()
+        enriched["relative_volume"] = volume / volume_baseline
+        enriched["price_vs_vwap"] = (close - enriched["vwap"]) / close.replace(0, pd.NA)
+        enriched["obv_slope"] = enriched["obv"].diff().fillna(0.0)
+        enriched["atr_pct"] = enriched["atr"] / close.replace(0, pd.NA)
+        enriched["momentum"] = IndicatorFactory.momentum(close)
+        enriched["adx_regime"] = enriched["adx"].apply(_classify_adx_regime)
+        enriched["session_phase"] = enriched["time"].apply(_resolve_session_phase)
+        enriched = enriched.ffill().bfill().fillna(0.0)
+
+        computed_at = pd.Timestamp.utcnow().to_pydatetime()
+        rows: list[tuple[Any, ...]] = []
+        for row in enriched.itertuples(index=False):
+            payload = {
+                "family": family,
+                "feature_version": str(feature_profile.get("feature_version") or "v1"),
+                "profile_version": str(feature_profile.get("profile_version") or "v1"),
+                "entry_features": list(feature_profile.get("entry_features") or []),
+                "audit_features": list(feature_profile.get("audit_features") or []),
+                "price_vs_vwap": float(getattr(row, "price_vs_vwap", 0.0) or 0.0),
+                "obv_slope": float(getattr(row, "obv_slope", 0.0) or 0.0),
+                "atr_pct": float(getattr(row, "atr_pct", 0.0) or 0.0),
+                "momentum": float(getattr(row, "momentum", 0.0) or 0.0),
+                "adx_regime": str(getattr(row, "adx_regime", "flat") or "flat"),
+            }
+            rows.append(
+                (
+                    row.time.to_pydatetime() if hasattr(row.time, "to_pydatetime") else row.time,
+                    symbol,
+                    timeframe_name,
+                    profile_name,
+                    float(getattr(row, "ema_fast", 0.0) or 0.0),
+                    float(getattr(row, "ema_slow", 0.0) or 0.0),
+                    float(getattr(row, "ema200", 0.0) or 0.0),
+                    float(getattr(row, "vwap", 0.0) or 0.0),
+                    float(getattr(row, "obv", 0.0) or 0.0),
+                    float(getattr(row, "rsi", 0.0) or 0.0),
+                    float(getattr(row, "adx", 0.0) or 0.0),
+                    float(getattr(row, "atr", 0.0) or 0.0),
+                    float(getattr(row, "bb_width", 0.0) or 0.0),
+                    float(getattr(row, "relative_volume", 0.0) or 0.0),
+                    str(getattr(row, "session_phase", "unknown") or "unknown"),
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    computed_at,
                 )
             )
         return rows
@@ -528,6 +787,8 @@ def initialize_history_terminal(args: argparse.Namespace) -> None:
         RuntimeError: Si le terminal MT5 ne peut pas etre initialise.
         ValueError: Si le compte connecte ne correspond pas au compte attendu.
     """
+    if mt5 is None:
+        raise RuntimeError("MetaTrader5 indisponible dans cet environnement Python.")
 
     init_kwargs: dict[str, Any] = {
         "timeout": max(int(args.timeout_ms), 1000),
@@ -1017,7 +1278,8 @@ def main() -> int:
         logger.info("Export historique termine: %s fichiers.", len(generated_files))
         return 0
     finally:
-        mt5.shutdown()
+        if mt5 is not None:
+            mt5.shutdown()
 
 
 if __name__ == "__main__":

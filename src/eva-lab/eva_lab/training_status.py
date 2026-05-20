@@ -87,6 +87,39 @@ def _now_iso() -> str:
     return datetime.now().isoformat()
 
 
+def _resolve_focus_symbols_from_env() -> list[str]:
+    """Resout l'univers effectif cible depuis l'environnement courant.
+
+    La vue `training_status` doit refléter l'univers vraiment demandé par le
+    run, même si l'inventaire historique complet contient beaucoup plus de
+    symboles. On privilégie donc les variables explicites du run avant de
+    retomber sur l'inventaire global.
+
+    Returns:
+        list[str]: Liste ordonnée de symboles ciblés par le run.
+    """
+
+    env_names = (
+        "TRAINING_FOCUS_SYMBOLS",
+        "TRAIN_GNN_SYMBOLS",
+        "MUZERO_SYMBOLS_SCALP",
+        "MUZERO_SYMBOLS",
+        "TRAINING_SYMBOLS",
+    )
+    for env_name in env_names:
+        raw_value = str(os.getenv(env_name, "")).strip()
+        if not raw_value:
+            continue
+        symbols: list[str] = []
+        for item in raw_value.split(","):
+            normalized = str(item).strip()
+            if normalized and normalized not in symbols:
+                symbols.append(normalized)
+        if symbols:
+            return symbols
+    return []
+
+
 def _default_status() -> dict[str, Any]:
     """Construit la structure de base du statut training."""
 
@@ -344,16 +377,16 @@ def load_training_status() -> dict[str, Any]:
     """Charge le statut courant d'entrainement."""
 
     if not STATUS_PATH.exists():
-        return _default_status()
+        return _normalize_training_status_snapshot(_default_status())
     try:
         payload = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
     except Exception:
-        return _default_status()
+        return _normalize_training_status_snapshot(_default_status())
     if not isinstance(payload, dict):
-        return _default_status()
+        return _normalize_training_status_snapshot(_default_status())
     status = _default_status()
     status.update(payload)
-    return status
+    return _normalize_training_status_snapshot(status)
 
 
 def persist_training_status(status: dict[str, Any]) -> dict[str, Any]:
@@ -361,8 +394,50 @@ def persist_training_status(status: dict[str, Any]) -> dict[str, Any]:
 
     snapshot = _default_status()
     snapshot.update(status)
+    snapshot = _normalize_training_status_snapshot(snapshot)
     snapshot["updated_at"] = _now_iso()
     _atomic_write_json(STATUS_PATH, snapshot)
+    return snapshot
+
+
+def _normalize_training_status_snapshot(status: dict[str, Any]) -> dict[str, Any]:
+    """Nettoie un instantane de statut avant exposition ou persistance.
+
+    Cette normalisation limite les derives de statut lorsque le fichier JSON
+    brut contient des reliquats d'un ancien skip, d'un ancien verrou ou d'un
+    univers global trop large par rapport au run effectivement demande.
+
+    Args:
+        status (dict[str, Any]): Charge utile courante a normaliser.
+
+    Returns:
+        dict[str, Any]: Instantane nettoye et complet.
+    """
+
+    snapshot = _default_status()
+    snapshot.update(dict(status or {}))
+
+    focus_symbols = [
+        str(symbol).strip()
+        for symbol in list(snapshot.get("focus_symbols") or [])
+        if str(symbol).strip()
+    ]
+    if not focus_symbols:
+        focus_symbols = _resolve_focus_symbols_from_env()
+    snapshot["focus_symbols"] = focus_symbols
+
+    launcher = dict(snapshot.get("launcher") or {})
+    run_is_active = bool(snapshot.get("active")) and str(snapshot.get("status") or "").lower() == "running"
+    if run_is_active:
+        # Un run actif ne doit pas continuer d'afficher un skip d'un run precedent.
+        launcher.pop("skip_lock", None)
+        launcher.pop("last_skip_reason", None)
+    snapshot["launcher"] = launcher
+
+    snapshot["universe"] = build_effective_training_universe_summary(
+        focus_symbols,
+        base_universe=dict(snapshot.get("universe") or {}),
+    )
     return snapshot
 
 
@@ -1120,11 +1195,7 @@ def reset_training_status(
     """Reinitialise le statut d'un nouveau run en preservant le lanceur."""
 
     previous = load_training_status()
-    focus_symbols = [
-        item.strip()
-        for item in str(os.getenv("TRAINING_FOCUS_SYMBOLS", "")).split(",")
-        if item.strip()
-    ]
+    focus_symbols = _resolve_focus_symbols_from_env()
     status = _default_status()
     status["engine"] = engine
     status["run_id"] = run_id
@@ -1165,7 +1236,11 @@ def reset_training_status(
     status["focus_symbols"] = focus_symbols
     status["gate_profile"] = str(os.getenv("TRAINING_GATE_PROFILE", "")).strip() or None
     status["supervisor_state"] = str(os.getenv("TRAINING_SUPERVISOR_STATE", "")).strip() or None
-    status["launcher"] = dict(previous.get("launcher") or {})
+    launcher = dict(previous.get("launcher") or {})
+    launcher.pop("skip_lock", None)
+    launcher.pop("last_skip_reason", None)
+    launcher["active_run_id"] = run_id
+    status["launcher"] = launcher
     status["dependencies"] = dict(previous.get("dependencies") or {})
     status["universe"] = build_effective_training_universe_summary(
         focus_symbols,
@@ -1323,11 +1398,7 @@ def mark_step_running(
     if focus_symbols is not None:
         status["focus_symbols"] = [str(item).strip() for item in focus_symbols if str(item).strip()]
     elif status.get("focus_symbols") in (None, []):
-        status["focus_symbols"] = [
-            item.strip()
-            for item in str(os.getenv("TRAINING_FOCUS_SYMBOLS", "")).split(",")
-            if item.strip()
-        ]
+        status["focus_symbols"] = _resolve_focus_symbols_from_env()
     if gate_profile is not None:
         status["gate_profile"] = gate_profile
     elif not status.get("gate_profile"):

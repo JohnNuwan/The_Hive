@@ -196,36 +196,58 @@ class MuZeroTrainerJAX:
         loss_val = jnp.mean(optax.softmax_cross_entropy(value_logits, target_value_support))
 
         root_loss_pol = jnp.mean(optax.softmax_cross_entropy(logits, root_target_policy_smoothed))
-        loss_rew = jnp.array(0.0, dtype=value_logits.dtype)
-        unroll_loss_pol_sum = jnp.array(0.0, dtype=value_logits.dtype)
+        unroll_actions = jnp.swapaxes(batch.actions, 0, 1)
+        unroll_target_rewards = jnp.swapaxes(batch.target_rewards, 0, 1)
+        unroll_target_values = jnp.swapaxes(batch.target_values[:, 1:], 0, 1)
+        unroll_target_policies = jnp.swapaxes(batch.target_policies[:, 1:], 0, 1)
+        unroll_alpha = float(
+            getattr(self.config, "policy_target_smoothing_alpha_unroll", 0.18) or 0.18
+        )
 
-        for step_idx in range(self.config.num_unroll_steps):
-            action_onehot = jax.nn.one_hot(
-                batch.actions[:, step_idx],
-                self.config.action_space_size,
-            )
-            next_hidden_state, reward_logits, logits, value_logits = self.recurrent_apply(
+        def _scan_unroll_step(
+            carry_hidden_state: jnp.ndarray,
+            scan_inputs: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
+        ) -> tuple[jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
+            """Calcule une tete recurrente complete sans reboucler en Python."""
+            action_ids, target_rewards, target_values, target_policies = scan_inputs
+            action_onehot = jax.nn.one_hot(action_ids, self.config.action_space_size)
+            next_hidden_state, reward_logits, step_logits, step_value_logits = self.recurrent_apply(
                 params,
                 None,
-                hidden_state,
+                carry_hidden_state,
                 action_onehot,
             )
-            hidden_state = next_hidden_state
+            target_reward_support = scalar_to_support(target_rewards, self.config.support_size)
+            target_value_support = scalar_to_support(target_values, self.config.support_size)
+            target_policy_smoothed = self._smooth_target_policy(
+                target_policies,
+                self._build_uniform_policy_from_target(target_policies),
+                unroll_alpha,
+            )
+            step_loss_rew = jnp.mean(
+                optax.softmax_cross_entropy(reward_logits, target_reward_support)
+            )
+            step_loss_val = jnp.mean(
+                optax.softmax_cross_entropy(step_value_logits, target_value_support)
+            )
+            step_loss_pol = jnp.mean(
+                optax.softmax_cross_entropy(step_logits, target_policy_smoothed)
+            )
+            return next_hidden_state, (step_loss_rew, step_loss_val, step_loss_pol)
 
-            target_reward_support = scalar_to_support(batch.target_rewards[:, step_idx], self.config.support_size)
-            target_value_support = scalar_to_support(batch.target_values[:, step_idx + 1], self.config.support_size)
-            unroll_target_policy = batch.target_policies[:, step_idx + 1]
-            unroll_target_policy_smoothed = self._smooth_target_policy(
-                unroll_target_policy,
-                self._build_uniform_policy_from_target(unroll_target_policy),
-                float(getattr(self.config, "policy_target_smoothing_alpha_unroll", 0.18) or 0.18),
-            )
-            
-            loss_rew += jnp.mean(optax.softmax_cross_entropy(reward_logits, target_reward_support))
-            loss_val += jnp.mean(optax.softmax_cross_entropy(value_logits, target_value_support))
-            unroll_loss_pol_sum += jnp.mean(
-                optax.softmax_cross_entropy(logits, unroll_target_policy_smoothed)
-            )
+        hidden_state, (scan_loss_rew, scan_loss_val, scan_loss_pol) = jax.lax.scan(
+            _scan_unroll_step,
+            hidden_state,
+            (
+                unroll_actions,
+                unroll_target_rewards,
+                unroll_target_values,
+                unroll_target_policies,
+            ),
+        )
+        loss_rew = jnp.sum(scan_loss_rew)
+        loss_val += jnp.sum(scan_loss_val)
+        unroll_loss_pol_sum = jnp.sum(scan_loss_pol)
 
         policy_loss_root_weight = float(
             getattr(self.config, "policy_loss_root_weight", 0.95) or 0.95

@@ -48,17 +48,42 @@ class Strategist:
             os.getenv("BANKER_TRAINING_COMPAT_MODE", "disabled")
         )
         self._cpu_live_mode = self._training_compat_mode == "cpu_live"
+        self._cpu_live_gnn_live = self._read_env_flag("BANKER_CPU_LIVE_GNN_LIVE", False)
+        self._cpu_live_cortex_advisory = self._read_env_flag(
+            "BANKER_CPU_LIVE_CORTEX_ADVISORY",
+            False,
+        )
         self.cortex_model = self._resolve_cortex_model(settings)
-        self.cortex = None if self._cpu_live_mode else LLMClient(model=self.cortex_model)
+        self.cortex = None
+        if not self._cpu_live_mode or self._cpu_live_cortex_advisory:
+            self.cortex = LLMClient(model=self.cortex_model)
         self.latest_strategy: dict[str, dict[str, Any]] = {}
         self.last_update: datetime = datetime.min
 
         if self._cpu_live_mode:
             logger.info(
-                "Mode cpu_live actif: Cortex desactive, GNN consultatif, contexte local uniquement."
+                "Mode cpu_live actif: Cortex %s, GNN %s, contexte local prioritaire.",
+                "advisory" if self._cpu_live_cortex_advisory else "desactive",
+                "live" if self._cpu_live_gnn_live else "consultatif",
             )
         else:
             logger.info("Cortex bancaire initialise avec le modele: %s", self.cortex_model)
+
+    @staticmethod
+    def _read_env_flag(name: str, default: bool) -> bool:
+        """Lit un booleen depuis l'environnement.
+
+        Args:
+            name (str): Nom de la variable d'environnement.
+            default (bool): Valeur de repli si absente.
+
+        Returns:
+            bool: Valeur booleenne resolue.
+        """
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+        return raw_value.strip().lower() not in {"0", "false", "no", "off"}
 
     @staticmethod
     def _resolve_training_compat_mode(raw_mode: str) -> str:
@@ -252,11 +277,13 @@ class Strategist:
         }
 
         response = ""
-        if self._cpu_live_mode or self.cortex is None:
+        if self._cpu_live_mode and self.cortex is None:
             cortex_bias = "NEUTRAL"
             cortex_reason = (
                 "Mode CPU live: Cortex desactive pendant l'entrainement GPU. "
-                "Le GNN reste consultatif et ne force aucune direction."
+                "Le GNN pilote les biais live."
+                if self._cpu_live_gnn_live
+                else "Le GNN reste consultatif et ne force aucune direction."
             )
         else:
             prompt = (
@@ -339,13 +366,35 @@ class Strategist:
                 bias_strength = "weak"
 
         if self._cpu_live_mode:
-            if gnn_bias != "NEUTRAL" and gnn_confidence >= 0.55:
+            if self._cpu_live_cortex_advisory:
+                # En mode advisory, le LLM enrichit la lecture humaine sans
+                # imposer de direction live tant que le GNN n'a pas un vrai signal.
+                final_bias = "NEUTRAL"
+                bias_alignment = "cpu_live_cortex_advisory"
+                bias_strength = "weak"
+            gnn_live_bias = gnn_scalp if gnn_scalp != "NEUTRAL" else gnn_intraday
+            if self._cpu_live_gnn_live:
+                if gnn_live_bias in {"BULLISH", "BEARISH"} and gnn_confidence >= 0.55:
+                    if gnn_swing in {"NEUTRAL", gnn_live_bias}:
+                        final_bias = gnn_live_bias
+                        bias_alignment = "cpu_live_gnn_live"
+                        bias_strength = "strong" if gnn_confidence >= 0.80 else "moderate"
+                    else:
+                        final_bias = "RANGING"
+                        bias_alignment = "cpu_live_gnn_swing_conflict"
+                        bias_strength = "weak"
+                else:
+                    final_bias = "NEUTRAL"
+                    bias_alignment = "cpu_live_gnn_live_neutral"
+                    bias_strength = "weak"
+            elif gnn_bias != "NEUTRAL" and gnn_confidence >= 0.55:
                 final_bias = "RANGING"
                 bias_alignment = "cpu_live_gnn_consultatif"
+                bias_strength = "weak"
             else:
                 final_bias = "NEUTRAL"
                 bias_alignment = "cpu_live_neutral"
-            bias_strength = "weak"
+                bias_strength = "weak"
 
         strategy = {
             "symbol": symbol,

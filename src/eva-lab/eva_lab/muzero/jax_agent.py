@@ -690,17 +690,28 @@ class JAXMuZeroAgent:
         while len(new_values) < total_observations:
             new_values.append(0.0)
 
+        symbol = str((game.metadata or {}).get("symbol") or "")
+        entry_filter = self._build_root_policy_entry_filter(
+            training_mode=True,
+            symbol=symbol,
+        )
+        selected_observations = np.asarray(
+            [np.asarray(game.observations[index], dtype=np.float32) for index in selected_indices],
+            dtype=np.float32,
+        ).reshape((len(selected_indices), *self.config.observation_shape))
+        batched_hidden_states, batched_root_logits, batched_root_value_logits = self._jit_init(
+            self.params,
+            jnp.asarray(selected_observations),
+        )
         mcts = JAXMuZeroMCTS(self.config, self.params, (self._jit_init, self._jit_rec))
-        for observation_index in selected_indices:
-            obs = game.observations[observation_index]
-            obs_jax = jnp.array(obs).reshape(1, -1)
-            hidden_state, root_logits, root_value_logits = self._jit_init(self.params, obs_jax)
+        for batch_index, observation_index in enumerate(selected_indices):
+            obs = selected_observations[batch_index]
+            hidden_state = jnp.expand_dims(batched_hidden_states[batch_index], axis=0)
+            root_logits = jnp.expand_dims(batched_root_logits[batch_index], axis=0)
+            root_value_logits = jnp.expand_dims(batched_root_value_logits[batch_index], axis=0)
             root_legal_actions = TradingEnvironment.infer_root_policy_actions_from_observation(
                 obs,
-                entry_filter=self._build_root_policy_entry_filter(
-                    training_mode=True,
-                    symbol=str((game.metadata or {}).get("symbol") or ""),
-                ),
+                entry_filter=entry_filter,
             )
             root = mcts.run(
                 hidden_state,

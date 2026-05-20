@@ -233,6 +233,41 @@ async def _read_mt5_snapshot(mt5_service: MT5Service) -> tuple[AccountBalance | 
     return account, positions or []
 
 
+async def _ensure_auto_engine_running_after_mt5_recovery() -> None:
+    """
+    Relance automatiquement le moteur live apres une reconnexion MT5.
+
+    Le demarrage initial peut rater si le terminal MT5 n'est pas encore pret.
+    Dans ce cas, la reconnexion automatique ramene ensuite `mt5_connected`,
+    mais le moteur auto reste inactif tant qu'aucun restart manuel n'est fait.
+    Ce garde-fou relance proprement l'univers, les liens copy-trading et la
+    boucle live des que MT5 redevient disponible.
+    """
+    if getattr(app.state, "follower_mode", False):
+        return
+
+    auto_engine = getattr(app.state, "auto_engine", None)
+    mt5_service = getattr(app.state, "mt5_service", None)
+    bootstrap_lock = getattr(app.state, "auto_engine_bootstrap_lock", None)
+    if auto_engine is None or mt5_service is None or bootstrap_lock is None:
+        return
+    if auto_engine.is_active or not mt5_service.is_connected:
+        return
+
+    async with bootstrap_lock:
+        if auto_engine.is_active or not mt5_service.is_connected:
+            return
+
+        logger.warning(
+            "MT5 est revenu apres un demarrage incomplet. Relance automatique du moteur live."
+        )
+        await auto_engine.refresh_symbol_universe(force=True)
+        await mt5_service.initialize_symbols(auto_engine.get_symbol_batch(advance=False))
+        await _repair_copy_links_without_duplication(mt5_service)
+        await auto_engine.start()
+        logger.info("Moteur live relance automatiquement apres reconnexion MT5.")
+
+
 def _is_mt5_live_offline(mt5_service: MT5Service) -> bool:
     """
     Indique si le mode reel MT5 est hors ligne.
@@ -279,6 +314,7 @@ def _build_connector_status(app: FastAPI) -> dict[str, Any]:
     trade_republic: TradeRepublicService = app.state.tr_service
     gnn_available = not bool(getattr(getattr(auto_engine, "manager", None), "brain", None) is None)
     gnn_stub = bool(getattr(getattr(auto_engine, "manager", None), "brain", None) and getattr(getattr(auto_engine.manager, "brain", None), "gnn", None) and getattr(auto_engine.manager.brain.gnn, "stub", False))
+    gnn_live_enabled = bool(getattr(auto_engine, "_cpu_live_gnn_live", False))
     live_inference_url = ""
     if hasattr(auto_engine, "_resolve_live_inference_url"):
         try:
@@ -301,10 +337,18 @@ def _build_connector_status(app: FastAPI) -> dict[str, Any]:
         trade_republic_mode = ConnectorMode.PAPER
 
     gnn_mode = ConnectorMode.DISABLED
-    if gnn_available and not gnn_stub:
+    if bool(getattr(auto_engine, "_cpu_live_mode", False)) and gnn_live_enabled:
+        gnn_mode = ConnectorMode.LIVE
+    elif gnn_available and not gnn_stub:
         gnn_mode = ConnectorMode.LIVE
 
-    vllm_mode = ConnectorMode.DISABLED if bool(getattr(auto_engine, "_cpu_live_mode", False)) else ConnectorMode.LIVE
+    cpu_live_mode = bool(getattr(auto_engine, "_cpu_live_mode", False))
+    strategist = getattr(auto_engine, "cortex", None)
+    cpu_live_cortex_advisory = bool(
+        getattr(auto_engine, "_cpu_live_cortex_advisory", False)
+        or getattr(strategist, "_cpu_live_cortex_advisory", False)
+    )
+    vllm_mode = ConnectorMode.DISABLED if cpu_live_mode else ConnectorMode.LIVE
     live_inference_mode = ConnectorMode.LIVE if live_inference_url else ConnectorMode.DISABLED
 
     return {
@@ -324,15 +368,45 @@ def _build_connector_status(app: FastAPI) -> dict[str, Any]:
         "gnn": {
             "mode": gnn_mode.value,
             "stub": gnn_stub,
-            "role": "consultatif" if bool(getattr(auto_engine, "_cpu_live_mode", False)) else "fusionne",
+            "backend": "lab_remote" if bool(getattr(auto_engine, "_cpu_live_mode", False)) and gnn_live_enabled else "local_model",
+            "role": (
+                "live"
+                if bool(getattr(auto_engine, "_cpu_live_mode", False)) and gnn_live_enabled
+                else "consultatif"
+                if bool(getattr(auto_engine, "_cpu_live_mode", False))
+                else "fusionne"
+            ),
         },
         "vllm": {
             "mode": vllm_mode.value,
-            "required": not bool(getattr(auto_engine, "_cpu_live_mode", False)),
+            "required": not cpu_live_mode,
+            "reason": (
+                (
+                    "Cortex LLM en advisory en mode cpu_live; le master s'appuie sur MuZero + GNN pour la decision."
+                    if cpu_live_cortex_advisory
+                    else "Cortex LLM desactive en mode cpu_live; le master s'appuie sur MuZero + GNN."
+                )
+                if cpu_live_mode
+                else "Cortex LLM actif pour l'analyse contextuelle."
+            ),
+        },
+        "cortex": {
+            "mode": "advisory" if cpu_live_cortex_advisory else ("disabled" if cpu_live_mode else "live"),
+            "backend": "vllm" if (not cpu_live_mode or cpu_live_cortex_advisory) else None,
+            "role": "analyse_contextuelle",
+            "reason": (
+                (
+                    "Actif en advisory: produit une lecture de marche et un commentaire, sans piloter seul la decision live."
+                    if cpu_live_cortex_advisory
+                    else "Suspendu pendant l'entrainement GPU pour eviter une dependance LLM dans la boucle live."
+                )
+                if cpu_live_mode
+                else "Utilise pour produire un avis de contexte et un raisonnement micro."
+            ),
         },
         "live_inference": {
             "mode": live_inference_mode.value,
-            "required": bool(getattr(auto_engine, "_cpu_live_mode", False)),
+            "required": cpu_live_mode,
             "url": live_inference_url or None,
         },
     }
@@ -456,7 +530,7 @@ async def _repair_copy_links_without_duplication(mt5_service: Any) -> None:
         return
 
     try:
-        result = await repair_method(create_missing=False)
+        result = await repair_method(create_missing=False, close_orphans=False)
     except Exception as exc:
         logger.warning("Copy trading: reparation des liens au demarrage impossible: %s", exc)
         return
@@ -694,6 +768,7 @@ async def lifespan(app: FastAPI):
     app.state.start_time = datetime.now()
     app.state.request_count = 0
     app.state.error_count = 0
+    app.state.auto_engine_bootstrap_lock = asyncio.Lock()
 
     if follower_mode:
         app.state.swarm = None
@@ -779,6 +854,7 @@ async def hard_heartbeat():
         try:
             account = await mt5_service.get_account_info()
             if account is not None:
+                await _ensure_auto_engine_running_after_mt5_recovery()
                 payload = {
                     "status": "online",
                     "ts": datetime.now().timestamp(),
@@ -1759,6 +1835,7 @@ async def get_copy_trading_status() -> dict[str, Any]:
 @app.post("/copy-trading/repair-open-positions", tags=["Trading"])
 async def repair_copy_trading_open_positions(
     create_missing: bool = Query(default=True),
+    close_orphans: bool = Query(default=False),
 ) -> dict[str, Any]:
     """
     Repare la copie du panier courant vers les followers actifs.
@@ -1771,6 +1848,8 @@ async def repair_copy_trading_open_positions(
     Args:
         create_missing (bool): Si True, ouvre les positions absentes sur les
             followers actifs.
+        close_orphans (bool): Si True, ferme aussi les positions followers
+            orphelines deja marquees par EVA lorsque le maitre est flat.
 
     Returns:
         dict[str, Any]: Resume detaille de la reparation.
@@ -1785,7 +1864,7 @@ async def repair_copy_trading_open_positions(
             status_code=409,
             detail="Le copy trading n'est pas actif sur cette instance.",
         )
-    return await repair_method(create_missing=create_missing)
+    return await repair_method(create_missing=create_missing, close_orphans=close_orphans)
 
 
 @app.get("/symbols/discover", tags=["Trading"])

@@ -63,7 +63,10 @@ def _build_muzero_child_runtime_env(base_env: dict[str, str]) -> dict[str, str]:
 
     child_env = dict(base_env)
     child_env["CUDA_VISIBLE_DEVICES"] = str(
-        base_env.get("TRAINING_CHILD_CUDA_VISIBLE_DEVICES", "0")
+        base_env.get(
+            "TRAINING_CHILD_CUDA_VISIBLE_DEVICES",
+            base_env.get("TRAINING_GPU_DEVICE", "1"),
+        )
     ).strip()
     child_env["JAX_PLATFORMS"] = str(
         base_env.get("TRAINING_CHILD_JAX_PLATFORMS", "cuda")

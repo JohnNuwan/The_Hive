@@ -605,19 +605,27 @@ class CopyTradingRouter:
             open_time=open_time,
         )
 
-    async def repair_open_positions(self, create_missing: bool = True) -> dict[str, Any]:
+    async def repair_open_positions(
+        self,
+        create_missing: bool = True,
+        close_orphans: bool = False,
+    ) -> dict[str, Any]:
         """
         Repare les liens de copy trading et rattrape les positions manquantes.
 
         Cette routine sert apres l'ajout de nouveaux followers ou apres un
         redemarrage controle du maitre. Elle inspecte les positions ouvertes
         du maitre, reconstruit les liens `master -> remote ticket` quand les
-        followers ont deja la position, puis ouvre les positions absentes si
-        `create_missing` reste actif.
+        followers ont deja la position, ouvre les positions absentes si
+        `create_missing` reste actif, puis peut fermer uniquement des
+        positions de reparation evidemment orphelines si `close_orphans`
+        reste actif.
 
         Args:
             create_missing (bool): Si True, ouvre les positions absentes sur
                 les followers actifs.
+            close_orphans (bool): Si True, ferme seulement les positions
+                followers de reparation manifestement orphelines.
 
         Returns:
             dict[str, Any]: Resume detaille de la reparation.
@@ -636,6 +644,7 @@ class CopyTradingRouter:
             "master_positions": len(master_positions),
             "active_targets": len(active_targets),
             "create_missing": create_missing,
+            "close_orphans": close_orphans,
             "targets": [],
         }
         if not master_positions or not active_targets:
@@ -647,6 +656,7 @@ class CopyTradingRouter:
                 master_positions=master_positions,
                 master_balance=master_balance,
                 create_missing=create_missing,
+                close_orphans=close_orphans,
             )
             summary["targets"].append(target_result)
             if target_result.get("errors"):
@@ -714,6 +724,7 @@ class CopyTradingRouter:
         master_positions: list[Position],
         master_balance: Decimal | None,
         create_missing: bool,
+        close_orphans: bool,
     ) -> dict[str, Any]:
         """
         Repare les positions d'une cible follower pour le panier courant.
@@ -723,6 +734,7 @@ class CopyTradingRouter:
             master_positions (list[Position]): Positions ouvertes du maitre.
             master_balance (Decimal | None): Capital courant du maitre.
             create_missing (bool): Ouvre les positions manquantes si True.
+            close_orphans (bool): Ferme les positions followers orphelines si True.
 
         Returns:
             dict[str, Any]: Resultat detaille de la synchronisation.
@@ -735,6 +747,8 @@ class CopyTradingRouter:
         matched_positions = 0
         skipped_positions = 0
         missing_positions = 0
+        orphan_positions = 0
+        orphan_closed = 0
         unsupported_symbols: list[str] = []
         errors: list[str] = []
         details: list[dict[str, Any]] = []
@@ -850,6 +864,17 @@ class CopyTradingRouter:
                 }
             )
 
+        if close_orphans:
+            orphan_result = await self._close_orphan_remote_positions(
+                target=target,
+                remote_positions=remote_positions,
+                used_remote_tickets=used_remote_tickets,
+            )
+            orphan_positions = int(orphan_result.get("orphan_positions", 0) or 0)
+            orphan_closed = int(orphan_result.get("orphan_closed", 0) or 0)
+            errors.extend(list(orphan_result.get("errors") or []))
+            details.extend(list(orphan_result.get("details") or []))
+
         return {
             "target_id": str(target.id),
             "target_name": target.name,
@@ -858,11 +883,95 @@ class CopyTradingRouter:
             "created_positions": created_positions,
             "repaired_links": repaired_links,
             "missing_positions": missing_positions,
+            "orphan_positions": orphan_positions,
+            "orphan_closed": orphan_closed,
             "skipped_positions": skipped_positions,
             "unsupported_symbols": unsupported_symbols,
             "errors": errors,
             "details": details,
         }
+
+    async def _close_orphan_remote_positions(
+        self,
+        *,
+        target: CopyTradingTarget,
+        remote_positions: list[dict[str, Any]],
+        used_remote_tickets: set[int],
+    ) -> dict[str, Any]:
+        """
+        Ferme les positions followers orphelines creees par une ancienne
+        reparation automatique.
+
+        Args:
+            target (CopyTradingTarget): Cible follower a nettoyer.
+            remote_positions (list[dict[str, Any]]): Positions ouvertes distantes.
+            used_remote_tickets (set[int]): Tickets deja relies a un ticket maitre.
+
+        Returns:
+            dict[str, Any]: Resume des fermetures orphelines.
+        """
+        orphan_positions = 0
+        orphan_closed = 0
+        errors: list[str] = []
+        details: list[dict[str, Any]] = []
+
+        for remote_position in remote_positions:
+            try:
+                remote_ticket = int(remote_position.get("ticket") or 0)
+            except (TypeError, ValueError):
+                continue
+            if remote_ticket <= 0 or remote_ticket in used_remote_tickets:
+                continue
+            if not self._is_copy_managed_remote_position(remote_position):
+                continue
+
+            orphan_positions += 1
+            close_result = await self._close_remote_ticket(target, remote_ticket)
+            if close_result.get("success"):
+                orphan_closed += 1
+                details.append(
+                    {
+                        "remote_ticket": remote_ticket,
+                        "symbol": str(remote_position.get("symbol") or ""),
+                        "status": "closed_orphan",
+                    }
+                )
+                continue
+
+            error_message = str(close_result.get("message") or "Cloture orpheline inconnue.")
+            errors.append(f"{remote_ticket}: {error_message}")
+            details.append(
+                {
+                    "remote_ticket": remote_ticket,
+                    "symbol": str(remote_position.get("symbol") or ""),
+                    "status": "close_orphan_failed",
+                    "message": error_message,
+                }
+            )
+
+        return {
+            "orphan_positions": orphan_positions,
+            "orphan_closed": orphan_closed,
+            "errors": errors,
+            "details": details,
+        }
+
+    @staticmethod
+    def _is_copy_managed_remote_position(remote_position: dict[str, Any]) -> bool:
+        """
+        Indique si une position distante ressemble a un artefact de reparation.
+
+        Args:
+            remote_position (dict[str, Any]): Position distante serialisee.
+
+        Returns:
+            bool: True si le commentaire indique une ancienne reparation
+                automatique devenue orpheline.
+        """
+        comment = str(remote_position.get("comment") or "").strip().upper()
+        if not comment:
+            return False
+        return comment.startswith("COPY REPAIR")
 
     async def _execute_scaled_copy(
         self,

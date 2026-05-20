@@ -139,6 +139,8 @@ PASSTHROUGH_VARS = [
     "NIGHTLY_KEEP_VLLM",
     "NIGHTLY_DEFER_VLLM_RESTART",
     "NIGHTLY_STOP_COMFYUI",
+    "VLLM_GPU_DEVICE",
+    "TRAINING_GPU_DEVICE",
     "REBUILD_TRAINER_IMAGE",
     "RUN_TRAIN_GNN",
     "RUN_TRAIN_MUZERO",
@@ -394,6 +396,7 @@ PASSTHROUGH_VARS = [
     "JAX_PLATFORMS",
     "XLA_PYTHON_CLIENT_PREALLOCATE",
     "XLA_PYTHON_CLIENT_MEM_FRACTION",
+    "NVIDIA_VISIBLE_DEVICES",
     "TRAINING_CHILD_CUDA_VISIBLE_DEVICES",
     "TRAINING_CHILD_JAX_PLATFORMS",
     "TRAINING_CHILD_XLA_PYTHON_CLIENT_PREALLOCATE",
@@ -824,7 +827,6 @@ export TRAINING_RUN_LOCK_ALREADY_HELD=1
 
 if [ \"$TRAINING_PROFILE\" = \"research\" ]; then
   echo \"[nightly] Profil research actif: priorite a l'entrainement massif\"
-  : \"${NIGHTLY_KEEP_VLLM:=0}\"
   : \"${RUN_TRAIN_DREAMER:=0}\"
   : \"${MUZERO_MAX_SYMBOLS:=0}\"
   : \"${ARENA_MAX_SYMBOLS:=0}\"
@@ -835,7 +837,15 @@ if [ \"$TRAINING_PROFILE\" = \"research\" ]; then
   : \"${MUZERO_TRAINING_STEPS:=32000}\"
 fi
 
-export NIGHTLY_KEEP_VLLM=\"${NIGHTLY_KEEP_VLLM:-1}\"
+export VLLM_GPU_DEVICE=\"${VLLM_GPU_DEVICE:-0}\"
+export TRAINING_GPU_DEVICE=\"${TRAINING_GPU_DEVICE:-1}\"
+if [ -z \"${NIGHTLY_KEEP_VLLM:-}\" ]; then
+  if [ \"$VLLM_GPU_DEVICE\" != \"$TRAINING_GPU_DEVICE\" ]; then
+    export NIGHTLY_KEEP_VLLM=\"1\"
+  else
+    export NIGHTLY_KEEP_VLLM=\"0\"
+  fi
+fi
 export NIGHTLY_DEFER_VLLM_RESTART=\"${NIGHTLY_DEFER_VLLM_RESTART:-0}\"
 export NIGHTLY_STOP_COMFYUI=\"${NIGHTLY_STOP_COMFYUI:-1}\"
 acquire_lock
@@ -846,9 +856,9 @@ echo \"[nightly] Verification des services critiques avant entrainement\"
 docker ps --format '{{.Names}} {{.Status}}' | grep -E 'the_hive-(lab|vllm|redis|neo4j|mosquitto)' || true
 
 if [ \"$NIGHTLY_KEEP_VLLM\" = \"1\" ]; then
-  echo \"[nightly] vLLM conserve en ligne pour le live\"
+  echo \"[nightly] vLLM conserve en ligne grace a la separation GPU\"
   emit_launcher_state \"preflight\" \"online\" \"$([ \"$NIGHTLY_STOP_COMFYUI\" = \"1\" ] && echo stop_requested || echo online)\"
-  emit_training_log INFO launcher \"vLLM conserve en ligne pour ce run.\"
+  emit_training_log INFO launcher \"vLLM conserve en ligne pour ce run grace a la separation GPU ou a un override explicite.\"
 else
   echo \"[nightly] Arret temporaire de vLLM pour liberer le GPU\"
   docker update --restart=no the_hive-vllm-1 >/dev/null 2>&1 || true
@@ -905,7 +915,7 @@ trap cleanup EXIT
 
 export RUN_TRAIN_GNN=\"${RUN_TRAIN_GNN:-1}\"
 export RUN_TRAIN_MUZERO=\"${RUN_TRAIN_MUZERO:-1}\"
-export RUN_TRAIN_DREAMER=\"${RUN_TRAIN_DREAMER:-1}\"
+export RUN_TRAIN_DREAMER=\"${RUN_TRAIN_DREAMER:-0}\"
 export TRAINING_ENGINE=\"${TRAINING_ENGINE:-}\"
 export TRAINING_TRIAL_MODE=\"${TRAINING_TRIAL_MODE:-}\"
 export TRAINING_TRIAL_COST_PROFILE=\"${TRAINING_TRIAL_COST_PROFILE:-}\"
@@ -1084,7 +1094,7 @@ export DREAMER_HIDDEN_STATE_SIZE=\"${DREAMER_HIDDEN_STATE_SIZE:-128}\"
 export DREAMER_NETWORK_HIDDEN_DIMS=\"${DREAMER_NETWORK_HIDDEN_DIMS:-256,256}\"
 export DREAMER_NUM_UNROLL_STEPS=\"${DREAMER_NUM_UNROLL_STEPS:-3}\"
 export DREAMER_REPLAY_MAX_GAMES=\"${DREAMER_REPLAY_MAX_GAMES:-2500}\"
-export CUDA_VISIBLE_DEVICES=\"${CUDA_VISIBLE_DEVICES:-}\"
+export CUDA_VISIBLE_DEVICES=\"${CUDA_VISIBLE_DEVICES:-${TRAINING_GPU_DEVICE:-1}}\"
 export JAX_PLATFORMS=\"${JAX_PLATFORMS:-cpu}\"
 export XLA_PYTHON_CLIENT_PREALLOCATE=\"${XLA_PYTHON_CLIENT_PREALLOCATE:-false}\"
 if [ -z \"${XLA_PYTHON_CLIENT_MEM_FRACTION:-}\" ]; then
