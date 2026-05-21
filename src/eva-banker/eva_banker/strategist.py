@@ -133,6 +133,24 @@ class Strategist:
 
         return settings.ollama_model
 
+    def _resolve_gnn_url(self) -> str:
+        """Construit l'URL de prediction GNN.
+
+        Le live Windows peut atteindre le service `live-inference` sur `8610`
+        meme lorsque le port direct du Lab `8600` n'est pas joignable. Cette
+        methode privilegie donc une URL explicite, puis retombe sur `LAB_PORT`.
+
+        Returns:
+            str: URL HTTP complete du endpoint GNN.
+        """
+        explicit_url = str(os.getenv("BANKER_GNN_URL", "")).strip()
+        if explicit_url:
+            return explicit_url.rstrip("/")
+
+        lab_host = str(os.getenv("LAB_HOST", "localhost")).strip() or "localhost"
+        lab_port = str(os.getenv("LAB_PORT", "8600")).strip() or "8600"
+        return f"http://{lab_host}:{lab_port}/gnn/predict"
+
     @staticmethod
     def _strip_json_fence(content: str) -> str:
         """Retire les balises Markdown autour d'un JSON eventuel.
@@ -307,8 +325,7 @@ class Strategist:
         try:
             import aiohttp
 
-            lab_host = os.getenv("LAB_HOST", "localhost")
-            url = f"http://{lab_host}:8600/gnn/predict"
+            url = self._resolve_gnn_url()
             payload = {
                 "assets_data": {
                     f"{symbol}_5": [closes[-15:]],
@@ -474,7 +491,7 @@ class Strategist:
         adx = float(indicators.get("adx", 25) or 25)
         macd = float(indicators.get("MACD_Hist", 0) or 0)
 
-        if self._cpu_live_mode or self.cortex is None:
+        if self.cortex is None or (self._cpu_live_mode and not self._cpu_live_cortex_advisory):
             return (
                 f"Mode CPU live: {action} sur {symbol} conserve en demo avec RSI {rsi:.1f}, "
                 f"ADX {adx:.1f} et MACD {macd:.4f}."

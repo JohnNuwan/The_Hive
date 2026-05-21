@@ -242,6 +242,106 @@ class CopyTradingRouter:
             )
         return statuses
 
+    async def get_targets_runtime_status(self) -> list[dict[str, Any]]:
+        """
+        Retourne un etat runtime des cibles de copy trading.
+
+        Cette vue complete la configuration statique par un diagnostic reseau
+        simple: disponibilite de l'instance distante, lecture du compte et
+        nombre de positions visibles. Elle sert surtout au tableau de bord et
+        au debogage des followers qui ratent une copie sans planter le master.
+
+        Returns:
+            list[dict[str, Any]]: Statut enrichi de chaque cible.
+        """
+        statuses: list[dict[str, Any]] = []
+        for target in self.targets.values():
+            runtime_status: dict[str, Any] = {
+                "id": str(target.id),
+                "name": target.name,
+                "banker_base_url": target.banker_base_url,
+                "allocation_ratio": float(target.allocation_ratio),
+                "enabled": target.enabled,
+                "broker": target.broker,
+                "server": target.server,
+                "login": target.login,
+                "phase": target.phase,
+                "terminal_label": target.terminal_label,
+                "symbol_map": dict(target.symbol_map),
+                "supported_symbols": list(target.supported_symbols),
+                "reachable": False,
+                "health_status": None,
+                "mt5_connected": None,
+                "balance": None,
+                "equity": None,
+                "positions_count": None,
+                "symbols_count": None,
+                "last_error": None,
+            }
+
+            try:
+                health_response = await self._http_client.get(
+                    self._join_url(target.banker_base_url, "/health"),
+                    headers=get_internal_headers("banker"),
+                )
+                health_response.raise_for_status()
+                health_payload = health_response.json()
+                runtime_status["reachable"] = True
+                runtime_status["health_status"] = health_payload.get("status")
+                runtime_status["mt5_connected"] = health_payload.get("mt5_connected")
+            except Exception as exc:
+                runtime_status["last_error"] = f"health: {exc}"
+                statuses.append(runtime_status)
+                continue
+
+            try:
+                account_response = await self._http_client.get(
+                    self._join_url(target.banker_base_url, "/account"),
+                    headers=get_internal_headers("banker"),
+                )
+                account_response.raise_for_status()
+                account_payload = account_response.json()
+                runtime_status["balance"] = account_payload.get("balance")
+                runtime_status["equity"] = account_payload.get("equity")
+            except Exception as exc:
+                runtime_status["last_error"] = f"account: {exc}"
+
+            try:
+                positions_response = await self._http_client.get(
+                    self._join_url(target.banker_base_url, "/positions"),
+                    headers=get_internal_headers("banker"),
+                )
+                positions_response.raise_for_status()
+                positions_payload = positions_response.json()
+                if isinstance(positions_payload, list):
+                    runtime_status["positions_count"] = len(positions_payload)
+            except Exception as exc:
+                runtime_status["last_error"] = (
+                    f"{runtime_status['last_error']} | positions: {exc}"
+                    if runtime_status["last_error"]
+                    else f"positions: {exc}"
+                )
+
+            try:
+                symbols_response = await self._http_client.get(
+                    self._join_url(target.banker_base_url, "/symbols/discover"),
+                    headers=get_internal_headers("banker"),
+                )
+                symbols_response.raise_for_status()
+                symbols_payload = symbols_response.json()
+                raw_symbols = symbols_payload.get("symbols", []) if isinstance(symbols_payload, dict) else []
+                if isinstance(raw_symbols, list):
+                    runtime_status["symbols_count"] = len(raw_symbols)
+            except Exception as exc:
+                runtime_status["last_error"] = (
+                    f"{runtime_status['last_error']} | symbols: {exc}"
+                    if runtime_status["last_error"]
+                    else f"symbols: {exc}"
+                )
+
+            statuses.append(runtime_status)
+        return statuses
+
     async def execute_order(self, order: TradeOrder) -> dict[str, Any]:
         """
         Execute l'ordre localement puis le recopie vers les instances filles.

@@ -10,6 +10,7 @@ $SupervisorPidDir = Join-Path $Root "logs\banker_supervisors"
 $Instances = @(
     @{ Port = 8110; Env = ".env.banker.ftmo50k.local"; Host = "127.0.0.1" },
     @{ Port = 8170; Env = ".env.banker.ftmo541264545.local"; Host = "127.0.0.1" },
+    @{ Port = 8190; Env = ".env.banker.ftmo541283689.local"; Host = "127.0.0.1" },
     @{ Port = 8120; Env = ".env.banker.ftuk100k.local"; Host = "127.0.0.1" },
     @{ Port = 8130; Env = ".env.banker.ftuk100k_333382206.local"; Host = "127.0.0.1" },
     # Le compte 333382355 est retire du fleet actif.
@@ -51,6 +52,7 @@ function Stop-BankerApis {
         $_.CommandLine -like "*banker.master.bat*" -or
         $_.CommandLine -like "*banker.ftmo50k.bat*" -or
         $_.CommandLine -like "*banker.ftmo541264545.bat*" -or
+        $_.CommandLine -like "*banker.ftmo541283689.bat*" -or
         $_.CommandLine -like "*banker.ftuk100k*"
     }
 

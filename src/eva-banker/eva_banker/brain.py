@@ -146,6 +146,7 @@ class AutoTradingEngine:
         self._lab_universe_horizon = self._env_text("BANKER_LAB_UNIVERSE_HORIZON", "intraday").lower()
         self._live_inference_horizon = self._env_text("BANKER_LIVE_HORIZON", "auto").lower()
         self._live_inference_url = self._env_text("BANKER_LIVE_INFERENCE_URL", "")
+        self._live_universe_url = self._env_text("BANKER_LIVE_UNIVERSE_URL", "")
         self._live_inference_timeout_seconds = max(
             1,
             self._env_int("BANKER_LIVE_INFERENCE_TIMEOUT_SECONDS", 5),
@@ -972,13 +973,18 @@ class AutoTradingEngine:
         ):
             return self._lab_universe_symbols
 
-        lab_host = self._env_text("LAB_HOST", "localhost")
-        lab_port = self._env_int("LAB_PORT", 8600)
         horizon = "scalp" if self._cpu_live_mode else self._lab_universe_horizon
-        url = (
-            f"http://{lab_host}:{lab_port}/live/universe"
-            f"?horizon={horizon}&engine=muzero"
-        )
+        explicit_url = self._live_universe_url.strip()
+        if explicit_url:
+            separator = "&" if "?" in explicit_url else "?"
+            url = f"{explicit_url.rstrip('/')}{separator}horizon={horizon}&engine=muzero"
+        else:
+            lab_host = self._env_text("LAB_HOST", "localhost")
+            lab_port = self._env_int("LAB_PORT", 8600)
+            url = (
+                f"http://{lab_host}:{lab_port}/live/universe"
+                f"?horizon={horizon}&engine=muzero"
+            )
 
         try:
             async with aiohttp.ClientSession() as session:

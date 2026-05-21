@@ -1438,6 +1438,46 @@ class MT5Service:
                 normalized_symbol = normalized_symbol[: -len(suffix)]
         return normalized_symbol
 
+    def _load_spread_threshold_overrides(self) -> dict[str, int]:
+        """Charge des surcharges de spread depuis l'environnement local.
+
+        Returns:
+            dict[str, int]: Dictionnaire `symbole_normalise -> seuil`.
+        """
+        raw_value = str(os.getenv("BANKER_SPREAD_MAX_POINTS_JSON", "")).strip()
+        if not raw_value:
+            return {}
+        try:
+            payload = json.loads(raw_value)
+        except json.JSONDecodeError as exc:
+            logger.warning("Overrides spread ignores car JSON invalide: %s", exc)
+            return {}
+        if not isinstance(payload, dict):
+            logger.warning("Overrides spread ignores car le payload n'est pas un objet JSON.")
+            return {}
+
+        overrides: dict[str, int] = {}
+        for symbol, threshold in payload.items():
+            normalized_symbol = self._normalize_symbol_for_spread(str(symbol))
+            try:
+                parsed_threshold = int(float(threshold))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Override spread ignore pour %s: seuil invalide=%s",
+                    symbol,
+                    threshold,
+                )
+                continue
+            if parsed_threshold <= 0:
+                logger.warning(
+                    "Override spread ignore pour %s: seuil non positif=%s",
+                    symbol,
+                    threshold,
+                )
+                continue
+            overrides[normalized_symbol] = parsed_threshold
+        return overrides
+
     def get_max_spread_points(self, symbol: str) -> int:
         """Retourne le spread maximal autorisé pour un symbole.
 
@@ -1448,6 +1488,9 @@ class MT5Service:
             int: Seuil de spread en points.
         """
         normalized_symbol = self._normalize_symbol_for_spread(symbol)
+        env_overrides = self._load_spread_threshold_overrides()
+        if normalized_symbol in env_overrides:
+            return env_overrides[normalized_symbol]
         per_symbol_thresholds = {
             "US30": 250,
             # FTUK cote regulierement le DAX autour de 277-281 points au
@@ -1492,6 +1535,7 @@ class MT5Service:
             "profile": "per_symbol_v611",
             "default_forex_major": 25,
             "thresholds": thresholds,
+            "overrides": self._load_spread_threshold_overrides(),
         }
 
     @staticmethod

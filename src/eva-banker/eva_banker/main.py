@@ -1824,8 +1824,12 @@ async def get_copy_trading_status() -> dict[str, Any]:
         dict[str, Any]: Liste des cibles configurees et activation du module.
     """
     mt5_service = app.state.mt5_service
-    target_status_getter = getattr(mt5_service, "get_targets_status", None)
-    targets = target_status_getter() if callable(target_status_getter) else []
+    target_runtime_status_getter = getattr(mt5_service, "get_targets_runtime_status", None)
+    if callable(target_runtime_status_getter):
+        targets = await target_runtime_status_getter()
+    else:
+        target_status_getter = getattr(mt5_service, "get_targets_status", None)
+        targets = target_status_getter() if callable(target_status_getter) else []
     return {
         "enabled": bool(targets),
         "targets": targets,

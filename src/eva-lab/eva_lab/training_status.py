@@ -14,6 +14,7 @@ STATUS_PATH = STATUS_DIR / "training_status.json"
 RUN_LOG_PATH = STATUS_DIR / "training_run.log"
 NIGHTLY_SUMMARY_PATH = STATUS_DIR / "nightly_training_summary.json"
 CPU_SCHEDULER_STATE_PATH = STATUS_DIR / "cpu_scheduler" / "state.json"
+NIGHTLY_LOCK_PATH = STATUS_DIR / "nightly_training.lock"
 GA_SEEDED_MUZERO_DIR = STATUS_DIR / "ga_seeded_muzero"
 GA_SEEDED_MUZERO_STATE_PATH = GA_SEEDED_MUZERO_DIR / "current_campaign.json"
 ARENA_SUMMARY_DIR = STATUS_DIR / "arena_reports"
@@ -22,6 +23,7 @@ V4_SEQUENCE_STATE_PATH = V4_SEQUENCE_DIR / "sequence_state.json"
 V4_SEQUENCE_PID_PATH = V4_SEQUENCE_DIR / "sequence_supervisor.pid"
 TERMINAL_SUMMARY_DIR = Path(os.getenv("TRAINING_TERMINAL_SUMMARY_DIR", "data/muzero/results"))
 MAX_LOG_LINES = int(os.getenv("TRAINING_STATUS_MAX_LOG_LINES", "400"))
+STALE_RUNNING_STATUS_SECONDS = int(os.getenv("TRAINING_STALE_STATUS_SECONDS", "1800"))
 
 FOREX_CODES = {
     "AUD",
@@ -85,6 +87,24 @@ def _now_iso() -> str:
     """Retourne l'horodatage courant au format ISO."""
 
     return datetime.now().isoformat()
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    """Convertit une chaine ISO en horodatage Python.
+
+    Args:
+        value (Any): Valeur eventuellement serialisee en ISO.
+
+    Returns:
+        datetime | None: Horodatage parse si possible.
+    """
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
 
 
 def _resolve_focus_symbols_from_env() -> list[str]:
@@ -428,6 +448,25 @@ def _normalize_training_status_snapshot(status: dict[str, Any]) -> dict[str, Any
 
     launcher = dict(snapshot.get("launcher") or {})
     run_is_active = bool(snapshot.get("active")) and str(snapshot.get("status") or "").lower() == "running"
+    updated_at = _parse_iso_datetime(snapshot.get("updated_at"))
+    current_time = datetime.now()
+    status_is_stale = (
+        run_is_active
+        and not NIGHTLY_LOCK_PATH.exists()
+        and updated_at is not None
+        and (current_time - updated_at).total_seconds() > STALE_RUNNING_STATUS_SECONDS
+    )
+    if status_is_stale:
+        snapshot["active"] = False
+        snapshot["status"] = "idle"
+        snapshot["finished_at"] = snapshot.get("finished_at") or _now_iso()
+        snapshot["failed_step"] = None
+        snapshot["current_step"] = None
+        launcher["phase"] = "idle"
+        launcher["remote_pid"] = None
+        launcher["trainer_container"] = None
+        launcher["last_stop_reason"] = "etat_stale_sans_verrou"
+        run_is_active = False
     if run_is_active:
         # Un run actif ne doit pas continuer d'afficher un skip d'un run precedent.
         launcher.pop("skip_lock", None)
