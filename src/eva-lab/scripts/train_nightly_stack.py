@@ -46,9 +46,9 @@ def _enforce_parent_runtime_env() -> None:
 
 
 def _targets_muzero_trainer(command: list[str]) -> bool:
-    """Retourne `True` si la commande cible le trainer MuZero global."""
+    """Retourne `True` si la commande cible le trainer MuZero global ou Dreamer offline."""
 
-    return any("scripts/train_global_models.py" in str(token) for token in command)
+    return any("scripts/train_global_models.py" in str(token) or "eva_lab.muzero.offline_trainer" in str(token) for token in command)
 
 
 def _build_muzero_child_runtime_env(base_env: dict[str, str]) -> dict[str, str]:
@@ -494,7 +494,7 @@ def apply_training_strategy(decision: dict[str, object]) -> None:
         _set_env_default("TRAINING_PROFILE", "research")
         _set_env_default("RUN_TRAIN_GNN", "0")
         _set_env_default("RUN_TRAIN_MUZERO", "1")
-        _set_env_default("RUN_TRAIN_DREAMER", "0")
+        _set_env_default("RUN_TRAIN_DREAMER", "1")
         _set_env_default("MUZERO_TRAINING_STEPS", "32000")
         _set_env_default("MUZERO_GAMES_PER_SYMBOL", "20")
         _set_env_default("ARENA_GAMES_PER_SYMBOL", "8")
@@ -508,7 +508,7 @@ def apply_training_strategy(decision: dict[str, object]) -> None:
         _set_env_default("TRAINING_PROFILE", "refresh")
         _set_env_default("RUN_TRAIN_GNN", "0")
         _set_env_default("RUN_TRAIN_MUZERO", "1")
-        _set_env_default("RUN_TRAIN_DREAMER", "0")
+        _set_env_default("RUN_TRAIN_DREAMER", "1")
         _set_env_default("MUZERO_TRAINING_STEPS", "8000")
         _set_env_default("MUZERO_GAMES_PER_SYMBOL", "8")
         _set_env_default("ARENA_GAMES_PER_SYMBOL", "4")
@@ -694,6 +694,30 @@ def main() -> dict[str, object]:
                 extra_env={"DREAMER_EPOCHS": os.getenv("DREAMER_EPOCHS", "1500")},
             )
             append_step(summary, "dreamer_offline", "ok")
+
+        # Couplage AlphaEvolve Feedback Bridge (Live Bridging)
+        try:
+            logger.info("Executing AlphaEvolve feedback bridge...")
+            run_step(
+                "alphaevolve_bridge",
+                [sys.executable, "scripts/apply_alphaevolve_best.py"]
+            )
+            append_step(summary, "alphaevolve_bridge", "ok")
+        except Exception as bridge_exc:
+            logger.warning("AlphaEvolve feedback bridge failed: %s", bridge_exc)
+            append_step(summary, "alphaevolve_bridge", "error")
+
+        # Hermes Loss Auditor
+        try:
+            logger.info("Executing Hermes Loss Auditor...")
+            run_step(
+                "hermes_loss_auditor",
+                [sys.executable, "scripts/hermes_loss_auditor.py"]
+            )
+            append_step(summary, "hermes_loss_auditor", "ok")
+        except Exception as audit_exc:
+            logger.warning("Hermes Loss Auditor failed: %s", audit_exc)
+            append_step(summary, "hermes_loss_auditor", "error")
 
         summary["status"] = "ok"
         summary["finished_at"] = datetime.now().isoformat()

@@ -198,12 +198,35 @@ class Arena:
         except (TypeError, ValueError):
             return float("-inf")
 
+    def _find_historical_champions(self) -> list[Path]:
+        """Scans the weights folder and archive subfolder for up to 3 recent checkpoints."""
+        candidates = []
+        search_dirs = [self.weights_dir, self.weights_dir / "archive"]
+        for d in search_dirs:
+            if d.exists() and d.is_dir():
+                for file in d.iterdir():
+                    if file.is_file() and (file.suffix in {".pkl", ".pt"}):
+                        # Filter for muzero or dreamer checkpoints
+                        if "ckpt" in file.name or "champion" in file.name or "latest" in file.name:
+                            candidates.append(file)
+        
+        # Sort by modification time, most recent first
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        
+        # Keep unique by name and take top 3
+        unique_candidates = []
+        seen = set()
+        for c in candidates:
+            if c.name not in seen:
+                seen.add(c.name)
+                unique_candidates.append(c)
+            if len(unique_candidates) >= 3:
+                break
+        return unique_candidates
+
     @staticmethod
     def _empty_metrics() -> dict[str, Any]:
         """Retourne un jeu de metriques neutres si l'evaluation echoue.
-
-        Returns:
-            dict[str, Any]: Metriques nulles et tailles d'echantillons a zero.
         """
         return {
             "profit_factor": 0.0,
@@ -1243,6 +1266,9 @@ class Arena:
         if agent is None:
             return self._empty_metrics()
 
+        normalized_engine = str(engine or "muzero").strip().lower()
+
+
         effective_games_per_symbol = (
             max(1, int(eval_games_per_symbol))
             if eval_games_per_symbol is not None
@@ -1318,11 +1344,20 @@ class Arena:
                     config=config,
                     max_steps=max_steps,
                 )
-                agent.play_game(
-                    env,
-                    exploration=False,
-                    action_transform=action_transform,
-                )
+                if normalized_engine == "dreamer":
+                    if action_transform is not None:
+                        original_step = env.step
+                        env.step = lambda action, ot=original_step, at=action_transform: ot(at(action))
+                    agent.play_game(
+                        env,
+                        exploration=False,
+                    )
+                else:
+                    agent.play_game(
+                        env,
+                        exploration=False,
+                        action_transform=action_transform,
+                    )
                 summary = env.get_summary()
 
                 episode_return = float(summary.get("return_pct", 0.0))
@@ -1920,6 +1955,58 @@ class Arena:
             else self._empty_metrics()
         )
 
+        # ----------------------------------------------------
+        # RED-TEAMING LEAGUE & DUMMY BASELINES (AlphaStar Style)
+        # ----------------------------------------------------
+        # 1. Historical Champions
+        historical_champions = self._find_historical_champions()
+        historical_metrics_list = []
+        historical_scores = []
+        for idx, hc_path in enumerate(historical_champions, start=1):
+            logger.info("Arena: Evaluating historical champion %d: %s", idx, hc_path.name)
+            hc_metrics = self._evaluate_model(
+                hc_path,
+                eval_symbols,
+                horizon,
+                engine=normalized_engine,
+                role=f"historical_champion_{idx}",
+            )
+            hc_score = self._score_metrics(hc_metrics)
+            historical_metrics_list.append({
+                "path": str(hc_path),
+                "name": hc_path.name,
+                "metrics": hc_metrics,
+                "score": hc_score
+            })
+            historical_scores.append(hc_score)
+
+        # 2. Always Long Baseline
+        logger.info("Arena: Evaluating Always Long dummy baseline...")
+        always_long_metrics = self._evaluate_model(
+            challenger_path,
+            eval_symbols,
+            horizon,
+            engine=normalized_engine,
+            role="always_long",
+            action_transform=lambda a: BUY,
+        )
+        always_long_score = self._score_metrics(always_long_metrics)
+
+        # 3. Always Short Baseline
+        logger.info("Arena: Evaluating Always Short dummy baseline...")
+        always_short_metrics = self._evaluate_model(
+            challenger_path,
+            eval_symbols,
+            horizon,
+            engine=normalized_engine,
+            role="always_short",
+            action_transform=lambda a: SELL,
+        )
+        always_short_score = self._score_metrics(always_short_metrics)
+
+        # ----------------------------------------------------
+        # SCORING & COMPLIANCE VERDICTS
+        # ----------------------------------------------------
         challenger_score = self._score_metrics(challenger_metrics)
         champion_score = self._score_metrics(champion_metrics)
         inverse_score = self._score_metrics(inverse_metrics)
@@ -1970,12 +2057,64 @@ class Arena:
             or not self._read_bool_env("ARENA_REQUIRE_NEMESIS_VALIDATION", True)
         )
 
+        # Historical validation: Challenger must beat each historical champion
+        historical_ok = True
+        for hc in historical_metrics_list:
+            if challenger_score <= (hc["score"] + min_score_edge):
+                historical_ok = False
+                logger.info("Challenger failed to beat historical champion %s: Challenger %.4f <= %.4f + %.4f", hc["name"], challenger_score, hc["score"], min_score_edge)
+
+        # Baseline validation: Challenger must beat both always_long and always_short
+        baselines_ok = (
+            challenger_score > always_long_score
+            and challenger_score > always_short_score
+        )
+        if not baselines_ok:
+            logger.info("Challenger failed to beat direction baselines. Challenger: %.4f, Always Long: %.4f, Always Short: %.4f", challenger_score, always_long_score, always_short_score)
+
+        # ----------------------------------------------------
+        # COUPLING HERMES COORDINATOR (Port 9500)
+        # ----------------------------------------------------
+        hermes_stress_scenario = "Hermes coordinator not requested."
+        import requests
+        try:
+            url = "http://192.168.1.6:9500/chat"
+            prompt = f"""
+            The HIVE MuZero Challenger evaluation results:
+            - Score: {challenger_score:.4f}
+            - Return Pct: {challenger_metrics.get('return_pct', 0.0):.2f}%
+            - Profit Factor: {challenger_metrics.get('profit_factor', 0.0):.2f}
+            - Max Drawdown: {challenger_metrics.get('max_drawdown_pct', 0.0):.2f}%
+            - Total Trades: {challenger_metrics.get('total_trades', 0)}
+            - Win Rate: {challenger_metrics.get('win_rate', 0.0):.2f}%
+            
+            Formulate a detailed market stress scenario and macro conditions to challenge and stress-test this trading model in the future. Suggest specific market regimes (e.g., high volatility regimes, range-bound markets) where this agent might fail based on its current profile.
+            """
+            payload = {
+                "message": prompt.strip(),
+                "expert": "coordinator",
+                "system_prompt": "You are Hermes, the master coordinator and quantitative research director. You stress-test AI trading policies by analyzing their backtest metrics and designing custom adversarial market scenarios.",
+                "temperature": 0.3,
+                "max_tokens": 800
+            }
+            logger.info("Querying Hermes coordinator for stress-testing analysis...")
+            response = requests.post(url, json=payload, timeout=30)
+            if response.status_code == 200:
+                hermes_stress_scenario = response.json().get("response", "No stress scenario formulated.")
+            else:
+                hermes_stress_scenario = f"Error from Hermes coordinator API: {response.text}"
+        except Exception as exc:
+            logger.warning("Failed to reach Hermes coordinator: %s", exc)
+            hermes_stress_scenario = f"Hermes coordinator unreachable: {exc}"
+
         is_bootstrap = champion_path is None
         is_victory = (
             sample_size_ok
             and challenger_directional_ok
             and inverse_ok
             and nemesis_ok
+            and historical_ok
+            and baselines_ok
             and (is_bootstrap or challenger_score > (champion_score + min_score_edge))
         )
 
@@ -2002,6 +2141,8 @@ class Arena:
                 "directional_ok": challenger_directional_ok,
                 "inverse_ok": inverse_ok,
                 "nemesis_ok": nemesis_ok,
+                "historical_ok": historical_ok,
+                "baselines_ok": baselines_ok,
                 "inverse_checks": inverse_checks,
                 "min_games": min_games,
                 "min_symbols": min_symbols,
@@ -2019,6 +2160,16 @@ class Arena:
                 "score": round(champion_score, 4),
                 "metrics": champion_metrics,
             },
+            "historical_champions": historical_metrics_list,
+            "always_long_baseline": {
+                "score": round(always_long_score, 4),
+                "metrics": always_long_metrics,
+            },
+            "always_short_baseline": {
+                "score": round(always_short_score, 4),
+                "metrics": always_short_metrics,
+            },
+            "hermes_stress_scenario": hermes_stress_scenario,
             "inverse_metrics": inverse_metrics,
             "nemesis_validation": nemesis_validation,
             "inverse_challenger": {
@@ -2046,9 +2197,17 @@ class Arena:
                                 "REJECT_NEMESIS_SLICE"
                                 if not nemesis_ok
                                 else (
-                                    "REJECT_DIRECTIONAL_COLLAPSE"
-                                    if not challenger_directional_ok
-                                    else "KEEP_CURRENT"
+                                    "REJECT_HISTORICAL_CHAMPIONS"
+                                    if not historical_ok
+                                    else (
+                                        "REJECT_DIRECTIONAL_BASELINES"
+                                        if not baselines_ok
+                                        else (
+                                            "REJECT_DIRECTIONAL_COLLAPSE"
+                                            if not challenger_directional_ok
+                                            else "KEEP_CURRENT"
+                                        )
+                                    )
                                 )
                             )
                         )
@@ -2071,6 +2230,12 @@ class Arena:
         arena_progress["challenger_score"] = round(challenger_score, 4)
         arena_progress["champion_score"] = round(champion_score, 4)
         arena_progress["inverse_challenger_score"] = round(inverse_score, 4)
+        arena_progress["historical_champions"] = [
+            {"name": hc["name"], "score": round(hc["score"], 4)} for hc in historical_metrics_list
+        ]
+        arena_progress["always_long_score"] = round(always_long_score, 4)
+        arena_progress["always_short_score"] = round(always_short_score, 4)
+        arena_progress["hermes_stress_scenario"] = hermes_stress_scenario
         arena_progress["challenger"] = {
             "id": challenger_id,
             "path": str(challenger_path),
