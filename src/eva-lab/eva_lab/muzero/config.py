@@ -32,6 +32,10 @@ class MuZeroConfigV3:
             "max_symbols",
             "dataset_source",
         }
+        self.use_jepa_encoder = str(
+            os.getenv("MUZERO_USE_JEPA_ENCODER", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self.jepa_latent_size = int(os.getenv("MUZERO_JEPA_LATENT_SIZE", "128"))
         self.observation_shape = (32,)
         self.action_space_size = 5
         self.hidden_state_size = 256

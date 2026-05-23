@@ -48,17 +48,36 @@ def scalar_to_support(scalar: jnp.ndarray, support_size: int) -> jnp.ndarray:
 
 
 class RepresentationNetwork(hk.Module):
-    """Encode l'observation brute dans un etat latent compact."""
+    """Encode l'observation brute dans un etat latent compact (optionnellement via JEPA)."""
 
-    def __init__(self, output_dim: int, hidden_dims: list[int]):
-        """Memorise la taille de sortie et les couches cachees."""
+    def __init__(
+        self,
+        output_dim: int,
+        hidden_dims: list[int],
+        use_jepa_encoder: bool = False,
+        jepa_latent_size: int = 128,
+    ):
+        """Mémorise la taille de sortie, les couches cachées et les paramètres JEPA."""
         super().__init__()
         self.output_dim = output_dim
         self.hidden_dims = hidden_dims
+        self.use_jepa_encoder = use_jepa_encoder
+        self.jepa_latent_size = jepa_latent_size
 
     def __call__(self, observation: jnp.ndarray) -> jnp.ndarray:
-        """Projette l'observation dans l'espace latent MuZero."""
-        hidden = observation
+        """Projette l'observation (éventuellement compressée par JEPA) dans l'espace latent MuZero."""
+        if self.use_jepa_encoder:
+            from eva_lab.muzero.jepa_encoder import JEPAEncoder
+            # Instanciation de l'encodeur de contexte JEPA pré-entraîné
+            jepa_encoder = JEPAEncoder(
+                self.jepa_latent_size,
+                [256, 256],
+                name="context_encoder",
+            )
+            hidden = jepa_encoder(observation)
+        else:
+            hidden = observation
+
         for hidden_dim in self.hidden_dims:
             hidden = hk.Linear(hidden_dim)(hidden)
             hidden = jax.nn.relu(hidden)
@@ -117,6 +136,8 @@ def make_muzero_networks(config):
         representation = RepresentationNetwork(
             config.hidden_state_size,
             config.network_hidden_dims,
+            use_jepa_encoder=getattr(config, "use_jepa_encoder", False),
+            jepa_latent_size=getattr(config, "jepa_latent_size", 128),
         )
         dynamics = DynamicsNetwork(
             config.hidden_state_size,

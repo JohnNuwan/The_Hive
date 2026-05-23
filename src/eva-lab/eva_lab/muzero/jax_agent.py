@@ -1,4 +1,4 @@
-﻿"""Agent MuZero JAX pour le self-play, l'entrainement et la persistence."""
+"""Agent MuZero JAX pour le self-play, l'entrainement et la persistence."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from time import perf_counter
 from typing import Callable, NamedTuple
 
 import jax
+import haiku as hk
 import jax.numpy as jnp
 import numpy as np
 
@@ -56,6 +57,44 @@ class JAXMuZeroAgent:
 
         dummy_obs = jnp.zeros((1, *config.observation_shape))
         self.params, self.opt_state = self.trainer.init_params(dummy_obs)
+
+        # Injection conditionnelle des poids de l'encodeur JEPA pré-entraîné
+        if getattr(config, "use_jepa_encoder", False):
+            import pickle
+            jepa_path = os.path.join("data", "muzero", "weights", "jepa_encoder_latest.pkl")
+            if os.path.exists(jepa_path):
+                try:
+                    with open(jepa_path, "rb") as f:
+                        jepa_params = pickle.load(f)
+                    
+                    # Conversion en dictionnaire mutable Haiku
+                    new_params = hk.data_structures.to_mutable_dict(self.params)
+                    injected_count = 0
+                    for k, v in jepa_params.items():
+                        # Injection des tenseurs du context_encoder sous le namespace de RepresentationNetwork
+                        if k.startswith("context_encoder/"):
+                            muzero_key = f"representation_network/{k}"
+                            if muzero_key in new_params:
+                                new_params[muzero_key] = jnp.asarray(v)
+                                injected_count += 1
+                    
+                    # Reconstruction de la structure immuable
+                    self.params = hk.data_structures.to_immutable_dict(new_params)
+                    logger.info(
+                        "[JAXMuZeroAgent] Injecté %d tenseurs de l'encodeur JEPA pré-entraîné dans les poids MuZero.",
+                        injected_count,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "[JAXMuZeroAgent] Échec de l'injection des poids JEPA : %s. Poursuite avec l'initialisation standard.",
+                        exc,
+                    )
+            else:
+                logger.warning(
+                    "[JAXMuZeroAgent] Fichier de poids JEPA %s introuvable. "
+                    "Poursuite avec l'initialisation standard pour le RepresentationNetwork.",
+                    jepa_path,
+                )
 
         self.replay_buffer = PrioritizedReplayBuffer(
             max_games=config.window_size // config.max_moves
