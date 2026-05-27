@@ -48,7 +48,12 @@ class LLMClient:
         self._cooldown_until = 0.0
         self._last_failure_reason = ""
 
-        if self.backend == "vllm":
+        if self.backend == "openrouter":
+            self.api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+            self.model = model or os.getenv("BANKER_CORTEX_MODEL", "nvidia/nemotron-3-super-120b-a12b:free").strip()
+            self.host = "https://openrouter.ai"
+            self.api_url = "https://openrouter.ai/api/v1/chat/completions"
+        elif self.backend == "vllm":
             self.model = model or self.settings.vllm_model
             self.host = self._build_base_url(host, self.settings.vllm_host, self.settings.vllm_port)
             self.api_url = f"{self.host}/v1/chat/completions"
@@ -132,7 +137,7 @@ class LLMClient:
         Returns:
             bool: True si un cooldown est actif.
         """
-        return self.backend == "vllm" and time.time() < self._cooldown_until
+        return self.backend in {"vllm", "openrouter"} and time.time() < self._cooldown_until
 
     def _mark_failure(self, reason: str) -> None:
         """
@@ -163,7 +168,7 @@ class LLMClient:
         """
         full_prompt = f"Context: {context}\n\nTask: {prompt}\n\nResponse:"
 
-        if self.backend == "vllm":
+        if self.backend in {"vllm", "openrouter"}:
             payload = {
                 "model": self.model,
                 "messages": [{"role": "user", "content": full_prompt}],
@@ -192,7 +197,7 @@ class LLMClient:
 
         try:
             async with aiohttp.ClientSession() as session:
-                if self.backend == "vllm":
+                if self.backend in {"vllm", "openrouter"}:
                     return await self._analyze_vllm_with_retries(session, payload)
 
                 async with session.post(self.api_url, json=payload, timeout=30.0) as resp:
@@ -253,7 +258,7 @@ class LLMClient:
 
     async def _analyze_vllm(self, session: aiohttp.ClientSession, payload: dict[str, Any]) -> str:
         """
-        Execute un appel `vLLM` avec repli automatique si le modele est absent.
+        Execute un appel `vLLM` ou `OpenRouter` avec repli automatique si le modele est absent.
 
         Args:
             session (aiohttp.ClientSession): Session HTTP reutilisee.
@@ -266,7 +271,13 @@ class LLMClient:
             aiohttp.ClientError: Si la connexion ou la requete echoue.
             asyncio.TimeoutError: Si l'appel depasse le delai.
         """
-        async with session.post(self.api_url, json=payload, timeout=30.0) as resp:
+        headers = {}
+        if self.backend == "openrouter":
+            headers["Authorization"] = f"Bearer {getattr(self, 'api_key', '')}"
+            headers["HTTP-Referer"] = "https://thehive.dev"
+            headers["X-Title"] = "THE HIVE Banker"
+
+        async with session.post(self.api_url, json=payload, headers=headers, timeout=30.0) as resp:
             if resp.status == 200:
                 result = await resp.json()
                 return result["choices"][0]["message"]["content"].strip()

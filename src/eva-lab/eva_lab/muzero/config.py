@@ -36,7 +36,12 @@ class MuZeroConfigV3:
             os.getenv("MUZERO_USE_JEPA_ENCODER", "1")
         ).strip().lower() in {"1", "true", "yes", "on"}
         self.jepa_latent_size = int(os.getenv("MUZERO_JEPA_LATENT_SIZE", "128"))
-        self.observation_shape = (32,)
+        self.use_league = str(
+            os.getenv("MUZERO_USE_LEAGUE", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self.league_mix_ratio = float(os.getenv("MUZERO_LEAGUE_MIX_RATIO", "0.20"))
+        self.league_max_champions = int(os.getenv("MUZERO_LEAGUE_MAX_CHAMPIONS", "10"))
+        self.observation_shape = (35,)
         self.action_space_size = 5
         self.hidden_state_size = 256
         self.network_hidden_dims = [512, 512, 512]
@@ -44,7 +49,10 @@ class MuZeroConfigV3:
 
         self.horizon = str(overrides.get("horizon") or os.getenv("MUZERO_HORIZON", "intraday")).lower()
         self.primary_timeframe = str(
-            overrides.get("primary_timeframe") or get_horizon_timeframe(self.horizon)
+            overrides.get("primary_timeframe")
+            or os.getenv(f"MUZERO_TIMEFRAME_{self.horizon.upper()}")
+            or os.getenv("MUZERO_TIMEFRAME")
+            or get_horizon_timeframe(self.horizon)
         ).upper()
         self.model_family = str(
             overrides.get("model_family") or os.getenv("MUZERO_MODEL_FAMILY", "")
