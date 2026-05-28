@@ -201,14 +201,16 @@ class DreamerTrainerJAX:
 
     @property
     def update_wm_fn(self):
-        def step(params, opt_state, rng, batch):
-            (loss, metrics), grads = jax.value_and_grad(self.world_model_loss, has_aux=True)(
-                params, rng, batch
-            )
-            updates, new_opt_state = self.wm_opt.update(grads, opt_state, params)
-            new_params = optax.apply_updates(params, updates)
-            return new_params, new_opt_state, metrics, {k: v for k,v in metrics.items() if k.startswith("state_")}
-        return jax.jit(step)
+        if not hasattr(self, "_update_wm_fn_cached"):
+            def step(params, opt_state, rng, batch):
+                (loss, metrics), grads = jax.value_and_grad(self.world_model_loss, has_aux=True)(
+                    params, rng, batch
+                )
+                updates, new_opt_state = self.wm_opt.update(grads, opt_state, params)
+                new_params = optax.apply_updates(params, updates)
+                return new_params, new_opt_state, metrics, {k: v for k,v in metrics.items() if k.startswith("state_")}
+            self._update_wm_fn_cached = jax.jit(step)
+        return self._update_wm_fn_cached
 
     def actor_critic_loss(self, params, rng, start_states):
         """
@@ -298,14 +300,16 @@ class DreamerTrainerJAX:
 
     @property
     def update_ac_fn(self):
-        def step(params, opt_state, rng, start_states):
-            (loss, metrics), grads = jax.value_and_grad(self.actor_critic_loss, has_aux=True)(
-                params, rng, start_states
-            )
-            updates, new_opt_state = self.ac_opt.update(grads, opt_state, params)
-            new_params = optax.apply_updates(params, updates)
-            return new_params, new_opt_state, metrics
-        return jax.jit(step)
+        if not hasattr(self, "_update_ac_fn_cached"):
+            def step(params, opt_state, rng, start_states):
+                (loss, metrics), grads = jax.value_and_grad(self.actor_critic_loss, has_aux=True)(
+                    params, rng, start_states
+                )
+                updates, new_opt_state = self.ac_opt.update(grads, opt_state, params)
+                new_params = optax.apply_updates(params, updates)
+                return new_params, new_opt_state, metrics
+            self._update_ac_fn_cached = jax.jit(step)
+        return self._update_ac_fn_cached
 
     def train_step(self, batch: WorldModelBatch):
         """

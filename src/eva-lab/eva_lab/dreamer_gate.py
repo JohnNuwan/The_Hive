@@ -43,10 +43,49 @@ class DreamerGate:
         self._ensemble_min_edge = float(os.getenv("ENSEMBLE_MIN_EDGE", "0.15"))
         self._ensemble_requires_double_validation = True
 
+        self._symbol_min_edge_modifiers: dict[str, float] = {}
+        self._symbol_stop_loss_rescale_modifiers: dict[str, float] = {}
+        self.load_redteam_self_healing_modifiers()
+
         if enable_training:
             logger.info("[DreamerGate] Mode shadow training actif.")
         else:
             logger.info("[DreamerGate] Mode inference uniquement actif.")
+
+    def load_redteam_self_healing_modifiers(self) -> None:
+        """Charge le dernier rapport RedTeam et configure les ajustements de self-healing."""
+        import json
+        report_path = Path("data/redteam/redteam_report_latest.json")
+        if not report_path.exists():
+            # Essayer un niveau plus haut si execute depuis un script de dossier different
+            report_path = Path("../../data/redteam/redteam_report_latest.json")
+            if not report_path.exists():
+                return
+
+        try:
+            with open(report_path, "r", encoding="utf-8") as f:
+                report = json.load(f)
+            
+            weaknesses = report.get("weaknesses", [])
+            self._symbol_min_edge_modifiers = {}
+            self._symbol_stop_loss_rescale_modifiers = {}
+            
+            for w in weaknesses:
+                symbol = w.get("symbol")
+                fragility = float(w.get("fragility_score", 0.0))
+                
+                # Si fragilite critique (>0.85), on active le self-healing
+                if fragility > 0.85:
+                    # Plus la fragilite est forte, plus on augmente le min_edge (+0.10 a +0.25)
+                    self._symbol_min_edge_modifiers[symbol] = round(0.10 + (fragility - 0.85) * 1.0, 3)
+                    # Plus la fragilite est forte, plus on resserre les stop-loss (scaling factor 0.75 a 0.50)
+                    self._symbol_stop_loss_rescale_modifiers[symbol] = round(max(0.50, 0.75 - (fragility - 0.85) * 1.66), 3)
+                    logger.info(
+                        "[RedTeam Self-Healing] Activation pour %s (fragilite: %.3f) -> min_edge modifier: +%.3f, stop_loss scale: %.3f",
+                        symbol, fragility, self._symbol_min_edge_modifiers[symbol], self._symbol_stop_loss_rescale_modifiers[symbol]
+                    )
+        except Exception as exc:
+            logger.warning("[RedTeam Self-Healing] Echec de chargement du rapport : %s", exc)
 
     @staticmethod
     def _env_flag(name: str, default: bool = False) -> bool:
@@ -65,18 +104,21 @@ class DreamerGate:
         return str(raw_value).strip().lower() not in {"0", "false", "no", "off"}
 
     @staticmethod
-    def _build_agent_cache_key(engine: str, horizon: str) -> str:
-        """Construit une cle de cache stable pour un moteur et un horizon.
+    def _build_agent_cache_key(engine: str, horizon: str, symbol: str | None = None) -> str:
+        """Construit une cle de cache stable pour un moteur, un horizon et eventuellement un symbole.
 
         Args:
             engine (str): Moteur cible.
             horizon (str): Horizon cible.
+            symbol (str | None): Symbole cible optionnel.
 
         Returns:
             str: Cle de cache unique.
         """
         normalized_engine = ChampionPromoter.normalize_engine_name(engine)
         normalized_horizon = str(horizon or "scalp").strip().lower() or "scalp"
+        if symbol:
+            return f"{symbol.upper()}:{normalized_engine}:{normalized_horizon}"
         return f"{normalized_engine}:{normalized_horizon}"
 
     def _get_muzero_agent(self):
@@ -109,6 +151,7 @@ class DreamerGate:
         horizon: str,
         selection_policy_override: str | None = None,
         engine: str = "muzero",
+        symbol: str | None = None,
     ) -> tuple[Path | None, dict[str, object]]:
         """Retourne le checkpoint JAX autorise pour l'inference live.
 
@@ -116,6 +159,7 @@ class DreamerGate:
             horizon (str): Horizon cible.
             selection_policy_override (str | None): Politique de selection a imposer.
             engine (str): Moteur de prediction cible.
+            symbol (str | None): Symbole live cible optionnel.
 
         Returns:
             tuple[object | None, dict[str, object]]: Chemin retenu et metadonnees.
@@ -124,27 +168,31 @@ class DreamerGate:
             horizon,
             selection_policy=selection_policy_override,
             engine=engine,
+            symbol=symbol,
         )
 
     def _get_muzero_inference_agent(
         self,
         horizon: str,
         selection_policy_override: str | None = None,
+        symbol: str | None = None,
     ):
         """Charge a la demande un agent MuZero JAX pour l'inference live.
 
         Args:
             horizon (str): Horizon de prediction.
             selection_policy_override (str | None): Politique de selection a imposer.
+            symbol (str | None): Symbole live cible.
 
         Returns:
             object | None: Agent JAX charge, sinon ``None``.
         """
         horizon = (horizon or "intraday").lower()
-        cache_key = self._build_agent_cache_key("muzero", horizon)
+        cache_key = self._build_agent_cache_key("muzero", horizon, symbol=symbol)
         checkpoint_path, selection_meta = self._resolve_inference_checkpoint(
             horizon,
             selection_policy_override=selection_policy_override,
+            symbol=symbol,
         )
         checkpoint_mtime = checkpoint_path.stat().st_mtime if checkpoint_path else None
         meta = self._jax_inference_meta.get(cache_key)
@@ -162,8 +210,9 @@ class DreamerGate:
             self._jax_inference_agents.pop(cache_key, None)
             self._jax_inference_meta[cache_key] = selection_meta
             logger.warning(
-                "[DreamerGate] Aucun checkpoint live promu pour %s. Aucun agent JAX charge.",
+                "[DreamerGate] Aucun checkpoint live promu pour %s (symbole: %s). Aucun agent JAX charge.",
                 horizon,
+                symbol,
             )
             return None
 
@@ -181,14 +230,15 @@ class DreamerGate:
                 **selection_meta,
             }
             logger.info(
-                "[DreamerGate] Agent JAX %s charge depuis %s (%s).",
+                "[DreamerGate] Agent JAX %s charge depuis %s (%s) pour le symbole %s.",
                 horizon,
                 checkpoint_path,
                 selection_meta.get("selection", "unknown"),
+                symbol,
             )
             return agent
         except Exception as exc:
-            logger.warning("[DreamerGate] Chargement JAX impossible pour %s: %s", horizon, exc)
+            logger.warning("[DreamerGate] Chargement JAX impossible pour %s (%s): %s", horizon, symbol, exc)
             self._jax_inference_agents.pop(cache_key, None)
             self._jax_inference_meta.pop(cache_key, None)
             return None
@@ -197,22 +247,25 @@ class DreamerGate:
         self,
         horizon: str,
         selection_policy_override: str | None = None,
+        symbol: str | None = None,
     ):
         """Charge a la demande un agent Dreamer JAX pour l'inference live.
 
         Args:
             horizon (str): Horizon de prediction.
             selection_policy_override (str | None): Politique de selection a imposer.
+            symbol (str | None): Symbole live cible.
 
         Returns:
             object | None: Agent JAX charge, sinon ``None``.
         """
         horizon = (horizon or "intraday").lower()
-        cache_key = self._build_agent_cache_key("dreamer", horizon)
+        cache_key = self._build_agent_cache_key("dreamer", horizon, symbol=symbol)
         checkpoint_path, selection_meta = self._resolve_inference_checkpoint(
             horizon,
             selection_policy_override=selection_policy_override,
             engine="dreamer",
+            symbol=symbol,
         )
         checkpoint_mtime = checkpoint_path.stat().st_mtime if checkpoint_path else None
         meta = self._jax_inference_meta.get(cache_key)
@@ -230,8 +283,9 @@ class DreamerGate:
             self._jax_inference_agents.pop(cache_key, None)
             self._jax_inference_meta[cache_key] = selection_meta
             logger.warning(
-                "[DreamerGate] Aucun checkpoint Dreamer live promu pour %s. Aucun agent JAX charge.",
+                "[DreamerGate] Aucun checkpoint Dreamer live promu pour %s (symbole: %s). Aucun agent JAX charge.",
                 horizon,
+                symbol,
             )
             return None
 
@@ -249,16 +303,18 @@ class DreamerGate:
                 **selection_meta,
             }
             logger.info(
-                "[DreamerGate] Agent Dreamer JAX %s charge depuis %s (%s).",
+                "[DreamerGate] Agent Dreamer JAX %s charge depuis %s (%s) pour le symbole %s.",
                 horizon,
                 checkpoint_path,
                 selection_meta.get("selection", "unknown"),
+                symbol,
             )
             return agent
         except Exception as exc:
             logger.warning(
-                "[DreamerGate] Chargement Dreamer JAX impossible pour %s: %s",
+                "[DreamerGate] Chargement Dreamer JAX impossible pour %s (%s): %s",
                 horizon,
+                symbol,
                 exc,
             )
             self._jax_inference_agents.pop(cache_key, None)
@@ -444,11 +500,13 @@ class DreamerGate:
                 service="live_inference_cpu",
             )
 
+        symbol = str(observation.get("symbol") or "").strip() or None
         if normalized_engine == "muzero":
-            cache_key = self._build_agent_cache_key("muzero", horizon)
+            cache_key = self._build_agent_cache_key("muzero", horizon, symbol=symbol)
             agent = self._get_muzero_inference_agent(
                 horizon,
                 selection_policy_override="champion_only" if strict_live else selection_policy,
+                symbol=symbol,
             )
             checkpoint_meta = self._jax_inference_meta.get(cache_key, {})
             checkpoint_path = checkpoint_meta.get("path")
@@ -456,10 +514,21 @@ class DreamerGate:
             if agent is not None:
                 try:
                     result = agent.infer_action(observation)
+                    symbol = str(observation.get("symbol") or "unknown")
+                    confidence = result["confidence"]
+                    action = result["action"]
+                    prediction = result["action_name"]
+                    
+                    min_edge_val = self._ensemble_min_edge + self._symbol_min_edge_modifiers.get(symbol, 0.0)
+                    if confidence < min_edge_val and self._symbol_min_edge_modifiers.get(symbol, 0.0) > 0.0:
+                        action = 0
+                        prediction = "REJECTED_REDTEAM_FRAGILITY"
+                        logger.info("[Self-Healing] Muzero prediction for %s rejected (confidence %.3f < min_edge %.3f due to fragility)", symbol, confidence, min_edge_val)
+
                     return {
-                        "action": result["action"],
-                        "prediction": result["action_name"],
-                        "confidence": result["confidence"],
+                        "action": action,
+                        "prediction": prediction,
+                        "confidence": confidence,
                         "policy": result["policy"],
                         "value": result["value"],
                         "price_input": observation.get("price", 0.0),
@@ -484,6 +553,7 @@ class DreamerGate:
                         "device": "cpu" if strict_live else "jax_default",
                         "model_status": "live",
                         "model_version": model_version,
+                        "stop_loss_scale": self._symbol_stop_loss_rescale_modifiers.get(symbol, 1.0),
                     }
                 except Exception as exc:
                     logger.warning("[DreamerGate] Inference live MuZero impossible pour %s: %s", horizon, exc)
@@ -512,6 +582,7 @@ class DreamerGate:
             horizon,
             selection_policy_override="champion_only" if strict_live else selection_policy,
             engine="dreamer",
+            symbol=symbol,
         )
         checkpoint_meta = dict(checkpoint_meta or {})
         checkpoint_meta["path"] = str(checkpoint_path) if checkpoint_path is not None else None
@@ -526,10 +597,11 @@ class DreamerGate:
                 service="dreamer_predict",
             )
 
-        cache_key = self._build_agent_cache_key("dreamer", horizon)
+        cache_key = self._build_agent_cache_key("dreamer", horizon, symbol=symbol)
         agent = self._get_dreamer_inference_agent(
             horizon,
             selection_policy_override="champion_only" if strict_live else selection_policy,
+            symbol=symbol,
         )
         checkpoint_meta = self._jax_inference_meta.get(cache_key, checkpoint_meta)
         checkpoint_path = checkpoint_meta.get("path")
@@ -548,10 +620,21 @@ class DreamerGate:
 
         try:
             result = agent.infer_action(observation)
+            symbol = str(observation.get("symbol") or "unknown")
+            confidence = result["confidence"]
+            action = result["action"]
+            prediction = result["action_name"]
+            
+            min_edge_val = self._ensemble_min_edge + self._symbol_min_edge_modifiers.get(symbol, 0.0)
+            if confidence < min_edge_val and self._symbol_min_edge_modifiers.get(symbol, 0.0) > 0.0:
+                action = 0
+                prediction = "REJECTED_REDTEAM_FRAGILITY"
+                logger.info("[Self-Healing] Dreamer prediction for %s rejected (confidence %.3f < min_edge %.3f due to fragility)", symbol, confidence, min_edge_val)
+
             return {
-                "action": result["action"],
-                "prediction": result["action_name"],
-                "confidence": result["confidence"],
+                "action": action,
+                "prediction": prediction,
+                "confidence": confidence,
                 "policy": result["policy"],
                 "value": result["value"],
                 "price_input": observation.get("price", 0.0),
@@ -576,6 +659,7 @@ class DreamerGate:
                 "device": "cpu" if strict_live else "jax_default",
                 "model_status": "live",
                 "model_version": model_version,
+                "stop_loss_scale": self._symbol_stop_loss_rescale_modifiers.get(symbol, 1.0),
             }
         except Exception as exc:
             logger.warning("[DreamerGate] Inference live Dreamer impossible pour %s: %s", horizon, exc)
@@ -820,6 +904,8 @@ class DreamerGate:
             dict[str, object]: Sous-decisions, scores et decision finale.
         """
         self._inference_count += 1
+        symbol = str(observation.get("symbol") or "unknown")
+        
         muzero_result = self._run_live_inference_for_engine(observation, engine="muzero", strict_live=True)
         dreamer_result = self._run_live_inference_for_engine(observation, engine="dreamer", strict_live=True)
 
@@ -854,6 +940,7 @@ class DreamerGate:
             final_result["ensemble_mode"] = governance_mode
             final_result["degraded_fallback_reason"] = degraded_reason
             final_result["model_status"] = "degraded"
+            final_result["stop_loss_scale"] = self._symbol_stop_loss_rescale_modifiers.get(symbol, 1.0)
             return final_result
 
         muzero_scores = self._build_action_scores(muzero_result)
@@ -869,13 +956,21 @@ class DreamerGate:
             self._normalize_action_label(muzero_result.get("action"), muzero_result.get("prediction"))
             != self._normalize_action_label(dreamer_result.get("action"), dreamer_result.get("prediction"))
         )
-        if disagreement or score_gap < self._ensemble_min_edge:
+        
+        min_edge = self._ensemble_min_edge + self._symbol_min_edge_modifiers.get(symbol, 0.0)
+        
+        if disagreement or score_gap < min_edge:
             best_action = "HOLD"
-        action_to_id = {"HOLD": 0, "BUY": 1, "SELL": 2}
+            if not disagreement and score_gap < min_edge and self._symbol_min_edge_modifiers.get(symbol, 0.0) > 0.0:
+                best_action = "REJECTED_REDTEAM_FRAGILITY"
+                logger.info("[Self-Healing] Ensemble prediction for %s rejected (score gap %.3f < min_edge %.3f due to fragility)", symbol, score_gap, min_edge)
+                
+        action_to_id = {"HOLD": 0, "BUY": 1, "SELL": 2, "REJECTED_REDTEAM_FRAGILITY": 0}
+        
         return {
-            "action": action_to_id[best_action],
+            "action": action_to_id.get(best_action, 0),
             "prediction": best_action,
-            "confidence": final_scores.get(best_action, 0.0),
+            "confidence": final_scores.get(best_action, 0.0) if best_action in final_scores else 0.0,
             "policy": [],
             "value": max(
                 float(muzero_result.get("value", 0.0) or 0.0),
@@ -898,6 +993,7 @@ class DreamerGate:
             "model_version": None,
             "ensemble_mode": governance_mode,
             "degraded_fallback_reason": None,
+            "stop_loss_scale": self._symbol_stop_loss_rescale_modifiers.get(symbol, 1.0),
             "governance": {
                 "mode": governance_mode,
                 "degraded_fallback_reason": None,
@@ -952,7 +1048,7 @@ class DreamerGate:
             "inference_count": self._inference_count,
             "mode": "FULL" if self.enable_training else "SHADOW_ONLY",
             "engine": "MuZero JAX" if bool(jax_agents) else "RSI Heuristic",
-            "muzero_loaded": bool(self._jax_inference_agents.get(self._build_agent_cache_key("muzero", "scalp"))),
+            "muzero_loaded": any(key.endswith("muzero:scalp") or key == "muzero:scalp" for key in self._jax_inference_agents),
             "live_selection_policy": self._promoter.get_live_selection_policy(),
             "jax_agents": jax_agents,
             "legacy_agent_loaded": self._muzero_agent is not None,

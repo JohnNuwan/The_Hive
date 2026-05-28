@@ -1,0 +1,119 @@
+{
+  "campaign_id": "alphaevolve_20260521_164644",
+  "created_at": "2026-05-21T16:46:44.416941",
+  "mode": "offline_safe",
+  "parent_label": "gen_scalp_20260428_045305_ckpt10500_manual",
+  "base_profile": {
+    "split_window_activation_bonus": 0.14,
+    "runner_window_hold_bonus": 0.1,
+    "pyramid_window_activation_bonus": 0.12,
+    "missed_window_penalty": 0.05,
+    "giveback_soft_penalty": 0.1,
+    "giveback_hard_penalty": 0.22,
+    "muzero_collection_num_simulations_xauusd": 128.0,
+    "muzero_collection_max_moves_xauusd": 72.0,
+    "muzero_collection_max_episode_seconds_xauusd": 150.0
+  },
+  "variants": [
+    {
+      "variant_id": "alphaevolve_20260521_164644_variant_001",
+      "campaign_id": "alphaevolve_20260521_164644",
+      "created_at": "2026-05-21T16:46:44.416941",
+      "parent_label": "gen_scalp_20260428_045305_ckpt10500_manual",
+      "params": {
+        "split_window_activation_bonus": 0.1271,
+        "runner_window_hold_bonus": 0.1077,
+        "pyramid_window_activation_bonus": 0.12,
+        "missed_window_penalty": 0.05,
+        "giveback_soft_penalty": 0.1,
+        "giveback_hard_penalty": 0.22,
+        "muzero_collection_num_simulations_xauusd": 128.0,
+        "muzero_collection_max_moves_xauusd": 72.0,
+        "muzero_collection_max_episode_seconds_xauusd": 150.0
+      },
+      "notes": [
+        "runner_window_hold_bonus: 0.1 -> 0.1077",
+        "split_window_activation_bonus: 0.14 -> 0.1271"
+      ],
+      "score_proxy": null,
+      "score_arena": null,
+      "score_nemesis": null,
+      "rejection_reason": null
+    },
+    {
+      "variant_id": "alphaevolve_20260521_164644_variant_002",
+      "campaign_id": "alphaevolve_20260521_164644",
+      "created_at": "2026-05-21T16:46:44.416941",
+      "parent_label": "gen_scalp_20260428_045305_ckpt10500_manual",
+      "params": {
+        "split_window_activation_bonus": 0.14,
+        "runner_window_hold_bonus": 0.1125,
+        "pyramid_window_activation_bonus": 0.1268,
+        "missed_window_penalty": 0.05,
+        "giveback_soft_penalty": 0.1,
+        "giveback_hard_penalty": 0.22,
+        "muzero_collection_num_simulations_xauusd": 128.0,
+        "muzero_collection_max_moves_xauusd": 72.0,
+        "muzero_collection_max_episode_seconds_xauusd": 150.0
+      },
+      "notes": [
+        "pyramid_window_activation_bonus: 0.12 -> 0.1268",
+        "runner_window_hold_bonus: 0.1 -> 0.1125"
+      ],
+      "score_proxy": null,
+      "score_arena": null,
+      "score_nemesis": null,
+      "rejection_reason": null
+    },
+    {
+      "variant_id": "alphaevolve_20260521_164644_variant_003",
+      "campaign_id": "alphaevolve_20260521_164644",
+      "created_at": "2026-05-21T16:46:44.416941",
+      "parent_label": "gen_scalp_20260428_045305_ckpt10500_manual",
+      "params": {
+        "split_window_activation_bonus": 0.14,
+        "runner_window_hold_bonus": 0.085,
+        "pyramid_window_activation_bonus": 0.12,
+        "missed_window_penalty": 0.05,
+        "giveback_soft_penalty": 0.1,
+        "giveback_hard_penalty": 0.22,
+        "muzero_collection_num_simulations_xauusd": 107.0,
+        "muzero_collection_max_moves_xauusd": 72.0,
+        "muzero_collection_max_episode_seconds_xauusd": 150.0
+      },
+      "notes": [
+        "runner_window_hold_bonus: 0.1 -> 0.085",
+        "muzero_collection_num_simulations_xauusd: 128.0 -> 107.0"
+      ],
+      "score_proxy": null,
+      "score_arena": null,
+      "score_nemesis": null,
+      "rejection_reason": null
+    },
+    {
+      "variant_id": "alphaevolve_20260521_164644_variant_004",
+      "campaign_id": "alphaevolve_20260521_164644",
+      "created_at": "2026-05-21T16:46:44.416941",
+      "parent_label": "gen_scalp_20260428_045305_ckpt10500_manual",
+      "params": {
+        "split_window_activation_bonus": 0.1509,
+        "runner_window_hold_bonus": 0.1,
+        "pyramid_window_activation_bonus": 0.12,
+        "missed_window_penalty": 0.0512,
+        "giveback_soft_penalty": 0.1,
+        "giveback_hard_penalty": 0.22,
+        "muzero_collection_num_simulations_xauusd": 128.0,
+        "muzero_collection_max_moves_xauusd": 72.0,
+        "muzero_collection_max_episode_seconds_xauusd": 150.0
+      },
+      "notes": [
+        "missed_window_penalty: 0.05 -> 0.0512",
+        "split_window_activation_bonus: 0.14 -> 0.1509"
+      ],
+      "score_proxy": null,
+      "score_arena": null,
+      "score_nemesis": null,
+      "rejection_reason": null
+    }
+  ]
+}

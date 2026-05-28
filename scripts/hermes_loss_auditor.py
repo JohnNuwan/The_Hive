@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
+"""THE HIVE — Auditeur de Pertes Hermes (Loss Auditor).
+
+Ce script analyse le journal des revues de transactions réelles de la journée,
+isole les 3 pires transactions perdantes, interroge l'expert de trading
+Hermes (LLM sur port 9500) pour un audit de conformité aux règles FTMO/FTUK,
+génère un rapport détaillé en Markdown et envoie une alerte de synthèse.
 """
-THE HIVE — Hermes Loss Auditor
-This script analyzes the latest daily live trade review positions log,
-isolates the 3 worst losing trades, requests an audit from Hermes LLM expert (trading)
-on port 9500 to evaluate the risk and compliance (FTMO/FTUK rules),
-creates a detailed markdown report, and sends a Telegram alert.
-"""
+
+from __future__ import annotations
 
 import os
 import sys
@@ -15,7 +17,7 @@ import requests
 from datetime import datetime
 from pathlib import Path
 
-# Setup paths
+# Résolution des chemins et injection du PYTHONPATH
 WORKDIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(WORKDIR / "src" / "shared"))
 sys.path.append(str(WORKDIR / "src" / "eva-lab"))
@@ -23,15 +25,35 @@ sys.path.append(str(WORKDIR / "src" / "eva-lab"))
 try:
     from shared.telegram_client import TelegramClient
 except ImportError:
-    # Fallback to direct requests if path configuration is weird on host
+    # Client de secours robuste si la structure des imports est altérée hors conteneur
     class TelegramClient:
-        def __init__(self):
+        """Client Telegram & Discord de secours minimal."""
+
+        def __init__(self) -> None:
             self.token = os.getenv("TELEGRAM_BOT_TOKEN")
             self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
             self.topic_id = os.getenv("TELEGRAM_TOPIC_ID")
             self.enabled = bool(self.token and self.chat_id)
+            
+            # Initialisation de Discord pour le secours
+            try:
+                from shared.discord_client import DiscordClient
+                self.discord = DiscordClient()
+            except Exception:
+                self.discord = None
         
         def send_sync(self, message: str) -> None:
+            """Envoie de manière synchrone le message sur Telegram et Discord.
+
+            Args:
+                message (str): Texte brut à transmettre.
+            """
+            if self.discord:
+                try:
+                    self.discord.send_sync(message)
+                except Exception:
+                    pass
+
             if not self.enabled:
                 return
             url = f"https://api.telegram.org/bot{self.token}/sendMessage"
@@ -42,7 +64,10 @@ except ImportError:
             }
             if self.topic_id:
                 payload["message_thread_id"] = self.topic_id
-            requests.post(url, json=payload, timeout=10)
+            try:
+                requests.post(url, json=payload, timeout=10)
+            except Exception:
+                pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("hermes_loss_auditor")
@@ -50,21 +75,34 @@ logger = logging.getLogger("hermes_loss_auditor")
 REVIEWS_DIR = WORKDIR / "data" / "live_trade_reviews"
 REPORTS_DIR = WORKDIR / "data" / "reports"
 
+
 def find_latest_review_file() -> Path | None:
-    """Finds the most recent live trade review JSONL file."""
+    """Recherche le journal de revue de transactions réelles le plus récent.
+
+    Returns:
+        Path | None: Chemin absolu du fichier .jsonl ou None si introuvable.
+    """
     if not REVIEWS_DIR.exists():
-        logger.warning(f"Reviews directory does not exist: {REVIEWS_DIR}")
+        logger.warning("Le répertoire des revues n'existe pas : %s", REVIEWS_DIR)
         return None
     files = sorted(REVIEWS_DIR.glob("live_trade_review_*.jsonl"), key=lambda p: p.name, reverse=True)
     if not files:
-        logger.warning("No live trade reviews found.")
+        logger.warning("Aucun journal de revue trouvé.")
         return None
     return files[0]
 
+
 def analyze_losses(file_path: Path) -> list[dict]:
-    """Reads the JSONL and returns the worst 3 losing trades (pnl < 0)."""
+    """Analyse le fichier journal et isole les 3 pires transactions perdantes.
+
+    Args:
+        file_path (Path): Chemin absolu du fichier journal .jsonl.
+
+    Returns:
+        list[dict]: Liste des 3 pires transactions avec PNL négatif.
+    """
     trades = []
-    logger.info(f"Reading trades from {file_path.name}...")
+    logger.info("Lecture des transactions depuis %s...", file_path.name)
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -75,20 +113,28 @@ def analyze_losses(file_path: Path) -> list[dict]:
                     if float(trade.get("pnl", 0.0)) < 0.0:
                         trades.append(trade)
                 except Exception as e:
-                    logger.warning(f"Error parsing trade line: {e}")
+                    logger.warning("Erreur de parsing sur une ligne de transaction : %s", e)
     except Exception as e:
-        logger.error(f"Error reading file {file_path}: {e}")
+        logger.error("Erreur de lecture du fichier %s : %s", file_path, e)
         return []
 
-    # Sort by pnl ascending (most negative first)
+    # Tri par PNL croissant (la plus grande perte en premier)
     trades.sort(key=lambda t: float(t.get("pnl", 0.0)))
     return trades[:3]
 
+
 def query_hermes_expert(trade: dict) -> str:
-    """Queries the Hermes LLM trading expert for risk, FTMO/FTUK compliance, and technical analysis."""
+    """Interroge l'expert quantitatif Hermes pour obtenir un diagnostic de risque.
+
+    Args:
+        trade (dict): Dictionnaire de la transaction perdante.
+
+    Returns:
+        str: Diagnostic rédigé par l'IA Hermes.
+    """
     url = "http://192.168.1.6:9500/chat"
     
-    # Extract trade details
+    # Extraction des métadonnées et indicateurs de la transaction
     symbol = trade.get("symbol", "UNKNOWN")
     action = trade.get("action", "UNKNOWN")
     pnl = trade.get("pnl", 0.0)
@@ -135,47 +181,49 @@ Please provide an expert trading diagnostic:
     }
 
     try:
-        logger.info(f"Querying Hermes trading expert for {symbol} trade ({pnl} EUR)...")
+        logger.info("Interrogation de l'expert Hermes pour %s (%s EUR)...", symbol, pnl)
         response = requests.post(url, json=payload, timeout=45)
         if response.status_code == 200:
             result = response.json()
-            return result.get("response", "No response content from Hermes.")
+            return result.get("message", result.get("response", "No response content from Hermes."))
         else:
             return f"Error from Hermes API (Status {response.status_code}): {response.text}"
     except Exception as exc:
-        logger.error(f"Failed to query Hermes expert: {exc}")
+        logger.error("Échec de l'interrogation Hermes : %s", exc)
         return f"Failed to reach Hermes expert: {exc}"
 
-def main():
+
+def main() -> None:
+    """Routine principale d'analyse et d'audit Hermes."""
     latest_file = find_latest_review_file()
     if not latest_file:
-        logger.error("No live trade review file found. Aborting audit.")
+        logger.error("Aucun fichier de revue trouvé. Audit annulé.")
         return
         
     worst_trades = analyze_losses(latest_file)
     if not worst_trades:
-        logger.info("No losing trades found in the latest review file. Excellent job!")
+        logger.info("Aucune transaction perdante trouvée aujourd'hui. Excellent travail !")
         return
         
-    logger.info(f"Found {len(worst_trades)} losing trades to audit.")
+    logger.info("Trouvé %d transaction(s) perdante(s) à auditer.", len(worst_trades))
     
     audits = []
     for trade in worst_trades:
         diagnosis = query_hermes_expert(trade)
         audits.append((trade, diagnosis))
         
-    # Create markdown report
+    # Création du rapport en Markdown
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     report_path = REPORTS_DIR / "hermes_loss_audit_latest.md"
     
     report_content = []
-    report_content.append(f"# 🛡️ Hermes Loss Audit Report — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    report_content.append(f"Source file: `{latest_file.name}`\n")
-    report_content.append("This report audits the worst daily losing positions against FTMO/FTUK compliance rules and provides technical diagnostics from the Hermes LLM Trading Expert.\n")
+    report_content.append(f"# 🛡️ Rapport d'Audit Hermes — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    report_content.append(f"Fichier source : `{latest_file.name}`\n")
+    report_content.append("Ce document audite les pires pertes de la journée face aux règles FTMO/FTUK.\n")
     
     telegram_lines = []
-    telegram_lines.append(f"🚨 *HERMES LOSS AUDIT* ({datetime.now().strftime('%d/%m/%Y')})")
-    telegram_lines.append(f"Analyzed {latest_file.name}\n")
+    telegram_lines.append(f"🚨 *AUDIT DE PERTE HERMES* ({datetime.now().strftime('%d/%m/%Y')})")
+    telegram_lines.append(f"Fichier : `{latest_file.name}`\n")
     
     for i, (trade, diagnosis) in enumerate(audits, start=1):
         symbol = trade.get("symbol")
@@ -185,42 +233,42 @@ def main():
         duration = trade.get("duration_minutes", 0.0)
         close_reason = trade.get("close_reason")
         
-        # Markdown Report section
-        report_content.append(f"## ❌ Trade #{i}: {symbol} {action} (Ticket: {ticket})")
+        # Section rapport Markdown
+        report_content.append(f"## ❌ Transaction #{i}: {symbol} {action} (Ticket: {ticket})")
         report_content.append(f"- **PNL**: **{pnl} EUR**")
-        report_content.append(f"- **Duration**: {duration:.1f} mins")
-        report_content.append(f"- **Exit Reason**: `{close_reason}`")
-        report_content.append("\n### 🧠 Hermes Diagnosis:")
+        report_content.append(f"- **Durée**: {duration:.1f} mins")
+        report_content.append(f"- **Raison de clôture**: `{close_reason}`")
+        report_content.append("\n### 🧠 Diagnostic d'Hermes :")
         report_content.append(diagnosis)
         report_content.append("\n" + "—" * 40 + "\n")
         
-        # Telegram Summary section
-        short_diag = diagnosis.split("\n")[0] if diagnosis else "No summary available."
-        # If the first line is headers/intro, try getting a longer snippet
+        # Section résumé synthétique
+        short_diag = diagnosis.split("\n")[0] if diagnosis else "Aucun résumé."
         if len(short_diag) < 15 and len(diagnosis.split("\n")) > 1:
             short_diag = diagnosis.split("\n")[1]
         
         telegram_lines.append(f"*{i}. {symbol} {action}* (Ticket {ticket})")
-        telegram_lines.append(f" 💸 PNL: *{pnl} EUR* | Exit: `{close_reason}`")
-        telegram_lines.append(f" 🧠 *Diagnosis*: {short_diag[:140]}...")
+        telegram_lines.append(f" 💸 PNL: *{pnl} EUR* | Clôture : `{close_reason}`")
+        telegram_lines.append(f" 🧠 *Diagnostic* : {short_diag[:140]}...")
         telegram_lines.append("")
         
     report_content_str = "\n".join(report_content)
     try:
         report_path.write_text(report_content_str, encoding="utf-8")
-        logger.info(f"Markdown report written to {report_path}")
+        logger.info("Rapport Markdown écrit avec succès dans %s", report_path)
     except Exception as e:
-        logger.error(f"Failed to write markdown report: {e}")
+        logger.error("Échec de l'écriture du rapport Markdown : %s", e)
         
-    # Send telegram alert
-    telegram_lines.append(f"📝 Full audit saved in `data/reports/hermes_loss_audit_latest.md` on the server.")
+    # Envoi de la notification
+    telegram_lines.append("📝 Audit complet sauvegardé dans `data/reports/hermes_loss_audit_latest.md` sur le serveur.")
     telegram_msg = "\n".join(telegram_lines)
     
     try:
-        logger.info("Sending Telegram alert...")
+        logger.info("Envoi de la notification de synthèse...")
         TelegramClient().send_sync(telegram_msg)
     except Exception as e:
-        logger.error(f"Failed to send Telegram alert: {e}")
+        logger.error("Échec de l'envoi de la notification : %s", e)
+
 
 if __name__ == "__main__":
     main()

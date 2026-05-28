@@ -83,12 +83,14 @@ def main():
     parser.add_argument("--steps", type=int, default=3000, help="Nombre de pas d'optimisation.")
     parser.add_argument("--lr", type=float, default=1e-3, help="Taux d'apprentissage.")
     parser.add_argument("--batch-size", type=int, default=256, help="Taille du batch.")
+    parser.add_argument("--episodes", type=int, default=8, help="Nombre d'episodes de collecte par symbole.")
     parser.add_argument("--smoke-test", action="store_true", help="Active un run rapide de test.")
     args = parser.parse_args()
 
     # Si smoke test, on limite grandement l'entraînement
     total_steps = 50 if args.smoke_test else args.steps
     batch_size = 64 if args.smoke_test else args.batch_size
+    episodes_per_symbol = 2 if args.smoke_test else args.episodes
 
     # Charger la configuration et l'univers de symboles
     config = MuZeroConfigV3()
@@ -98,7 +100,7 @@ def main():
     obs_t, obs_future = collect_jepa_trajectories(
         config,
         symbols,
-        num_episodes_per_symbol=2 if args.smoke_test else 8,
+        num_episodes_per_symbol=episodes_per_symbol,
     )
     logger.info("Données collectées : %d échantillons pour l'entraînement JEPA.", obs_t.shape[0])
 
@@ -109,7 +111,7 @@ def main():
 
     # Initialisation des paramètres de JEPA
     key = jax.random.PRNGKey(42)
-    dummy_obs = jnp.zeros((1, 32))  # Observation de forme standard (32,)
+    dummy_obs = jnp.zeros((1, obs_t.shape[1]))  # Dynamiquement adapté aux dimensions réelles
     params = jepa_net.init(key, dummy_obs, dummy_obs)
 
     # 3. Optimiseur et étape d'apprentissage

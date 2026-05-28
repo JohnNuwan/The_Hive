@@ -1,4 +1,4 @@
-﻿"""
+"""
 Service de validation des risques pour The Banker.
 
 Ce module applique les garde-fous de la Constitution (Loi 2) et centralise
@@ -63,6 +63,9 @@ class RiskValidator:
         max_open_positions: int = 3,
         anti_tilt_losses: int = 2,
         anti_tilt_hours: int = 24,
+        max_daily_profit: Decimal = Decimal("2.0"),
+        giveback_activation: Decimal = Decimal("1.0"),
+        giveback_tolerance: Decimal = Decimal("0.5"),
     ) -> None:
         """
         Initialise le validateur.
@@ -74,6 +77,9 @@ class RiskValidator:
             max_open_positions (int): Nombre maximal de positions ouvertes.
             anti_tilt_losses (int): Nombre de pertes consecutives avant pause.
             anti_tilt_hours (int): Duree de la pause anti-tilt en heures.
+            max_daily_profit (Decimal): Seuil cible de profit quotidien.
+            giveback_activation (Decimal): Seuil d'activation du trailing profit.
+            giveback_tolerance (Decimal): Amortisseur de baisse autorisée depuis le pic.
         """
         self.max_risk_per_trade = max_risk_per_trade
         self.max_daily_drawdown = max_daily_drawdown
@@ -81,16 +87,23 @@ class RiskValidator:
         self.max_open_positions = max_open_positions
         self.anti_tilt_losses = anti_tilt_losses
         self.anti_tilt_hours = anti_tilt_hours
+        self.max_daily_profit = max_daily_profit
+        self.giveback_activation = giveback_activation
+        self.giveback_tolerance = giveback_tolerance
         self.settings = get_settings()
 
         self._consecutive_losses = 0
         self._anti_tilt_until: datetime | None = None
         self._daily_pnl = Decimal("0")
+        self._daily_pnl_peak = Decimal("0")
+        self._daily_profit_locked = False
+        self._daily_giveback_locked = False
         self._total_pnl = Decimal("0")
         self._open_positions_count = 0
         self._total_positions_count = 0
         self._hold_positions_count = 0
         self._ignored_positions_count = 0
+        self._open_positions_pnl = Decimal("0")
         self._account_balance = Decimal("100000")
         self._session_log_states: dict[str, str] = {}
         self._symbol_asset_classes: dict[str, str] = {}
@@ -175,6 +188,20 @@ class RiskValidator:
             return result
         result["checks"].append(("anti_tilt", True, "Anti-Tilt inactif"))
 
+        if self._daily_profit_locked:
+            result["allowed"] = False
+            result["reason"] = "Trading bloque: cible de profit journalier atteinte"
+            result["checks"].append(("daily_profit_lock", False, result["reason"]))
+            return result
+        result["checks"].append(("daily_profit_lock", True, "Verrou de profit journalier inactif"))
+
+        if self._daily_giveback_locked:
+            result["allowed"] = False
+            result["reason"] = "Trading bloque: protection anti-giveback declenchee"
+            result["checks"].append(("daily_giveback_lock", False, result["reason"]))
+            return result
+        result["checks"].append(("daily_giveback_lock", True, "Verrou anti-giveback inactif"))
+
         if self._get_daily_drawdown_percent() >= self.max_daily_drawdown:
             result["allowed"] = False
             result["reason"] = (
@@ -256,6 +283,8 @@ class RiskValidator:
         comment = str(getattr(position, "comment", "") or "").strip().upper()
         if "HOLD" in comment:
             return True
+        if comment.startswith("EVA CLOSE") or comment.startswith("CLAUSE"):
+            return True
 
         stop_loss = getattr(position, "stop_loss", None)
         if stop_loss is None:
@@ -336,6 +365,13 @@ class RiskValidator:
         self._hold_positions_count = counters["hold"]
         self._ignored_positions_count = counters["ignored"]
         self._open_positions_count = counters["counted"]
+
+        # Calculer le PnL latent total (Floating P&L) des positions actives non ignorees
+        floating_pnl = Decimal("0")
+        for pos in (positions or []):
+            if not self.is_ignored_position(pos):
+                floating_pnl += Decimal(str(pos.profit))
+        self._open_positions_pnl = floating_pnl
 
     def register_symbol_universe(self, asset_classes: dict[str, str]) -> None:
         """
@@ -585,9 +621,12 @@ class RiskValidator:
         Returns:
             Decimal: Drawdown journalier.
         """
-        if self._account_balance <= 0 or self._daily_pnl >= 0:
+        if self._account_balance <= 0:
             return Decimal("0")
-        return (abs(self._daily_pnl) / self._account_balance * 100).quantize(
+        combined_pnl = self._daily_pnl + self._open_positions_pnl
+        if combined_pnl >= 0:
+            return Decimal("0")
+        return (abs(combined_pnl) / self._account_balance * 100).quantize(
             Decimal("0.01")
         )
 
@@ -598,9 +637,12 @@ class RiskValidator:
         Returns:
             Decimal: Drawdown total.
         """
-        if self._account_balance <= 0 or self._total_pnl >= 0:
+        if self._account_balance <= 0:
             return Decimal("0")
-        return (abs(self._total_pnl) / self._account_balance * 100).quantize(
+        combined_total_pnl = self._total_pnl + self._open_positions_pnl
+        if combined_total_pnl >= 0:
+            return Decimal("0")
+        return (abs(combined_total_pnl) / self._account_balance * 100).quantize(
             Decimal("0.01")
         )
 
@@ -614,12 +656,80 @@ class RiskValidator:
         self._daily_pnl += profit
         self._total_pnl += profit
 
+        if self._daily_pnl > self._daily_pnl_peak:
+            self._daily_pnl_peak = self._daily_pnl
+
         if profit < 0:
             self._consecutive_losses += 1
             if self._consecutive_losses >= self.anti_tilt_losses:
                 self._activate_anti_tilt()
         else:
             self._consecutive_losses = 0
+
+    def check_gains_protection(self, open_positions_pnl: Decimal) -> dict[str, Any]:
+        """
+        Evalue les verrous de gain (profit target et anti-giveback).
+
+        Cette methode prend en compte le profit deja realise sur la journee (ferme)
+        ainsi que les gains/pertes latents (ouverts) en cours.
+
+        Args:
+            open_positions_pnl (Decimal): PnL latent total des positions ouvertes.
+
+        Returns:
+            dict[str, Any]: Statut des verrous de gain.
+        """
+        combined_pnl = self._daily_pnl + open_positions_pnl
+        
+        # Mise a jour du sommet de profit combiné de la journee
+        if combined_pnl > self._daily_pnl_peak:
+            self._daily_pnl_peak = combined_pnl
+
+        balance = self._account_balance if self._account_balance > 0 else Decimal("100000")
+        pnl_percent = (combined_pnl / balance * 100).quantize(Decimal("0.01"))
+        peak_percent = (self._daily_pnl_peak / balance * 100).quantize(Decimal("0.01"))
+
+        # 1. Controle du Verrou de Profit Target Lock-in
+        if not self._daily_profit_locked and pnl_percent >= self.max_daily_profit:
+            self._daily_profit_locked = True
+            logger.warning(
+                "TARGET PROFIT JOURNALIER ATTEINT (+%s%% >= +%s%%). Verrouillage active.",
+                pnl_percent,
+                self.max_daily_profit,
+            )
+            return {
+                "lock_triggered": True,
+                "reason": "daily_profit_target_reached",
+                "combined_pnl_percent": pnl_percent,
+                "peak_percent": peak_percent,
+            }
+
+        # 2. Controle de la Protection Anti-Giveback
+        if not self._daily_giveback_locked and peak_percent >= self.giveback_activation:
+            giveback_drop = peak_percent - pnl_percent
+            if giveback_drop >= self.giveback_tolerance:
+                self._daily_giveback_locked = True
+                logger.warning(
+                    "PROTECTION ANTI-GIVEBACK DECLENCHEE (Pic: +%s%% | Courant: +%s%% | Drop: %s%% >= tolerance %s%%). Verrouillage active.",
+                    peak_percent,
+                    pnl_percent,
+                    giveback_drop,
+                    self.giveback_tolerance,
+                )
+                return {
+                    "lock_triggered": True,
+                    "reason": "daily_giveback_triggered",
+                    "combined_pnl_percent": pnl_percent,
+                    "peak_percent": peak_percent,
+                    "giveback_drop_percent": giveback_drop,
+                }
+
+        return {
+            "lock_triggered": self._daily_profit_locked or self._daily_giveback_locked,
+            "reason": "locked" if (self._daily_profit_locked or self._daily_giveback_locked) else "none",
+            "combined_pnl_percent": pnl_percent,
+            "peak_percent": peak_percent,
+        }
 
     def _activate_anti_tilt(self) -> None:
         """Active le mode anti-tilt."""
@@ -774,6 +884,8 @@ class RiskValidator:
         """
         trading_allowed = (
             not self._is_anti_tilt_active()
+            and not self._daily_profit_locked
+            and not self._daily_giveback_locked
             and self._get_daily_drawdown_percent() < self.max_daily_drawdown
             and self._get_total_drawdown_percent() < self.max_total_drawdown
             and self._open_positions_count < self.max_open_positions
@@ -809,4 +921,7 @@ def get_risk_validator() -> RiskValidator:
         max_open_positions=effective_max_open_positions,
         anti_tilt_losses=settings.risk_anti_tilt_losses,
         anti_tilt_hours=settings.risk_anti_tilt_duration_hours,
+        max_daily_profit=Decimal(str(settings.risk_max_daily_profit_percent)),
+        giveback_activation=Decimal(str(settings.risk_daily_giveback_activation_percent)),
+        giveback_tolerance=Decimal(str(settings.risk_daily_giveback_tolerance_percent)),
     )

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Configuration CentralisÃƒÂ©e - THE HIVE
 Utilise pydantic-settings pour validation et chargement .env
 """
@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     vllm_host: str = "host.docker.internal"
     vllm_port: int = 8000
     vllm_model: str = "Qwen/Qwen2.5-1.5B-Instruct"
-    llm_backend: Literal["ollama", "vllm"] = "vllm"
+    llm_backend: Literal["ollama", "vllm", "openrouter"] = "vllm"
     # Alternative: Ollama
     ollama_host: str = "host.docker.internal"
     ollama_port: int = 11434
@@ -158,6 +158,9 @@ class Settings(BaseSettings):
     # Constitution Loi 2 - Limites de risque
     risk_max_daily_drawdown_percent: float = 4.0
     risk_max_total_drawdown_percent: float = 8.0
+    risk_max_daily_profit_percent: float = 2.0
+    risk_daily_giveback_activation_percent: float = 1.0
+    risk_daily_giveback_tolerance_percent: float = 0.5
     risk_max_single_trade_percent: float = 1.0
     risk_max_open_positions: int = 3
     risk_follower_max_open_positions: int = 12

@@ -50,8 +50,8 @@ set "BANKER_TUNNEL_KEY=%USERPROFILE%\.ssh\the_hive_banker_tunnel"
 set "BANKER_SSH_BIN=%SystemRoot%\System32\OpenSSH\ssh.exe"
 
 set PYTHONPATH=%CD%\src\shared;%CD%\src\eva-banker
-set MOCK_MT5=false
-set PAPER_TRADING=false
+if "%MOCK_MT5%"=="" set MOCK_MT5=false
+if "%PAPER_TRADING%"=="" set PAPER_TRADING=false
 
 echo Serveur THE HIVE cible: %HIVE_SERVER_HOST%
 echo Redis cible: %REDIS_HOST%:%REDIS_PORT%

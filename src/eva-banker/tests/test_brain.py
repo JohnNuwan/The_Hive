@@ -26,6 +26,10 @@ class _FakeMT5:
             return "metals"
         return "indices"
 
+    async def ensure_symbol_selected(self, symbol: str) -> bool:
+        """Retourne toujours True pour le mock."""
+        return True
+
 
 def _build_engine_stub() -> AutoTradingEngine:
     """Construit un moteur minimal sans dependances runtime lourdes."""
@@ -72,8 +76,8 @@ def test_refresh_symbol_universe_keeps_live_top_symbols_in_cpu_live_mode():
 
     symbols = asyncio.run(engine.refresh_symbol_universe(force=True))
 
-    assert symbols == ["US500.cash", "XAUUSD", "US100.cash"]
-    assert engine.symbols == ["US500.cash", "XAUUSD", "US100.cash"]
+    assert symbols == ["EURUSD", "XAUUSD", "GBPUSD", "US500.cash", "US100.cash"]
+    assert engine.symbols == ["EURUSD", "XAUUSD", "GBPUSD", "US500.cash", "US100.cash"]
 
 
 def test_resolve_live_position_state_for_buy_position():

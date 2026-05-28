@@ -1,4 +1,4 @@
-﻿"""
+"""
 Service MT5 - Client MetaTrader 5
 GÃ¨re la connexion et l'exÃ©cution des ordres sur MT5
 """
@@ -1651,6 +1651,7 @@ class MT5Service:
                     "retcode": 99010,
                 }
 
+            await self.ensure_symbol_selected(order.symbol)
             symbol_info = await asyncio.to_thread(mt5.symbol_info, order.symbol)
             if symbol_info is None:
                 return {"success": False, "message": f"Symbole {order.symbol} non trouvÃ©"}

@@ -114,10 +114,10 @@ class CopyTradingRouterTests(unittest.TestCase):
         )
 
         order = TradeOrder(
-            symbol="XAUUSD",
+            symbol="EURUSD",
             action=TradeAction.BUY,
             volume=Decimal("1.00"),
-            stop_loss_price=Decimal("4800"),
+            stop_loss_price=Decimal("1.0500"),
         )
 
         local_result = asyncio.run(router.execute_order(order))
@@ -655,12 +655,12 @@ class CopyTradingRouterTests(unittest.TestCase):
         primary.open_positions = [
             Position(
                 ticket=111,
-                symbol="XAUUSD",
+                symbol="EURUSD",
                 action=TradeAction.BUY,
                 volume=Decimal("0.02"),
-                open_price=Decimal("4700"),
-                current_price=Decimal("4710"),
-                stop_loss=Decimal("4650"),
+                open_price=Decimal("1.0700"),
+                current_price=Decimal("1.0710"),
+                stop_loss=Decimal("1.0650"),
                 take_profit=None,
                 profit=Decimal("10"),
                 open_time=datetime(2026, 5, 7, 20, 0, 0),
@@ -673,8 +673,8 @@ class CopyTradingRouterTests(unittest.TestCase):
             banker_base_url="http://banker-ftuk-355:8140",
             allocation_ratio=Decimal("1.0"),
             balance_reference=Decimal("100000"),
-            symbol_map={"XAUUSD": "XAUUSD.m"},
-            supported_symbols=["XAUUSD.m"],
+            symbol_map={"EURUSD": "EURUSD.e"},
+            supported_symbols=["EURUSD.e"],
         )
         router.targets[target.id] = target
         router._fetch_remote_positions = AsyncMock(return_value=[])

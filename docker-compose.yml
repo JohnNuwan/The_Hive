@@ -650,23 +650,29 @@ services:
     ports:
       - 9500:9500
     environment:
-      - LLM_BACKEND=${HIVE_LLM_BACKEND:-vllm}
+      - LLM_BACKEND=openrouter
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - VLLM_HOST=${HERMES_VLLM_HOST:-host.docker.internal}
       - VLLM_PORT=${HIVE_VLLM_PORT:-8000}
       - OLLAMA_HOST=${HIVE_OLLAMA_HOST:-host.docker.internal}
       - OLLAMA_PORT=${HIVE_OLLAMA_PORT:-11434}
       - COUNCIL_VLLM_HOST=${HERMES_VLLM_HOST:-host.docker.internal}
       - COUNCIL_VLLM_PORT=${HIVE_VLLM_PORT:-8000}
-      - HERMES_EXPERT_COORDINATOR_ROLE=${HERMES_EXPERT_COORDINATOR_ROLE:-general}
-      - HERMES_EXPERT_TECHNICAL_ROLE=${HERMES_EXPERT_TECHNICAL_ROLE:-research}
-      - HERMES_EXPERT_TECHNICAL_BACKEND=${HERMES_EXPERT_TECHNICAL_BACKEND:-ollama}
-      - HERMES_EXPERT_TECHNICAL_MODEL=${HERMES_EXPERT_TECHNICAL_MODEL:-gemma3:4b}
-      - HERMES_EXPERT_TRADING_ROLE=${HERMES_EXPERT_TRADING_ROLE:-banker}
-      - HERMES_EXPERT_TRADING_BACKEND=${HERMES_EXPERT_TRADING_BACKEND:-ollama}
-      - HERMES_EXPERT_TRADING_MODEL=${HERMES_EXPERT_TRADING_MODEL:-gemma3:4b}
-      - HERMES_EXPERT_MACRO_NEWS_ROLE=${HERMES_EXPERT_MACRO_NEWS_ROLE:-research}
-      - HERMES_EXPERT_DEVELOPMENT_ROLE=${HERMES_EXPERT_DEVELOPMENT_ROLE:-code}
-      - HERMES_EXPERT_DEVELOPMENT_BACKEND=${HERMES_EXPERT_DEVELOPMENT_BACKEND:-ollama}
+      - HERMES_EXPERT_COORDINATOR_ROLE=general
+      - HERMES_EXPERT_COORDINATOR_BACKEND=openrouter
+      - HERMES_EXPERT_COORDINATOR_MODEL=nvidia/nemotron-3-super-120b-a12b:free
+      - HERMES_EXPERT_TECHNICAL_ROLE=research
+      - HERMES_EXPERT_TECHNICAL_BACKEND=openrouter
+      - HERMES_EXPERT_TECHNICAL_MODEL=nvidia/nemotron-3-super-120b-a12b:free
+      - HERMES_EXPERT_TRADING_ROLE=banker
+      - HERMES_EXPERT_TRADING_BACKEND=openrouter
+      - HERMES_EXPERT_TRADING_MODEL=nvidia/nemotron-3-super-120b-a12b:free
+      - HERMES_EXPERT_MACRO_NEWS_ROLE=research
+      - HERMES_EXPERT_MACRO_NEWS_BACKEND=openrouter
+      - HERMES_EXPERT_MACRO_NEWS_MODEL=nvidia/nemotron-3-super-120b-a12b:free
+      - HERMES_EXPERT_DEVELOPMENT_ROLE=code
+      - HERMES_EXPERT_DEVELOPMENT_BACKEND=openrouter
+      - HERMES_EXPERT_DEVELOPMENT_MODEL=nvidia/nemotron-3-super-120b-a12b:free
       - HERMES_MISSION_OUTPUT_DIR=${HERMES_MISSION_OUTPUT_DIR:-/app/eva-hermes/data/hermes/missions}
     extra_hosts:
       - host.docker.internal:host-gateway
@@ -772,6 +778,10 @@ services:
       - TRAINING_TIMESCALE_HOST=${TRAINING_TIMESCALE_HOST:-timescaledb}
       - TRAINING_TIMESCALE_PORT=${TRAINING_TIMESCALE_PORT:-5432}
       - TRAINING_TIMESCALE_DB=${TRAINING_TIMESCALE_DB:-thehive}
+      - TRAINING_TIMESCALE_ENABLED=${TRAINING_TIMESCALE_ENABLED:-1}
+      - TRAINING_TIMESCALE_HOST=${TRAINING_TIMESCALE_HOST:-timescaledb}
+      - TRAINING_TIMESCALE_PORT=${TRAINING_TIMESCALE_PORT:-5432}
+      - TRAINING_TIMESCALE_DB=${TRAINING_TIMESCALE_DB:-thehive}
       - TRAINING_TIMESCALE_USER=${TRAINING_TIMESCALE_USER:-eva}
       - TRAINING_TIMESCALE_PASSWORD=${TIMESCALE_PASSWORD:-devpassword}
       - TRAINING_TIMESCALE_BARS_TABLE=${TRAINING_TIMESCALE_BARS_TABLE:-market.market_bars}
@@ -779,9 +789,11 @@ services:
       - TRAINING_TIMESCALE_DATASETS_TABLE=${TRAINING_TIMESCALE_DATASETS_TABLE:-training.training_datasets}
       - TRAINING_TIMESCALE_ARENA_TABLE=${TRAINING_TIMESCALE_ARENA_TABLE:-training.arena_results}
     volumes:
-      # Persistent named volume for all trained model weights
-      - trainer_models:/app/eva-lab/data
-      # Live code mounts (no container rebuild needed to change scripts)
+      # Le trainer doit partager exactement le meme dossier `data` que
+      # `lab` et `live-inference`, sinon `training_status.json`, les
+      # checkpoints et les resumes nightly divergent entre conteneurs.
+      - ./data:/app/eva-lab/data
+      # Montage du code source pour pouvoir patcher sans rebuild complet.
       - ./src/eva-lab/scripts:/app/eva-lab/scripts
       - ./src/eva-lab/eva_lab:/app/eva-lab/eva_lab
     networks:
@@ -792,7 +804,8 @@ services:
           devices:
             - driver: nvidia
               device_ids:
-                - "${TRAINING_GPU_DEVICE:-1}"
+                - "0"
+                - "1"
               capabilities: [ gpu ]
       # restart: no = only runs when explicitly called (never auto-restart)
       restart_policy:
@@ -801,10 +814,53 @@ services:
         constraints:
           - node.labels.gpu == true
 
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: the_hive-hermes-agent-1
+    command: gateway run
+    ports:
+      - "8642:8642"
+    environment:
+      - API_SERVER_ENABLED=true
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_PORT=8642
+      - OPENAI_API_KEY=${OPENROUTER_API_KEY}
+      - OPENAI_API_BASE=https://openrouter.ai/api/v1
+    volumes:
+      - hermes_agent_data:/opt/data
+    networks:
+      - hive-net
+    depends_on:
+      - redis
+      - vllm
+    restart: unless-stopped
+
+  hermes-workspace:
+    image: ghcr.io/outsourc-e/hermes-workspace:latest
+    container_name: the_hive-hermes-workspace-1
+    ports:
+      - "3040:3000"
+    environment:
+      - OLLAMA_API_BASE=http://host.docker.internal:11434
+      - VLLM_API_BASE=http://vllm:8000/v1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - COOKIE_SECURE=0
+      - HERMES_ALLOW_INSECURE_REMOTE=1
+    networks:
+      - hive-net
+    depends_on:
+      - redis
+      - vllm
+      - hermes-agent
+    restart: unless-stopped
+
 networks:
   hive-net:
     driver: overlay
     attachable: true
+
 volumes:
   black_box: null
   redis_data: null
@@ -812,7 +868,4 @@ volumes:
   timescale_data: null
   mosquitto_data: null
   neo4j_data: null
-  trainer_models: {}
-
-
-
+  hermes_agent_data: null

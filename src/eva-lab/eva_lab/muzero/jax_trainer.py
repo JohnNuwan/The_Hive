@@ -301,14 +301,14 @@ class MuZeroTrainerJAX:
     @property
     def update_fn(self):
         """Expose une etape d'optimisation JITtee."""
-
-        def step(params, opt_state, batch):
-            (loss, metrics), grads = jax.value_and_grad(self.loss_fn, has_aux=True)(params, batch)
-            updates, new_opt_state = self.optimizer.update(grads, opt_state, params)
-            new_params = optax.apply_updates(params, updates)
-            return new_params, new_opt_state, metrics
-
-        return jax.jit(step)
+        if not hasattr(self, "_update_fn_cached"):
+            def step(params, opt_state, batch):
+                (loss, metrics), grads = jax.value_and_grad(self.loss_fn, has_aux=True)(params, batch)
+                updates, new_opt_state = self.optimizer.update(grads, opt_state, params)
+                new_params = optax.apply_updates(params, updates)
+                return new_params, new_opt_state, metrics
+            self._update_fn_cached = jax.jit(step)
+        return self._update_fn_cached
 
     def prepare_batch(self, batch_list: List[tuple]) -> TrainingBatch:
         """Convertit une liste de jeux en tenseurs JAX pour l'entrainement.

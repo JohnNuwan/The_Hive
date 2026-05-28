@@ -1,4 +1,4 @@
-﻿"""
+"""
 EVA Lab - Laboratoire d'ExpÃ©rimentation & Backtesting
 Expert Lab: Arena de combat, backtesting, Ã©volution gÃ©nÃ©tique, World Model.
 
@@ -180,7 +180,7 @@ async def _collect_training_dependencies(run_status: dict[str, Any]) -> dict[str
     redis_host = os.getenv("REDIS_HOST", "redis")
     neo4j_host = os.getenv("NEO4J_HOST", "neo4j")
     mqtt_host = os.getenv("HIVE_MQTT_HOST", "mosquitto")
-    timescale_info = describe_timescale_source()
+    timescale_info = await asyncio.to_thread(describe_timescale_source)
 
     vllm_state = str(launcher.get("vllm_state") or "").lower()
     probe_tasks: dict[str, asyncio.Future] = {}
@@ -696,7 +696,7 @@ class TradeRecordRequest(BaseModel):
     done: bool = False
 
 class GNNPredictRequest(BaseModel):
-    """RequÃªte d'infÃ©rence pour le GNN (Multi-Asset correlation)"""
+    """Requête d'inférence pour le GNN (Multi-Asset correlation)"""
     assets_data: dict[str, list[list[float]]]  # { "XAUUSD": [[...features...], ...], ... }
 
 
@@ -711,6 +711,55 @@ class GNNRefreshRequest(BaseModel):
     batch_size: int | None = None
     checkpoint_every: int | None = None
     max_symbols: int | None = None
+
+
+async def _replay_streaming_receiver_loop() -> None:
+    """Consomme en continu les episodes de replay depuis Redis et les persiste."""
+    logger.info("[Replay Streaming] Demarrage du daemon recepteur Redis...")
+    from shared.redis_client import get_redis_client
+    from eva_lab.muzero.replay_buffer import GameHistory
+    from eva_lab.muzero.league_buffer import LeagueBuffer
+    import json
+    
+    while True:
+        try:
+            redis_client = get_redis_client()
+            await redis_client.connect()
+            if redis_client._client is None:
+                await asyncio.sleep(5.0)
+                continue
+            
+            res = await redis_client._client.blpop("eva.lab.replay_queue", timeout=5)
+            if res:
+                _, raw_data = res
+                try:
+                    payload = json.loads(raw_data)
+                    game = GameHistory(
+                        observations=payload.get("observations", []),
+                        actions=payload.get("actions", []),
+                        rewards=payload.get("rewards", []),
+                        policies=payload.get("policies", []),
+                        values=payload.get("values", []),
+                        priorities=payload.get("priorities", []),
+                        metadata=payload.get("metadata", {}),
+                    )
+                    if not game.priorities and game.actions:
+                        game.priorities = [1.0] * len(game.actions)
+                        
+                    buffer = LeagueBuffer()
+                    buffer.save_game(game, champion_id="streamed_cpu_nodes")
+                    logger.info(
+                        "[Replay Streaming] Trajectoire persistee avec succes dans la ligue (longueur=%d, symbole=%s)",
+                        len(game), game.metadata.get("symbol", "unknown")
+                    )
+                except Exception as parse_err:
+                    logger.warning("[Replay Streaming] Erreur de parsing ou de persistance : %s", parse_err)
+        except asyncio.CancelledError:
+            logger.info("[Replay Streaming] Arret du daemon recepteur.")
+            raise
+        except Exception as exc:
+            logger.warning("[Replay Streaming] Erreur dans la boucle de streaming : %s", exc)
+            await asyncio.sleep(5.0)
 
 
 
@@ -811,6 +860,7 @@ async def lifespan(app: FastAPI):
             }
         )
     app.state.gnn_refresh_queue_task = asyncio.create_task(_gnn_refresh_queue_loop(app))
+    app.state.replay_streaming_task = asyncio.create_task(_replay_streaming_receiver_loop())
 
     asyncio.create_task(hard_heartbeat())
     if _env_flag("ENABLE_LAB_INTERNAL_NIGHTLY_SCHEDULER", False):
@@ -825,6 +875,11 @@ async def lifespan(app: FastAPI):
     if app.state.shadow:
         count = app.state.shadow.manual_flush()
         logger.info(f"ðŸ’¾ Shadow Learning: {count} transitions saved sur arrÃªt")
+    replay_task = getattr(app.state, "replay_streaming_task", None)
+    if replay_task:
+        replay_task.cancel()
+        await asyncio.gather(replay_task, return_exceptions=True)
+
     queue_task = getattr(app.state, "gnn_refresh_queue_task", None)
     if queue_task:
         queue_task.cancel()
@@ -941,6 +996,22 @@ async def health():
         dict: Statut online.
     """
     return {"status": "online", "service": "lab"}
+
+
+@app.get("/redteam/latest")
+async def get_latest_redteam_report():
+    """Retourne le dernier rapport de la RedTeam pour l'affichage Nexus."""
+    import json
+    from pathlib import Path
+    latest_path = Path("data/redteam/redteam_report_latest.json")
+    if not latest_path.exists():
+        # Fallback pour retour vide et propre
+        return {"generated_at": None, "weaknesses": [], "champion_survival_score": 100.0}
+    try:
+        with open(latest_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        return {"error": str(exc), "weaknesses": [], "champion_survival_score": 100.0}
 
 
 @app.post("/backtest")
@@ -1624,7 +1695,7 @@ async def champion_status():
     promoter: ChampionPromoter = app.state.promoter
     genetic: GeneticUpdater = app.state.genetic
     gate: DreamerGate = app.state.dreamer_gate
-    timescale_source = describe_timescale_source()
+    timescale_source = await asyncio.to_thread(describe_timescale_source)
 
     horizons = ["scalp", "intraday", "swing"]
     registry_champions = genetic.get_all_champions()
@@ -1640,7 +1711,7 @@ async def champion_status():
     except Exception as exc:
         logger.warning("Lecture du resume nocturne impossible: %s", exc)
 
-    engine_status = promoter.build_engine_matrix_status(horizons, registry_champions)
+    engine_status = await asyncio.to_thread(promoter.build_engine_matrix_status, horizons, registry_champions)
     runtime_profile = _resolve_runtime_profile()
     horizon_status = dict(engine_status.get("muzero") or {})
     live_champions = {
@@ -1660,12 +1731,13 @@ async def champion_status():
         governance_status,
         run_status=load_training_status(),
     )
+    gate_status = await asyncio.to_thread(gate.get_status)
 
     payload = {
         "status": "ok",
         "runtime_profile": runtime_profile,
         "selection_policy": promoter.get_live_selection_policy(),
-        "dreamer_gate": gate.get_status(),
+        "dreamer_gate": gate_status,
         "data_source": timescale_source.get("source"),
         "timescaledb": timescale_source,
         "research_context_version": "v1_consultatif",

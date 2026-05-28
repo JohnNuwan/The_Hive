@@ -35,8 +35,14 @@ def test_rssm_structural():
     obs = jnp.zeros((batch_size, *config.observation_shape), dtype=jnp.float32)
     action = jnp.zeros((batch_size, config.action_space_size), dtype=jnp.float32)
     
+    # Dynamically calculate RSSM state size based on config
+    deterministic_size = config.hidden_state_size * 8
+    stochastic_size = 32
+    discrete_classes = 32
+    state_size = deterministic_size + 2 * (stochastic_size * discrete_classes)
+    
     # Initialize params with mode 0 (observe)
-    params = transformed.init(rng, 0, obs, action, jnp.zeros((batch_size, 2560)))
+    params = transformed.init(rng, 0, obs, action, jnp.zeros((batch_size, state_size)))
     print("  Dreamer Model parameters initialized successfully.")
 
     # Initialize state through mode 2

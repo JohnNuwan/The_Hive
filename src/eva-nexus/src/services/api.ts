@@ -1076,6 +1076,33 @@ export async function getLabTrainingStatus(): Promise<TrainingRunStatus> {
     }, 8000)
 }
 
+export interface RedTeamWeakness {
+    symbol: string
+    fragility_score: number
+    trades_analyzed: number
+    hard_negatives: number
+}
+
+export interface RedTeamReport {
+    generated_at: string | null
+    champion_id?: string
+    total_trades_analyzed?: number
+    hard_negatives_found?: number
+    scenarios_generated?: number
+    weaknesses: RedTeamWeakness[]
+    failure_type_distribution?: Record<string, number>
+    symbol_weakness_score?: Record<string, number>
+    champion_survival_score: number
+}
+
+export async function getLatestRedTeamReport(): Promise<RedTeamReport> {
+    return safeFetch('/api/lab/redteam/latest', {
+        generated_at: null,
+        champion_survival_score: 100.0,
+        weaknesses: [],
+    }, 8000)
+}
+
 export async function getMarketGnnStatus(): Promise<MarketGnnStatusResponse> {
     return safeFetch('/api/lab/gnn/status', {
         status: 'offline',

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Cerveau de l'Expert Banker (The Brain).
 Contient la logique dÃ©cisionnelle (Manager), l'exÃ©cution (Worker) et la boucle d'autonomie.
 """
@@ -2617,6 +2617,9 @@ class AutoTradingEngine:
                     duration = (datetime.now() - info["open_time"]).total_seconds() / 60
                     reason = "Ferme (details indisponibles)"
 
+                # Enregistrer le resultat dans le validateur de risque
+                self.risk.record_trade_result(Decimal(str(profit)))
+
                 if hasattr(self.mt5, "synchronize_external_close"):
                     try:
                         sync_result = await self.mt5.synchronize_external_close(
@@ -3308,6 +3311,14 @@ class AutoTradingEngine:
                             "unrealized_return": float(live_position_state["unrealized_return"]),
                             "slbe_state": float(live_position_state["slbe_state"]),
                         }
+                        
+                        # Enrichissement Nemesis context features pour l'inference live
+                        nemesis = get_nemesis_system()
+                        nemesis_status = nemesis.predict_trap(symbol, "BUY")
+                        observation["nemesis_trap_rate"] = float(nemesis_status.get("global_trap_rate", 0.0) or 0.0)
+                        observation["nemesis_recent_losses"] = float(nemesis_status.get("recent_losses", 0.0) or 0.0)
+                        observation["nemesis_quarantine_active"] = 1.0 if nemesis.is_symbol_quarantined(symbol) else 0.0
+                        
                         observation = self._json_safe_value(observation)
                         
                         action = None

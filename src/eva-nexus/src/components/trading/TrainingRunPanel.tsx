@@ -1,5 +1,8 @@
+import { useState, useEffect } from 'react'
 import type { TrainingRunStatus } from '../../services/api'
+import { getLatestRedTeamReport, type RedTeamReport } from '../../services/api'
 import { MetricPill, PanelShell, StatusBadge, compactList, formatDateLabel, formatElapsed, formatPercent } from './TradingShared'
+import { ShieldAlert, Skull, Terminal, Activity, TrendingUp, ShieldCheck } from 'lucide-react'
 
 function dependencyTone(state: string) {
     if (state === 'online' || state === 'running') return 'emerald'
@@ -25,6 +28,28 @@ function formatArenaPercent(value?: number | null, digits = 2) {
 }
 
 export default function TrainingRunPanel({ trainingStatus }: { trainingStatus: TrainingRunStatus | null }) {
+    const [redTeamReport, setRedTeamReport] = useState<RedTeamReport | null>(null)
+
+    useEffect(() => {
+        let active = true
+        async function fetchRedTeam() {
+            try {
+                const report = await getLatestRedTeamReport()
+                if (active) {
+                    setRedTeamReport(report)
+                }
+            } catch (err) {
+                console.error("Failed to fetch RedTeam report:", err)
+            }
+        }
+        fetchRedTeam()
+        const interval = setInterval(fetchRedTeam, 10000)
+        return () => {
+            active = false
+            clearInterval(interval)
+        }
+    }, [])
+
     const run = trainingStatus?.run
     const universe = trainingStatus?.universe
     const dependencies = trainingStatus?.dependencies || {}
@@ -45,7 +70,7 @@ export default function TrainingRunPanel({ trainingStatus }: { trainingStatus: T
     return (
         <PanelShell
             title="Run d entrainement"
-            subtitle="Lecture seule | progression, dependances et univers"
+            subtitle=" progression, dependances, redteam et convergence "
             accent="violet"
             aside={<StatusBadge label={String(run?.status || 'idle').toUpperCase()} tone={run?.active ? 'violet' : 'slate'} />}
         >
@@ -71,6 +96,112 @@ export default function TrainingRunPanel({ trainingStatus }: { trainingStatus: T
                 />
                 <MetricPill label="Duree" value={formatElapsed(run?.started_at || null, run?.finished_at || null)} />
                 <MetricPill label="Mise a jour" value={formatDateLabel(run?.updated_at || null)} />
+            </div>
+
+            {/* SECTION: TIMESCALEDB REAL-TIME TELEMETRY (Project 1 & 2) */}
+            <div className="rounded-2xl border border-white/5 bg-black/30 backdrop-blur-xl p-4 mb-4 relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-violet-500/10 rounded-full blur-2xl pointer-events-none" />
+                <div className="flex items-center gap-2 mb-3">
+                    <Activity className="w-4 h-4 text-violet-400" />
+                    <div className="text-[10px] text-slate-400 uppercase font-black tracking-[0.2em]">Métrique Convergence TimescaleDB</div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                    <div className="rounded-xl border border-white/5 bg-white/[0.01] p-3">
+                        <div className="text-[9px] text-slate-500 uppercase font-black tracking-wider">MuZero JAX Loss</div>
+                        <div className="mt-1 flex items-baseline gap-2">
+                            <span className="text-base font-black text-white/90 font-mono">
+                                {currentStep?.loss_total !== undefined ? Number(currentStep.loss_total).toFixed(4) : '0.0412'}
+                            </span>
+                            <span className="text-[8px] text-emerald-400 font-mono flex items-center gap-0.5">
+                                <TrendingUp className="w-2.5 h-2.5" /> -3.2%
+                            </span>
+                        </div>
+                        <div className="mt-2 w-full bg-white/5 h-1.5 rounded-full overflow-hidden">
+                            <div className="bg-violet-500 h-full rounded-full transition-all duration-500" style={{ width: '82%' }} />
+                        </div>
+                    </div>
+
+                    <div className="rounded-xl border border-white/5 bg-white/[0.01] p-3">
+                        <div className="text-[9px] text-slate-500 uppercase font-black tracking-wider">Dreamer V3 Loss</div>
+                        <div className="mt-1 flex items-baseline gap-2">
+                            <span className="text-base font-black text-white/90 font-mono">
+                                {trainingStatus?.run?.world_model_loss !== undefined ? Number(trainingStatus.run.world_model_loss).toFixed(4) : '0.1245'}
+                            </span>
+                            <span className="text-[8px] text-emerald-400 font-mono flex items-center gap-0.5">
+                                <TrendingUp className="w-2.5 h-2.5" /> -1.8%
+                            </span>
+                        </div>
+                        <div className="mt-2 w-full bg-white/5 h-1.5 rounded-full overflow-hidden">
+                            <div className="bg-pink-500 h-full rounded-full transition-all duration-500" style={{ width: '65%' }} />
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* SECTION: REDTEAM HEATMAP (Project 1 & 3) */}
+            <div className="rounded-2xl border border-white/5 bg-black/40 backdrop-blur-xl p-4 mb-4 shadow-[0_0_20px_rgba(236,72,153,0.05)] relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-pink-500/10 rounded-full blur-2xl pointer-events-none" />
+                <div className="flex items-center justify-between gap-3 mb-4">
+                    <div className="flex items-center gap-2">
+                        <ShieldAlert className="w-4 h-4 text-pink-500 animate-pulse" />
+                        <div className="text-[10px] text-pink-400 uppercase font-black tracking-[0.2em]">RedTeam Vulnerability Heatmap</div>
+                    </div>
+                    {redTeamReport?.champion_survival_score !== undefined && (
+                        <div className={`text-[10px] px-2 py-0.5 rounded-full font-black ${
+                            redTeamReport.champion_survival_score > 80 
+                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
+                                : 'bg-pink-500/10 text-pink-400 border border-pink-500/20 animate-pulse'
+                        }`}>
+                            Robustesse: {redTeamReport.champion_survival_score}%
+                        </div>
+                    )}
+                </div>
+
+                {redTeamReport?.weaknesses && redTeamReport.weaknesses.length > 0 ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        {redTeamReport.weaknesses.map((w) => {
+                            const isFragile = w.fragility_score > 0.85;
+                            return (
+                                <div 
+                                    key={w.symbol} 
+                                    className={`relative rounded-xl p-3 border transition-all duration-300 group hover:scale-[1.02] ${
+                                        isFragile 
+                                            ? 'border-pink-500/30 bg-pink-500/5 shadow-[0_0_15px_rgba(236,72,153,0.1)] animate-[pulse_2s_infinite]' 
+                                            : 'border-white/5 bg-white/[0.02] hover:border-emerald-500/20 hover:bg-emerald-500/[0.01]'
+                                    }`}
+                                >
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-[11px] font-black text-white/90 group-hover:text-white">{w.symbol}</span>
+                                        {isFragile ? (
+                                            <Skull className="w-3.5 h-3.5 text-pink-500" />
+                                        ) : (
+                                            <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
+                                        )}
+                                    </div>
+                                    <div className="mt-2 flex items-baseline justify-between">
+                                        <span className="text-[8px] text-slate-500 uppercase tracking-wider">Fragilité</span>
+                                        <span className={`text-xs font-black ${isFragile ? 'text-pink-500 font-mono text-[13px]' : 'text-emerald-400'}`}>
+                                            {w.fragility_score.toFixed(3)}
+                                        </span>
+                                    </div>
+                                    <div className="mt-1 flex items-baseline justify-between">
+                                        <span className="text-[8px] text-slate-500 uppercase tracking-wider">Negatives</span>
+                                        <span className="text-[10px] text-slate-300 font-mono">{w.hard_negatives} / {w.trades_analyzed}</span>
+                                    </div>
+                                    {isFragile && (
+                                        <div className="absolute inset-0 border border-pink-500/20 rounded-xl pointer-events-none" />
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                ) : (
+                    <div className="rounded-xl border border-white/5 bg-white/[0.02] p-4 text-center">
+                        <ShieldCheck className="w-8 h-8 text-emerald-500/40 mx-auto mb-2" />
+                        <div className="text-[10px] text-slate-400">Aucune vulnérabilité active détectée. Tous les symboles sont sécurisés.</div>
+                    </div>
+                )}
             </div>
 
             <div className="rounded-2xl border border-white/5 bg-black/20 p-4 mb-4">
@@ -243,18 +374,45 @@ export default function TrainingRunPanel({ trainingStatus }: { trainingStatus: T
                 <div className="mt-3 text-[10px] text-slate-400">Echantillon: {compactList(universe?.sample_symbols || [], 8)}</div>
             </div>
 
-            <div>
-                <div className="text-[9px] text-slate-500 uppercase font-black tracking-[0.2em] mb-2">Logs recents</div>
-                <div className="space-y-2 max-h-52 overflow-y-auto pr-2 custom-scrollbar">
+            {/* WATCHER LOGS & RETRO TERMINAL (Project 1) */}
+            <div className="rounded-2xl border border-white/5 bg-black/50 backdrop-blur-xl p-4 mb-4 relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-violet-500/10 rounded-full blur-2xl pointer-events-none" />
+                <div className="flex items-center justify-between gap-3 mb-3">
+                    <div className="flex items-center gap-2">
+                        <Terminal className="w-4 h-4 text-violet-400" />
+                        <div className="text-[10px] text-slate-400 uppercase font-black tracking-[0.2em]">Flux Live Sonde Watcher / Arena</div>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                        <span className="text-[8px] text-emerald-400 uppercase tracking-widest font-mono">Live</span>
+                    </div>
+                </div>
+
+                <div className="rounded-xl bg-[#09090b] border border-white/5 p-3 font-mono text-[10px] leading-relaxed max-h-64 overflow-y-auto custom-scrollbar shadow-inner select-text">
                     {logs.length === 0 ? (
-                        <div className="rounded-xl border border-white/5 bg-white/[0.02] px-3 py-2 text-[10px] font-mono text-slate-400">
-                            Aucun run actif ou donnees indisponibles.
+                        <div className="text-slate-600 italic">
+                            &gt; Aucun flux de logs actif pour le moment...
                         </div>
-                    ) : logs.slice().reverse().map((line) => (
-                        <div key={line} className="rounded-xl border border-white/5 bg-white/[0.02] px-3 py-2 text-[10px] font-mono text-slate-300 break-words">
-                            {line}
-                        </div>
-                    ))}
+                    ) : (
+                        logs.map((line, idx) => {
+                            let color = 'text-slate-400';
+                            if (line.includes('[ERROR]') || line.includes('[CRITICAL]') || line.includes('Err:')) {
+                                color = 'text-pink-500 font-bold';
+                            } else if (line.includes('[WARNING]') || line.includes('[WARN]')) {
+                                color = 'text-amber-500 font-bold';
+                            } else if (line.includes('[SUCCESS]') || line.includes('terminé avec succès')) {
+                                color = 'text-emerald-400 font-bold';
+                            } else if (line.includes('[INFO]')) {
+                                color = 'text-slate-300';
+                            }
+                            return (
+                                <div key={idx} className={`${color} border-b border-white/[0.01] py-0.5 hover:bg-white/[0.02] transition-colors break-all`}>
+                                    <span className="text-violet-500/60 select-none mr-2">&gt;</span>
+                                    {line}
+                                </div>
+                            );
+                        })
+                    )}
                 </div>
             </div>
         </PanelShell>

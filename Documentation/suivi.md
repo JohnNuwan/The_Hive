@@ -49,11 +49,14 @@ Ce document récapitule l'état actuel du système EVA et les étapes futures.
 - [x] **DreamerGate** : Gating conditionnel (inference-only RTX 2060 / training RTX 3090).
 - [x] **API Lab** : 6 endpoints (/shadow/record, /shadow/flush, /shadow/stats, /dreamer/status, /dreamer/predict, /dreamer/train).
 
-### Sprint 6 : Stabilisation Banker & Pipeline Training - EN COURS
+### Sprint 6 : Stabilisation Banker & Pipeline Training - EN PRODUCTION / ACTIF
+
 - [x] **Monitoring Telegram** : Nettoyage complet de `brain.py`. Résolution des problèmes de *mojibake* et formatage cassé (f-strings) en utilisant des échappements Unicode propres, des séparateurs dynamiques stricts et des emojis normalisés.
 - [x] **Fix Pipeline de Données (auto_train_gnn.sh)** :
   - Correction des chemins de montage de volumes Docker (`$PROJECT_DIR/data` au lieu du sous-dossier non pertinent) permettant de voir les 462 fichiers CSV.
   - Isolation du script face au `git pull` sauvage écrasant le fix en cours d'exécution.
 - [x] **Fix Cache CPU (gold_cpu_prep.py)** : Résolution de l'erreur fatale `OSError [Errno 36] File name too long` (crash en 4s). Le script tentait de créer un fichier `.pkl` concaténant 80+ symboles dans son nom. Tronquage dynamique de la signature implémenté.
-- [x] **Lancement Entraînement Initial** : Les endpoints de `live-inference` sont connectés au Banker. L'entraînement GNN est *actuellement en cours de traitement* sur le GPU RTX 3090, générant les modèles MuZero/GNN pour tous les actifs restants (D1, H1, M5).
-- [ ] **Validation Live des Trades** : En attente de la production du "Champion" GNN/MuZero pour valider la prise de position autonome complète par le Banker sur le broker MT5.
+- [x] **Pré-entraînement VICReg Market-JEPA (Terminé)** : Pré-entraînement auto-supervisé VICReg Market-JEPA écrit en JAX achevé avec succès sur le serveur Proxmox. Production des poids de l'encodeur `jepa_encoder_latest.pkl` (1.4 Mo) le 27 mai à 17:59. L'importateur automatique est câblé dans `jax_agent.py` pour enrichir les représentations du modèle de monde MuZero.
+- [x] **Routage Multi-Champion Swarm (Actif)** : Mise en place du routage dynamique et de la clé de cache `SYMBOL:ENGINE:HORIZON` dans `champion_promoter.py` et `dreamer_gate.py`. Configuration du manifeste `swarm_manifest.json` pour allouer des experts individuels (ex: checkpoints `17500` et `20500`) aux actifs clés (`GER40.cash`, `XAUUSD`, `EURUSD`, `BTCUSD`) avec fallback automatique vers le champion global. Test d'inférence validé en conteneur de production `the_hive-lab-1` via `test_swarm_routing.py`.
+- [x] **Entraînement de Nuit (En cours)** : L'entraînement GNN de la pile de nuit tourne de manière stable sur le serveur Proxmox GPU 0 (actuellement à l'Epoch 398+/500). Dès sa fin, il enchaînera sur l'optimisation MuZero & DreamerV3 avec les représentations JEPA.
+- [ ] **Validation Live des Trades** : En attente du cycle complet de production des champions GNN/MuZero/Dreamer de nuit pour valider les premières positions multi-champions en direct.

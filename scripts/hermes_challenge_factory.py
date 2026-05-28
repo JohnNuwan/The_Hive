@@ -78,8 +78,8 @@ logger = logging.getLogger("hermes_challenge_factory")
 # Règles Prop Firm — FTMO/FTUK Standard & Profils Personnalisés
 PROP_FIRM_RULES = {
     "ftmo": {
-        "daily_dd_pct": 5.0,     # % max drawdown journalier (sur balance initiale)
-        "total_dd_pct": 10.0,    # % max drawdown total
+        "daily_dd_pct": 4.0,     # % max drawdown journalier strict (4.0%)
+        "total_dd_pct": 8.0,     # % max drawdown total strict (8.0%)
         "profit_target_pct": 10.0,  # % cible de profit en 30 jours
         "min_trading_days": 10,  # jours minimum de trading actif
         "max_lot_gold": 5.0,     # taille max lot sur XAUUSD
@@ -432,14 +432,6 @@ def backtest_candidate(
             if current_day is not None:
                 day_return = (current_balance - day_start_balance) / day_start_balance
                 daily_returns.append(day_return)
-                # Drawdown journalier
-                day_dd = (day_start_balance - current_balance) / balance * 100
-                if day_dd > max_daily_dd:
-                    max_daily_dd = day_dd
-                    if day_dd >= rules["daily_dd_pct"] and "Drawdown journalier" not in str(violations):
-                        violations.append(
-                            f"Jour {trade_day}: Drawdown journalier {day_dd:.2f}% >= {rules['daily_dd_pct']}%"
-                        )
             current_day = trade_day
             day_start_balance = current_balance
             trading_days_set.add(trade_day)
@@ -447,11 +439,20 @@ def backtest_candidate(
         current_balance += trade_pnl
         pnl_series.append(trade_pnl)
 
+        # Drawdown journalier calculé après chaque trade (temps réel)
+        day_dd = (day_start_balance - current_balance) / balance * 100
+        if day_dd > max_daily_dd:
+            max_daily_dd = day_dd
+            if day_dd >= rules["daily_dd_pct"] and "Drawdown journalier" not in str(violations):
+                violations.append(
+                    f"Jour {trade_day}: Drawdown journalier {day_dd:.2f}% >= {rules['daily_dd_pct']}%"
+                )
+
         # Suivi du peak
         if current_balance > peak_balance:
             peak_balance = current_balance
 
-        # Drawdown total
+        # Drawdown total calculé après chaque trade (temps réel)
         total_dd = (peak_balance - current_balance) / balance * 100
         if total_dd > max_total_dd:
             max_total_dd = total_dd
@@ -468,6 +469,11 @@ def backtest_candidate(
             current_consecutive_losses += 1
             if current_consecutive_losses > max_consecutive_losses:
                 max_consecutive_losses = current_consecutive_losses
+
+    # Enregistrer le retour du dernier jour de trading
+    if current_day is not None:
+        day_return = (current_balance - day_start_balance) / day_start_balance
+        daily_returns.append(day_return)
 
     # ── Métriques finales ────────────────────────────────────────────────────
     total_trades = len(trades)

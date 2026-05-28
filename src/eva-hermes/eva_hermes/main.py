@@ -171,10 +171,10 @@ class ExpertRouter:
     def _resolve_backend(self, role: str, default_backend: str) -> str:
         """Resout le backend cible pour un role Hermes."""
         role_backend = os.getenv(f"COUNCIL_BACKEND_{role.upper()}", "").strip().lower()
-        if role_backend in {"vllm", "ollama"}:
+        if role_backend in {"vllm", "ollama", "openrouter"}:
             return role_backend
         fallback = os.getenv("LLM_BACKEND", self.settings.llm_backend).strip().lower()
-        if fallback in {"vllm", "ollama"}:
+        if fallback in {"vllm", "ollama", "openrouter"}:
             return fallback if default_backend == "vllm" else default_backend
         return default_backend
 
@@ -189,6 +189,8 @@ class ExpertRouter:
 
     def _resolve_endpoint(self, role: str, backend: str, env_prefix: str) -> tuple[str, int]:
         """Resout l'endpoint host/port pour un expert Hermes."""
+        if backend == "openrouter":
+            return "openrouter.ai", 443
         if backend == "ollama":
             default_host = self.settings.ollama_host
             default_port = self.settings.ollama_port
@@ -347,6 +349,8 @@ class HermesService:
 
         if expert.backend == "ollama":
             reply = await self._call_ollama(expert, request, system_prompt)
+        elif expert.backend == "openrouter":
+            reply = await self._call_openrouter(expert, request, system_prompt)
         else:
             reply = await self._call_vllm(expert, request, system_prompt)
 
@@ -529,6 +533,44 @@ class HermesService:
             )
         payload = response.json()
         return str(payload.get("response", "")).strip()
+
+    async def _call_openrouter(self, expert: ExpertDefinition, request: ChatRequest, system_prompt: str) -> str:
+        """Interroge l'API OpenRouter."""
+        api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        if not api_key:
+            logger.warning("OPENROUTER_API_KEY non configurée dans l'environnement, repli vers vLLM")
+            return await self._call_vllm(expert, request, system_prompt)
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://thehive.dev",
+            "X-Title": "The Hive Hermes",
+            "Content-Type": "application/json"
+        }
+        
+        # Modèle par défaut si non spécifié (Llama 3.1 Nemotron 70B Free de Nvidia)
+        model_name = expert.model or "nvidia/llama-3.1-nemotron-70b-instruct:free"
+        
+        response = await self.client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": request.message},
+                ],
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+            },
+        )
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=502,
+                detail=f"OpenRouter indisponible pour l'expert {expert.name}: HTTP {response.status_code} - {response.text}",
+            )
+        payload = response.json()
+        return str(payload["choices"][0]["message"]["content"]).strip()
 
 
 @asynccontextmanager

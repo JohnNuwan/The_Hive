@@ -258,17 +258,31 @@ def _ensure_status_dir() -> None:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Ecrit un JSON de facon atomique."""
+    """Ecrit un JSON de facon atomique avec mecanisme de retry robuste en cas de collision."""
+    import time
+    import random
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
-    tmp_path.replace(path)
+    
+    for attempt in range(5):
+        try:
+            tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+            tmp_path.replace(path)
+            return
+        except Exception:
+            if attempt == 4:
+                # Repli en ecriture directe non atomique pour eviter le crash du training stack
+                try:
+                    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+                    return
+                except Exception:
+                    # Ignorer silencieusement la perte d'un unique update de statut pour proteger le run
+                    return
+            time.sleep(0.05 + random.uniform(0.01, 0.05))
 
 
 def load_nightly_summary() -> dict[str, Any] | None:
-    """Charge le dernier resume nightly si disponible."""
-
     if not NIGHTLY_SUMMARY_PATH.exists():
         return None
     try:

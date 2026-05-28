@@ -500,14 +500,16 @@ class Arena:
             float: Score comparatif utilise pour le duel champion/challenger.
         """
         profit_factor = min(max(float(metrics.get("profit_factor", 0.0)), 0.0), 5.0)
-        stretch_target_pct = Arena._read_float_env("MUZERO_DAILY_STRETCH_TARGET_PCT", 10.0)
-        stretch_score_bonus = Arena._read_float_env("ARENA_DAILY_STRETCH_SCORE_BONUS", 4.0)
         best_day_net_return_pct = float(metrics.get("best_day_net_return_pct", 0.0) or 0.0)
         days_above_10pct = max(float(metrics.get("days_above_10pct", 0.0) or 0.0), 0.0)
         stretch_bonus = 0.0
-        if best_day_net_return_pct >= stretch_target_pct and days_above_10pct > 0.0:
-            stretch_bonus += stretch_score_bonus
-            stretch_bonus += min(days_above_10pct, 3.0) * (stretch_score_bonus * 0.25)
+        # Formule progressive continue pour encourager des gains réguliers et sécurisés (Prop Firm compliant)
+        if best_day_net_return_pct >= 1.0:
+            # Progression continue (0.4 point par 1% de rendement quotidien max, plafonné à 4.0 points)
+            stretch_bonus += min(best_day_net_return_pct * 0.4, 4.0)
+            # Valorisation de la régularité des pics de performance
+            if days_above_10pct > 0.0:
+                stretch_bonus += min(days_above_10pct, 3.0) * 1.0
         directional_bias = str(metrics.get("directional_bias") or "inactive").strip().lower()
         directional_penalty = 0.0
         if directional_bias != "balanced":
@@ -2100,7 +2102,8 @@ class Arena:
             logger.info("Querying Hermes coordinator for stress-testing analysis...")
             response = requests.post(url, json=payload, timeout=30)
             if response.status_code == 200:
-                hermes_stress_scenario = response.json().get("response", "No stress scenario formulated.")
+                res_json = response.json()
+                hermes_stress_scenario = res_json.get("message", res_json.get("response", "No stress scenario formulated."))
             else:
                 hermes_stress_scenario = f"Error from Hermes coordinator API: {response.text}"
         except Exception as exc:

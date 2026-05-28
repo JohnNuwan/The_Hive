@@ -2177,6 +2177,7 @@ class ChampionPromoter:
         horizon: str,
         selection_policy: str | None = None,
         engine: str = "muzero",
+        symbol: str | None = None,
     ) -> tuple[Path | None, dict[str, Any]]:
         """Determine le checkpoint live autorise pour un horizon.
 
@@ -2184,6 +2185,7 @@ class ChampionPromoter:
             horizon (str): Horizon de decision live.
             selection_policy (str | None): Politique de selection a imposer.
             engine (str): Moteur de prediction cible.
+            symbol (str | None): Symbole live optionnel pour le routage de swarm.
 
         Returns:
             tuple[Path | None, dict[str, Any]]: Chemin retenu et metadonnees.
@@ -2198,6 +2200,26 @@ class ChampionPromoter:
         arena_report = self.load_arena_report(horizon, engine=normalized_engine)
         promotion_gate = self.resolve_promotion_gate(manifest, arena_report)
         champion_path = self.get_champion_path(horizon, engine=normalized_engine)
+
+        # Routage Swarm dynamique par symbole
+        swarm_manifest_path = self.results_dir / "swarm_manifest.json"
+        if symbol and swarm_manifest_path.exists():
+            try:
+                import json
+                swarm_data = json.loads(swarm_manifest_path.read_text(encoding="utf-8"))
+                custom_checkpoint_name = swarm_data.get(horizon, {}).get(normalized_engine, {}).get(symbol)
+                if not custom_checkpoint_name:
+                    custom_checkpoint_name = swarm_data.get(horizon, {}).get(normalized_engine, {}).get("default")
+                if custom_checkpoint_name:
+                    custom_path = self.weights_dir / custom_checkpoint_name
+                    if custom_path.exists():
+                        champion_path = custom_path
+                        logger.info("[ChampionPromoter] Swarm routing: %s (%s/%s) resolu vers %s", symbol, normalized_engine, horizon, custom_checkpoint_name)
+                    else:
+                        logger.warning("[ChampionPromoter] Expert Swarm %s introuvable, repli standard", custom_checkpoint_name)
+            except Exception as exc:
+                logger.warning("[ChampionPromoter] Erreur lecture swarm_manifest: %s", exc)
+
         legacy_champion = self.weights_dir / "muzero_champion.pkl"
         latest_path = self.get_latest_model_path(horizon, engine=normalized_engine)
         latest_checkpoint = None

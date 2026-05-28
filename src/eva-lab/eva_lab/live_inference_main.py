@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -177,7 +178,7 @@ async def status() -> dict[str, object]:
         dict[str, object]: Etat du gate et contraintes d'usage.
     """
     gate: DreamerGate = app.state.dreamer_gate
-    gate_status = gate.get_status()
+    gate_status = await asyncio.to_thread(gate.get_status)
     return {
         "status": "ok",
         "service": "live_inference_cpu",

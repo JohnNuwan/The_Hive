@@ -1,4 +1,4 @@
-﻿"""Entraine MuZero sur historique reel puis execute la selection ADN."""
+"""Entraine MuZero sur historique reel puis execute la selection ADN."""
 
 from __future__ import annotations
 
@@ -92,19 +92,22 @@ def _resolve_collection_runtime_budget(
         getattr(config, "collection_max_episode_seconds", 0.0) or 0.0
     )
 
+    normalized_symbol = str(symbol or "").strip().upper()
+
     if family == "indices":
         simulations = max(
             32,
             min(
                 simulations,
-                int(os.getenv("MUZERO_COLLECTION_NUM_SIMULATIONS_INDICES", "192")),
+                # int(float(...)) supporte les valeurs flottantes dans .env (ex: "192.0")
+                int(float(os.getenv("MUZERO_COLLECTION_NUM_SIMULATIONS_INDICES", "192"))),
             ),
         )
         max_moves = max(
             48,
             min(
                 max_moves,
-                int(os.getenv("MUZERO_COLLECTION_MAX_MOVES_INDICES", "96")),
+                int(float(os.getenv("MUZERO_COLLECTION_MAX_MOVES_INDICES", "96"))),
             ),
         )
         max_episode_seconds = max(
@@ -112,6 +115,85 @@ def _resolve_collection_runtime_budget(
             min(
                 max_episode_seconds,
                 float(os.getenv("MUZERO_COLLECTION_MAX_EPISODE_SECONDS_INDICES", "180")),
+            ),
+        )
+    elif family == "metals":
+        simulations = max(
+            32,
+            min(
+                simulations,
+                int(float(os.getenv("MUZERO_COLLECTION_NUM_SIMULATIONS_METALS", "160"))),
+            ),
+        )
+        max_moves = max(
+            48,
+            min(
+                max_moves,
+                int(float(os.getenv("MUZERO_COLLECTION_MAX_MOVES_METALS", "96"))),
+            ),
+        )
+        max_episode_seconds = max(
+            120.0,
+            min(
+                max_episode_seconds,
+                float(os.getenv("MUZERO_COLLECTION_MAX_EPISODE_SECONDS_METALS", "180")),
+            ),
+        )
+
+    if normalized_symbol == "XAUUSD":
+        simulations = max(
+            16,
+            min(
+                simulations,
+                # Toujours convertir via float() pour éviter ValueError sur les valeurs "128.0"
+                int(float(os.getenv("MUZERO_COLLECTION_NUM_SIMULATIONS_XAUUSD", str(simulations)))),
+            ),
+        )
+        max_moves = max(
+            32,
+            min(
+                max_moves,
+                int(float(os.getenv("MUZERO_COLLECTION_MAX_MOVES_XAUUSD", str(max_moves)))),
+            ),
+        )
+        max_episode_seconds = max(
+            90.0,
+            min(
+                max_episode_seconds,
+                float(
+                    os.getenv(
+                        "MUZERO_COLLECTION_MAX_EPISODE_SECONDS_XAUUSD",
+                        str(max_episode_seconds),
+                    )
+                ),
+            ),
+        )
+
+    if normalized_symbol == "EURUSD":
+        simulations = max(
+            16,
+            min(
+                simulations,
+                int(float(os.getenv("MUZERO_COLLECTION_NUM_SIMULATIONS_EURUSD", str(simulations)))),
+            ),
+        )
+        max_moves = max(
+            32,
+            min(
+                max_moves,
+                int(float(os.getenv("MUZERO_COLLECTION_MAX_MOVES_EURUSD", str(max_moves)))),
+            ),
+        )
+        max_episode_seconds = max(
+            90.0,
+            min(
+                max_episode_seconds,
+                float(
+                    os.getenv(
+                        "MUZERO_COLLECTION_MAX_EPISODE_SECONDS_EURUSD",
+                        str(max_episode_seconds),
+                    )
+                ),
             ),
         )
 
@@ -2440,6 +2522,12 @@ def main() -> dict[str, object]:
     )
 
     agent = JAXMuZeroAgent(config)
+    if getattr(config, "use_league", False) and getattr(agent, "league_buffer", None) is not None:
+        logger.info(
+            "[MuZero %s] Initialisation de l'AlphaStar League. %d trajectoires historiques chargees.",
+            horizon,
+            len(agent.league_buffer)
+        )
     weights_dir = Path(config.weights_path)
     weights_dir.mkdir(parents=True, exist_ok=True)
     results_dir = Path(config.results_path)
@@ -2709,6 +2797,11 @@ def main() -> dict[str, object]:
                             continue
                         if len(game) > 0:
                             agent.replay_buffer.save_game(game)
+                            if getattr(config, "use_league", False) and getattr(agent, "league_buffer", None) is not None:
+                                import random
+                                profit_factor = float((game.metadata or {}).get("profit_factor", 1.0) or 1.0)
+                                if profit_factor > 1.2 or random.random() < 0.1:
+                                    agent.league_buffer.save_game(game, f"champion_{horizon}")
                         total_games += 1
                         if stopped_reason:
                             logger.warning(

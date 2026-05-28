@@ -70,3 +70,31 @@ THE HIVE a des règles strictes régies par [AGENTS.md](file:///c:/Users/nandi/D
    * Chaque fonction ou classe publique doit documenter explicitement ses arguments (`Args`), son retour (`Returns`) et les exceptions possibles (`Raises`).
 3. **Pas de CD Commandes** :
    * Dans vos scripts ou commandes Windows, évitez l'utilisation directe de la commande `cd` pour éviter les dysfonctionnements de chemin absolu. Définissez toujours vos chemins à partir de la racine du répertoire.
+
+---
+
+## 5. Exécution des Pipelines d'Entraînement Hors-Ligne
+
+Nous disposons de scripts d'automatisation pour lancer les entraînements sur le GPU 0 du serveur distant sans impacter le GPU 1.
+
+### A. Pré-entraînement Market-JEPA (VICReg)
+Pour collecter des observations fraîches et lancer une phase de pré-entraînement de l'encodeur JEPA (30 000 étapes sur 100 épisodes) :
+```bash
+# Génère les observations et entraîne le modèle JEPA sur GPU 0
+python scratch/run_grand_jepa.py
+```
+Le fichier de poids résultant `jepa_encoder_latest.pkl` sera automatiquement sauvegardé dans `data/muzero/weights/` et injecté dynamiquement dans les agents MuZero lors de l'initialisation.
+
+### B. Entraînement de Weekend Stack (GNN + DreamerV3)
+Pendant le weekend, quand les marchés financiers sont fermés, vous devez maximiser l'usage du matériel en coupant `vllm` et en entraînant les modèles décisionnels :
+```bash
+# Exécute séquentiellement :
+# 1. Extinction de vllm pour libérer la VRAM de GPU 0
+# 2. Entraînement complet du GNN (500 époques)
+# 3. Entraînement massif hors-ligne de DreamerV3 (3 000 époques)
+python scratch/run_weekend_stack.py
+```
+Vous pouvez suivre l'état de l'entraînement avec le script d'audit des processus :
+```bash
+python scratch/check_container_processes.py
+```

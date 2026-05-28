@@ -634,6 +634,7 @@ class CopyTradingRouter:
                 master_balance=master_balance,
                 target_balance=target_balance,
                 allocation_ratio=target.allocation_ratio,
+                symbol=master_position.symbol,
             )
             if expected_volume <= Decimal("0"):
                 expected_volume = Decimal(str(master_position.volume))
@@ -872,6 +873,7 @@ class CopyTradingRouter:
                 master_balance=master_balance,
                 target_balance=target_balance,
                 allocation_ratio=target.allocation_ratio,
+                symbol=master_position.symbol,
             )
             if expected_volume <= Decimal("0"):
                 skipped_positions += 1
@@ -1071,7 +1073,7 @@ class CopyTradingRouter:
         comment = str(remote_position.get("comment") or "").strip().upper()
         if not comment:
             return False
-        return comment.startswith("COPY REPAIR")
+        return comment.startswith("COPY") or comment.startswith("EVA CLOSE")
 
     async def _execute_scaled_copy(
         self,
@@ -1096,6 +1098,7 @@ class CopyTradingRouter:
             master_balance=master_balance,
             target_balance=target_balance,
             allocation_ratio=target.allocation_ratio,
+            symbol=master_order.symbol,
         )
         if scaled_volume <= Decimal("0"):
             return {
@@ -1593,6 +1596,7 @@ class CopyTradingRouter:
         master_balance: Decimal | None,
         target_balance: Decimal | None,
         allocation_ratio: Decimal,
+        symbol: str | None = None,
     ) -> Decimal:
         """
         Calcule un volume proportionnel entre compte maitre et compte fille.
@@ -1602,11 +1606,20 @@ class CopyTradingRouter:
             master_balance (Decimal | None): Capital du maitre.
             target_balance (Decimal | None): Capital de la cible.
             allocation_ratio (Decimal): Ratio supplementaire de la cible.
+            symbol (str | None): Symbole de la transaction pour regles specifiques.
 
         Returns:
             Decimal: Volume cible arrondi au centieme inferieur.
         """
         ratio = Decimal(str(allocation_ratio or Decimal("1.0")))
+        
+        # Division par 5 sur le Gold (XAUUSD) pour ramener le risque pip/volatilité
+        # au même niveau que les paires Forex classiques.
+        if symbol:
+            symbol_upper = str(symbol).strip().upper()
+            if "XAUUSD" in symbol_upper or "GOLD" in symbol_upper:
+                ratio /= Decimal("5.0")
+
         if target_balance is not None and master_balance is not None and master_balance > 0:
             ratio *= target_balance / master_balance
 

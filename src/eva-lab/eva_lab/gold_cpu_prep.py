@@ -162,6 +162,16 @@ def compute_gnn_feature_sequences(
     atr = IndicatorFactory.atr(highs, lows, closes, 14)
     bb_pct = IndicatorFactory.bollinger_bands(closes)["pct_b"]
 
+    # Pre-calcul vectorise des signaux de Liquidity Trap Nemesis
+    highest_15 = frame["high"].shift(1).rolling(15).max()
+    lowest_15 = frame["low"].shift(1).rolling(15).min()
+    bull_trap = (frame["high"] > highest_15) & (frame["close"] < frame["open"]) & (adx < 25.0)
+    bear_trap = (frame["low"] < lowest_15) & (frame["close"] > frame["open"]) & (adx < 25.0)
+    is_trap = (bull_trap | bear_trap).astype(float).fillna(0.0)
+    recent_traps = is_trap.rolling(30).sum().fillna(0.0)
+    liquidity_trap_rate = (recent_traps / 30.0).fillna(0.0)
+    quarantine_status = (recent_traps >= 2.0).astype(float)
+
     features: list[list[list[float]]] = []
     labels: list[int] = []
     start_idx = max(50, seq_len)
@@ -189,9 +199,9 @@ def compute_gnn_feature_sequences(
                 (price - low_price) / (high_price - low_price + 1e-8),
                 (high_price - max(price, open_price)) / price if price else 0.0,
                 (min(price, open_price) - low_price) / price if price else 0.0,
-                0.0,
-                0.0,
-                0.0,
+                float(liquidity_trap_rate.iloc[idx]),
+                float(recent_traps.iloc[idx]),
+                float(quarantine_status.iloc[idx]),
                 0.0,
                 0.0,
                 0.0,

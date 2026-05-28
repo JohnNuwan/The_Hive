@@ -8,15 +8,15 @@ $Python = Join-Path $Root "venv\Scripts\python.exe"
 $SupervisorPidDir = Join-Path $Root "logs\banker_supervisors"
 
 $Instances = @(
-    @{ Port = 8110; Env = ".env.banker.ftmo50k.local"; Host = "127.0.0.1" },
-    @{ Port = 8170; Env = ".env.banker.ftmo541264545.local"; Host = "127.0.0.1" },
-    @{ Port = 8190; Env = ".env.banker.ftmo541283689.local"; Host = "127.0.0.1" },
-    @{ Port = 8120; Env = ".env.banker.ftuk100k.local"; Host = "127.0.0.1" },
-    @{ Port = 8130; Env = ".env.banker.ftuk100k_333382206.local"; Host = "127.0.0.1" },
+    @{ Port = 8110; Env = "instances/.env.banker.ftmo50k.local"; Host = "127.0.0.1" },
+    @{ Port = 8170; Env = "instances/.env.banker.ftmo541264545.local"; Host = "127.0.0.1" },
+    @{ Port = 8190; Env = "instances/.env.banker.ftmo541283689.local"; Host = "127.0.0.1" },
+    @{ Port = 8120; Env = "instances/.env.banker.ftuk100k.local"; Host = "127.0.0.1" },
+    @{ Port = 8130; Env = "instances/.env.banker.ftuk100k_333382206.local"; Host = "127.0.0.1" },
     # Le compte 333382355 est retire du fleet actif.
     # Le compte 333382356 reste mis de cote jusqu'a validation des identifiants.
-    @{ Port = 8180; Env = ".env.banker.ftuk100k_333382439.local"; Host = "127.0.0.1" },
-    @{ Port = 8100; Env = ".env.banker.master.local"; Host = "0.0.0.0" }
+    @{ Port = 8180; Env = "instances/.env.banker.ftuk100k_333382439.local"; Host = "127.0.0.1" },
+    @{ Port = 8100; Env = "instances/.env.banker.master.local"; Host = "0.0.0.0" }
 )
 
 function Stop-BankerApis {

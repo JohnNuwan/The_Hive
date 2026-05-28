@@ -437,6 +437,13 @@ class FollowerAgent:
         """
 
         ratio = self._resolve_risk_multiplier()
+        
+        # Sécurité Gold (XAUUSD) : division par 5 du risque
+        if command.symbol:
+            symbol_upper = str(command.symbol).strip().upper()
+            if "XAUUSD" in symbol_upper or "GOLD" in symbol_upper:
+                ratio /= Decimal("5.0")
+
         master_reference = self._resolve_master_reference(command)
         local_reference = await self._resolve_local_reference()
         if master_reference is not None and local_reference is not None and master_reference > 0:

@@ -86,6 +86,15 @@ PARAMETER_SPECS: dict[str, dict[str, Any]] = {
     "MUZERO_CLOSE_WINNER_THRESHOLD": {"type": "float", "default": 0.15, "min": 0.05, "max": 0.40, "step": 0.02},
     "MUZERO_CLOSE_STRONG_WINNER_THRESHOLD": {"type": "float", "default": 0.30, "min": 0.10, "max": 0.80, "step": 0.05},
     "MUZERO_CLOSE_TP_LIKE_THRESHOLD": {"type": "float", "default": 0.45, "min": 0.20, "max": 1.20, "step": 0.05},
+    "MUZERO_SPLIT_WINDOW_ACTIVATION_BONUS": {"type": "float", "default": 0.14, "min": 0.08, "max": 0.24, "step": 0.01},
+    "MUZERO_RUNNER_HOLD_CAPTURE_BONUS": {"type": "float", "default": 0.10, "min": 0.06, "max": 0.18, "step": 0.01},
+    "MUZERO_PYRAMID_WINDOW_ACTIVATION_BONUS": {"type": "float", "default": 0.12, "min": 0.08, "max": 0.20, "step": 0.01},
+    "MUZERO_MISSED_WINDOW_PENALTY": {"type": "float", "default": 0.05, "min": 0.02, "max": 0.08, "step": 0.01},
+    "MUZERO_RUNNER_GIVEBACK_SOFT_PENALTY": {"type": "float", "default": 0.10, "min": 0.06, "max": 0.16, "step": 0.01},
+    "MUZERO_RUNNER_GIVEBACK_HARD_PENALTY": {"type": "float", "default": 0.22, "min": 0.14, "max": 0.30, "step": 0.01},
+    "MUZERO_COLLECTION_NUM_SIMULATIONS_XAUUSD": {"type": "int", "default": 128, "min": 96, "max": 192, "step": 8},
+    "MUZERO_COLLECTION_MAX_MOVES_XAUUSD": {"type": "int", "default": 72, "min": 56, "max": 96, "step": 4},
+    "MUZERO_COLLECTION_MAX_EPISODE_SECONDS_XAUUSD": {"type": "int", "default": 150, "min": 120, "max": 210, "step": 10},
 }
 
 
@@ -226,6 +235,30 @@ def _read_remote_json(path: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"JSON inattendu pour {remote_path}.")
     return payload
+
+
+def _load_latest_alphaevolve_variants() -> list[dict[str, Any]]:
+    """Charge les variantes de la campagne AlphaEvolve la plus recente."""
+
+    campaign_dir = ROOT_DIR / "data" / "alphaevolve" / "campaigns"
+    if not campaign_dir.exists():
+        _append_log("Dossier des campagnes AlphaEvolve introuvable.")
+        return []
+
+    files = sorted(campaign_dir.glob("alphaevolve_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        _append_log("Aucune campagne AlphaEvolve (.json) trouvee.")
+        return []
+
+    latest_file = files[0]
+    _append_log(f"Chargement des variantes AlphaEvolve depuis : {latest_file.name}")
+    try:
+        data = json.loads(latest_file.read_text(encoding="utf-8"))
+        variants = data.get("variants", [])
+        return variants
+    except Exception as exc:
+        _append_log(f"Erreur lors du chargement des variantes AlphaEvolve: {exc}")
+        return []
 
 
 def _load_local_env_defaults() -> dict[str, str]:
@@ -478,6 +511,14 @@ def _build_seeded_overrides(
             "TRAINING_RESUME_STEP": "0",
             "TRAINING_GA_GENOME_JSON": json.dumps(genome, ensure_ascii=True, separators=(",", ":")),
             "TRAINING_GATE_PROFILE": gate_profile,
+            "MUZERO_PROMOTION_GATE_PROFILE": "standard",
+            "MUZERO_PROMOTION_MIN_WIN_RATE": "50.0",
+            "MUZERO_PROMOTION_MIN_PROFIT_FACTOR": "1.05",
+            "MUZERO_PROMOTION_MIN_TOTAL_TRADES": "12",
+            "MUZERO_PROMOTION_MIN_EVAL_SYMBOLS": "1",
+            "MUZERO_PROMOTION_MAX_DRAWDOWN_PCT": "4.5",
+            "MUZERO_PROMOTION_MIN_LONG_ENTRY_SHARE": "0.10",
+            "MUZERO_PROMOTION_MIN_SHORT_ENTRY_SHARE": "0.10",
             "ARENA_GAMES_PER_SYMBOL": str(arena_games_per_symbol),
             "ARENA_MIN_GAMES": str(arena_min_games),
             "ARENA_MIN_SYMBOLS": str(arena_min_symbols),
@@ -710,6 +751,7 @@ def main() -> int:
         return 0
 
     base_genome = _build_base_genome()
+    alpha_variants = _load_latest_alphaevolve_variants()
     _publish_campaign_state(
         {
             "campaign_id": campaign_id,
@@ -739,7 +781,37 @@ def main() -> int:
     for index in range(1, PROXY_TRIAL_COUNT + 1):
         trial_id = f"seeded_proxy_g{GENERATION_INDEX:02d}_t{index:02d}"
         trigger = f"manual_muzero_seeded_ga_proxy_{GENERATION_INDEX:02d}_{index:02d}"
-        genome = _build_mutated_genome(base_genome, seed=index)
+        # S'il reste des variantes AlphaEvolve, on utilise leurs parametres en priorite
+        alpha_variant = None
+        if index - 1 < len(alpha_variants):
+            alpha_variant = alpha_variants[index - 1]
+            _append_log(f"Utilisation de la variante AlphaEvolve {alpha_variant.get('variant_id')} pour le trial {trial_id}.")
+            genome = dict(base_genome)
+            alpha_params = alpha_variant.get("params", {})
+            mapping = {
+                "split_window_activation_bonus": "MUZERO_SPLIT_WINDOW_ACTIVATION_BONUS",
+                "runner_window_hold_bonus": "MUZERO_RUNNER_HOLD_CAPTURE_BONUS",
+                "pyramid_window_activation_bonus": "MUZERO_PYRAMID_WINDOW_ACTIVATION_BONUS",
+                "missed_window_penalty": "MUZERO_MISSED_WINDOW_PENALTY",
+                "giveback_soft_penalty": "MUZERO_RUNNER_GIVEBACK_SOFT_PENALTY",
+                "giveback_hard_penalty": "MUZERO_RUNNER_GIVEBACK_HARD_PENALTY",
+                "muzero_collection_num_simulations_xauusd": "MUZERO_COLLECTION_NUM_SIMULATIONS_XAUUSD",
+                "muzero_collection_max_moves_xauusd": "MUZERO_COLLECTION_MAX_MOVES_XAUUSD",
+                "muzero_collection_max_episode_seconds_xauusd": "MUZERO_COLLECTION_MAX_EPISODE_SECONDS_XAUUSD",
+            }
+            for alpha_name, env_name in mapping.items():
+                if alpha_name in alpha_params:
+                    spec = PARAMETER_SPECS[env_name]
+                    val = alpha_params[alpha_name]
+                    if spec["type"] == "bool":
+                        genome[env_name] = bool(val)
+                    elif spec["type"] == "int":
+                        genome[env_name] = int(round(val))
+                    else:
+                        genome[env_name] = float(val)
+            genome["alphaevolve_variant_id"] = alpha_variant.get("variant_id")
+        else:
+            genome = _build_mutated_genome(base_genome, seed=index)
         _append_log(f"Lancement du proxy {trial_id}.")
         overrides = _build_seeded_overrides(
             trigger=trigger,

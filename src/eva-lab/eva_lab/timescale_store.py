@@ -32,6 +32,7 @@ class TimescaleTableMap:
     gpu_metrics: str
     cpu_jobs: str
     run_windows: str
+    metrics_history: str
 
 
 DEFAULT_TABLES = TimescaleTableMap(
@@ -46,6 +47,7 @@ DEFAULT_TABLES = TimescaleTableMap(
     gpu_metrics="ops.gpu_metrics",
     cpu_jobs="ops.cpu_jobs_history",
     run_windows="training.run_windows",
+    metrics_history="training.metrics_history",
 )
 
 CANONICAL_TIMESCALE_DATABASE = "thehive"
@@ -377,6 +379,7 @@ def _ensure_schema_objects(connection: Any, settings: dict[str, Any]) -> None:
         _split_identifier(tables.gpu_metrics)[0],
         _split_identifier(tables.cpu_jobs)[0],
         _split_identifier(tables.run_windows)[0],
+        _split_identifier(tables.metrics_history)[0],
     }
     with connection.cursor() as cursor:
         for schema_name in sorted(schema_names):
@@ -604,6 +607,20 @@ def _ensure_schema_objects(connection: Any, settings: dict[str, Any]) -> None:
             )
             """
         )
+        cursor.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {_sql_identifier(tables.metrics_history)} (
+                "timestamp" TIMESTAMPTZ NOT NULL,
+                run_id TEXT NOT NULL,
+                engine TEXT NOT NULL,
+                metric_name TEXT NOT NULL,
+                metric_value DOUBLE PRECISION NOT NULL,
+                step INTEGER NOT NULL,
+                epoch INTEGER NULL,
+                PRIMARY KEY (run_id, engine, metric_name, step, "timestamp")
+            )
+            """
+        )
         _ensure_column(cursor, tables.ga_trials, "sequence_id", "TEXT NULL")
         _ensure_column(cursor, tables.ga_trials, "profile", "TEXT NULL")
         _ensure_column(cursor, tables.run_windows, "sequence_id", "TEXT NULL")
@@ -821,6 +838,9 @@ def _apply_balanced_storage_profile(connection: Any, settings: dict[str, Any]) -
     _ensure_hypertable(connection, tables.gpu_metrics, "timestamp")
     _ensure_retention_policy(connection, tables.gpu_metrics, "30 days")
     _purge_cpu_jobs_history(connection, tables.cpu_jobs, "30 days")
+
+    _ensure_hypertable(connection, tables.metrics_history, "timestamp")
+    _ensure_retention_policy(connection, tables.metrics_history, "90 days")
 
 
 def _apply_storage_profile(connection: Any, settings: dict[str, Any]) -> None:
@@ -1082,8 +1102,17 @@ def ensure_timescale_ready() -> bool:
     return False
 
 
+_timescale_inventory_cache = None
+_timescale_inventory_cache_time = 0.0
+
+
 def discover_timescale_inventory() -> dict[str, set[str]]:
     """Construit un inventaire minimal des symboles presents dans TimeDB."""
+    global _timescale_inventory_cache, _timescale_inventory_cache_time
+    import time
+    now = time.time()
+    if _timescale_inventory_cache is not None and (now - _timescale_inventory_cache_time) < 300.0:
+        return _timescale_inventory_cache
 
     settings = get_timescale_settings()
     if not settings["enabled"]:
@@ -1104,6 +1133,9 @@ def discover_timescale_inventory() -> dict[str, set[str]]:
         except Exception as exc:
             logger.warning("Inventaire TimeDB indisponible: %s", exc)
             return {}
+            
+    _timescale_inventory_cache = inventory
+    _timescale_inventory_cache_time = now
     return inventory
 
 
@@ -1862,3 +1894,46 @@ def record_run_window(window_payload: dict[str, Any]) -> bool:
             window_payload.get("finished_at"),
         ),
     )
+
+
+def insert_training_metric(
+    engine: str,
+    metric_name: str,
+    metric_value: float,
+    step: int,
+    epoch: int | None = None,
+    run_id: str | None = None,
+) -> None:
+    """Insere une metrique d'entrainement en temps reel dans la hypertable TimescaleDB."""
+    settings = get_timescale_settings()
+    if not settings["enabled"]:
+        return
+
+    # Si run_id n'est pas fourni, on tente de le charger depuis le training status
+    if not run_id:
+        try:
+            from eva_lab.training_status import load_training_status
+            run_status = load_training_status()
+            run_id = run_status.get("run_id") or "nightly_fallback"
+        except Exception:
+            run_id = "nightly_fallback"
+
+    tables = settings["tables"]
+    with _connect() as connection:
+        if connection is None:
+            return
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    INSERT INTO {_sql_identifier(tables.metrics_history)}
+                    ("timestamp", run_id, engine, metric_name, metric_value, step, epoch)
+                    VALUES (NOW(), %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (run_id, engine, metric_name, float(metric_value), int(step), epoch),
+                )
+                connection.commit()
+        except Exception as exc:
+            logger.warning("Impossible d'inserer la metrique dans TimescaleDB: %s", exc)
+

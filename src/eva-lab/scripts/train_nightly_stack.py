@@ -492,27 +492,33 @@ def apply_training_strategy(decision: dict[str, object]) -> None:
     strategy = str(decision.get("strategy", "research")).lower()
     if strategy == "research":
         _set_env_default("TRAINING_PROFILE", "research")
-        _set_env_default("RUN_TRAIN_GNN", "0")
+        # Mode recherche massif : GNN actif pour produire de meilleurs embeddings
+        _set_env_default("RUN_TRAIN_GNN", "1")
         _set_env_default("RUN_TRAIN_MUZERO", "1")
         _set_env_default("RUN_TRAIN_DREAMER", "1")
-        _set_env_default("MUZERO_TRAINING_STEPS", "32000")
-        _set_env_default("MUZERO_GAMES_PER_SYMBOL", "20")
-        _set_env_default("ARENA_GAMES_PER_SYMBOL", "8")
-        _set_env_default("ARENA_MIN_GAMES", "24")
-        _set_env_default("ARENA_MIN_SYMBOLS", "6")
+        # Arena et metriques actives pour promouvoir des champions a chaque run
+        _set_env_default("RUN_ARENA", "1")
+        _set_env_default("RUN_EXPORT_METRICS", "1")
+        _set_env_default("MUZERO_TRAINING_STEPS", "8000")
+        _set_env_default("MUZERO_GAMES_PER_SYMBOL", "10")
+        _set_env_default("ARENA_GAMES_PER_SYMBOL", "4")
+        _set_env_default("ARENA_MIN_GAMES", "12")
+        _set_env_default("ARENA_MIN_SYMBOLS", "4")
         _set_env_default("MUZERO_MAX_SYMBOLS", "0")
         _set_env_default("ARENA_MAX_SYMBOLS", "0")
         return
 
     if strategy == "refresh":
         _set_env_default("TRAINING_PROFILE", "refresh")
-        _set_env_default("RUN_TRAIN_GNN", "0")
+        _set_env_default("RUN_TRAIN_GNN", "1")
         _set_env_default("RUN_TRAIN_MUZERO", "1")
         _set_env_default("RUN_TRAIN_DREAMER", "1")
-        _set_env_default("MUZERO_TRAINING_STEPS", "8000")
-        _set_env_default("MUZERO_GAMES_PER_SYMBOL", "8")
-        _set_env_default("ARENA_GAMES_PER_SYMBOL", "4")
-        _set_env_default("ARENA_MIN_GAMES", "12")
+        _set_env_default("RUN_ARENA", "1")
+        _set_env_default("RUN_EXPORT_METRICS", "1")
+        _set_env_default("MUZERO_TRAINING_STEPS", "4000")
+        _set_env_default("MUZERO_GAMES_PER_SYMBOL", "5")
+        _set_env_default("ARENA_GAMES_PER_SYMBOL", "2")
+        _set_env_default("ARENA_MIN_GAMES", "6")
         _set_env_default("ARENA_MIN_SYMBOLS", "3")
         _set_env_default("MUZERO_MAX_SYMBOLS", "6")
         _set_env_default("ARENA_MAX_SYMBOLS", "6")
@@ -595,6 +601,51 @@ def run_step(name: str, command: list[str], extra_env: dict[str, str] | None = N
     logger.info("Etape %s terminee avec succes.", name)
 
 
+def _stop_vllm_container() -> None:
+    """Arrete temporairement le conteneur vLLM pour liberer la VRAM sur le GPU 0."""
+    logger.info("Arrêt temporaire du conteneur vLLM sur le GPU 0...")
+    try:
+        root_dir = WORKDIR.parent.parent
+        res = subprocess.run(
+            ["docker", "compose", "stop", "vllm"],
+            cwd=root_dir,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if res.returncode == 0:
+            logger.info("Conteneur vLLM arrete avec succes via docker compose stop vllm.")
+            return
+        
+        logger.warning("Echec de docker compose stop vllm (%s). Tentative de docker stop direct...", res.stderr.strip() or "inconnu")
+        subprocess.run(["docker", "stop", "the_hive-vllm-1"], capture_output=True, check=False)
+        subprocess.run(["docker", "stop", "vllm"], capture_output=True, check=False)
+    except Exception as exc:
+        logger.warning("Impossible d'arreter le conteneur vLLM : %s. Poursuite de la sequence nocturne.", exc)
+
+
+def _start_vllm_container() -> None:
+    """Redemarre le conteneur vLLM a la fin de la sequence."""
+    logger.info("Redémarrage du conteneur vLLM...")
+    try:
+        root_dir = WORKDIR.parent.parent
+        res = subprocess.run(
+            ["docker", "compose", "start", "vllm"],
+            cwd=root_dir,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if res.returncode == 0:
+            logger.info("Conteneur vLLM redemarre avec succes.")
+            return
+        
+        subprocess.run(["docker", "start", "the_hive-vllm-1"], capture_output=True, check=False)
+        subprocess.run(["docker", "start", "vllm"], capture_output=True, check=False)
+    except Exception as exc:
+        logger.error("Impossible de redemarrer le conteneur vLLM : %s", exc)
+
+
 def main() -> dict[str, object]:
     """Lance GNN, MuZero multi-horizon puis Dreamer offline.
 
@@ -640,6 +691,23 @@ def main() -> dict[str, object]:
         source="nightly",
     )
 
+    # Purge des vieux checkpoints MuZero incompatibles avant de lancer l'entrainement
+    try:
+        from scripts.purge_incompatible_checkpoints import purge_incompatible_checkpoints
+        purge_report = purge_incompatible_checkpoints()
+        if purge_report.get("archived", 0) > 0:
+            logger.warning(
+                "%d checkpoints MuZero incompatibles archives dans %s.",
+                purge_report["archived"],
+                purge_report.get("archive_dir", "?"),
+            )
+            append_training_log(
+                f"Purge MuZero: {purge_report['archived']} checkpoints incompatibles archives.",
+                source="nightly",
+            )
+    except Exception as purge_exc:
+        logger.warning("Purge MuZero ignoree: %s", purge_exc)
+
     if summary["strategy"] == "skip":
         summary["status"] = "skipped"
         summary["finished_at"] = datetime.now().isoformat()
@@ -667,23 +735,49 @@ def main() -> dict[str, object]:
         universe=universe_summary,
     )
 
+    run_jepa = _env_flag("RUN_TRAIN_JEPA", True)
     run_gnn = _env_flag("RUN_TRAIN_GNN", True)
     run_muzero = _env_flag("RUN_TRAIN_MUZERO", True)
     run_dreamer = _env_flag("RUN_TRAIN_DREAMER", True)
+    run_arena = _env_flag("RUN_ARENA", True)
+    run_export_metrics = _env_flag("RUN_EXPORT_METRICS", True)
+    # En mode entraînement massif, on ne touche pas au vLLM
+    # Positionner TRAINING_DISABLE_VLLM_TOGGLE=0 dans .env pour réactiver
+    disable_vllm_toggle = _env_flag("TRAINING_DISABLE_VLLM_TOGGLE", True)
 
     try:
+        # Gestion vLLM : uniquement si le toggle n'est pas désactivé
+        if disable_vllm_toggle:
+            logger.info(
+                "Mode entraînement massif : vLLM non touché (TRAINING_DISABLE_VLLM_TOGGLE=1). "
+                "Positionner TRAINING_DISABLE_VLLM_TOGGLE=0 pour réactiver la rotation vLLM."
+            )
+        else:
+            _stop_vllm_container()
+
+        if run_jepa:
+            logger.info("Lancement du pre-entrainement auto-supervise VICReg (Market-JEPA)...")
+            run_step("jepa_pretrain", [sys.executable, "scripts/train_jepa.py"], extra_env={"CUDA_VISIBLE_DEVICES": "0"})
+            append_step(summary, "jepa_pretrain", "ok")
+
         if run_gnn:
-            run_step("gnn", [sys.executable, "scripts/train_gnn.py"])
+            run_step("gnn", [sys.executable, "scripts/train_gnn.py"],
+                     extra_env={"CUDA_VISIBLE_DEVICES": "0", "JAX_PLATFORMS": "cpu"})
             append_step(summary, "gnn", "ok")
 
         if run_muzero:
             horizons = _resolve_horizons()
             for horizon in horizons:
                 step_name = f"muzero_{horizon}"
+                # Entraînement parallèle JAX sur les deux GPU (0 et 1)
                 run_step(
                     step_name,
                     [sys.executable, "scripts/train_global_models.py"],
-                    extra_env={"MUZERO_HORIZON": horizon},
+                    extra_env={
+                        "MUZERO_HORIZON": horizon,
+                        "CUDA_VISIBLE_DEVICES": "1",
+                        "TRAINING_CHILD_CUDA_VISIBLE_DEVICES": "1"
+                    },
                 )
                 append_step(summary, step_name, "ok")
 
@@ -691,9 +785,40 @@ def main() -> dict[str, object]:
             run_step(
                 "dreamer_offline",
                 [sys.executable, "-m", "eva_lab.muzero.offline_trainer"],
-                extra_env={"DREAMER_EPOCHS": os.getenv("DREAMER_EPOCHS", "1500")},
+                extra_env={
+                    "DREAMER_EPOCHS": os.getenv("DREAMER_EPOCHS", "1500"),
+                    "CUDA_VISIBLE_DEVICES": "0",
+                    "TRAINING_CHILD_CUDA_VISIBLE_DEVICES": "0"
+                },
             )
             append_step(summary, "dreamer_offline", "ok")
+
+        # Arena : compare challenger vs champion et promeut si victoire
+        if run_arena:
+            try:
+                logger.info("Lancement de l'Arena : comparaison challenger vs champion...")
+                run_step(
+                    "arena_promote",
+                    [sys.executable, "scripts/run_arena_promote.py"],
+                    extra_env={"CUDA_VISIBLE_DEVICES": "0"},
+                )
+                append_step(summary, "arena_promote", "ok")
+            except Exception as arena_exc:
+                # L'Arena ne bloque pas la sequence si elle echoue
+                logger.warning("Arena echouee : %s. La sequence continue.", arena_exc)
+                append_step(summary, "arena_promote", "warning", str(arena_exc))
+
+        # Export metriques JSON structurees (lisibles par Nexus/Dashboard)
+        if run_export_metrics:
+            try:
+                run_step(
+                    "export_metrics",
+                    [sys.executable, "scripts/export_training_metrics.py"],
+                )
+                append_step(summary, "export_metrics", "ok")
+            except Exception as metrics_exc:
+                logger.warning("Export metriques echoue : %s.", metrics_exc)
+                append_step(summary, "export_metrics", "warning", str(metrics_exc))
 
         # Couplage AlphaEvolve Feedback Bridge (Live Bridging)
         try:
@@ -719,6 +844,20 @@ def main() -> dict[str, object]:
             logger.warning("Hermes Loss Auditor failed: %s", audit_exc)
             append_step(summary, "hermes_loss_auditor", "error")
 
+        # Red Team : analyse les trades live et detecte les faiblesses du champion
+        if run_arena:
+            try:
+                logger.info("Lancement du Red Team : analyse des hard negatifs live...")
+                run_step(
+                    "redteam",
+                    [sys.executable, "scripts/run_redteam.py", "--window", "30"],
+                    extra_env={"CUDA_VISIBLE_DEVICES": "0"},
+                )
+                append_step(summary, "redteam", "ok")
+            except Exception as redteam_exc:
+                logger.warning("Red Team echouee : %s.", redteam_exc)
+                append_step(summary, "redteam", "warning", str(redteam_exc))
+
         summary["status"] = "ok"
         summary["finished_at"] = datetime.now().isoformat()
         persist_summary(summary)
@@ -736,6 +875,9 @@ def main() -> dict[str, object]:
         send_nightly_summary(summary)
         raise
     finally:
+        # Redemarrage vLLM uniquement si le toggle est desactive
+        if not disable_vllm_toggle:
+            _start_vllm_container()
         release_run_lock(lock_payload)
 
 

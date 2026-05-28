@@ -539,6 +539,10 @@ class TradingEnvironment:
         self.steps_since_last_trade = 0
         self.total_trades = 0
         self.total_profitable = 0
+        self.nemesis_trap_losses = 0
+        self.nemesis_recent_losses = 0
+        self.nemesis_quarantine_active = 0.0
+        self.nemesis_trap_rate = 0.0
         self.gross_profit_pct = 0.0
         self.gross_loss_pct = 0.0
         self.net_realized_pnl_pct = 0.0
@@ -2757,6 +2761,13 @@ class TradingEnvironment:
 
         full_close = close_size is None or realized_notional >= current_notional
         if full_close:
+            if realized_trade < 0:
+                self.nemesis_recent_losses += 1
+                if str(self._episode_regime or "").strip().lower() == "range":
+                    self.nemesis_trap_losses += 1
+                self.nemesis_trap_rate = self.nemesis_trap_losses / max(self.nemesis_recent_losses, 1)
+                self.nemesis_quarantine_active = 1.0 if self.nemesis_recent_losses >= 3 else 0.0
+
             if self.position_pyramids > 0:
                 if realized_trade > 0:
                     self.pyramid_profitable_count += 1
@@ -2821,7 +2832,12 @@ class TradingEnvironment:
         vol = min((high_price - low_price) / max(close_price, 1e-8) * 100.0, 1.0) if close_price > 0 else 0.0
 
         extra = np.array([pos_state, pnl_pct, slbe_state, hour_feat, day_feat, vol], dtype=np.float32)
-        return np.concatenate([base, extra])
+        nemesis_feats = np.array([
+            self.nemesis_trap_rate,
+            float(self.nemesis_recent_losses),
+            self.nemesis_quarantine_active
+        ], dtype=np.float32)
+        return np.concatenate([base, extra, nemesis_feats])
 
     def get_legal_root_actions(self) -> list[int]:
         """Retourne les actions legales a la racine pour l'etat courant.

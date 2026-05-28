@@ -1,4 +1,4 @@
-﻿"""Entraine le GNN multi-timeframe sur l'historique reel disponible."""
+"""Entraine le GNN multi-timeframe sur l'historique reel disponible."""
 
 from __future__ import annotations
 
@@ -234,10 +234,23 @@ def train_gnn() -> dict[str, object]:
             logger.warning("Checkpoint GNN ignore: %s", exc)
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(EPOCHS, 1), eta_min=1e-5)
+    # CosineAnnealingWarmRestarts : se réinitialise cycliquement tous les T_0 epochs.
+    # Contrairement à CosineAnnealingLR (calibré sur EPOCHS total), ce scheduler
+    # reste actif quelle que soit la durée de l'entraînement.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=max(int(os.getenv("TRAIN_GNN_LR_RESTART_EVERY", "200")), 50),
+        T_mult=1,
+        eta_min=float(os.getenv("TRAIN_GNN_LR_MIN", "1e-5")),
+    )
     criterion = nn.CrossEntropyLoss()
     edge_index = build_graph(len(valid_symbols)).to(device)
     torch.backends.cudnn.benchmark = True
+
+    # Suivi du meilleur modèle par accuracy scalp
+    best_scalp_accuracy = 0.0
+    best_epoch = 0
+    gnn_champion_path = MODEL_DIR / os.getenv("TRAIN_GNN_CHAMPION_NAME", "gnn_champion.pth")
 
     last_metrics = {
         "loss": None,
@@ -309,20 +322,23 @@ def train_gnn() -> dict[str, object]:
 
         scheduler.step()
         avg_loss = total_loss / max(batch_count, 1)
+        current_lr = scheduler.get_last_lr()[0] if hasattr(scheduler, "get_last_lr") else optimizer.param_groups[0]["lr"]
         last_metrics = {
             "loss": avg_loss,
             "scalp_accuracy": round(100.0 * correct_scalp / max(total_nodes, 1), 2),
             "intraday_accuracy": round(100.0 * correct_intraday / max(total_nodes, 1), 2),
             "swing_accuracy": round(100.0 * correct_swing / max(total_nodes, 1), 2),
+            "lr": current_lr,
         }
         logger.info(
-            "Epoch %03d/%03d | loss=%.4f | scalp=%.2f%% | intraday=%.2f%% | swing=%.2f%%",
+            "Epoch %03d/%03d | loss=%.4f | scalp=%.2f%% | intraday=%.2f%% | swing=%.2f%% | lr=%.2e",
             epoch + 1,
             EPOCHS,
             avg_loss,
             last_metrics["scalp_accuracy"],
             last_metrics["intraday_accuracy"],
             last_metrics["swing_accuracy"],
+            current_lr,
         )
         if epoch == 0 or (epoch + 1) % 10 == 0 or epoch + 1 == EPOCHS:
             append_training_log(
@@ -333,11 +349,38 @@ def train_gnn() -> dict[str, object]:
                 source="gnn",
             )
 
+        # Sauvegarde du meilleur modèle (champion GNN) dès qu'un nouveau record est atteint
+        scalp_acc = last_metrics["scalp_accuracy"]
+        if scalp_acc > best_scalp_accuracy and scalp_acc > 0.0:
+            best_scalp_accuracy = scalp_acc
+            best_epoch = epoch + 1
+            MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            torch.save(model.state_dict(), gnn_champion_path)
+            logger.info(
+                "Nouveau champion GNN (epoch %d, scalp=%.2f%%) sauvegardf dans %s",
+                best_epoch,
+                best_scalp_accuracy,
+                gnn_champion_path,
+            )
+
         if CHECKPOINT_EVERY > 0 and (epoch + 1) % CHECKPOINT_EVERY == 0:
             MODEL_DIR.mkdir(parents=True, exist_ok=True)
             checkpoint_path = MODEL_DIR / f"gnn_ckpt_ep{epoch + 1}.pth"
             torch.save(model.state_dict(), checkpoint_path)
             logger.info("Checkpoint GNN sauvegarde: %s", checkpoint_path)
+            # Export des métriques intermédiaires pour le dashboard Nexus
+            interim_metrics = {
+                **last_metrics,
+                "epoch": epoch + 1,
+                "epoch_total": EPOCHS,
+                "best_scalp_accuracy": best_scalp_accuracy,
+                "best_epoch": best_epoch,
+                "progress_pct": round(100.0 * (epoch + 1) / EPOCHS, 2),
+            }
+            try:
+                METRICS_PATH.write_text(json.dumps(interim_metrics, indent=2), encoding="utf-8")
+            except Exception:
+                pass
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), MODEL_PATH)

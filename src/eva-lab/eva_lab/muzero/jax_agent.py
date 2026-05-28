@@ -75,8 +75,16 @@ class JAXMuZeroAgent:
                         if k.startswith("context_encoder/"):
                             muzero_key = f"representation_network/{k}"
                             if muzero_key in new_params:
-                                new_params[muzero_key] = jnp.asarray(v)
-                                injected_count += 1
+                                if isinstance(v, dict):
+                                    # C'est un dictionnaire de parametres, ex: {"w": array, "b": array}
+                                    if not isinstance(new_params[muzero_key], dict):
+                                        new_params[muzero_key] = {}
+                                    for pk, pv in v.items():
+                                        new_params[muzero_key][pk] = jnp.asarray(pv)
+                                        injected_count += 1
+                                else:
+                                    new_params[muzero_key] = jnp.asarray(v)
+                                    injected_count += 1
                     
                     # Reconstruction de la structure immuable
                     self.params = hk.data_structures.to_immutable_dict(new_params)
@@ -938,7 +946,7 @@ class JAXMuZeroAgent:
         position_state = float(observation.get("position_state", 0.0) or 0.0)
         unrealized_return = float(observation.get("unrealized_return", 0.0) or 0.0)
         slbe_state = float(observation.get("slbe_state", 0.0) or 0.0)
-        obs_vec[26:] = np.array(
+        obs_vec[26:32] = np.array(
             [
                 position_state,
                 unrealized_return,
@@ -949,6 +957,9 @@ class JAXMuZeroAgent:
             ],
             dtype=np.float32,
         )
+        obs_vec[32] = float(observation.get("nemesis_trap_rate", 0.0) or 0.0)
+        obs_vec[33] = float(observation.get("nemesis_recent_losses", 0.0) or 0.0)
+        obs_vec[34] = float(observation.get("nemesis_quarantine_active", 0.0) or 0.0)
         return obs_vec
 
     def infer_action(self, observation: dict | np.ndarray) -> dict[str, object]:

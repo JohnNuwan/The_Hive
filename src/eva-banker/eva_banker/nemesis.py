@@ -427,6 +427,71 @@ class NemesisSystem:
             reason,
         )
 
+    def predict_trap(self, symbol: str, action: str = "BUY") -> dict:
+        """Evalue le risque de LIQUIDITY_TRAP avant l'ouverture d'un trade.
+
+        Methode appelee PRE-TRADE pour bloquer preventif les setups risques
+        avant d'envoyer l'ordre MT5.
+
+        Args:
+            symbol (str): Symbole a evaluer.
+            action (str): Direction du trade (BUY ou SELL).
+
+        Returns:
+            dict: block (bool), risk_score (float 0-1), reason (str).
+        """
+        normalized_symbol = str(symbol or "").strip().upper()
+        now = datetime.now()
+        lookback = now - timedelta(hours=self.lookback_hours)
+
+        recent_symbol_losses = []
+        for entry in self.defeat_ledger:
+            entry_time = self._parse_timestamp(entry.get("timestamp"))
+            if not entry_time or entry_time < lookback:
+                continue
+            ctx = dict(entry.get("context") or {})
+            entry_symbol = str(ctx.get("symbol") or "").strip().upper()
+            if entry_symbol == normalized_symbol:
+                recent_symbol_losses.append(entry)
+
+        n_losses = len(recent_symbol_losses)
+        liquidity_trap_losses = sum(
+            1 for e in recent_symbol_losses
+            if str(e.get("nemesis_type") or "").upper() == "LIQUIDITY_TRAP"
+        )
+
+        total_nemesis_defeats = max(sum(self.known_nemeses.values()), 1)
+        global_trap_rate = self.known_nemeses.get("LIQUIDITY_TRAP", 0) / total_nemesis_defeats
+
+        symbol_score = min(1.0, n_losses / max(self.symbol_quarantine_same_type_threshold, 1))
+        global_score = min(1.0, global_trap_rate)
+        risk_score = round(0.6 * symbol_score + 0.4 * global_score, 3)
+
+        threshold = float(os.getenv("BANKER_NEMESIS_PRETRADE_BLOCK_THRESHOLD", "0.70"))
+        should_block = risk_score >= threshold
+
+        if should_block:
+            reason = (
+                f"Nemesis pre-trade BLOCK {action} {normalized_symbol}: "
+                f"{n_losses} pertes recentes ({liquidity_trap_losses} LIQUIDITY_TRAP) "
+                f"+ taux_global={global_trap_rate:.0%}. Score={risk_score:.2f}>={threshold:.2f}"
+            )
+            logger.warning("Nemesis pre-trade block: %s", reason)
+        else:
+            reason = (
+                f"Nemesis pre-trade OK: score={risk_score:.2f}<{threshold:.2f} "
+                f"({n_losses} pertes recentes sur {normalized_symbol})"
+            )
+
+        return {
+            "block": should_block,
+            "risk_score": risk_score,
+            "reason": reason,
+            "recent_losses": n_losses,
+            "liquidity_trap_losses": liquidity_trap_losses,
+            "global_trap_rate": global_trap_rate,
+        }
+
     @staticmethod
     def _parse_timestamp(raw_value: Optional[str]) -> Optional[datetime]:
         """

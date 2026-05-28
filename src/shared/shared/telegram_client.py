@@ -159,6 +159,14 @@ class TelegramClient:
                 self.topic_id,
             )
 
+        # Initialisation de Discord pour le mirroring multi-salons
+        try:
+            from shared.discord_client import DiscordClient
+            self.discord = DiscordClient()
+        except Exception as exc:
+            logger.warning("Impossible d'initialiser le client Discord dans TelegramClient : %s", exc)
+
+
     def _build_message_payload(
         self,
         message: str,
@@ -197,6 +205,13 @@ class TelegramClient:
             message (str): Texte a transmettre.
             parse_mode (str | None): Mode de rendu Telegram optionnel.
         """
+        # Miroring sur Discord multi-salons
+        if hasattr(self, "discord") and self.discord:
+            try:
+                self.discord.send_sync(message)
+            except Exception as exc:
+                logger.warning("Echec du mirroring Discord dans TelegramClient : %s", exc)
+
         if not self.enabled:
             return
 
@@ -246,6 +261,13 @@ class TelegramClient:
             caption (str): Legende associee.
             parse_mode (str | None): Mode de rendu Telegram optionnel.
         """
+        # Miroring sur Discord multi-salons
+        if hasattr(self, "discord") and self.discord:
+            try:
+                self.discord._send_photo_sync_internal(photo, caption)
+            except Exception as exc:
+                logger.warning("Echec du mirroring Photo Discord dans TelegramClient : %s", exc)
+
         if not self.enabled:
             return
 

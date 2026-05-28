@@ -1,0 +1,23 @@
+{
+  "candidate_id": "synthetic_eurusd_20260528",
+  "symbol": "EURUSD",
+  "model_type": "baseline_mean_reversion",
+  "source": "synthetic",
+  "score": 84.43,
+  "profit_pct": 86.19333857615325,
+  "max_daily_dd_pct": 2.810326855976382,
+  "max_total_dd_pct": 8.65831208649679,
+  "win_rate": 56.54450261780105,
+  "sharpe_ratio": 13.723048389026072,
+  "trading_days": 24,
+  "total_trades": 191,
+  "promoted_at": "2026-05-28T13:12:45.051278",
+  "weights_path": null,
+  "redis_key": null,
+  "metadata": {
+    "strategy": "mean_reversion",
+    "lookback": 20,
+    "threshold": 1.5
+  },
+  "prop_firm_compliant": true
+}

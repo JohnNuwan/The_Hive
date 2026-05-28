@@ -1,0 +1,23 @@
+{
+  "candidate_id": "synthetic_us100_cash_20260528",
+  "symbol": "US100.cash",
+  "model_type": "baseline_mean_reversion",
+  "source": "synthetic",
+  "score": 81.08,
+  "profit_pct": 47.24687066087478,
+  "max_daily_dd_pct": 3.5382524868619294,
+  "max_total_dd_pct": 8.638526050662348,
+  "win_rate": 51.445086705202314,
+  "sharpe_ratio": 9.827331676164915,
+  "trading_days": 23,
+  "total_trades": 173,
+  "promoted_at": "2026-05-28T17:12:48.940162",
+  "weights_path": null,
+  "redis_key": null,
+  "metadata": {
+    "strategy": "mean_reversion",
+    "lookback": 20,
+    "threshold": 1.5
+  },
+  "prop_firm_compliant": true
+}

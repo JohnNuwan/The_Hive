@@ -27,9 +27,23 @@ class TelegramNotifier:
             logger.warning("🔔 Telegram Notifier in MOCK MODE (No credentials found in .env)")
         else:
             logger.info("✅ Telegram Notifier INITIALIZED")
+            
+        # Initialisation Discord Notifier
+        try:
+            from shared.discord_client import DiscordClient
+            self.discord = DiscordClient()
+        except Exception as exc:
+            logger.warning("Impossible d'initialiser le client Discord dans TelegramNotifier : %s", exc)
 
     async def send_message(self, text: str, parse_mode: str = "Markdown") -> bool:
         """Sends a notification message."""
+        # Discord Dispatching
+        if hasattr(self, "discord") and self.discord:
+            try:
+                await self.discord.send_message(text)
+            except Exception as exc:
+                logger.warning("Echec de l'envoi Discord dans TelegramNotifier : %s", exc)
+
         if not self.enabled:
             logger.info(f"🎭 [MOCK TELEGRAM] {text}")
             return True

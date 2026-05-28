@@ -390,28 +390,41 @@ class Strategist:
                 bias_alignment = "cpu_live_cortex_advisory"
                 bias_strength = "weak"
             gnn_live_bias = gnn_scalp if gnn_scalp != "NEUTRAL" else gnn_intraday
-            if self._cpu_live_gnn_live:
-                if gnn_live_bias in {"BULLISH", "BEARISH"} and gnn_confidence >= 0.55:
-                    if gnn_swing in {"NEUTRAL", gnn_live_bias}:
-                        final_bias = gnn_live_bias
-                        bias_alignment = "cpu_live_gnn_live"
-                        bias_strength = "strong" if gnn_confidence >= 0.80 else "moderate"
-                    else:
-                        final_bias = "RANGING"
-                        bias_alignment = "cpu_live_gnn_swing_conflict"
-                        bias_strength = "weak"
+        if self._cpu_live_gnn_live:
+            # Seuil abaisse a 0.50 (vs 0.55) pour plus de signaux directionnels
+            if gnn_live_bias in {"BULLISH", "BEARISH"} and gnn_confidence >= 0.50:
+                if gnn_swing in {"NEUTRAL", gnn_live_bias}:
+                    final_bias = gnn_live_bias
+                    bias_alignment = "cpu_live_gnn_live"
+                    bias_strength = "strong" if gnn_confidence >= 0.80 else "moderate"
                 else:
-                    final_bias = "NEUTRAL"
-                    bias_alignment = "cpu_live_gnn_live_neutral"
+                    final_bias = "RANGING"
+                    bias_alignment = "cpu_live_gnn_swing_conflict"
                     bias_strength = "weak"
-            elif gnn_bias != "NEUTRAL" and gnn_confidence >= 0.55:
-                final_bias = "RANGING"
-                bias_alignment = "cpu_live_gnn_consultatif"
-                bias_strength = "weak"
             else:
                 final_bias = "NEUTRAL"
-                bias_alignment = "cpu_live_neutral"
+                bias_alignment = "cpu_live_gnn_live_neutral"
                 bias_strength = "weak"
+        elif gnn_bias != "NEUTRAL" and gnn_confidence >= 0.50:
+            final_bias = "RANGING"
+            bias_alignment = "cpu_live_gnn_consultatif"
+            bias_strength = "weak"
+        else:
+            final_bias = "NEUTRAL"
+            bias_alignment = "cpu_live_neutral"
+            bias_strength = "weak"
+
+        # En mode advisory : si le GNN est tres fort (>= 0.80), il peut driver
+        # malgre le vLLM mort — evite le blocage NEUTRAL systematique
+        if self._cpu_live_cortex_advisory and gnn_live_bias in {"BULLISH", "BEARISH"} and gnn_confidence >= 0.80:
+            if gnn_swing in {"NEUTRAL", gnn_live_bias}:
+                final_bias = gnn_live_bias
+                bias_alignment = "cpu_live_gnn_strong_override"
+                bias_strength = "moderate"
+                logger.info(
+                    "GNN override advisory NEUTRAL sur %s: %s (conf=%.2f)",
+                    "cortex", gnn_live_bias, gnn_confidence,
+                )
 
         strategy = {
             "symbol": symbol,

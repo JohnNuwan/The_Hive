@@ -542,6 +542,9 @@ class PrioritizedReplayBuffer:
             errors (list[float]): Erreurs scalaires utilisees comme priorites.
         """
         for idx, error in zip(indices, errors):
+            # Ignorer les indices invalides ou fictifs (ex. -1) provenant de la ligue
+            if int(idx) < self.tree.capacity - 1:
+                continue
             priority = (float(error) + 1e-5) ** self.alpha
             self.tree.update(int(idx), priority)
 
