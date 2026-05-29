@@ -64,9 +64,9 @@ def _coerce_dtype(value: Any) -> str:
 def _flatten_tree_signature(tree: Any, prefix: str = "") -> list[dict[str, Any]]:
     """Aplati un pytree en signature stable basee sur les chemins et formes."""
 
-    if isinstance(tree, dict):
+    if isinstance(tree, dict) or (hasattr(tree, "keys") and hasattr(tree, "__getitem__")):
         flattened: list[dict[str, Any]] = []
-        for key in sorted(tree):
+        for key in sorted(list(tree.keys())):
             child_prefix = f"{prefix}/{key}" if prefix else str(key)
             flattened.extend(_flatten_tree_signature(tree[key], prefix=child_prefix))
         return flattened
