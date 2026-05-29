@@ -156,6 +156,8 @@ def build_muzero_config_snapshot(config: Any) -> dict[str, Any]:
             for value in list(getattr(config, "network_hidden_dims", []) or [])
         ],
         "support_size": int(getattr(config, "support_size", 0) or 0),
+        "use_jepa_encoder": bool(getattr(config, "use_jepa_encoder", False)),
+        "jepa_latent_size": int(getattr(config, "jepa_latent_size", 128)),
     }
 
 
@@ -168,6 +170,8 @@ def build_muzero_config_fingerprint(config_snapshot: dict[str, Any]) -> dict[str
         "hidden_state_size": int(config_snapshot.get("hidden_state_size") or 0),
         "network_hidden_dims": [int(value) for value in list(config_snapshot.get("network_hidden_dims") or [])],
         "support_size": int(config_snapshot.get("support_size") or 0),
+        "use_jepa_encoder": bool(config_snapshot.get("use_jepa_encoder", False)),
+        "jepa_latent_size": int(config_snapshot.get("jepa_latent_size", 128)),
     }
     serialized = json.dumps(
         normalized,
@@ -254,9 +258,45 @@ def build_muzero_param_signature_from_snapshot(
     support_size = int(config_snapshot.get("support_size") or 0)
     support_bins = 2 * support_size + 1
 
+    use_jepa_encoder = bool(config_snapshot.get("use_jepa_encoder", False))
+    jepa_latent_size = int(config_snapshot.get("jepa_latent_size", 128))
+
     signature: list[dict[str, Any]] = []
 
-    representation_dims = [input_dim, *hidden_dims, hidden_state_size]
+    if use_jepa_encoder:
+        # L'encodeur de contexte JEPA a 3 couches linéaires :
+        # representation_network/context_encoder/linear : [input_dim, 256]
+        signature.extend(
+            _build_linear_signature(
+                "representation_network/context_encoder/linear",
+                input_dim,
+                256,
+                dtype=dtype,
+            )
+        )
+        # representation_network/context_encoder/linear_1 : [256, 256]
+        signature.extend(
+            _build_linear_signature(
+                "representation_network/context_encoder/linear_1",
+                256,
+                256,
+                dtype=dtype,
+            )
+        )
+        # representation_network/context_encoder/linear_2 : [256, jepa_latent_size]
+        signature.extend(
+            _build_linear_signature(
+                "representation_network/context_encoder/linear_2",
+                256,
+                jepa_latent_size,
+                dtype=dtype,
+            )
+        )
+        representation_input_dim = jepa_latent_size
+    else:
+        representation_input_dim = input_dim
+
+    representation_dims = [representation_input_dim, *hidden_dims, hidden_state_size]
     for index, (source_dim, target_dim) in enumerate(zip(representation_dims, representation_dims[1:])):
         suffix = "" if index == 0 else f"_{index}"
         signature.extend(
