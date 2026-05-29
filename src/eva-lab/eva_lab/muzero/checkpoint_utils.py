@@ -532,6 +532,27 @@ def inspect_muzero_checkpoint(
             )
             return payload, compatibility
 
+        # Inférence dynamique de use_jepa_encoder pour la rétrocompatibilité
+        if "use_jepa_encoder" not in config_snapshot:
+            params = payload.get("params")
+            has_jepa = False
+            def _has_jepa_weights(tree: Any) -> bool:
+                if isinstance(tree, dict):
+                    for k, v in tree.items():
+                        if "context_encoder" in str(k):
+                            return True
+                        if _has_jepa_weights(v):
+                            return True
+                elif isinstance(tree, (list, tuple)):
+                    for item in tree:
+                        if _has_jepa_weights(item):
+                            return True
+                return False
+            has_jepa = _has_jepa_weights(params)
+            config_snapshot["use_jepa_encoder"] = has_jepa
+            if has_jepa and "jepa_latent_size" not in config_snapshot:
+                config_snapshot["jepa_latent_size"] = 128
+
         artifact_fingerprint = build_muzero_config_fingerprint(config_snapshot)
         compatibility["artifact_fingerprint"] = artifact_fingerprint
 
