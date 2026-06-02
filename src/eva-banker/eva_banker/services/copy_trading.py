@@ -627,15 +627,15 @@ class CopyTradingRouter:
         if master_snapshot:
             await self._rebuild_links_for_external_close(ticket, master_snapshot)
 
-        # NEW BRIDGE ------------------------------------------------
-        try:
-            source = SourceStrategy(broker_name="FTMO", account_size=10000)
-            payload = ClosePayload(
-                source_ticket_id=str(ticket), full_close=True, reason="EXTERNAL_CLOSE"
-            )
-            BridgeConnector().send_order(source_strategy=source, payload=payload)
-        except Exception as e:
-            logger.error(f"BridgeError: {e}")
+        # TODO: NEW BRIDGE modify order ------------------------------------------------
+        # try:
+        # source = SourceStrategy(broker_name="FTMO", account_size=10000)
+        # payload = ClosePayload(
+        # source_ticket_id=str(ticket), full_close=True, reason="EXTERNAL_CLOSE"
+        # )
+        # BridgeConnector().send_order(source_strategy=source, payload=payload)
+        # except Exception as e:
+        # logger.error(f"BridgeError: {e}")
 
         # NEW BRIDGE -------------------------------------------------
 
