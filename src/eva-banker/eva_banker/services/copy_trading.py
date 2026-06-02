@@ -23,6 +23,12 @@ from pydantic import BaseModel, Field
 
 from shared import OrderSource, Position, TradeAction, TradeOrder, get_settings
 from shared.internal_auth import get_internal_headers
+from eva_banker.services.orion_bridge.bridge_helper import (
+    SourceStrategy,
+    OpenPayload,
+    ClosePayload,
+    BridgeConnector,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -365,9 +371,20 @@ class CopyTradingRouter:
         if not local_result.get("success"):
             return local_result
 
-        # TODO: (bridge OPEN): appeler le bridge ici, juste apres confirmation de
-        # l'ouverture sur le compte maitre et avant le fan-out followers.
-        # Utiliser `local_result["ticket"]` comme ticket_id maitre.
+        # NEW BRIDGE ------------------------------------------------
+        try:
+            source = SourceStrategy(broker_name="FTMO", account_size=100000)
+            payload = OpenPayload(
+                source_ticket_id=local_result["ticket"],
+                symbol=order.symbol,
+                volume=order.volume,
+                type=order.action,
+            )
+            BridgeConnector().send_order(source_strategy=source, payload=payload)
+        except Exception as e:
+            logger.error(f"Bridge error: {e}")
+        # NEW BRIDGE CALL ----------------------------------------
+
         active_targets = [target for target in self.targets.values() if target.enabled]
         if not active_targets:
             return local_result
@@ -400,11 +417,19 @@ class CopyTradingRouter:
         local_result = await self._close_local_position(ticket, volume=volume)
         if not local_result.get("success"):
             return local_result
+        # NEW BRIDGE ----------------------------------------------------
+        try:
+            source = SourceStrategy(broker_name="FTMO", account_size=10000)
+            full_close = volume is None
+            payload = ClosePayload(
+                source_ticket_id=str(ticket), full_close=full_close, reason="EXTERNAL_CLOSE"
+            )
+            BridgeConnector().send_order(source_strategy=source, payload=payload)
+        except Exception as e:
+            logger.error(f"BridgeError: {e}")
 
-        # TODO: (bridge CLOSE) appeler le bridge ici, juste apres confirmation de
-        # la cloture cote maitre et avant la propagation followers.
-        # Distinguer les cas via `local_result.get("copy_close_mode")`
-        # (`full_close` vs `runner`) et `local_result.get("partial_close")`.
+        # NEW BRIDGE ----------------------------------------
+
         remote_results = await self._close_remote_links(
             ticket,
             close_as_runner=self._should_keep_remote_runner(local_result),
@@ -510,10 +535,19 @@ class CopyTradingRouter:
         if not partial_result.get("success"):
             return partial_result
 
-        # TODO: (bridge CLOSE_PARTIAL): appeler le bridge ici apres confirmation
-        # de la cloture partielle sur le maitre. Le reliquat reste ouvert et le
-        # ticket maitre ne change pas; utiliser `volume_remaining` pour le
-        # distinguer d'une cloture totale.
+        # NEW BRIDGE ------------------------------------------------
+        try:
+            source = SourceStrategy(broker_name="FTMO", account_size=10000)
+            payload = ClosePayload(
+                source_ticket_id=str(position.ticket),
+                full_close=False,
+                reason="PARTIAL_PROFIT_CLOSE",
+            )
+            BridgeConnector().send_order(source_strategy=source, payload=payload)
+        except Exception as e:
+            logger.error(f"BridgeError: {e}")
+        # NEW BRIDGE ------------------------------------------------
+
         remaining_volume = Decimal(str(partial_result.get("volume_remaining") or "0"))
         if remaining_volume <= Decimal("0"):
             partial_result["copy_close_mode"] = "full_close"
@@ -593,9 +627,18 @@ class CopyTradingRouter:
         if master_snapshot:
             await self._rebuild_links_for_external_close(ticket, master_snapshot)
 
-        # TODO: (bridge CLOSE_EXTERNAL): appeler le bridge ici quand le maitre a
-        # deja ete ferme hors du chemin nominal (TP/SL/fermeture manuelle).
-        # Ce point couvre les clotures detectees apres coup, avant sync followers.
+        # NEW BRIDGE ------------------------------------------------
+        try:
+            source = SourceStrategy(broker_name="FTMO", account_size=10000)
+            payload = ClosePayload(
+                source_ticket_id=str(ticket), full_close=True, reason="EXTERNAL_CLOSE"
+            )
+            BridgeConnector().send_order(source_strategy=source, payload=payload)
+        except Exception as e:
+            logger.error(f"BridgeError: {e}")
+
+        # NEW BRIDGE -------------------------------------------------
+
         remote_results = await self._close_remote_links(
             ticket,
             close_as_runner=profit > 0.0,
