@@ -138,13 +138,11 @@ class CopyTradingRouter:
         Returns:
             tuple[set[int], set[int]]: Logins forces actifs puis logins forces inactifs.
         """
-        enabled_raw = (
-            os.getenv("BANKER_COPY_ENABLED_LOGINS")
-            or str(getattr(self.settings, "banker_copy_enabled_logins", "") or "")
+        enabled_raw = os.getenv("BANKER_COPY_ENABLED_LOGINS") or str(
+            getattr(self.settings, "banker_copy_enabled_logins", "") or ""
         )
-        disabled_raw = (
-            os.getenv("BANKER_COPY_DISABLED_LOGINS")
-            or str(getattr(self.settings, "banker_copy_disabled_logins", "") or "")
+        disabled_raw = os.getenv("BANKER_COPY_DISABLED_LOGINS") or str(
+            getattr(self.settings, "banker_copy_disabled_logins", "") or ""
         )
         return self._parse_login_override(enabled_raw), self._parse_login_override(disabled_raw)
 
@@ -329,7 +327,9 @@ class CopyTradingRouter:
                 )
                 symbols_response.raise_for_status()
                 symbols_payload = symbols_response.json()
-                raw_symbols = symbols_payload.get("symbols", []) if isinstance(symbols_payload, dict) else []
+                raw_symbols = (
+                    symbols_payload.get("symbols", []) if isinstance(symbols_payload, dict) else []
+                )
                 if isinstance(raw_symbols, list):
                     runtime_status["symbols_count"] = len(raw_symbols)
             except Exception as exc:
@@ -365,6 +365,9 @@ class CopyTradingRouter:
         if not local_result.get("success"):
             return local_result
 
+        # TODO: (bridge OPEN): appeler le bridge ici, juste apres confirmation de
+        # l'ouverture sur le compte maitre et avant le fan-out followers.
+        # Utiliser `local_result["ticket"]` comme ticket_id maitre.
         active_targets = [target for target in self.targets.values() if target.enabled]
         if not active_targets:
             return local_result
@@ -398,6 +401,10 @@ class CopyTradingRouter:
         if not local_result.get("success"):
             return local_result
 
+        # TODO: (bridge CLOSE) appeler le bridge ici, juste apres confirmation de
+        # la cloture cote maitre et avant la propagation followers.
+        # Distinguer les cas via `local_result.get("copy_close_mode")`
+        # (`full_close` vs `runner`) et `local_result.get("partial_close")`.
         remote_results = await self._close_remote_links(
             ticket,
             close_as_runner=self._should_keep_remote_runner(local_result),
@@ -503,6 +510,10 @@ class CopyTradingRouter:
         if not partial_result.get("success"):
             return partial_result
 
+        # TODO: (bridge CLOSE_PARTIAL): appeler le bridge ici apres confirmation
+        # de la cloture partielle sur le maitre. Le reliquat reste ouvert et le
+        # ticket maitre ne change pas; utiliser `volume_remaining` pour le
+        # distinguer d'une cloture totale.
         remaining_volume = Decimal(str(partial_result.get("volume_remaining") or "0"))
         if remaining_volume <= Decimal("0"):
             partial_result["copy_close_mode"] = "full_close"
@@ -535,7 +546,9 @@ class CopyTradingRouter:
         partial_result["modify_result"] = modify_result
         return partial_result
 
-    async def modify_position(self, ticket: int, sl: float = 0.0, tp: float = 0.0) -> dict[str, Any]:
+    async def modify_position(
+        self, ticket: int, sl: float = 0.0, tp: float = 0.0
+    ) -> dict[str, Any]:
         """
         Modifie une position maitre puis propage la modification aux copies.
 
@@ -580,6 +593,9 @@ class CopyTradingRouter:
         if master_snapshot:
             await self._rebuild_links_for_external_close(ticket, master_snapshot)
 
+        # TODO: (bridge CLOSE_EXTERNAL): appeler le bridge ici quand le maitre a
+        # deja ete ferme hors du chemin nominal (TP/SL/fermeture manuelle).
+        # Ce point couvre les clotures detectees apres coup, avant sync followers.
         remote_results = await self._close_remote_links(
             ticket,
             close_as_runner=profit > 0.0,
@@ -784,7 +800,9 @@ class CopyTradingRouter:
         """
         master_balance = await self._resolve_master_balance()
         tasks = [
-            self._execute_scaled_copy(target=target, master_order=master_order, master_balance=master_balance)
+            self._execute_scaled_copy(
+                target=target, master_order=master_order, master_balance=master_balance
+            )
             for target in targets
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1150,11 +1168,15 @@ class CopyTradingRouter:
         """
         payload = {
             "symbol": order.symbol,
-            "action": order.action.value if isinstance(order.action, TradeAction) else str(order.action),
+            "action": order.action.value
+            if isinstance(order.action, TradeAction)
+            else str(order.action),
             "volume": str(order.volume),
             "entry_price": str(order.entry_price) if order.entry_price is not None else None,
             "stop_loss": str(order.stop_loss_price) if order.stop_loss_price is not None else None,
-            "take_profit": str(order.take_profit_price) if order.take_profit_price is not None else None,
+            "take_profit": str(order.take_profit_price)
+            if order.take_profit_price is not None
+            else None,
             "account_id": str(order.account_id) if order.account_id is not None else None,
             "comment": order.comment,
             "source": order.source.value if hasattr(order.source, "value") else str(order.source),
@@ -1185,9 +1207,7 @@ class CopyTradingRouter:
 
         data["target_id"] = str(target.id)
         data["target_name"] = target.name
-        log_payload = (
-            "Copy trading: cible=%s | ordre=%s %s %s | succes=%s | ticket=%s | message=%s"
-        )
+        log_payload = "Copy trading: cible=%s | ordre=%s %s %s | succes=%s | ticket=%s | message=%s"
         log_args = (
             target.name,
             order.symbol,
@@ -1259,7 +1279,9 @@ class CopyTradingRouter:
         normalized: list[dict[str, Any]] = []
         for result in results:
             if isinstance(result, Exception):
-                normalized.append({"success": False, "message": f"Echec cloture distante: {result}"})
+                normalized.append(
+                    {"success": False, "message": f"Echec cloture distante: {result}"}
+                )
             else:
                 normalized.append(result)
 
@@ -1336,7 +1358,9 @@ class CopyTradingRouter:
             )
         return partial_result
 
-    async def _modify_remote_links(self, master_ticket: int, sl: float, tp: float) -> list[dict[str, Any]]:
+    async def _modify_remote_links(
+        self, master_ticket: int, sl: float, tp: float
+    ) -> list[dict[str, Any]]:
         """
         Propage une modification de SL/TP aux tickets distants lies.
 
@@ -1365,7 +1389,9 @@ class CopyTradingRouter:
         normalized: list[dict[str, Any]] = []
         for result in results:
             if isinstance(result, Exception):
-                normalized.append({"success": False, "message": f"Echec modification distante: {result}"})
+                normalized.append(
+                    {"success": False, "message": f"Echec modification distante: {result}"}
+                )
             else:
                 normalized.append(result)
         return normalized
@@ -1536,9 +1562,7 @@ class CopyTradingRouter:
                 for link in links
                 if not (link.target_id == target_id and link.remote_ticket == remote_ticket)
             ]
-            deduped_links.append(
-                RemoteTicketLink(target_id=target_id, remote_ticket=remote_ticket)
-            )
+            deduped_links.append(RemoteTicketLink(target_id=target_id, remote_ticket=remote_ticket))
             self._ticket_links[master_ticket] = deduped_links
 
     async def _resolve_master_balance(self) -> Decimal | None:
@@ -1612,7 +1636,7 @@ class CopyTradingRouter:
             Decimal: Volume cible arrondi au centieme inferieur.
         """
         ratio = Decimal(str(allocation_ratio or Decimal("1.0")))
-        
+
         # Division par 5 sur le Gold (XAUUSD) pour ramener le risque pip/volatilité
         # au même niveau que les paires Forex classiques.
         if symbol:
@@ -1738,9 +1762,7 @@ class CopyTradingRouter:
                 master_open_price=master_open_price,
                 remote_position=remote_position,
             )
-            matching_candidates.append(
-                ((volume_score, time_score, price_score), remote_position)
-            )
+            matching_candidates.append(((volume_score, time_score, price_score), remote_position))
 
         if not matching_candidates:
             return None
@@ -1814,7 +1836,9 @@ class CopyTradingRouter:
             return float("inf")
         return abs(remote_open_price - master_open_price)
 
-    async def _resolve_target_symbol(self, target: CopyTradingTarget, source_symbol: str) -> str | None:
+    async def _resolve_target_symbol(
+        self, target: CopyTradingTarget, source_symbol: str
+    ) -> str | None:
         """
         Traduit un symbole source vers le meilleur symbole cible disponible.
 
