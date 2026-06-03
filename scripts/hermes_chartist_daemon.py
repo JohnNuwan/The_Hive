@@ -390,7 +390,7 @@ Veuillez rédiger un bulletin chartiste extrêmement rigoureux, structuré et pr
 
     import os
     openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
-    llm_model = os.getenv("LLM_MODEL", "meta-llama/llama-3-8b-instruct:free")
+    llm_model = os.getenv("LLM_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
     
     if openrouter_api_key:
         headers = {
