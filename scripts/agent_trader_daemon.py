@@ -43,7 +43,7 @@ REDIS_HOST = "192.168.1.6"
 REDIS_PASSWORD = "devpassword"
 
 LLM_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-v4-flash")
 
 def get_analyst_reports(r: redis.Redis) -> dict[str, str]:
     """Recupere tous les rapports d'analyse publies par la Swarm."""
