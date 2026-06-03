@@ -388,46 +388,37 @@ Veuillez rédiger un bulletin chartiste extrêmement rigoureux, structuré et pr
 3. **Verdict Chartist & Biais Tactique** : Donnez le biais global (HAUSSIER / BAISSIER / NEUTRE) et un indice de confiance (Faible / Modéré / Élevé).
 """
 
-    hermes_url = "http://192.168.1.6:9500/chat"
-    payload = {
-        "message": prompt.strip(),
-        "expert": "trading",
-        "system_prompt": "You are Hermes, the master AI chief chartist and technical analysis officer. Analyze indicators and structural patterns for the trading fleet.",
-        "temperature": 0.3,
-        "max_tokens": 1000
-    }
-
-    try:
-        logger.info("Interrogation de l'expert Hermes pour %s (%s)...", symbol, timeframe)
-        response = requests.post(hermes_url, json=payload, timeout=45)
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("message", result.get("response", "Aucun contenu reçu de Hermes."))
-    except Exception as exc:
-        logger.warning("Échec de connexion directe à Hermes (port 9500) : %s. Tentative de secours vLLM...", exc)
-
-    # Secours vers vLLM Direct (port 8000)
-    vllm_url = "http://192.168.1.6:8000/v1/chat/completions"
-    vllm_model = os.getenv("VLLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
-    vllm_payload = {
-        "model": vllm_model,
-        "messages": [
-            {"role": "system", "content": "Vous êtes Hermes, le Maître Chartist de THE HIVE. Rédigez des bulletins d'analyse technique rigoureux et clairs en Français."},
-            {"role": "user", "content": prompt.strip()}
-        ],
-        "temperature": 0.3,
-        "max_tokens": 1000
-    }
+    import os
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
+    llm_model = os.getenv("LLM_MODEL", "meta-llama/llama-3-8b-instruct:free")
     
-    try:
-        logger.info("Interrogation du serveur vLLM de secours (%s)...", vllm_model)
-        response = requests.post(vllm_url, json=vllm_payload, timeout=45)
-        if response.status_code == 200:
-            content = response.json()["choices"][0]["message"]["content"]
-            return content
-    except Exception as exc:
-        logger.error("Échec de toutes les méthodes d'inférence LLM : %s", exc)
+    if openrouter_api_key:
+        headers = {
+            "Authorization": f"Bearer {openrouter_api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": llm_model,
+            "messages": [
+                {"role": "system", "content": "Vous etes Hermes, le Maitre Chartist de THE HIVE. Redigez des bulletins d'analyse technique rigoureux et clairs en Francais."},
+                {"role": "user", "content": prompt.strip()}
+            ],
+            "temperature": 0.3
+        }
         
+        try:
+            logger.info("Interrogation OpenRouter (%s) pour l'analyse chartiste de %s...", llm_model, symbol)
+            response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
+            if response.status_code == 200:
+                content = response.json()["choices"][0]["message"]["content"]
+                return content
+            else:
+                logger.warning("Erreur OpenRouter: %s", response.text)
+        except Exception as exc:
+            logger.error("Echec OpenRouter : %s", exc)
+    else:
+        logger.warning("Pas de OPENROUTER_API_KEY trouvee. Impossible de lancer l'analyse I.A.")
+
     # Fallback ultime purement algorithmique
     return f"""### 📊 ANALYSE TECHNIQUE AUTOMATIQUE (FALLBACK) — {symbol} [{timeframe}]
 *   **Prix Actuel** : {coords['close']:.2f}
@@ -479,6 +470,18 @@ def main() -> None:
             symbol_report += f"**Cours de clôture : {coords['close']:.2f}**\n\n"
             symbol_report += briefing
             reports.append((symbol_report, chart_bytes))
+            
+            # --- START LLM SWARM MEMORY LOGIC ---
+            try:
+                import redis
+                # Pousse le rapport dans la memoire partagee (Redis) pour que l'Agent Trader le lise.
+                r = redis.Redis(host='192.168.1.6', port=6379, db=0, password='devpassword')
+                redis_key = f"hive:agent:chartist:report:{symbol}:{args.timeframe.upper()}"
+                r.set(redis_key, symbol_report)
+                logger.info("Rapport publiÃ© dans la mÃ©moire Redis : %s", redis_key)
+            except Exception as e:
+                logger.error("Erreur de sauvegarde Swarm Memoire: %s", e)
+            # --- END LLM SWARM MEMORY LOGIC ---
             
             print(f"\n--- RAPPORT {symbol} ---\n{symbol_report}\n")
         except Exception as exc:

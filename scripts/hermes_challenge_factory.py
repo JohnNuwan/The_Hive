@@ -328,7 +328,10 @@ def scan_candidates(redis_client: Optional[Any]) -> List[ChampionCandidate]:
     # ── Source 3 : Synthétique (fallback si aucun candidat) ─────────────────
     if not candidates:
         logger.warning("Aucun candidat trouvé. Génération de candidats synthétiques de référence...")
-        symbols = ["XAUUSD", "EURUSD", "US100.cash"]
+        symbols = [
+            "XAUUSD", "EURUSD", "US100.cash", "BTCUSD",
+            "US30.cash", "GER40.cash", "US500.cash", "GBPUSD", "USDJPY",
+        ]
         for symbol in symbols:
             candidate = ChampionCandidate(
                 candidate_id=f"synthetic_{symbol.lower().replace('.', '_')}_{datetime.now().strftime('%Y%m%d')}",

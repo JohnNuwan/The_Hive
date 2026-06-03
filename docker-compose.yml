@@ -765,13 +765,17 @@ services:
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - TELEGRAM_TOPIC_ID=${TELEGRAM_TOPIC_ID:-}
       - TELEGRAM_NOTIFY_TRAINING=${TELEGRAM_NOTIFY_TRAINING:-1}
-      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}
       - JAX_PLATFORMS=${JAX_PLATFORMS:-cpu}
       - TRAINING_GPU_DEVICE=${TRAINING_GPU_DEVICE:-1}
       - CUDA_VISIBLE_DEVICES=${TRAINING_GPU_DEVICE:-1}
-        - TRAINING_CHILD_CUDA_VISIBLE_DEVICES=${TRAINING_CHILD_CUDA_VISIBLE_DEVICES:-0}
+      - TRAINING_CHILD_CUDA_VISIBLE_DEVICES=${TRAINING_CHILD_CUDA_VISIBLE_DEVICES:-0}
       - TRAINING_CHILD_JAX_PLATFORMS=${TRAINING_CHILD_JAX_PLATFORMS:-cuda}
       - NVIDIA_VISIBLE_DEVICES=${TRAINING_GPU_DEVICE:-1}
+      - TRAIN_GNN_SYMBOLS=${TRAIN_GNN_SYMBOLS}
+      - TRAIN_GNN_CONTEXT_SYMBOLS=${TRAIN_GNN_CONTEXT_SYMBOLS}
+      - MUZERO_SYMBOLS_SCALP=${MUZERO_SYMBOLS_SCALP}
+      - TRAINING_PROFILE=${TRAINING_PROFILE:-smart}
+      - MUZERO_PROMOTION_MIN_EVAL_SYMBOLS=${MUZERO_PROMOTION_MIN_EVAL_SYMBOLS:-1}
       - XLA_PYTHON_CLIENT_PREALLOCATE=${XLA_PYTHON_CLIENT_PREALLOCATE:-false}
       - XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.05}
       - TRAINING_TIMESCALE_ENABLED=${TRAINING_TIMESCALE_ENABLED:-1}
@@ -826,6 +830,7 @@ services:
       - API_SERVER_PORT=8642
       - OPENAI_API_KEY=${OPENROUTER_API_KEY}
       - OPENAI_API_BASE=https://openrouter.ai/api/v1
+      - API_SERVER_KEY=${HERMES_API_SERVER_KEY:-default_secret_key_123}
     volumes:
       - hermes_agent_data:/opt/data
     networks:
@@ -854,6 +859,27 @@ services:
       - redis
       - vllm
       - hermes-agent
+    restart: unless-stopped
+
+  hermes-factory:
+    build:
+      context: .
+      dockerfile: src/eva-banker/Dockerfile
+    container_name: the_hive-hermes-factory-1
+    healthcheck:
+      disable: true
+    command: ["python", "/app/scripts/hermes_challenge_factory.py", "--firm", "custom_strict", "--timeframe", "M15", "--loop", "--interval-minutes", "120"]
+    volumes:
+      - ./scripts:/app/scripts:ro
+      - ./data:/app/data
+      - ./src/shared:/app/src/shared:ro
+      - ./src/eva-banker:/app/src/eva-banker:ro
+    environment:
+      - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+    networks:
+      - hive-net
     restart: unless-stopped
 
 networks:

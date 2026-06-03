@@ -45,14 +45,13 @@ def analyze_rr_ratio(review: dict):
     print("=" * 50)
     
     # Extraire les stats des trades depuis la review
-    diagnostics = review.get("diagnostics", {})
-    pnl_stats = diagnostics.get("pnl_stats", {})
+    performance = review.get("performance", {})
     
-    total_pnl = pnl_stats.get("total_pnl", 0)
-    win_rate = pnl_stats.get("win_rate", 0)
-    avg_gain = pnl_stats.get("avg_gain", 0)
-    avg_loss = pnl_stats.get("avg_loss", 0)
-    n_trades = pnl_stats.get("n_trades", 0)
+    total_pnl = performance.get("realized_pnl", 0)
+    win_rate = performance.get("win_rate", 0)
+    avg_gain = performance.get("avg_gain", 0)
+    avg_loss = performance.get("avg_loss", 0)
+    n_trades = performance.get("total_trades", 0)
     
     print(f"  Trades totaux : {n_trades}")
     print(f"  PnL total     : {total_pnl:+.2f}")
@@ -113,6 +112,8 @@ def analyze_gnn(review: dict):
     print("=" * 50)
     
     diagnostics = review.get("diagnostics", {})
+    if isinstance(diagnostics, list):
+        diagnostics = {}
     bias_stats = diagnostics.get("bias_alignment_stats", {})
     
     neutral_rate = bias_stats.get("neutral_rate", None)
@@ -141,6 +142,8 @@ def analyze_muzero(review: dict):
     print("=" * 50)
     
     diagnostics = review.get("diagnostics", {})
+    if isinstance(diagnostics, list):
+        diagnostics = {}
     champion_info = diagnostics.get("champion_info", {})
     
     forced = os.getenv("BANKER_CPU_LIVE_CHAMPION_ID", "")

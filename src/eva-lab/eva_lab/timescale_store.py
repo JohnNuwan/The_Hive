@@ -192,6 +192,10 @@ def get_timescale_settings() -> dict[str, Any]:
             os.getenv("TRAINING_TIMESCALE_RUN_WINDOWS_TABLE"),
             DEFAULT_TABLES.run_windows,
         ),
+        metrics_history=_normalize_table_name(
+            os.getenv("TRAINING_TIMESCALE_METRICS_HISTORY_TABLE"),
+            DEFAULT_TABLES.metrics_history,
+        ),
     )
     storage_profile = str(os.getenv("TIMESCALE_STORAGE_PROFILE", DEFAULT_STORAGE_PROFILE) or "").strip().lower()
     if not storage_profile:

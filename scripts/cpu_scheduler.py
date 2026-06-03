@@ -283,12 +283,14 @@ def _run_once(args: argparse.Namespace) -> int:
     training_after = _fetch_training_snapshot(service_urls, args.timeout)
     if training_before and training_after:
         same_run = training_before.get("run_id") == training_after.get("run_id")
+        was_running = training_before.get("trainer_state") == "running"
         trainer_running = training_after.get("trainer_state") == "running"
-        if not same_run or not trainer_running:
+        if not same_run or (was_running and not trainer_running):
             logger.error(
-                "Le scheduler CPU a detecte une derive training: avant=%s apres=%s trainer=%s",
+                "Le scheduler CPU a detecte une derive training: avant=%s apres=%s trainer_avant=%s trainer_apres=%s",
                 training_before.get("run_id"),
                 training_after.get("run_id"),
+                training_before.get("trainer_state"),
                 training_after.get("trainer_state"),
             )
             return 2

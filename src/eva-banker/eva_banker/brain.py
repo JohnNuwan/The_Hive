@@ -2924,6 +2924,7 @@ class AutoTradingEngine:
                     position.symbol
                     for position in positions
                     if getattr(position, "symbol", None)
+                    and not str(getattr(position, "comment", "") or "").strip().lower().startswith("eva close")
                 }
 
                 # CLOSE DETECTION (Sprint 9)
@@ -3054,6 +3055,7 @@ class AutoTradingEngine:
                             position.symbol
                             for position in positions
                             if getattr(position, "symbol", None)
+                            and not str(getattr(position, "comment", "") or "").strip().lower().startswith("eva close")
                         }
 
                 status = await self.risk.get_current_status()
@@ -3715,6 +3717,7 @@ class AutoTradingEngine:
                             current_positions = await self.mt5.get_open_positions()
                             if current_positions and any(
                                 getattr(position, "symbol", None) == symbol
+                                and not str(getattr(position, "comment", "") or "").strip().lower().startswith("eva close")
                                 for position in current_positions
                             ):
                                 logger.info(

@@ -1695,6 +1695,8 @@ class CopyTradingRouter:
             rounding=ROUND_FLOOR,
         )
         if scaled_volume < Decimal("0.01"):
+            if master_volume > 0:
+                return Decimal("0.01")
             return Decimal("0")
         return scaled_volume
 

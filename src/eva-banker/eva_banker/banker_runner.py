@@ -75,6 +75,16 @@ def build_uvicorn_command(host: str, port: int, env_file: str) -> list[str]:
     ]
 
 
+def safe_write_stdout(text: str) -> None:
+    """Ecrit du texte dans stdout de maniere securisee face aux erreurs d'encodage."""
+    try:
+        sys.stdout.write(text)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "utf-8"
+        encoded = text.encode(encoding, errors="replace").decode(encoding)
+        sys.stdout.write(encoded)
+
+
 def stream_process_output(process: subprocess.Popen[str], log_file_path: Path) -> int:
     """Recopie la sortie d'un sous-processus vers la console et un fichier.
 
@@ -91,7 +101,7 @@ def stream_process_output(process: subprocess.Popen[str], log_file_path: Path) -
         f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
         f"Demarrage du logger Banker vers {log_file_path}\n"
     )
-    sys.stdout.write(start_line)
+    safe_write_stdout(start_line)
     sys.stdout.flush()
 
     with log_file_path.open("a", encoding="utf-8") as handle:
@@ -103,7 +113,7 @@ def stream_process_output(process: subprocess.Popen[str], log_file_path: Path) -
         for line in process.stdout:
             handle.write(line)
             handle.flush()
-            sys.stdout.write(line)
+            safe_write_stdout(line)
             sys.stdout.flush()
 
     return process.wait()

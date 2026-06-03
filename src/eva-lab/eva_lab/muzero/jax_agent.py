@@ -1084,7 +1084,20 @@ class JAXMuZeroAgent:
             )
         checkpoint_payload = dict(payload or {})
         self.params = checkpoint_payload["params"]
-        self.opt_state = checkpoint_payload.get("opt_state", self.opt_state)
+        loaded_opt_state = checkpoint_payload.get("opt_state")
+        if loaded_opt_state is not None:
+            try:
+                if jax.tree_util.tree_structure(loaded_opt_state) == jax.tree_util.tree_structure(self.opt_state):
+                    self.opt_state = loaded_opt_state
+                else:
+                    logger.warning("[JAXMuZeroAgent] Mismatch in optimizer state structure. Re-initializing opt_state.")
+                    self.opt_state = self.trainer.optimizer.init(self.params)
+            except Exception as exc:
+                logger.warning("[JAXMuZeroAgent] Error comparing optimizer states (%s). Re-initializing opt_state.", exc)
+                self.opt_state = self.trainer.optimizer.init(self.params)
+        else:
+            logger.info("[JAXMuZeroAgent] No optimizer state found in checkpoint. Re-initializing opt_state.")
+            self.opt_state = self.trainer.optimizer.init(self.params)
         raw_training_step_count = checkpoint_payload.get("training_step_count")
         if raw_training_step_count is None:
             raw_training_step_count = self._extract_training_step_from_checkpoint_path(path)
