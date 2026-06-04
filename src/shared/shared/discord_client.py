@@ -124,10 +124,16 @@ def build_discord_embed(text: str, channel: str, image_url: Optional[str] = None
 
     color = colors.get(channel, 0x2F3542)
     title = titles.get(channel, "THE HIVE SYSTEM MESSAGE")
-
+    
+    # Tronquer la description pour respecter la limite stricte de Discord (4096 caractères)
+    max_desc_len = 4000
+    description_text = text
+    if len(description_text) > max_desc_len:
+        description_text = description_text[:max_desc_len] + "\n\n... *(Rapport tronqué car trop long pour Discord)*"
+        
     embed = {
         "title": title,
-        "description": text,
+        "description": description_text,
         "color": color,
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "footer": {
