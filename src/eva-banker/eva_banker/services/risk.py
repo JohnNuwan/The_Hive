@@ -661,7 +661,7 @@ class RiskValidator:
 
         if profit < 0:
             self._consecutive_losses += 1
-            if self._consecutive_losses >= self.anti_tilt_losses:
+            if self._consecutive_losses >= self.anti_tilt_losses and self._daily_pnl < 0:
                 self._activate_anti_tilt()
         else:
             self._consecutive_losses = 0
