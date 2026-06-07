@@ -86,8 +86,14 @@ class JAXMuZeroAgent:
                                     new_params[muzero_key] = jnp.asarray(v)
                                     injected_count += 1
                     
-                    # Reconstruction de la structure immuable
-                    self.params = hk.data_structures.to_immutable_dict(new_params)
+                    # Reconstruction de la structure immuable (FlatMap de FlatMaps)
+                    immutable_params = {
+                        k: hk.data_structures.to_immutable_dict(v) if isinstance(v, dict) else v
+                        for k, v in new_params.items()
+                    }
+                    self.params = hk.data_structures.to_immutable_dict(immutable_params)
+                    # Ré-initialisation de l'état de l'optimiseur avec la structure et les valeurs correctes
+                    self.opt_state = self.trainer.optimizer.init(self.params)
                     logger.info(
                         "[JAXMuZeroAgent] Injecté %d tenseurs de l'encodeur JEPA pré-entraîné dans les poids MuZero.",
                         injected_count,

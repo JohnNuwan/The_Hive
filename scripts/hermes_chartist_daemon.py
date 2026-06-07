@@ -428,6 +428,203 @@ Veuillez rédiger un bulletin chartiste extrêmement rigoureux, structuré et pr
 *   *Note : L'expert Hermes n'a pas pu être joint pour une synthèse rédigée.*"""
 
 
+def clean_pdf_text(text: str) -> str:
+    """Nettoie le texte des caractères non-compatibles avec la police standard de FPDF."""
+    text = text.replace("’", "'").replace("“", '"').replace("”", '"')
+    text = text.replace("–", "-").replace("—", "-")
+    text = text.replace("œ", "oe").replace("Œ", "Oe")
+    text = text.replace("€", "EUR").replace("…", "...")
+    
+    # Table de correspondance minimale pour les emojis courants dans les briefings
+    emoji_map = {
+        "📊": "[Anal.]", "🚨": "[Alert]", "⚡": "[Signal]", "🕒": "[Time]",
+        "📈": "[Bull]", "📉": "[Bear]", "📋": "[Audit]", "🌿": "[EVA]",
+        "✅": "[OK]", "❌": "[Err]", "ℹ️": "[Info]", "⭐": "[*]", "✨": "[*]"
+    }
+    for emoji, replacement in emoji_map.items():
+        text = text.replace(emoji, replacement)
+    
+    # Encodage/décodage latin-1 pour éliminer tout autre caractère non supporté par la police Helvetica de base
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
+def generate_pdf_report(reports: list, timeframe: str) -> bytes:
+    """Génère un document PDF unifié et professionnel contenant tous les briefings et graphiques.
+
+    Args:
+        reports (list): Liste de tuples (symbol, briefing, chart_bytes, coords).
+        timeframe (str): Horizon de temps des briefings.
+
+    Returns:
+        bytes: Données binaires du PDF.
+    """
+    from fpdf import FPDF
+    import tempfile
+    import os
+
+    class ChartistPDF(FPDF):
+        def header(self):
+            # En-tête de page premium
+            self.set_fill_color(21, 21, 28) # #15151c (sombre premium)
+            self.rect(0, 0, 210, 25, "F")
+            
+            self.set_text_color(255, 255, 255)
+            self.set_font("helvetica", "B", 12)
+            self.set_xy(10, 5)
+            self.cell(0, 8, "THE HIVE - RAPPORT TECHNIQUE HERMES", new_x="LMARGIN", new_y="NEXT", align="L")
+            
+            self.set_font("helvetica", "I", 9)
+            self.set_text_color(164, 176, 190)
+            self.set_x(10)
+            now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+            self.cell(0, 5, f"Rapport Chartist Multi-Actifs - TF: {timeframe.upper()} - Edite le {now_str}", new_x="LMARGIN", new_y="NEXT", align="L")
+            
+            # Ligne de séparation bleue néon (#54a0ff)
+            self.set_draw_color(84, 160, 255)
+            self.set_line_width(0.8)
+            self.line(0, 25, 210, 25)
+            self.ln(15)
+
+        def footer(self):
+            # Pied de page discret
+            self.set_y(-15)
+            self.set_font("helvetica", "I", 8)
+            self.set_text_color(127, 140, 141)
+            self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", align="C")
+
+    pdf = ChartistPDF()
+    pdf.alias_nb_pages()
+    
+    # Page de garde / Cover Page
+    pdf.add_page()
+    
+    # Titre de la page de garde
+    pdf.ln(20)
+    pdf.set_font("helvetica", "B", 24)
+    pdf.set_text_color(47, 53, 66) # Gris ardoise
+    pdf.cell(0, 15, "BULLETIN CHARTISTE", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.cell(0, 15, "HERMES COGNITIVE", new_x="LMARGIN", new_y="NEXT", align="C")
+    
+    pdf.ln(10)
+    pdf.set_font("helvetica", "", 12)
+    pdf.set_text_color(127, 140, 141)
+    pdf.cell(0, 10, f"Analyse multi-devises et indices en horizon {timeframe.upper()}", new_x="LMARGIN", new_y="NEXT", align="C")
+    
+    pdf.ln(20)
+    # Liste des actifs inclus
+    pdf.set_font("helvetica", "B", 14)
+    pdf.set_text_color(84, 160, 255) # Bleu néon
+    pdf.cell(0, 10, "Actifs analyses dans ce rapport :", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(5)
+    
+    pdf.set_font("helvetica", "", 12)
+    pdf.set_text_color(47, 53, 66)
+    for symbol, _, _, coords in reports:
+        pdf.cell(0, 8, f"- {symbol} (Dernier cours : {coords['close']:.2f})", new_x="LMARGIN", new_y="NEXT", align="C")
+        
+    pdf.ln(25)
+    pdf.set_font("helvetica", "I", 9)
+    pdf.set_text_color(255, 71, 87) # Rouge alerte
+    disclaimer_text = (
+        "Disclaimer : Ce document est genere automatiquement par l'intelligence artificielle Hermes "
+        "a titre purement informatif. Il ne constitue pas un conseil en investissement ni une incitation "
+        "a negocier sur les marches financiers."
+    )
+    pdf.multi_cell(0, 5, disclaimer_text, align="C")
+
+    # Une page par symbole
+    for symbol, report_text, chart, coords in reports:
+        pdf.add_page()
+        
+        # Titre du symbole
+        pdf.set_font("helvetica", "B", 16)
+        pdf.set_text_color(84, 160, 255) # Bleu
+        pdf.cell(0, 10, f"Rapport Technique : {symbol}", new_x="LMARGIN", new_y="NEXT", align="L")
+        pdf.ln(2)
+        
+        # Tableau récapitulatif des indicateurs clés
+        pdf.set_font("helvetica", "B", 9)
+        pdf.set_fill_color(241, 242, 246)
+        pdf.set_text_color(47, 53, 66)
+        
+        headers = ["Metrique", "Valeur", "Metrique", "Valeur"]
+        widths = [45, 45, 45, 45]
+        
+        # Ligne d'en-tête du tableau
+        for h, w in zip(headers, widths):
+            pdf.cell(w, 7, h, border=1, align="C", fill=True)
+        pdf.ln()
+        
+        # Lignes de données
+        pdf.set_font("helvetica", "", 9)
+        data_rows = [
+            ("Cours de Cloture", f"{coords['close']:.4f}", "Momentum RSI (14)", f"{coords['rsi']:.2f}"),
+            ("Resistance Pivot", f"{coords['support']:.4f}", "Force ADX", f"{coords['adx']:.2f}"),
+            ("Support Pivot", f"{coords['resistance']:.4f}", "Volatilite ATR", f"{coords['atr']:.4f} ({coords['atr_pct']:.2f}%)"),
+            ("Fibonacci 61.8%", f"{coords['fibs']['fib_618']:.4f}", "Pente Tendance (20p)", f"{coords['trend_slope']:.6f}"),
+        ]
+        
+        for row in data_rows:
+            pdf.cell(widths[0], 6, row[0], border=1, align="L")
+            pdf.cell(widths[1], 6, row[1], border=1, align="C")
+            pdf.cell(widths[2], 6, row[2], border=1, align="L")
+            pdf.cell(widths[3], 6, row[3], border=1, align="C")
+            pdf.ln()
+            
+        pdf.ln(5)
+        
+        # Corps du Briefing
+        pdf.set_font("helvetica", "B", 11)
+        pdf.set_text_color(47, 53, 66)
+        pdf.cell(0, 8, "Synthese Cognitive d'Hermes :", new_x="LMARGIN", new_y="NEXT", align="L")
+        
+        pdf.set_font("helvetica", "", 9.5)
+        pdf.set_text_color(47, 53, 66)
+        
+        # Nettoyage et découpage du briefing
+        cleaned_briefing = clean_pdf_text(report_text)
+        # Supprime le titre s'il est répété
+        lines = cleaned_briefing.split("\n")
+        filtered_lines = []
+        for line in lines:
+            line_strip = line.strip()
+            # Enlever les balises markdown de titre pour les ré-afficher proprement ou les ignorer
+            if line_strip.startswith("###") or line_strip.startswith("##"):
+                clean_line = line_strip.lstrip("#").strip()
+                filtered_lines.append(f"\n{clean_line.upper()} :")
+            elif line_strip.startswith("*") or line_strip.startswith("-"):
+                clean_line = line_strip.lstrip("*-").strip()
+                filtered_lines.append(f"  - {clean_line}")
+            else:
+                filtered_lines.append(line_strip)
+                
+        reconstructed_text = "\n".join(filtered_lines).strip()
+        
+        # Remplacement des ** pour que ça ne fasse pas tâche dans le PDF
+        reconstructed_text = reconstructed_text.replace("**", "")
+        pdf.multi_cell(0, 4.5, reconstructed_text)
+        
+        # Insérer l'image du graphique technique
+        if chart:
+            pdf.ln(6)
+            # Sauvegarder dans un fichier temporaire
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+                f.write(chart)
+                temp_path = f.name
+            
+            # Positionner l'image de façon centrée
+            current_y = pdf.get_y()
+            if current_y > 180:
+                # Si pas assez de place pour l'image, on crée une nouvelle page (sans ré-en-tête de symbol)
+                pdf.add_page()
+                current_y = pdf.get_y()
+                
+            pdf.image(temp_path, x=25, y=current_y, w=160, h=80)
+            os.unlink(temp_path)
+            
+    return pdf.output()
+
+
 def main() -> None:
     """Routine principale d'exécution du Daemon Chartist."""
     if hasattr(sys.stdout, "reconfigure"):
@@ -469,7 +666,7 @@ def main() -> None:
             symbol_report = f"### 📊 BRIEFING CHARTISTE — {symbol} [{args.timeframe.upper()}]\n"
             symbol_report += f"**Cours de clôture : {coords['close']:.2f}**\n\n"
             symbol_report += briefing
-            reports.append((symbol_report, chart_bytes))
+            reports.append((symbol, briefing, chart_bytes, coords))
             
             # --- START LLM SWARM MEMORY LOGIC ---
             try:
@@ -482,6 +679,50 @@ def main() -> None:
             except Exception as e:
                 logger.error("Erreur de sauvegarde Swarm Memoire: %s", e)
             # --- END LLM SWARM MEMORY LOGIC ---
+
+            # --- START HIPPORAG 2 GRAPH MEMORY INGESTION ---
+            if not args.dry_run:
+                try:
+                    import asyncio
+                    from shared.memory_bridge import get_memory_bridge
+                    
+                    logger.info("Ingestion du rapport dans la memoire de graphe HippoRAG 2...")
+                    metadata = {
+                        "source": "hermes_chartist",
+                        "symbol": symbol,
+                        "timeframe": args.timeframe.upper(),
+                        "close": float(coords["close"]),
+                        "rsi": float(coords["rsi"]),
+                        "adx": float(coords["adx"]),
+                        "support": float(coords["support"]),
+                        "resistance": float(coords["resistance"])
+                    }
+                    
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None
+                    
+                    if loop and loop.is_running():
+                        loop.create_task(
+                            get_memory_bridge().add(
+                                content=symbol_report,
+                                user_id="hermes_chartist",
+                                metadata=metadata
+                            )
+                        )
+                    else:
+                        asyncio.run(
+                            get_memory_bridge().add(
+                                content=symbol_report,
+                                user_id="hermes_chartist",
+                                metadata=metadata
+                            )
+                        )
+                    logger.info("✅ Ingestion HippoRAG 2 terminee pour %s.", symbol)
+                except Exception as e:
+                    logger.error("Erreur d'ingestion HippoRAG 2: %s", e)
+            # --- END HIPPORAG 2 GRAPH MEMORY INGESTION ---
             
             print(f"\n--- RAPPORT {symbol} ---\n{symbol_report}\n")
         except Exception as exc:
@@ -495,22 +736,32 @@ def main() -> None:
         logger.info("Exécution en mode simulation terminée. Aucun message envoyé.")
         return
 
-    # Envoi individuel par symbole à Discord (évite la limite de taille d'Embed de 4096 caractères)
+    # Compilation et envoi du rapport PDF global unifié
     if reports:
-        import time
-        logger.info("Transmission des bulletins chartistes avec graphiques vers Discord...")
-        for report, chart in reports:
-            try:
-                if chart:
-                    logger.info("Envoi du rapport avec graphique...")
-                    DiscordClient()._send_photo_sync_internal(chart, report, category="analyse_technique")
-                else:
-                    logger.info("Envoi du rapport texte seul (secours)...")
-                    DiscordClient().send_sync(report, category="analyse_technique")
-                time.sleep(0.5)
-            except Exception as exc:
-                logger.error("Impossible de transmettre le rapport à Discord : %s", exc)
-        logger.info("✅ Transmission Discord terminée.")
+        try:
+            logger.info("Compilation du rapport PDF global...")
+            pdf_bytes = generate_pdf_report(reports, args.timeframe)
+            
+            # Nom de fichier daté et propre
+            date_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
+            filename = f"Rapport_Chartist_{args.timeframe.upper()}_{date_str}.pdf"
+            
+            logger.info("Envoi du PDF a Discord : %s", filename)
+            symbols_str = ", ".join([r[0] for r in reports])
+            discord_msg = (
+                f"📊 **Bulletin Chartist Hermes [{args.timeframe.upper()}]**\n"
+                f"Consultez l'analyse technique detaillee pour les actifs suivants : **{symbols_str}**.\n"
+                f"*Genere a {datetime.now().strftime('%H:%M:%S')}*"
+            )
+            DiscordClient().send_file_sync(
+                file_bytes=pdf_bytes,
+                filename=filename,
+                content=discord_msg,
+                category="analyse_technique"
+            )
+            logger.info("✅ Transmission PDF Discord terminee.")
+        except Exception as exc:
+            logger.error("Impossible de compiler ou de transmettre le rapport PDF a Discord : %s", exc, exc_info=True)
 
 
 if __name__ == "__main__":

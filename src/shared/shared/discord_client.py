@@ -281,6 +281,95 @@ class DiscordClient:
             category=category,
         )
 
+    def _send_file_sync_internal(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        content: str = "",
+        *,
+        category: Optional[str] = None,
+    ) -> None:
+        """Envoie de manière synchrone un fichier vers le salon approprié.
+
+        Args:
+            file_bytes (bytes): Données binaires du fichier.
+            filename (str): Nom du fichier (ex: 'rapport.pdf').
+            content (str): Message texte associé au fichier.
+            category (Optional[str]): Catégorie optionnelle.
+        """
+        if not self.enabled:
+            return
+
+        channel = dispatch_channel(content or filename, category)
+        webhook_url = DISCORD_WEBHOOKS.get(channel)
+        if not webhook_url:
+            logger.warning("Aucun Webhook de fichier trouvé pour le salon : %s", channel)
+            return
+
+        files = {"file": (filename, file_bytes, "application/pdf" if filename.endswith(".pdf") else "application/octet-stream")}
+        data = {}
+        if content:
+            data["content"] = content
+
+        try:
+            response = requests.post(webhook_url, data=data, files=files, timeout=30)
+            if response.status_code not in (200, 204):
+                logger.error(
+                    "Erreur d'envoi Fichier Discord (%s) : %s - %s",
+                    channel,
+                    response.status_code,
+                    response.text,
+                )
+        except Exception as exc:
+            logger.error("Erreur de connexion Fichier Discord (%s) : %s", channel, exc)
+
+    async def send_file(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        content: str = "",
+        *,
+        category: Optional[str] = None,
+    ) -> None:
+        """Envoie asynchrone d'un fichier vers le salon approprié."""
+        if not self.enabled:
+            return
+        await asyncio.to_thread(
+            self._send_file_sync_internal,
+            file_bytes,
+            filename,
+            content,
+            category=category,
+        )
+
+    def send_file_sync(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        content: str = "",
+        *,
+        category: Optional[str] = None,
+    ) -> None:
+        """Déclenche un envoi synchrone de fichier tolérant à l'absence de boucle d'événement."""
+        if not self.enabled:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(
+                None,
+                functools.partial(
+                    self._send_file_sync_internal,
+                    file_bytes,
+                    filename,
+                    content,
+                    category=category,
+                ),
+            )
+        except RuntimeError:
+            self._send_file_sync_internal(file_bytes, filename, content, category=category)
+        except Exception as exc:
+            logger.error("Erreur Discord synchrone (envoi fichier) : %s", exc)
+
     def send_sync(
         self,
         message: str,
