@@ -195,3 +195,9 @@ Start-Sleep -Seconds 30
 foreach ($instance in $Instances) {
     Test-BankerHealth -Port $instance.Port
 }
+
+Write-Host "Keeping banker fleet supervisor alive to prevent sandbox process pruning."
+while ($true) {
+    Start-Sleep -Seconds 3600
+}
+

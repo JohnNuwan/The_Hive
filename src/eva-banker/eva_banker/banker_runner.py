@@ -132,6 +132,11 @@ def run_banker(host: str, port: int, env_file: str) -> int:
     """
 
     os.environ["BANKER_ENV_FILE"] = env_file
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path=env_file, override=True)
+    except ImportError:
+        pass
     log_file_path = resolve_log_file_path()
     command = build_uvicorn_command(host=host, port=port, env_file=env_file)
     process = subprocess.Popen(

@@ -164,6 +164,18 @@ class AutoTradingEngine:
                 "EURUSD,GBPUSD,USDJPY,XAUUSD",
             )
         )
+        # Symboles explicitement bloques (BANKER_BLOCKED_SYMBOLS) : jamais trades,
+        # meme si proposes par un champion lab legacy.
+        self._blocked_symbols: frozenset[str] = frozenset(
+            s.strip().upper()
+            for s in self._env_text("BANKER_BLOCKED_SYMBOLS", "").split(",")
+            if s.strip()
+        )
+        if self._blocked_symbols:
+            logger.info("Symboles bloques explicitement: %s", sorted(self._blocked_symbols))
+            self._cpu_live_symbols = [
+                s for s in self._cpu_live_symbols if s.upper() not in self._blocked_symbols
+            ]
         self._cpu_live_max_volume = max(
             0.01,
             self._env_float("BANKER_CPU_LIVE_MAX_VOLUME", 0.10),
@@ -478,6 +490,9 @@ class AutoTradingEngine:
             for symbol in live_priority_symbols:
                 normalized = str(symbol or "").strip().upper()
                 if not normalized or normalized in seen or nemesis.is_symbol_quarantined(normalized):
+                    continue
+                if normalized in self._blocked_symbols:
+                    logger.debug("Symbole %s ignore (bloque explicitement).", normalized)
                     continue
                 effective_symbols.append(normalized)
                 seen.add(normalized)
@@ -3105,14 +3120,9 @@ class AutoTradingEngine:
                     if not self.is_active: break
                     
                     try:
-                        if symbol in open_symbols:
-                            logger.info(
-                                "Signal ignore sur %s: position deja ouverte sur ce symbole.",
-                                symbol,
-                            )
-                            continue
+                        is_exit_scan = symbol in open_symbols
 
-                        if self._is_symbol_entry_cooling_down(symbol):
+                        if not is_exit_scan and self._is_symbol_entry_cooling_down(symbol):
                             logger.info(
                                 "Signal ignore sur %s: cooldown d'entree encore actif.",
                                 symbol,
@@ -3124,7 +3134,7 @@ class AutoTradingEngine:
                             continue
                             
                         # NEW: Localized News Tracking (Sprint 11 P3)
-                        if getattr(self, "news", None) and self.news.should_block_trading(symbol):
+                        if not is_exit_scan and getattr(self, "news", None) and self.news.should_block_trading(symbol):
                             continue
                             
                         # 3. Get Context from Cortex (Sprint 10)
@@ -3338,9 +3348,10 @@ class AutoTradingEngine:
                         raw_model_value = 0.0
                         raw_prediction = "HOLD"
                         checkpoint_path = None
-                        model_version = None
                         model_status = "unknown"
                         veto_reason = None
+                        model_wants_close = False
+                        model_wants_split = False
                         
                         try:
                             from shared.internal_auth import InternalAuth
@@ -3428,9 +3439,17 @@ class AutoTradingEngine:
                                             elif raw_model_action_id == 2:
                                                 action = TradeAction.SELL
                                                 comment = f"{dreamer_comment} -> SELL"
+                                            elif raw_model_action_id == 4 or raw_prediction == "CLOSE":
+                                                model_wants_close = True
+                                                comment = f"{dreamer_comment} -> CLOSE"
+                                            elif raw_model_action_id == 3 or raw_prediction == "SPLIT":
+                                                model_wants_split = True
+                                                comment = f"{dreamer_comment} -> SPLIT"
 
                                             if not live_model_allowed:
                                                 comment = f"Champion requis ({lab_selection})"
+                                                model_wants_close = False
+                                                model_wants_split = False
                                             if action is not None and not live_model_allowed:
                                                 logger.info(
                                                     "Entree live refusee sur %s: champion requis (%s / %s).",
@@ -3440,16 +3459,18 @@ class AutoTradingEngine:
                                                 )
                                                 action = None
                                             if (
-                                                action is not None
+                                                (action is not None or model_wants_close or model_wants_split)
                                                 and self._cpu_live_mode
                                                 and lab_selection_policy != "champion_only"
                                             ):
                                                 logger.info(
-                                                    "Entree live refusee sur %s: cpu_live exige champion_only (recu=%s).",
+                                                    "Entree/Sortie live refusee sur %s: cpu_live exige champion_only (recu=%s).",
                                                     symbol,
                                                     lab_selection_policy,
                                                 )
                                                 action = None
+                                                model_wants_close = False
+                                                model_wants_split = False
                                                 live_model_allowed = False
                                                 live_block_reason = (
                                                     f"selection_policy_invalide:{lab_selection_policy or 'unknown'}"
@@ -3600,8 +3621,64 @@ class AutoTradingEngine:
                         await self._publish_trading_context_event(symbol, live_horizon, decision_state)
                         await self._publish_trading_decision_event(symbol, live_horizon, decision_state)
 
+                        # Signaux de fermeture/split issus du modele (CLOSE/SPLIT)
+                        if model_wants_close or model_wants_split:
+                            live_position = self._find_symbol_position(symbol, positions)
+                            if live_position:
+                                ticket = getattr(live_position, "ticket", None)
+                                pos_action = getattr(live_position, "action", None)
+                                if ticket and pos_action in (TradeAction.BUY, TradeAction.SELL):
+                                    if model_wants_close:
+                                        logger.warning(f"❌ Model Close Signal on {symbol} (ticket={ticket})")
+                                        await self.mt5.close_position(ticket)
+                                    elif model_wants_split:
+                                        if self._can_split_live_runner(live_position):
+                                            logger.warning(f"✂️ Model Split Signal on {symbol} (ticket={ticket})")
+                                            action_label = "BUY" if pos_action == TradeAction.BUY else "SELL"
+                                            open_price = float(getattr(live_position, "open_price", 0.0) or 0.0)
+                                            profit = current_price - open_price if action_label == "BUY" else open_price - current_price
+                                            be_threshold, trail_activation, trail_distance, stale_minutes = self._get_shepherd_thresholds(symbol)
+                                            if action_label == "BUY":
+                                                new_sl = open_price + max(self._get_symbol_pip_size(symbol), trail_distance * 0.25)
+                                            else:
+                                                new_sl = open_price - max(self._get_symbol_pip_size(symbol), trail_distance * 0.25)
+                                            await self._split_positive_runner_or_secure(
+                                                position=live_position,
+                                                action_label=action_label,
+                                                fallback_sl=new_sl,
+                                                latent_profit=profit,
+                                            )
+                                        else:
+                                            logger.info(f"Model Split Signal on {symbol} ignored: volume is too small to split.")
+                            continue
+
                         if action is None:
                             continue
+
+                        # Reversal logic for model-initiated trades
+                        live_position = self._find_symbol_position(symbol, positions)
+                        if live_position:
+                            pos_action = getattr(live_position, "action", None)
+                            if (action == TradeAction.BUY and pos_action == TradeAction.SELL) or \
+                               (action == TradeAction.SELL and pos_action == TradeAction.BUY):
+                                logger.warning(f"🔄 Reversal: Closing opposite {pos_action.name} position #{live_position.ticket} before opening {action.name}")
+                                close_res = await self.mt5.close_position(live_position.ticket)
+                                if close_res.get("success"):
+                                    # Refresh positions snapshot immediately
+                                    refreshed_positions = await self.mt5.get_open_positions()
+                                    if refreshed_positions is not None:
+                                        positions = refreshed_positions
+                                        self.risk.update_positions_snapshot(positions)
+                                        open_symbols.discard(symbol)
+                                else:
+                                    logger.error(f"Failed to close opposite position on reversal: {close_res.get('message')}")
+                                    action = None
+                                    continue
+                            else:
+                                # Same direction or other action: do not open a duplicate trade
+                                logger.info(f"Model action {action.name} ignored: already has an open {pos_action.name} position on {symbol}")
+                                action = None
+                                continue
 
                         # D. Execution
                         atr = features.get("ATR", 0.0)

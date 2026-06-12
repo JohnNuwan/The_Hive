@@ -1078,6 +1078,21 @@ class Arena:
         if raw_candidate.exists():
             return raw_candidate
 
+        if "challenger" in model_id:
+            if "ckpt" in model_id:
+                ckpt_candidates = sorted(
+                    list(self.weights_dir.glob(f"{normalized_engine}_{horizon.lower()}_ckpt_*.pkl"))
+                    + list(self.weights_dir.glob(f"{normalized_engine}_{horizon.lower()}_ckpt*.pkl")),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                if ckpt_candidates:
+                    return ckpt_candidates[0]
+            else:
+                latest_path = self.weights_dir / f"{normalized_engine}_{horizon.lower()}_latest.pkl"
+                if latest_path.exists():
+                    return latest_path
+
         candidates = []
         if normalized_engine == "dreamer":
             if model_id in {"gen_000_baseline", "dreamer_champion"}:

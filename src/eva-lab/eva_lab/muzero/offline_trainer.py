@@ -1,4 +1,4 @@
-﻿"""Entraine DreamerV3 hors ligne a partir des historiques de marche."""
+"""Entraine DreamerV3 hors ligne a partir des historiques de marche."""
 
 from __future__ import annotations
 
@@ -33,7 +33,9 @@ from eva_lab.training_status import (
     set_training_runtime_state,
     write_terminal_summary,
 )
-from eva_lab.training_utils import load_history_frame, normalize_training_symbols
+import copy
+from eva_lab.training_utils import load_history_frame, normalize_training_symbols, build_muzero_market_context
+from eva_lab.muzero.environment import TradingEnvironment
 from shared.indicators import IndicatorFactory
 
 logging.basicConfig(level=logging.INFO)
@@ -409,59 +411,51 @@ class OfflineTrainer:
                 **self._build_status_kwargs(),
             )
 
+            env_config = copy.copy(self.config)
+            env_config.randomize_episode_start = False
+            env_config.episode_warmup_bars = 0
+
             try:
-                df = self._compute_indicators(frame)
+                market_data, day_labels = build_muzero_market_context(frame)
             except Exception as exc:
-                logger.error("Calcul des indicateurs impossible pour %s: %s", symbol, exc)
+                logger.error("Calcul des indicateurs ou preparation impossible pour %s: %s", symbol, exc)
                 continue
 
             segment_length = self.sequence_length
-            closes_seg = df["close"].values
-            for start_idx in range(0, len(df) - segment_length, self.sequence_stride):
+            for start_idx in range(0, len(market_data) - segment_length, self.sequence_stride):
                 end_idx = start_idx + segment_length
-                if end_idx > len(df):
+                if end_idx > len(market_data):
                     break
 
-                seg_closes = closes_seg[start_idx:end_idx]
+                segment_data = market_data[start_idx:end_idx]
+                segment_day_labels = day_labels[start_idx:end_idx]
+
+                try:
+                    env = TradingEnvironment(
+                        data=segment_data,
+                        day_labels=segment_day_labels,
+                        symbol=symbol,
+                        config=env_config,
+                        max_steps=segment_length - 1,
+                        training_mode=True,
+                    )
+                except Exception as exc:
+                    logger.error("Instanciation de l'environnement impossible pour %s à l'index %s: %s", symbol, start_idx, exc)
+                    continue
+
                 game = GameHistory()
-                actions = np.random.choice([0, 1, 2], size=segment_length, p=[0.35, 0.325, 0.325])
-                initial_balance = 10000.0
-                balance = initial_balance
-                peak_balance = initial_balance
-                position = 0
-                entry_price = 0.0
+                try:
+                    obs_vec, _ = env.reset()
+                except Exception as exc:
+                    logger.error("Reset de l'environnement impossible pour %s à l'index %s: %s", symbol, start_idx, exc)
+                    continue
 
                 for index_in_segment in range(segment_length):
-                    idx = start_idx + index_in_segment
-                    price = seg_closes[index_in_segment]
-                    obs_vec = np.zeros(self.config.observation_shape)
-                    obs_vec[0] = price / 3000.0
-                    obs_vec[1] = df["rsi"].values[idx] / 100.0
-                    features_list = [
-                        df["rsi"].values[idx],
-                        df["macd_hist"].values[idx],
-                        df["macd_signal"].values[idx],
-                        df["vwap"].values[idx],
-                        df["obv"].values[idx] / 10000.0,
-                        df["momentum"].values[idx],
-                        df["trix"].values[idx],
-                        df["stoch_k"].values[idx],
-                        df["stoch_d"].values[idx],
-                        df["cci"].values[idx],
-                        df["adx"].values[idx],
-                        df["adx_plus_di"].values[idx],
-                        df["adx_minus_di"].values[idx],
-                        df["ichi_tenkan"].values[idx],
-                        df["ichi_kijun"].values[idx],
-                        df["ichi_senkou_a"].values[idx],
-                        df["ichi_senkou_b"].values[idx],
-                    ]
-                    for feature_index, feature_value in enumerate(features_list):
-                        if feature_index + 2 < self.config.observation_shape[0]:
-                            obs_vec[feature_index + 2] = feature_value
+                    if env.position_size != 0:
+                        action_val = np.random.choice([0, 1, 2, 3, 4], p=[0.35, 0.15, 0.15, 0.15, 0.20])
+                    else:
+                        action_val = np.random.choice([0, 1, 2], p=[0.40, 0.30, 0.30])
 
-                    action_val = int(actions[index_in_segment])
-                    reward = 0.0
                     if action_val == 1:
                         self.action_counts["BUY"] += 1
                     elif action_val == 2:
@@ -469,37 +463,25 @@ class OfflineTrainer:
                     else:
                         self.action_counts["HOLD"] += 1
 
+                    reward = 0.0
+                    next_obs = obs_vec
                     if index_in_segment < segment_length - 1:
-                        next_price = seg_closes[index_in_segment + 1]
-                        ret = (next_price - price) / max(price, 1e-9) * 100
-                        if action_val == 1:
-                            reward = ret - 0.02
-                            if position == 0:
-                                position = 1
-                                entry_price = price
-                        elif action_val == 2:
-                            reward = -ret - 0.02
-                            if position == 0:
-                                position = -1
-                                entry_price = price
-                        elif action_val == 0 and position != 0:
-                            trade_pnl = (
-                                (price - entry_price) / max(entry_price, 1e-9) * 100
-                                if position == 1
-                                else (entry_price - price) / max(entry_price, 1e-9) * 100
-                            )
-                            balance += balance * trade_pnl / 100
-                            position = 0
-
-                        peak_balance = max(peak_balance, balance)
-                        drawdown_pct = (peak_balance - balance) / max(peak_balance, 1e-9) * 100
-                        if drawdown_pct >= 4.0:
-                            reward -= 15.0
+                        try:
+                            next_obs, reward, done, truncated, info = env.step(action_val)
+                        except Exception as exc:
+                            logger.error("Step de l'environnement impossible pour %s: %s", symbol, exc)
+                            done = True
 
                     action_one_hot = np.zeros(self.config.action_space_size)
                     action_one_hot[action_val] = 1.0
-                    game.store(obs_vec, action_one_hot, reward, [1 / 3] * 3, 0.0)
 
+                    policy_target = [1.0 / self.config.action_space_size] * self.config.action_space_size
+                    game.store(obs_vec, action_one_hot, reward, policy_target, 0.0)
+
+                    if index_in_segment < segment_length - 1:
+                        obs_vec = next_obs
+
+                game.metadata = env.get_summary()
                 self.replay_buffer.save_game(game)
                 total_steps += segment_length
 

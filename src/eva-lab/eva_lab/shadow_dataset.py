@@ -429,12 +429,12 @@ def _parse_timestamp(value: Any) -> datetime:
         datetime: Timestamp normalise.
     """
     if isinstance(value, datetime):
-        return value
+        return value.replace(tzinfo=None)
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value)
+        return datetime.fromtimestamp(value).replace(tzinfo=None)
     if isinstance(value, str) and value.strip():
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
         except ValueError:
             pass
-    return datetime.min
+    return datetime.min.replace(tzinfo=None)

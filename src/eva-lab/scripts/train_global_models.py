@@ -830,6 +830,8 @@ def _evaluate_policy_precheck_window(
     loss_pol_per_head_limit = float(
         getattr(config, "policy_precheck_max_loss_pol_per_head", 1.12) or 1.12
     )
+    has_v6_metrics = any("close_quality_score" in item for item in history)
+    has_symbol_metrics = any("close_quality_by_symbol" in item for item in history)
     full_checks = {
         "loss_pol_per_head": (
             medians["loss_pol_per_head"] <= loss_pol_per_head_limit
@@ -859,22 +861,22 @@ def _evaluate_policy_precheck_window(
         "short_entry_share": medians["short_entry_share"] >= float(
             getattr(config, "policy_precheck_min_short_entry_share", 0.35) or 0.35
         ),
-        "close_quality_score": medians["close_quality_score"] >= float(
+        "close_quality_score": not has_v6_metrics or medians["close_quality_score"] >= float(
             getattr(config, "policy_precheck_min_close_quality_score", 0.40) or 0.40
         ),
-        "split_efficiency": medians["split_efficiency"] >= float(
+        "split_efficiency": not has_v6_metrics or medians["split_efficiency"] >= float(
             getattr(config, "policy_precheck_min_split_efficiency", 0.35) or 0.35
         ),
-        "pyramid_efficiency": medians["pyramid_efficiency"] >= float(
+        "pyramid_efficiency": not has_v6_metrics or medians["pyramid_efficiency"] >= float(
             getattr(config, "policy_precheck_min_pyramid_efficiency", 0.35) or 0.35
         ),
-        "slbe_capture_rate": medians["slbe_capture_rate"] >= float(
+        "slbe_capture_rate": not has_v6_metrics or medians["slbe_capture_rate"] >= float(
             getattr(config, "policy_precheck_min_slbe_capture_rate", 0.45) or 0.45
         ),
-        "hold_drag_score": medians["hold_drag_score"] <= float(
+        "hold_drag_score": not has_v6_metrics or medians["hold_drag_score"] <= float(
             getattr(config, "policy_precheck_max_hold_drag_score", 0.10) or 0.10
         ),
-        "good_close_symbols": medians["good_close_symbols"] >= float(
+        "good_close_symbols": not has_symbol_metrics or medians["good_close_symbols"] >= float(
             getattr(config, "policy_precheck_min_good_close_symbols", 5) or 5
         ),
     }
@@ -907,6 +909,10 @@ def _evaluate_policy_precheck_window(
             getattr(config, "policy_screen_min_short_entry_share", 0.35) or 0.35
         ),
     }
+    if has_v6_metrics and has_symbol_metrics:
+        screen_checks["good_close_symbols"] = medians["good_close_symbols"] >= float(
+            getattr(config, "policy_precheck_min_good_close_symbols", 5) or 5
+        )
     full_failed_check = next((name for name, passed in full_checks.items() if not passed), None)
     screen_failed_check = next((name for name, passed in screen_checks.items() if not passed), None)
     if full_failed_check is None:

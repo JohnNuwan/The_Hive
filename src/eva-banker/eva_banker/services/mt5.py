@@ -178,6 +178,7 @@ class MT5Service:
         self._inflight_order_signatures: set[str] = set()
         self._order_guard_lock = asyncio.Lock()
         self._reconnect_lock = asyncio.Lock()
+        self._server_offset_seconds: float = 0.0
         self._reconnect_cooldown = timedelta(
             seconds=max(5, getattr(settings, "mt5_reconnect_cooldown_seconds", 15))
         )
@@ -820,6 +821,7 @@ class MT5Service:
 
             self.mock_mode = False
             self.is_connected = True
+            await self._update_server_offset()
             if self._last_disconnect_reason:
                 logger.info("MT5: connexion retablie sur le compte %s.", account_info.login)
             self._last_disconnect_reason = None
@@ -829,6 +831,38 @@ class MT5Service:
             logger.exception(f"Erreur connexion MT5: {e}")
             self._mark_live_disconnected(str(e))
             return False
+
+    async def _update_server_offset(self) -> None:
+        """Calcule le décalage horaire entre le serveur du broker et la machine locale."""
+        if self.mock_mode:
+            self._server_offset_seconds = 0.0
+            return
+
+        try:
+            symbols_to_try = ["EURUSD", "USDJPY", "GBPUSD", "XAUUSD"]
+            tick = None
+            for sym in symbols_to_try:
+                await self.ensure_symbol_selected(sym)
+                tick = await asyncio.to_thread(mt5.symbol_info_tick, sym)
+                if tick is not None and getattr(tick, "time", 0) > 0:
+                    break
+            
+            if tick is not None:
+                server_ts = float(tick.time)
+                local_ts = datetime.now().timestamp()
+                raw_offset = server_ts - local_ts
+                self._server_offset_seconds = round(raw_offset / 1800.0) * 1800.0
+                logger.info(
+                    "Décalage horaire détecté avec le serveur MT5: %s heures (%s secondes).",
+                    self._server_offset_seconds / 3600.0,
+                    self._server_offset_seconds
+                )
+            else:
+                self._server_offset_seconds = 0.0
+                logger.warning("Impossible de détecter le décalage horaire MT5, utilisation de 0.0s par défaut.")
+        except Exception as exc:
+            self._server_offset_seconds = 0.0
+            logger.error("Erreur lors du calcul du décalage horaire MT5: %s", exc)
 
     async def initialize_symbols(self, symbols: list[str]) -> None:
         """
@@ -1135,7 +1169,7 @@ class MT5Service:
                     commission=Decimal(str(getattr(pos, "commission", 0.0))),
                     magic_number=pos.magic,
                     comment=str(getattr(pos, "comment", "") or ""),
-                    open_time=datetime.fromtimestamp(pos.time),
+                    open_time=datetime.fromtimestamp(pos.time) - timedelta(seconds=self._server_offset_seconds),
                 )
             )
         return positions
@@ -2101,7 +2135,7 @@ class MT5Service:
                     "profit": deal.profit,
                     "swap": deal.swap,
                     "commission": deal.commission,
-                    "time": datetime.fromtimestamp(deal.time),
+                    "time": datetime.fromtimestamp(deal.time) - timedelta(seconds=self._server_offset_seconds),
                     "comment": deal.comment,
                     "magic": deal.magic,
                 })

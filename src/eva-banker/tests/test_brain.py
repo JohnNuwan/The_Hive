@@ -112,3 +112,27 @@ def test_resolve_live_position_state_for_sell_position():
     assert state["position_state"] == -1.0
     assert state["unrealized_return"] > 0.0
     assert state["slbe_state"] == 1.0
+
+
+def test_find_symbol_position():
+    """Verifie que _find_symbol_position retourne la bonne position."""
+    pos1 = SimpleNamespace(symbol="EURUSD", ticket=111)
+    pos2 = SimpleNamespace(symbol="GBPUSD", ticket=222)
+    positions = [pos1, pos2]
+
+    assert AutoTradingEngine._find_symbol_position("EURUSD", positions) == pos1
+    assert AutoTradingEngine._find_symbol_position("GBPUSD", positions) == pos2
+    assert AutoTradingEngine._find_symbol_position("XAUUSD", positions) is None
+    assert AutoTradingEngine._find_symbol_position("EURUSD", None) is None
+
+
+def test_can_split_live_runner():
+    """Verifie les conditions pour splitter un runner."""
+    pos1 = SimpleNamespace(volume=0.05)
+    pos2 = SimpleNamespace(volume=0.01)
+    pos3 = SimpleNamespace(volume=0.02)
+
+    assert AutoTradingEngine._can_split_live_runner(pos1) is True
+    assert AutoTradingEngine._can_split_live_runner(pos2) is False
+    assert AutoTradingEngine._can_split_live_runner(pos3) is True
+    assert AutoTradingEngine._can_split_live_runner(None) is False

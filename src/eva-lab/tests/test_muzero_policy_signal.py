@@ -2499,8 +2499,14 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         config.window_size = 512
         config.batch_size = 2
 
+        synthetic_data = np.zeros((10, 26), dtype=np.float32)
+        synthetic_data[:, 0] = 100.0  # open
+        synthetic_data[:, 1] = 101.0  # high
+        synthetic_data[:, 2] = 99.0   # low
+        synthetic_data[:, 3] = 100.0  # close
+
         agent = JAXMuZeroAgent(config)
-        env = TrackingEnvironment(symbol="XAUUSD", config=config, max_steps=1)
+        env = TrackingEnvironment(data=synthetic_data, symbol="XAUUSD", config=config, max_steps=1)
         agent.play_game(env, exploration=True)
 
         self.assertTrue(env.root_policy_called)
@@ -2513,11 +2519,45 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         from eva_lab.muzero.config import MuZeroConfigV3
         from eva_lab.muzero.jax_agent import JAXMuZeroAgent
 
+        config = MuZeroConfigV3(
+            horizon="scalp",
+            symbols=["XAUUSD"],
+            max_symbols=1,
+            dataset_source="csv",
+        )
+        config.num_simulations = 1
+        config.max_moves = 1
+        config.window_size = 512
+        config.batch_size = 2
+
+        synthetic_data = np.zeros((10, 26), dtype=np.float32)
+        synthetic_data[:, 0] = 100.0  # open
+        synthetic_data[:, 1] = 101.0  # high
+        synthetic_data[:, 2] = 99.0   # low
+        synthetic_data[:, 3] = 100.0  # close
+
+        agent = JAXMuZeroAgent(config)
+        env = TradingEnvironment(data=synthetic_data, symbol="XAUUSD", config=config, max_steps=1)
+        game = agent.play_game(env, exploration=True)
+        self.assertEqual(len(game.policies), 1)
+        self.assertEqual(len(game.values), 1)
+
+        game.policies[0] = np.zeros(config.action_space_size, dtype=np.float32)
+        game.values[0] = 123.456
+
+        agent.reanalyze_game(game)
+
+        self.assertEqual(len(game.policies), 1)
+        self.assertEqual(len(game.values), 1)
+        self.assertAlmostEqual(float(np.sum(game.policies[0])), 1.0, places=5)
+        self.assertNotAlmostEqual(float(game.values[0]), 123.456, places=3)
+
     def test_sanitize_metrics_keeps_text_scalars(self) -> None:
         """Conserve les metriques texte sans les convertir en flottants."""
 
         self._require_jax_stack()
 
+        from eva_lab.muzero.config import MuZeroConfigV3
         from eva_lab.muzero.jax_agent import JAXMuZeroAgent
 
         agent = object.__new__(JAXMuZeroAgent)
@@ -2533,33 +2573,6 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         self.assertEqual(sanitized["labels"], ["a", "b"])
         self.assertAlmostEqual(float(sanitized["loss_total"]), 1.25, places=6)
 
-        config = MuZeroConfigV3(
-            horizon="scalp",
-            symbols=["XAUUSD"],
-            max_symbols=1,
-            dataset_source="csv",
-        )
-        config.num_simulations = 1
-        config.max_moves = 1
-        config.window_size = 512
-        config.batch_size = 2
-
-        agent = JAXMuZeroAgent(config)
-        env = TradingEnvironment(symbol="XAUUSD", config=config, max_steps=1)
-        game = agent.play_game(env, exploration=True)
-        self.assertEqual(len(game.policies), 1)
-        self.assertEqual(len(game.values), 1)
-
-        game.policies[0] = np.zeros(config.action_space_size, dtype=np.float32)
-        game.values[0] = 123.456
-
-        agent.reanalyze_game(game)
-
-        self.assertEqual(len(game.policies), 1)
-        self.assertEqual(len(game.values), 1)
-        self.assertAlmostEqual(float(np.sum(game.policies[0])), 1.0, places=5)
-        self.assertNotAlmostEqual(float(game.values[0]), 123.456, places=3)
-
     def test_live_observation_preserves_position_state_without_changing_shape(self) -> None:
         """Injecte l'etat live de position dans le vecteur sans changer `[32]`."""
 
@@ -2568,7 +2581,7 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         from eva_lab.muzero.jax_agent import JAXMuZeroAgent
 
         agent = JAXMuZeroAgent.__new__(JAXMuZeroAgent)
-        agent.config = SimpleNamespace(observation_shape=(32,))
+        agent.config = SimpleNamespace(observation_shape=(35,))
         obs_vec = agent.process_observation(
             {
                 "symbol": "XAUUSD",
@@ -2608,7 +2621,7 @@ class MuZeroPolicySignalTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(obs_vec.shape[0], 32)
+        self.assertEqual(obs_vec.shape[0], 35)
         self.assertAlmostEqual(float(obs_vec[26]), 1.0, places=6)
         self.assertAlmostEqual(float(obs_vec[27]), 0.012, places=6)
         self.assertAlmostEqual(float(obs_vec[28]), 1.0, places=6)
@@ -2900,10 +2913,11 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         uniform_root = trainer._build_root_legal_policy(jnp.asarray([False]))
         smoothed = trainer._smooth_target_policy(target_policy, uniform_root, 0.10)
         logits = jnp.log(jnp.clip(smoothed, 1e-8, 1.0))
-        sharp_loss = optax.softmax_cross_entropy(logits, target_policy)
+        logits_sharp = jnp.log(jnp.clip(target_policy, 1e-8, 1.0))
+        loss_of_sharp_pred = optax.softmax_cross_entropy(logits_sharp, smoothed)
         smooth_loss = optax.softmax_cross_entropy(logits, smoothed)
 
-        self.assertLess(float(smooth_loss[0]), float(sharp_loss[0]))
+        self.assertLess(float(smooth_loss[0]), float(loss_of_sharp_pred[0]))
 
     def test_loss_pol_per_head_divise_la_loss_par_nombre_de_tetes(self) -> None:
         """Normalise correctement la loss policy par tete racine plus unroll."""
@@ -3226,7 +3240,7 @@ class MuZeroPolicySignalTests(unittest.TestCase):
         config = SimpleNamespace(
             arena_screen_recent_steps=2500,
             arena_screen_candidate_count=5,
-            arena_screen_window_size=500,
+            arena_screen_window_size=5,
             checkpoint_interval=500,
         )
         history: list[dict[str, object]] = []

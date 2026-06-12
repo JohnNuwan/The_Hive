@@ -3,10 +3,17 @@ import json
 import os
 import uuid
 from dataclasses import asdict, dataclass
+from decimal import Decimal
 
 import requests
 
 from .hmac_helper import generate_hmac_signature
+
+
+def json_default(obj):
+    if isinstance(obj, Decimal):
+        return float(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 @dataclass(kw_only=True)
@@ -73,7 +80,7 @@ class BridgeConnector:
         return f"{command_type}-{uuid_cmd}"
 
     def _generate_iso_datetime(self) -> str:
-        created_at = datetime.datetime.now(datetime.UTC)  # ISO 8601
+        created_at = datetime.datetime.now(datetime.timezone.utc)  # ISO 8601
         return created_at.isoformat()
 
     def _generate_full_payload(
@@ -102,7 +109,7 @@ class BridgeConnector:
         full_payload = self._generate_full_payload(
             command_id, command_type, created_at, source_strategy, payload
         )
-        json_payload = json.dumps(full_payload)
+        json_payload = json.dumps(full_payload, default=json_default)
 
         bridge_url = os.getenv("BRIDGE_URL")
         if not bridge_url:

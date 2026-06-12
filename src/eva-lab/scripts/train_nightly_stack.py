@@ -26,8 +26,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("eva_lab.nightly_training")
 
 WORKDIR = Path(__file__).resolve().parents[1]
-SUMMARY_PATH = WORKDIR / "data" / "checkpoints" / "nightly_training_summary.json"
-LOCK_PATH = WORKDIR / "data" / "checkpoints" / "nightly_training.lock"
+gpu_id = os.getenv("TRAINING_GPU_DEVICE", "1")
+SUMMARY_PATH = WORKDIR / "data" / "checkpoints" / f"nightly_training_summary_{gpu_id}.json"
+LOCK_PATH = WORKDIR / "data" / "checkpoints" / f"nightly_training_{gpu_id}.lock"
 SHADOW_DIR = WORKDIR / "data" / "shadow_learning"
 
 
@@ -601,6 +602,60 @@ def run_step(name: str, command: list[str], extra_env: dict[str, str] | None = N
     logger.info("Etape %s terminee avec succes.", name)
 
 
+def run_steps_parallel(steps: list[tuple[str, list[str], dict[str, str] | None]]) -> None:
+    """Execute plusieurs etapes d'entrainement en parallele dans des processus isoles.
+
+    Args:
+        steps (list[tuple[str, list[str], dict[str, str] | None]]): Liste de tuples (name, command, extra_env)
+    """
+    processes = []
+    for name, command, extra_env in steps:
+        env = os.environ.copy()
+        pythonpath_entries = [str(WORKDIR), env.get("PYTHONPATH", "")]
+        env["PYTHONPATH"] = os.pathsep.join([entry for entry in pythonpath_entries if entry])
+        if extra_env:
+            env.update(extra_env)
+        if _targets_muzero_trainer(command):
+            env = _build_muzero_child_runtime_env(env)
+            logger.info(
+                "Etape parallele %s executee en mode GPU cible (CUDA_VISIBLE_DEVICES=%s, JAX_PLATFORMS=%s).",
+                name,
+                env.get("CUDA_VISIBLE_DEVICES"),
+                env.get("JAX_PLATFORMS"),
+            )
+            append_training_log(
+                (
+                    f"Etape parallele {name}: runtime MuZero cible "
+                    f"CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES')} "
+                    f"JAX_PLATFORMS={env.get('JAX_PLATFORMS')}."
+                ),
+                source="nightly",
+            )
+
+        logger.info("Debut etape parallele %s: %s", name, command)
+        mark_step_running(name, phase="demarrage")
+        append_training_log(
+            f"Debut de l'etape parallele {name}.",
+            source="nightly",
+        )
+        proc = subprocess.Popen(command, cwd=WORKDIR, env=env)
+        processes.append((name, proc))
+
+    failures = []
+    for name, proc in processes:
+        returncode = proc.wait()
+        if returncode != 0:
+            failures.append((name, returncode))
+            logger.error("Etape parallele %s a echoue avec le code %d", name, returncode)
+        else:
+            logger.info("Etape parallele %s terminee avec succes.", name)
+
+    if failures:
+        fail_desc = ", ".join(f"{name} (code {code})" for name, code in failures)
+        raise RuntimeError(f"Echec des etapes paralleles: {fail_desc}")
+
+
+
 def _stop_vllm_container() -> None:
     """Arrete temporairement le conteneur vLLM pour liberer la VRAM sur le GPU 0."""
     logger.info("Arrêt temporaire du conteneur vLLM sur le GPU 0...")
@@ -755,43 +810,55 @@ def main() -> dict[str, object]:
         else:
             _stop_vllm_container()
 
+        target_gpu = os.getenv("TRAINING_GPU_DEVICE", "1")
+        primary_gpu = target_gpu
+        secondary_gpu = "0" if target_gpu == "1" else target_gpu
+
         if run_jepa:
             logger.info("Lancement du pre-entrainement auto-supervise VICReg (Market-JEPA)...")
-            run_step("jepa_pretrain", [sys.executable, "scripts/train_jepa.py"], extra_env={"CUDA_VISIBLE_DEVICES": "0"})
+            run_step("jepa_pretrain", [sys.executable, "scripts/train_jepa.py"], extra_env={"CUDA_VISIBLE_DEVICES": secondary_gpu})
             append_step(summary, "jepa_pretrain", "ok")
 
         if run_gnn:
             run_step("gnn", [sys.executable, "scripts/train_gnn.py"],
-                     extra_env={"CUDA_VISIBLE_DEVICES": "0", "JAX_PLATFORMS": "cpu"})
+                     extra_env={"CUDA_VISIBLE_DEVICES": secondary_gpu, "JAX_PLATFORMS": "cpu"})
             append_step(summary, "gnn", "ok")
 
-        if run_muzero:
+        if run_muzero or run_dreamer:
             horizons = _resolve_horizons()
             for horizon in horizons:
-                step_name = f"muzero_{horizon}"
-                # Entraînement parallèle JAX sur les deux GPU (0 et 1)
-                run_step(
-                    step_name,
-                    [sys.executable, "scripts/train_global_models.py"],
-                    extra_env={
-                        "MUZERO_HORIZON": horizon,
-                        "CUDA_VISIBLE_DEVICES": "1",
-                        "TRAINING_CHILD_CUDA_VISIBLE_DEVICES": "1"
-                    },
-                )
-                append_step(summary, step_name, "ok")
-
-        if run_dreamer:
-            run_step(
-                "dreamer_offline",
-                [sys.executable, "-m", "eva_lab.muzero.offline_trainer"],
-                extra_env={
-                    "DREAMER_EPOCHS": os.getenv("DREAMER_EPOCHS", "1500"),
-                    "CUDA_VISIBLE_DEVICES": "0",
-                    "TRAINING_CHILD_CUDA_VISIBLE_DEVICES": "0"
-                },
-            )
-            append_step(summary, "dreamer_offline", "ok")
+                parallel_steps = []
+                if run_muzero:
+                    parallel_steps.append((
+                        f"muzero_{horizon}",
+                        [sys.executable, "scripts/train_global_models.py"],
+                        {
+                            "MUZERO_HORIZON": horizon,
+                            "CUDA_VISIBLE_DEVICES": primary_gpu,
+                            "TRAINING_CHILD_CUDA_VISIBLE_DEVICES": primary_gpu
+                        }
+                    ))
+                if run_dreamer:
+                    parallel_steps.append((
+                        f"dreamer_{horizon}",
+                        [sys.executable, "-m", "eva_lab.muzero.offline_trainer"],
+                        {
+                            "DREAMER_HORIZON": horizon,
+                            "DREAMER_EPOCHS": os.getenv("DREAMER_EPOCHS", "1500"),
+                            "CUDA_VISIBLE_DEVICES": secondary_gpu,
+                            "TRAINING_CHILD_CUDA_VISIBLE_DEVICES": secondary_gpu
+                        }
+                    ))
+                
+                if len(parallel_steps) > 1:
+                    logger.info("Lancement parallele de MuZero et Dreamer pour l'horizon %s...", horizon)
+                    run_steps_parallel(parallel_steps)
+                    for name, _, _ in parallel_steps:
+                        append_step(summary, name, "ok")
+                else:
+                    for name, cmd, ext_env in parallel_steps:
+                        run_step(name, cmd, extra_env=ext_env)
+                        append_step(summary, name, "ok")
 
         # Arena : compare challenger vs champion et promeut si victoire
         if run_arena:
@@ -800,7 +867,7 @@ def main() -> dict[str, object]:
                 run_step(
                     "arena_promote",
                     [sys.executable, "scripts/run_arena_promote.py"],
-                    extra_env={"CUDA_VISIBLE_DEVICES": "0"},
+                    extra_env={"CUDA_VISIBLE_DEVICES": secondary_gpu},
                 )
                 append_step(summary, "arena_promote", "ok")
             except Exception as arena_exc:
@@ -851,7 +918,7 @@ def main() -> dict[str, object]:
                 run_step(
                     "redteam",
                     [sys.executable, "scripts/run_redteam.py", "--window", "30"],
-                    extra_env={"CUDA_VISIBLE_DEVICES": "0"},
+                    extra_env={"CUDA_VISIBLE_DEVICES": secondary_gpu},
                 )
                 append_step(summary, "redteam", "ok")
             except Exception as redteam_exc:

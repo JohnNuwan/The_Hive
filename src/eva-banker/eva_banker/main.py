@@ -1566,6 +1566,7 @@ async def get_trading_status():
             "symbols_total": len(app.state.auto_engine.symbols),
             "batch_size": len(app.state.auto_engine.get_symbol_batch(advance=False)),
             "lab_live": live_universe_status,
+            "blocked_symbols": list(getattr(app.state.auto_engine, "_blocked_symbols", [])),
         }
     }
     await _publish_trading_status_snapshot(payload)
@@ -1911,4 +1912,15 @@ async def discover_available_symbols(
             "include_crypto": include_crypto,
             "max_symbols": max_symbols,
         },
+    }
+
+
+@app.get("/debug/env", tags=["Système"])
+async def debug_env():
+    engine = getattr(app.state, "auto_engine", None)
+    return {
+        "os_env_blocked": os.getenv("BANKER_BLOCKED_SYMBOLS"),
+        "engine_blocked": str(getattr(engine, "_blocked_symbols", "NOT_FOUND")),
+        "engine_blocked_type": str(type(getattr(engine, "_blocked_symbols", None))),
+        "cpu_live_symbols": getattr(engine, "_cpu_live_symbols", "NOT_FOUND"),
     }

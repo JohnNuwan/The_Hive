@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import Any
 
 STATUS_DIR = Path(os.getenv("TRAINING_CHECKPOINT_DIR", "data/checkpoints"))
-STATUS_PATH = STATUS_DIR / "training_status.json"
-RUN_LOG_PATH = STATUS_DIR / "training_run.log"
-NIGHTLY_SUMMARY_PATH = STATUS_DIR / "nightly_training_summary.json"
+gpu_id = os.getenv("TRAINING_GPU_DEVICE", "1")
+STATUS_PATH = STATUS_DIR / f"training_status_{gpu_id}.json"
+RUN_LOG_PATH = STATUS_DIR / f"training_run_{gpu_id}.log"
+NIGHTLY_SUMMARY_PATH = STATUS_DIR / f"nightly_training_summary_{gpu_id}.json"
 CPU_SCHEDULER_STATE_PATH = STATUS_DIR / "cpu_scheduler" / "state.json"
-NIGHTLY_LOCK_PATH = STATUS_DIR / "nightly_training.lock"
+NIGHTLY_LOCK_PATH = STATUS_DIR / f"nightly_training_{gpu_id}.lock"
 GA_SEEDED_MUZERO_DIR = STATUS_DIR / "ga_seeded_muzero"
 GA_SEEDED_MUZERO_STATE_PATH = GA_SEEDED_MUZERO_DIR / "current_campaign.json"
 ARENA_SUMMARY_DIR = STATUS_DIR / "arena_reports"

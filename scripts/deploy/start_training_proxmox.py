@@ -1,4 +1,4 @@
-﻿"""Synchronise EVA Lab sur Proxmox puis lance l'entrainement nocturne."""
+"""Synchronise EVA Lab sur Proxmox puis lance l'entrainement nocturne."""
 
 from __future__ import annotations
 
@@ -20,6 +20,12 @@ from datetime import datetime
 from pathlib import Path
 
 import paramiko
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    load_dotenv("instances/.env.banker.master.local")
+except ImportError:
+    pass
 
 HOST = os.getenv("HIVE_SSH_HOST", "192.168.1.6")
 USER = os.getenv("HIVE_SSH_USER", "aza")
@@ -611,6 +617,7 @@ REMOTE_ENV_LOADER = """if [ -f .env ]; then
     python3 - <<'PY'
 from __future__ import annotations
 
+import os
 import pathlib
 import shlex
 
@@ -624,7 +631,8 @@ for raw_line in env_path.read_text(encoding="utf-8").splitlines():
     value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         value = value[1:-1]
-    print(f"export {key}={shlex.quote(value)}")
+    if key not in os.environ:
+        print(f"export {key}={shlex.quote(value)}")
 PY
   )"
 fi
@@ -634,9 +642,9 @@ REMOTE_LAUNCH_SCRIPT = """#!/usr/bin/env bash
 set -euo pipefail
 
 PROJECT_DIR=\"/home/aza/The_Hive\"
-LOCK_FILE=\"$PROJECT_DIR/data/checkpoints/nightly_training.lock\"
-LOCK_DIR=\"$PROJECT_DIR/data/checkpoints/nightly_training.lock.d\"
-SUMMARY_FILE=\"$PROJECT_DIR/data/checkpoints/nightly_training_summary.json\"
+LOCK_FILE=\"$PROJECT_DIR/data/checkpoints/nightly_training_${TRAINING_GPU_DEVICE:-1}.lock\"
+LOCK_DIR=\"$PROJECT_DIR/data/checkpoints/nightly_training_${TRAINING_GPU_DEVICE:-1}.lock.d\"
+SUMMARY_FILE=\"$PROJECT_DIR/data/checkpoints/nightly_training_summary_${TRAINING_GPU_DEVICE:-1}.json\"
 cd \"$PROJECT_DIR\"
 
 """ + REMOTE_ENV_LOADER + """
@@ -779,7 +787,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-lock_file = Path("/home/aza/The_Hive/data/checkpoints/nightly_training.lock")
+import os
+lock_file = Path(f"/home/aza/The_Hive/data/checkpoints/nightly_training_{os.environ.get('TRAINING_GPU_DEVICE', '1')}.lock")
 try:
     payload = json.loads(lock_file.read_text(encoding="utf-8"))
 except Exception:
@@ -792,7 +801,11 @@ PY
 }
 
 list_active_trainer_containers() {
-  docker ps --format '{{.Names}}' | grep '^the_hive-eva-trainer-run-' || true
+  for c in $(docker ps --format '{{.Names}}' | grep 'eva-trainer-run-' || true); do
+    if docker inspect $c 2>/dev/null | grep -q TRAINING_GPU_DEVICE=${TRAINING_GPU_DEVICE:-1}; then
+      echo $c
+    fi
+  done
 }
 
 acquire_lock() {
@@ -1842,7 +1855,7 @@ def _build_manual_massive_overrides() -> dict[str, str]:
         "TRAINING_PROFILE": "research",
         "TRAINING_AUTOMATION_MODE": "force_research",
         "TRAINING_RUN_TRIGGER": "manual_massive_research",
-        "NIGHTLY_KEEP_VLLM": "0",
+        "NIGHTLY_KEEP_VLLM": "1",
         "RUN_TRAIN_GNN": "1",
         "RUN_TRAIN_MUZERO": "1",
         "RUN_TRAIN_DREAMER": "1",
@@ -5110,12 +5123,28 @@ def _verify_remote_training_stopped(client: paramiko.SSHClient) -> dict[str, Any
         from pathlib import Path
 
         remote_dir = Path(%(remote_dir)s)
-        lock_file = remote_dir / "data" / "checkpoints" / "nightly_training.lock"
-        lock_dir = remote_dir / "data" / "checkpoints" / "nightly_training.lock.d"
-        raw_processes = [
+        gpu_id = %(gpu_id)s
+        lock_file = remote_dir / "data" / "checkpoints" / f"nightly_training_{gpu_id}.lock"
+        lock_dir = remote_dir / "data" / "checkpoints" / f"nightly_training_{gpu_id}.lock.d"
+        
+        raw_processes = []
+        for line in subprocess.run("pgrep -f 'scripts/train_global_models.py' || true", shell=True, capture_output=True, text=True, check=False).stdout.splitlines():
+            pid = line.strip()
+            if not pid:
+                continue
+            try:
+                import pathlib
+                env_text = pathlib.Path(f"/proc/{pid}/environ").read_text(errors="ignore")
+                if f"TRAINING_GPU_DEVICE={gpu_id}" in env_text:
+                    cmd_line = pathlib.Path(f"/proc/{pid}/cmdline").read_text(errors="ignore").replace("\\x00", " ")
+                    raw_processes.append(f"{pid} {cmd_line}")
+            except Exception:
+                pass
+
+        raw_containers = [
             line.strip()
             for line in subprocess.run(
-                "pgrep -af 'scripts/train_global_models.py' || true",
+                "docker ps --format '{{.Names}}' | grep 'eva-trainer-run-' || true",
                 shell=True,
                 capture_output=True,
                 text=True,
@@ -5123,17 +5152,13 @@ def _verify_remote_training_stopped(client: paramiko.SSHClient) -> dict[str, Any
             ).stdout.splitlines()
             if line.strip()
         ]
-        containers = [
-            line.strip()
-            for line in subprocess.run(
-                "docker ps --format '{{.Names}}' | grep '^the_hive-eva-trainer-run-' || true",
-                shell=True,
-                capture_output=True,
-                text=True,
-                check=False,
-            ).stdout.splitlines()
-            if line.strip()
-        ]
+        containers = []
+        for c in raw_containers:
+            inspect_cmd = f"docker inspect {c} 2>/dev/null"
+            inspect_out = subprocess.run(inspect_cmd, shell=True, capture_output=True, text=True, check=False).stdout
+            if f'"TRAINING_GPU_DEVICE={gpu_id}"' in inspect_out:
+                containers.append(c)
+
         payload = {
             "lock_exists": lock_file.exists() or lock_dir.exists(),
             "processes": raw_processes,
@@ -5141,7 +5166,7 @@ def _verify_remote_training_stopped(client: paramiko.SSHClient) -> dict[str, Any
         }
         print(json.dumps(payload, ensure_ascii=True))
         """
-    ) % {"remote_dir": repr(REMOTE_DIR)}
+    ) % {"remote_dir": repr(REMOTE_DIR), "gpu_id": repr(os.getenv("TRAINING_GPU_DEVICE", "1"))}
     snapshot = _run_remote_python_json(client, python_code, timeout=90, use_sudo=True)
     snapshot["processes"] = _filter_remote_training_process_lines(
         list(snapshot.get("processes") or [])
@@ -5647,10 +5672,11 @@ def stop_remote_training(client: paramiko.SSHClient, reason: str = "manual_facto
     Raises:
         RuntimeError: Si l'arret distant echoue.
     """
+    gpu_id = os.getenv("TRAINING_GPU_DEVICE", "1")
     _, sudo_password = _require_remote_credentials()
     remote_body = f"""
 cd {REMOTE_DIR}
-LOCK_FILE="{REMOTE_DIR}/data/checkpoints/nightly_training.lock"
+LOCK_FILE="{REMOTE_DIR}/data/checkpoints/nightly_training_{gpu_id}.lock"
 LOCK_PID=""
 if [ -f "$LOCK_FILE" ]; then
   LOCK_PID="$(python3 - <<'PY'
@@ -5659,7 +5685,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-lock_file = Path("{REMOTE_DIR}/data/checkpoints/nightly_training.lock")
+lock_file = Path("{REMOTE_DIR}/data/checkpoints/nightly_training_{gpu_id}.lock")
 try:
     payload = json.loads(lock_file.read_text(encoding="utf-8"))
 except Exception:
@@ -5677,13 +5703,19 @@ if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
   sleep 5
 fi
 
-TRAINERS="$(docker ps --format '{{{{.Names}}}}' | grep '^the_hive-eva-trainer-run-' || true)"
+TRAINERS=""
+for c in $(docker ps --format '{{{{.Names}}}}' | grep 'eva-trainer-run-' || true); do
+  if docker inspect "$c" 2>/dev/null | grep -q '"TRAINING_GPU_DEVICE={gpu_id}"'; then
+    TRAINERS="$TRAINERS $c"
+  fi
+done
+
 if [ -n "$TRAINERS" ]; then
-  printf '%s\\n' "$TRAINERS" | xargs -r docker stop
+  docker stop $TRAINERS
 fi
 
-rm -rf "{REMOTE_DIR}/data/checkpoints/nightly_training.lock.d"
-rm -f "{REMOTE_DIR}/data/checkpoints/nightly_training.lock"
+rm -rf "{REMOTE_DIR}/data/checkpoints/nightly_training_{gpu_id}.lock.d"
+rm -f "{REMOTE_DIR}/data/checkpoints/nightly_training_{gpu_id}.lock"
 
 PYTHONPATH="{REMOTE_DIR}/src/eva-lab:{REMOTE_DIR}/src/shared" python3 - <<'PY'
 from __future__ import annotations

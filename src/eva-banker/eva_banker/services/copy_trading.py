@@ -375,9 +375,9 @@ class CopyTradingRouter:
         try:
             source = SourceStrategy(broker_name="FTMO", account_size=100000)
             payload = OpenPayload(
-                source_ticket_id=local_result["ticket"],
+                source_ticket_id=str(local_result["ticket"]),
                 symbol=order.symbol,
-                volume=order.volume,
+                volume=float(order.volume),
                 type=order.action,
             )
             BridgeConnector().send_order(source_strategy=source, payload=payload)
@@ -1328,8 +1328,9 @@ class CopyTradingRouter:
             else:
                 normalized.append(result)
 
-        async with self._lock:
-            self._ticket_links.pop(master_ticket, None)
+        if not close_as_runner:
+            async with self._lock:
+                self._ticket_links.pop(master_ticket, None)
 
         return normalized
 

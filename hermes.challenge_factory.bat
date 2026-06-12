@@ -28,11 +28,16 @@ if "%~1"=="dry" (
     )
 )
 
-if not exist "venv\Scripts\python.exe" (
-    echo ERROR: environnement virtuel venv introuvable a la racine.
-    echo Lance d'abord: python -m venv venv
-    pause
-    exit /b 1
+if exist ".venv\Scripts\python.exe" (
+    set PYTHON_EXE=.venv\Scripts\python.exe
+) else (
+    if exist "venv\Scripts\python.exe" (
+        set PYTHON_EXE=venv\Scripts\python.exe
+    ) else (
+        echo ERROR: Le dossier virtuel ^(venv ou .venv^) est introuvable.
+        pause
+        exit /b 1
+    )
 )
 
 set PYTHONPATH=%CD%\src\shared;%CD%\src\eva-banker
@@ -44,7 +49,7 @@ if "%DRY_RUN%"=="--dry-run" echo   MODE : DRY-RUN (aucun envoi Discord)
 echo ======================================================
 echo.
 
-venv\Scripts\python -X utf8 scripts\hermes_challenge_factory.py --firm %FIRM% --balance %BALANCE% --loop --interval-minutes 120 %DRY_RUN%
+%PYTHON_EXE% -X utf8 scripts\hermes_challenge_factory.py --firm %FIRM% --balance %BALANCE% --loop --interval-minutes 120 %DRY_RUN%
 
 echo.
 echo [%DATE% %TIME%] Agent arrete.

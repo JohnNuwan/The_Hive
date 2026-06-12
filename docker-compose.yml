@@ -878,6 +878,8 @@ services:
       - REDIS_HOST=${HIVE_REDIS_HOST:-redis}
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      # URL de la Governance Arena pour le scan des vrais champions (service 'lab' sur hive-net)
+      - ARENA_API_URL=http://lab:8600
     networks:
       - hive-net
     restart: unless-stopped

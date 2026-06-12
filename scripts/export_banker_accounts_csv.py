@@ -272,8 +272,14 @@ def collect_rows(timeout: float) -> list[dict[str, Any]]:
     Returns:
         list[dict[str, Any]]: Lignes pretes a ecrire.
     """
-    env_files = sorted(ROOT.glob(".env.banker*.local"))
-    master_env = parse_env_file(ROOT / ".env.banker.master.local") if (ROOT / ".env.banker.master.local").exists() else {}
+    env_files = sorted((ROOT / "instances").glob(".env.banker*.local"))
+    if not env_files:
+        env_files = sorted(ROOT.glob(".env.banker*.local"))
+    
+    master_path = ROOT / "instances" / ".env.banker.master.local"
+    if not master_path.exists():
+        master_path = ROOT / ".env.banker.master.local"
+    master_env = parse_env_file(master_path) if master_path.exists() else {}
     targets_by_login = load_copy_targets(master_env)
     generated_at = datetime.now().isoformat(timespec="seconds")
     rows: list[dict[str, Any]] = []

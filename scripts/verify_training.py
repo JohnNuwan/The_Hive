@@ -1,9 +1,15 @@
-﻿"""Verifie les logs et artefacts de l'entrainement nocturne sur Proxmox."""
+"""Verifie les logs et artefacts de l'entrainement nocturne sur Proxmox."""
 
 from __future__ import annotations
 
 import os
 import sys
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 import paramiko
 

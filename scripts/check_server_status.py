@@ -1,5 +1,8 @@
 import os
 import paramiko
+from dotenv import load_dotenv
+
+load_dotenv()
 
 HOST = os.getenv("HIVE_SSH_HOST", "192.168.1.6")
 USER = os.getenv("HIVE_SSH_USER", "aza")
@@ -8,13 +11,11 @@ PASS = os.getenv("HIVE_SSH_PASSWORD")
 if not PASS:
     raise RuntimeError("Variable d'environnement HIVE_SSH_PASSWORD manquante.")
 
-
 def run(client, cmd):
     _, stdout, stderr = client.exec_command(cmd)
     out = stdout.read().decode().strip()
     err = stderr.read().decode().strip()
     return out, err
-
 
 client = paramiko.SSHClient()
 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
