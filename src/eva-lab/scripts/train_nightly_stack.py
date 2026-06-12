@@ -844,7 +844,8 @@ def main() -> dict[str, object]:
                         [sys.executable, "-m", "eva_lab.muzero.offline_trainer"],
                         {
                             "DREAMER_HORIZON": horizon,
-                            "DREAMER_EPOCHS": os.getenv("DREAMER_EPOCHS", "1500"),
+                            "DREAMER_EPOCHS": os.getenv("DREAMER_EPOCHS", "15"),
+                            "DREAMER_UPDATES_PER_EPOCH": os.getenv("DREAMER_UPDATES_PER_EPOCH", "100"),
                             "CUDA_VISIBLE_DEVICES": secondary_gpu,
                             "TRAINING_CHILD_CUDA_VISIBLE_DEVICES": secondary_gpu
                         }

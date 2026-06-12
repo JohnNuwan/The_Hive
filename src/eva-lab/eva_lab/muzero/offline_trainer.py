@@ -144,6 +144,39 @@ class OfflineTrainer:
         self.phase_durations_ms: dict[str, float] = {}
         self.last_successful_step = 0
 
+        # Check if we should resume from a checkpoint
+        resume_candidate = None
+        env_resume_path = os.getenv("DREAMER_RESUME_CHECKPOINT_PATH") or os.getenv("TRAINING_RESUME_CHECKPOINT_PATH")
+        if env_resume_path and "muzero" not in str(env_resume_path).lower():
+            resume_candidate = Path(env_resume_path)
+        else:
+            latest_path = self.weights_dir / f"dreamer_{self.horizon}_{self.family}_latest.pkl"
+            if latest_path.exists():
+                resume_candidate = latest_path
+
+        if resume_candidate and resume_candidate.exists():
+            try:
+                with open(resume_candidate, "rb") as file_obj:
+                    payload = pickle.load(file_obj)
+                if isinstance(payload, dict) and "params" in payload:
+                    params = payload.get("params")
+                    opt_states = payload.get("opt_states")
+                    self.params = params
+                    self.trainer.params["wm"] = params
+                    if opt_states:
+                        self.trainer.opt_states = dict(opt_states)
+                    self.last_successful_step = int(payload.get("step", 0) or 0)
+                    logger.info("Checkpoint Dreamer charge avec succes depuis %s (step=%s).", resume_candidate, self.last_successful_step)
+                    append_training_log(
+                        f"Dreamer {self.horizon}: reprise depuis {resume_candidate.name} (step={self.last_successful_step}).",
+                        source="dreamer",
+                    )
+                else:
+                    logger.warning("Checkpoint %s invalide pour Dreamer.", resume_candidate)
+            except Exception as exc:
+                logger.error("Impossible de charger le checkpoint Dreamer %s: %s", resume_candidate, exc)
+
+
     def _normalize_phase_durations(self) -> dict[str, float]:
         """Retourne les durees recentes des sous-phases sous forme serialisable."""
 
@@ -535,12 +568,11 @@ class OfflineTrainer:
             raise RuntimeError("Le buffer Dreamer est vide. Aucun historique n'a ete charge.")
 
         avg_loss = 0.0
-        total_updates = 0
+        total_updates = int(self.last_successful_step or 0)
         self.phase_durations_ms = {}
-        self.last_successful_step = 0
         self._set_runtime_state(
             train_step_phase="demarrage",
-            last_successful_step=0,
+            last_successful_step=total_updates,
             last_successful_step_at=None,
             stall_detected=False,
             stall_reason="",
@@ -557,6 +589,12 @@ class OfflineTrainer:
             steps = 0
             effective_batch_size = min(self.config.batch_size, self.replay_buffer.size)
             updates_per_epoch = max(1, self.replay_buffer.size // max(effective_batch_size, 1))
+            env_updates = os.getenv("DREAMER_UPDATES_PER_EPOCH")
+            if env_updates:
+                try:
+                    updates_per_epoch = max(1, int(env_updates))
+                except ValueError:
+                    logger.warning("DREAMER_UPDATES_PER_EPOCH invalide: %s. Utilisation de %s.", env_updates, updates_per_epoch)
             for update_index in range(updates_per_epoch):
                 context_label = (
                     f"epoch {epoch + 1}/{epochs}, mise a jour {update_index + 1}/{updates_per_epoch}"
@@ -644,6 +682,15 @@ class OfflineTrainer:
                     f"Dreamer: epoch {epoch + 1}/{epochs} | loss={avg_loss:.4f}",
                     source="dreamer",
                 )
+                try:
+                    latest_prefix = self.weights_dir / f"dreamer_{self.horizon}_{self.family}_latest"
+                    self.save_checkpoint(str(latest_prefix))
+                    epoch_prefix = self.weights_dir / f"dreamer_{self.horizon}_{self.family}_epoch_{epoch + 1}"
+                    self.save_checkpoint(str(epoch_prefix))
+                    logger.info("Sauvegarde checkpoint periodique effectuee pour l'epoch %s.", epoch + 1)
+                except Exception as ckpt_exc:
+                    logger.warning("Echec de la sauvegarde du checkpoint periodique a l'epoch %s : %s", epoch + 1, ckpt_exc)
+
 
         self.last_training_metrics = {
             "epochs": epochs,
